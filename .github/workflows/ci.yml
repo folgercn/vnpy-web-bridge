@@ -41,7 +41,8 @@ jobs:
         id: filter
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_REF: ${{ github.base_ref }}
+          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           BEFORE_SHA: ${{ github.event.before }}
           CURRENT_SHA: ${{ github.sha }}
         run: |
@@ -52,8 +53,8 @@ jobs:
           fi
 
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            git fetch origin "$BASE_REF" --depth=1
-            git diff --name-only "origin/$BASE_REF"...HEAD > /tmp/changed-files.txt
+            git fetch --no-tags --depth=1 origin "$PULL_REQUEST_BASE_SHA" "$PULL_REQUEST_HEAD_SHA"
+            git diff --name-only "$PULL_REQUEST_BASE_SHA" "$PULL_REQUEST_HEAD_SHA" > /tmp/changed-files.txt
           elif [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
             git diff --name-only "$BEFORE_SHA" "$CURRENT_SHA" > /tmp/changed-files.txt
           else
@@ -122,14 +123,15 @@ jobs:
       - name: Resolve changed files and check whitespace
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_REF: ${{ github.base_ref }}
+          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           BEFORE_SHA: ${{ github.event.before }}
           CURRENT_SHA: ${{ github.sha }}
         run: |
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            git fetch origin "$BASE_REF" --depth=1
-            git diff --check "origin/$BASE_REF"...HEAD
-            git diff --name-only "origin/$BASE_REF"...HEAD > /tmp/changed-files.txt
+            git fetch --no-tags --depth=1 origin "$PULL_REQUEST_BASE_SHA" "$PULL_REQUEST_HEAD_SHA"
+            git diff --check "$PULL_REQUEST_BASE_SHA" "$PULL_REQUEST_HEAD_SHA"
+            git diff --name-only "$PULL_REQUEST_BASE_SHA" "$PULL_REQUEST_HEAD_SHA" > /tmp/changed-files.txt
           elif [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
             git diff --check "$BEFORE_SHA" "$CURRENT_SHA"
             git diff --name-only "$BEFORE_SHA" "$CURRENT_SHA" > /tmp/changed-files.txt
@@ -193,13 +195,14 @@ jobs:
         id: changed-files
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_REF: ${{ github.base_ref }}
+          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           BEFORE_SHA: ${{ github.event.before }}
           CURRENT_SHA: ${{ github.sha }}
         run: |
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            git fetch origin "$BASE_REF" --depth=1
-            git diff --name-only --no-renames "origin/$BASE_REF"...HEAD > /tmp/changed-files.txt
+            git fetch --no-tags --depth=1 origin "$PULL_REQUEST_BASE_SHA" "$PULL_REQUEST_HEAD_SHA"
+            git diff --name-only --no-renames "$PULL_REQUEST_BASE_SHA" "$PULL_REQUEST_HEAD_SHA" > /tmp/changed-files.txt
             echo "baseline_status=known" >> "$GITHUB_OUTPUT"
           elif [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
             git diff --name-only --no-renames "$BEFORE_SHA" "$CURRENT_SHA" > /tmp/changed-files.txt
@@ -254,7 +257,8 @@ jobs:
       - name: Resolve changed files
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_REF: ${{ github.base_ref }}
+          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           BEFORE_SHA: ${{ github.event.before }}
           CURRENT_SHA: ${{ github.sha }}
         run: |
@@ -263,8 +267,8 @@ jobs:
             echo known > /tmp/baseline-status.txt
             echo true > /tmp/force-all.txt
           elif [ "$EVENT_NAME" = "pull_request" ]; then
-            git fetch origin "$BASE_REF" --depth=1
-            git diff --name-only --no-renames "origin/$BASE_REF"...HEAD > /tmp/changed-files.txt
+            git fetch --no-tags --depth=1 origin "$PULL_REQUEST_BASE_SHA" "$PULL_REQUEST_HEAD_SHA"
+            git diff --name-only --no-renames "$PULL_REQUEST_BASE_SHA" "$PULL_REQUEST_HEAD_SHA" > /tmp/changed-files.txt
             echo known > /tmp/baseline-status.txt
             echo false > /tmp/force-all.txt
           elif [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
@@ -467,15 +471,16 @@ jobs:
       - name: Resolve changed files for fail-closed Phase B classification
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_REF: ${{ github.base_ref }}
+          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           BEFORE_SHA: ${{ github.event.before }}
           CURRENT_SHA: ${{ github.sha }}
         run: |
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             git ls-tree -r --name-only "$CURRENT_SHA" > /tmp/changed-files.txt
           elif [ "$EVENT_NAME" = "pull_request" ]; then
-            git fetch origin "$BASE_REF" --depth=1
-            git diff --name-only --no-renames "origin/$BASE_REF"...HEAD > /tmp/changed-files.txt
+            git fetch --no-tags --depth=1 origin "$PULL_REQUEST_BASE_SHA" "$PULL_REQUEST_HEAD_SHA"
+            git diff --name-only --no-renames "$PULL_REQUEST_BASE_SHA" "$PULL_REQUEST_HEAD_SHA" > /tmp/changed-files.txt
           elif [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
             git diff --name-only --no-renames "$BEFORE_SHA" "$CURRENT_SHA" > /tmp/changed-files.txt
           else
@@ -671,7 +676,8 @@ jobs:
       - name: Resolve changed files and baseline
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_REF: ${{ github.base_ref }}
+          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           BEFORE_SHA: ${{ github.event.before }}
           CURRENT_SHA: ${{ github.sha }}
         run: |
@@ -679,8 +685,8 @@ jobs:
             git ls-tree -r --name-only "$CURRENT_SHA" > /tmp/changed-files.txt
             echo known > /tmp/baseline-status.txt; echo true > /tmp/force-all.txt
           elif [ "$EVENT_NAME" = "pull_request" ]; then
-            git fetch origin "$BASE_REF" --depth=1
-            git diff --name-only --no-renames "origin/$BASE_REF"...HEAD > /tmp/changed-files.txt
+            git fetch --no-tags --depth=1 origin "$PULL_REQUEST_BASE_SHA" "$PULL_REQUEST_HEAD_SHA"
+            git diff --name-only --no-renames "$PULL_REQUEST_BASE_SHA" "$PULL_REQUEST_HEAD_SHA" > /tmp/changed-files.txt
             echo known > /tmp/baseline-status.txt; echo false > /tmp/force-all.txt
           elif [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
             git diff --name-only --no-renames "$BEFORE_SHA" "$CURRENT_SHA" > /tmp/changed-files.txt

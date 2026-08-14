@@ -9,6 +9,7 @@ import sys
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,6 +23,9 @@ from app.services.commodity_c_fast_execution_quality_artifact_revalidation impor
     CFastExecutionQualityArtifactRevalidationError,
     CommodityCFastExecutionQualityArtifactRevalidator,
     SignedArtifactVerification,
+)
+from app.services import (
+    commodity_c_fast_execution_quality_artifact_revalidation as revalidation_module,
 )
 from app.services.commodity_c_fast_execution_quality_runtime import (
     CommodityCFastExecutionQualityRuntime,
@@ -359,6 +363,93 @@ def test_exact_file_reader_handles_short_os_reads(
     monkeypatch.setattr(os, "read", short_read)
 
     assert adapter("startup", NOW).revalidation_receipt.exact_contracts == CONTRACTS
+
+
+def test_exact_file_reader_allows_atime_change_during_double_read(
+    secure_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = build_adapter(secure_tmp_path)
+    target = adapter._artifact_paths["collection_admission"]
+    target_inode = target.stat().st_ino
+    original_fstat = os.fstat
+    reads = 0
+
+    def fstat_with_changed_atime(fd: int):
+        nonlocal reads
+        info = original_fstat(fd)
+        if info.st_ino != target_inode:
+            return info
+        reads += 1
+        return SimpleNamespace(
+            st_dev=info.st_dev,
+            st_ino=info.st_ino,
+            st_uid=info.st_uid,
+            st_gid=info.st_gid,
+            st_mode=info.st_mode,
+            st_nlink=info.st_nlink,
+            st_size=info.st_size,
+            st_mtime_ns=info.st_mtime_ns,
+            st_ctime_ns=info.st_ctime_ns,
+            st_atime_ns=info.st_atime_ns + reads,
+        )
+
+    root = adapter._open_custody_root()
+    monkeypatch.setattr(revalidation_module.os, "fstat", fstat_with_changed_atime)
+    try:
+        exact = adapter._read_exact("collection_admission", target, root)
+    finally:
+        os.close(root.fd)
+
+    assert exact.path == target
+    assert reads == 2
+
+
+@pytest.mark.parametrize("changed_field", ("st_nlink", "st_ctime_ns"))
+def test_exact_file_reader_rejects_non_atime_change_during_double_read(
+    secure_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changed_field: str,
+) -> None:
+    adapter = build_adapter(secure_tmp_path)
+    target = adapter._artifact_paths["collection_admission"]
+    target_inode = target.stat().st_ino
+    original_fstat = os.fstat
+    reads = 0
+
+    def fstat_with_changed_identity(fd: int):
+        nonlocal reads
+        info = original_fstat(fd)
+        if info.st_ino != target_inode:
+            return info
+        reads += 1
+        identity = {
+            "st_dev": info.st_dev,
+            "st_ino": info.st_ino,
+            "st_uid": info.st_uid,
+            "st_gid": info.st_gid,
+            "st_mode": info.st_mode,
+            "st_nlink": info.st_nlink,
+            "st_size": info.st_size,
+            "st_mtime_ns": info.st_mtime_ns,
+            "st_ctime_ns": info.st_ctime_ns,
+        }
+        if reads == 2:
+            identity[changed_field] += 1
+        return SimpleNamespace(**identity)
+
+    root = adapter._open_custody_root()
+    monkeypatch.setattr(revalidation_module.os, "fstat", fstat_with_changed_identity)
+    try:
+        with pytest.raises(
+            CFastExecutionQualityArtifactRevalidationError,
+            match="COLLECTION_ADMISSION_FILE_CHANGED",
+        ):
+            adapter._read_exact("collection_admission", target, root)
+    finally:
+        os.close(root.fd)
+
+    assert reads == 2
 
 
 def test_initial_custody_revalidation_failure_closes_retained_fd(

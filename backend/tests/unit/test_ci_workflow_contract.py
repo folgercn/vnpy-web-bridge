@@ -41,6 +41,29 @@ def test_quick_checks_only_run_dependency_free_ci_contract_tests() -> None:
     assert "backend/tests/unit/test_ci_workflow_contract.py" in quick_checks
 
 
+def test_pull_request_changed_files_use_event_commit_pair() -> None:
+    assert (
+        WORKFLOW.count(
+            "PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}"
+        )
+        == 6
+    )
+    assert (
+        WORKFLOW.count(
+            "PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}"
+        )
+        == 6
+    )
+    assert (
+        WORKFLOW.count(
+            'git fetch --no-tags --depth=1 origin "$PULL_REQUEST_BASE_SHA" "$PULL_REQUEST_HEAD_SHA"'
+        )
+        == 6
+    )
+    assert "origin/$BASE_REF" not in WORKFLOW
+    assert "...HEAD" not in WORKFLOW
+
+
 def test_windows_fence_gate_is_read_only_cross_platform_and_non_deploying() -> None:
     assert (
         "windows_fence_changed: ${{ steps.filter.outputs.windows_fence_changed }}"

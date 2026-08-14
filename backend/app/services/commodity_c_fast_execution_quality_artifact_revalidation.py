@@ -673,6 +673,34 @@ class CommodityCFastExecutionQualityArtifactRevalidator:
                 "st_mtime_ns",
             )
         )
+        before_read_identity = tuple(
+            getattr(before, field)
+            for field in (
+                "st_dev",
+                "st_ino",
+                "st_uid",
+                "st_gid",
+                "st_mode",
+                "st_nlink",
+                "st_size",
+                "st_mtime_ns",
+                "st_ctime_ns",
+            )
+        )
+        after_read_identity = tuple(
+            getattr(after, field)
+            for field in (
+                "st_dev",
+                "st_ino",
+                "st_uid",
+                "st_gid",
+                "st_mode",
+                "st_nlink",
+                "st_size",
+                "st_mtime_ns",
+                "st_ctime_ns",
+            )
+        )
         path_identity = tuple(
             getattr(path_info, field)
             for field in (
@@ -685,7 +713,7 @@ class CommodityCFastExecutionQualityArtifactRevalidator:
                 "st_mtime_ns",
             )
         )
-        if identity != path_identity or before != after:
+        if identity != path_identity or before_read_identity != after_read_identity:
             raise CFastExecutionQualityArtifactRevalidationError(
                 f"{role.upper()}_FILE_CHANGED"
             )
