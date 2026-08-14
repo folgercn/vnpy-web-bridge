@@ -526,6 +526,7 @@ def test_simnow_runner_image_keeps_the_real_import_closure_and_no_direct_gateway
         "scripts/phase_b_workers/__init__.py",
         "scripts/phase_b_workers/contracts.py",
         "scripts/phase_b_workers/durable.py",
+        "scripts/phase_b_workers/projections.py",
         "scripts/c_fast_producer",
         "scripts/map",
         "scripts/commodity_c_fast_pure_producer_kernel.py",
