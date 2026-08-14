@@ -15,6 +15,19 @@ from shared.phase_c_workflow.v1 import (
     FALSE_AUTHORITY_FLAGS,
 )
 
+TRUSTED_KEYLESS_TARGET_PLAN_V1_SCHEMA_REF = (
+    "web-bridge-simnow-keyless-target-plan-v1"
+)
+TRUSTED_KEYLESS_TARGET_PLAN_V2_SCHEMA_REF = (
+    "web-bridge-simnow-keyless-target-plan-v2"
+)
+TRUSTED_KEYLESS_TARGET_PLAN_SCHEMA_REFS = frozenset(
+    {
+        TRUSTED_KEYLESS_TARGET_PLAN_V1_SCHEMA_REF,
+        TRUSTED_KEYLESS_TARGET_PLAN_V2_SCHEMA_REF,
+    }
+)
+
 
 class StrictDTO(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -121,8 +134,8 @@ class TrustedKeylessCustodyReceiptDTO(AuthorityNegativeDTO):
     artifact_type: Literal["simnow-target-plan"]
     trust_domain: Literal["runtime_authorization"]
     schema_ref: Literal[
-        "web-bridge-simnow-keyless-target-plan-v1",
-        "web-bridge-simnow-keyless-target-plan-v2",
+        TRUSTED_KEYLESS_TARGET_PLAN_V1_SCHEMA_REF,
+        TRUSTED_KEYLESS_TARGET_PLAN_V2_SCHEMA_REF,
     ]
     artifact_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     scope: dict[str, Any]

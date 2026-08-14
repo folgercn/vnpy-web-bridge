@@ -452,6 +452,12 @@ def test_v2_plan_canonical_hash_is_stable() -> None:
     )
 
 
+def test_phase_c_client_keeps_the_control_api_image_boundary() -> None:
+    source = (ROOT / "backend/app/phase_c/client.py").read_text(encoding="utf-8")
+    assert "from shared.commodity_execution" not in source
+    assert "TRUSTED_KEYLESS_TARGET_PLAN_SCHEMA_REFS" in source
+
+
 def test_full_static_core_and_thermostat_are_bound_before_execution_mask() -> None:
     ag = _decision(product="ag")
     au = _decision(product="au")

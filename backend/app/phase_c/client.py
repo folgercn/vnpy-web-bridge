@@ -9,11 +9,6 @@ from typing import Any, Protocol
 
 import httpx
 
-from shared.commodity_execution import (
-    KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
-    KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
-)
-
 from .adapters import (
     OfflineFakeWorkflowAdapter,
     UnknownOutcomeError,
@@ -25,6 +20,7 @@ from .models import (
     CustodyReceiptDTO,
     ExecutionProjectionDTO,
     SignedArtifactUploadDTO,
+    TRUSTED_KEYLESS_TARGET_PLAN_SCHEMA_REFS,
     TrustedKeylessCustodyReceiptDTO,
     TrustedKeylessTargetPlanUploadDTO,
 )
@@ -206,10 +202,7 @@ class RemotePhaseCWorkflowClient:
     def _custody_receipt(raw: dict[str, Any] | None) -> CustodyInstallReceipt | None:
         if raw is None:
             return None
-        if raw.get("schema_ref") in {
-            KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
-            KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
-        }:
+        if raw.get("schema_ref") in TRUSTED_KEYLESS_TARGET_PLAN_SCHEMA_REFS:
             return TrustedKeylessCustodyReceiptDTO.model_validate(raw)
         return CustodyReceiptDTO.model_validate(raw)
 
