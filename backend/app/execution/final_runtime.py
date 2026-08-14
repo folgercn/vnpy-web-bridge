@@ -351,7 +351,7 @@ class FinalExecutionRuntime:
         return receipt
 
     def _preview_from_custody(
-        self, receipt_id: str
+        self, receipt_id: str, *, require_current_expiry: bool = True
     ) -> tuple[TargetPlan, VerifiedCustodyReceipt | TrustedKeylessCustodyReceipt]:
         """Fetch, cross-check and install a plan before a SIMNOW preview exists.
 
@@ -434,7 +434,10 @@ class FinalExecutionRuntime:
             or (keyless and not plan.is_trusted_keyless_simnow)
             or (not keyless and plan.is_trusted_keyless_simnow)
             or (keyless and receipt.raw["expires_at"] != plan.raw["expires_at"])
-            or receipt.expires_at() <= utc_now()
+            or (
+                (require_current_expiry or not keyless)
+                and receipt.expires_at() <= utc_now()
+            )
         ):
             raise PlanRejected("custody target plan receipt scope/expiry mismatch")
         self._plan_from_value(plan)
@@ -540,7 +543,7 @@ class FinalExecutionRuntime:
         ):
             raise PlanRejected("SIMNOW active plan lacks durable preview proof")
         preview_plan, preview_receipt = self._preview_from_custody(
-            str(proof["preview_receipt_id"])
+            str(proof["preview_receipt_id"]), require_current_expiry=False
         )
         if (
             preview_plan.plan_hash != plan.plan_hash

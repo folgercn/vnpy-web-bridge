@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -467,6 +468,23 @@ def test_exact_scope_and_expiry_are_revalidated_after_plan_hash_verification() -
     )
     with pytest.raises(AuthorityRejected, match="does not match immutable"):
         scoped.install_target_plan(plan(foreign))
+
+
+def test_legacy_target_preview_never_bypasses_current_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _core, _repo, _gateway, _ = runtime()
+    target = plan()
+    target_receipt = service.custody.add_target(target)
+    monkeypatch.setattr(
+        "app.execution.final_runtime.utc_now",
+        lambda: datetime(2100, 1, 1, tzinfo=timezone.utc),
+    )
+
+    with pytest.raises(PlanRejected, match="receipt scope/expiry mismatch"):
+        service._preview_from_custody(
+            target_receipt["receipt_id"], require_current_expiry=False
+        )
 
 
 def test_internal_order_uses_core_fence_and_local_gate() -> None:
