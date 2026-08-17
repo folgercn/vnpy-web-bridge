@@ -1,10 +1,13 @@
-# ruff: noqa: E402
 from __future__ import annotations
 
 import base64
+import json
+import stat
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -13,6 +16,9 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from research_warehouse import custody_transition as custody_transition_module
+from research_warehouse.acquisition import acquire_daily
+from research_warehouse.acquisition_models import HttpResponse
 from research_warehouse.canonical import canonical_json_line
 from research_warehouse.custody_locks import (
     custody_identity,
@@ -29,9 +35,79 @@ from research_warehouse.custody_transition import (
     verify_custody_transition,
 )
 from research_warehouse.errors import RegistryError
+from research_warehouse.file_integrity import read_regular_strict
+from research_warehouse.observation_contracts import OBSERVATION_SCHEMA, observation_id
+from research_warehouse.observations import load_observations
+from research_warehouse.registry import load_registry
 from research_warehouse.signing import public_key_sha256
 
 ATTESTED_AT = datetime(2026, 8, 17, 5, 0, tzinfo=timezone.utc)
+REGISTRY_PATH = ROOT / "deployments/research-warehouse/source-registry-v1.json"
+READ_ROOT_MANAGED_TRANSITION_RECEIPT = (
+    custody_transition_module._read_root_managed_transition_receipt
+)
+
+
+@pytest.fixture(autouse=True)
+def _test_receipts_bypass_m2_root_custody(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unit fixtures cannot create root:root files outside the M2 operator."""
+    monkeypatch.setattr(
+        custody_transition_module,
+        "_read_root_managed_transition_receipt",
+        lambda trust: read_regular_strict(
+            trust.receipt_path,
+            "test custody reboot transition receipt",
+            limit=1024 * 1024,
+            private=False,
+        ),
+    )
+
+
+class _OfficialTransport:
+    def __init__(self, raw: bytes) -> None:
+        self._raw = raw
+
+    @contextmanager
+    def open(self, _url: str, **_kwargs):
+        yield HttpResponse(
+            final_url=(
+                "https://www.shfe.com.cn/data/tradedata/future/"
+                "dailydata/kx20260728.dat"
+            ),
+            status=200,
+            headers={
+                "content-length": str(len(self._raw)),
+                "content-type": "application/json",
+                "etag": '"issue355"',
+                "last-modified": "Tue, 28 Jul 2026 08:00:00 GMT",
+            },
+            chunks=iter((self._raw,)),
+        )
+
+
+def _official_raw() -> bytes:
+    return json.dumps(
+        {
+            "o_curinstrument": [
+                {
+                    "DELIVERYMONTH": "2608",
+                    "PRODUCTID": "cu_f",
+                    "OPENPRICE": "80000",
+                    "HIGHESTPRICE": "80100",
+                    "LOWESTPRICE": "79900",
+                    "CLOSEPRICE": "80050",
+                    "SETTLEMENTPRICE": "80020",
+                    "VOLUME": "100",
+                    "OPENINTEREST": "200",
+                }
+            ],
+            "report_date": "20260728",
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
 
 
 def _public_key_file(tmp_path: Path, private_key: Ed25519PrivateKey) -> Path:
@@ -181,3 +257,151 @@ def test_transition_payload_binds_both_devices_to_stable_identity(
     assert payload["root_path"] == str(paths.root)
     assert payload["inode"] == paths.root.lstat().st_ino
     assert all(value is False for value in payload["authority"].values())
+
+
+def test_transition_receipt_requires_root_managed_parent_and_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _paths, trusted_paths, trust, _payload, _source, _destination = (
+        _transition_fixture(tmp_path)
+    )
+    monkeypatch.setattr(
+        custody_transition_module,
+        "_read_root_managed_transition_receipt",
+        READ_ROOT_MANAGED_TRANSITION_RECEIPT,
+    )
+
+    def reject_root_custody(_path: Path) -> None:
+        raise RegistryError("transition receipt parent/path is unsafe")
+
+    monkeypatch.setattr(
+        custody_transition_module,
+        "require_root_managed",
+        reject_root_custody,
+    )
+    with pytest.raises(RegistryError, match="parent/path is unsafe"):
+        verify_custody_transition(trusted_paths, trust)
+
+
+def test_transition_receipt_fd_requires_exact_root_create_only_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        custody_transition_module.os,
+        "fstat",
+        lambda _descriptor: SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o644,
+            st_uid=0,
+            st_nlink=1,
+        ),
+    )
+
+    with pytest.raises(RegistryError, match="root custody is unsafe"):
+        custody_transition_module._validate_root_managed_transition_receipt_fd(7)
+
+
+def test_transition_receipt_fd_requires_acl_free_opened_inode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checked: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        custody_transition_module.os,
+        "fstat",
+        lambda _descriptor: SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o444,
+            st_uid=0,
+            st_nlink=1,
+        ),
+    )
+    monkeypatch.setattr(
+        custody_transition_module,
+        "require_acl_free_fd",
+        lambda descriptor, label: checked.append((descriptor, label)),
+    )
+
+    custody_transition_module._validate_root_managed_transition_receipt_fd(7)
+
+    assert checked == [(7, "custody reboot transition receipt")]
+
+
+def test_transition_receipt_replacement_during_read_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _paths, trusted_paths, trust, _payload, _source, _destination = (
+        _transition_fixture(tmp_path)
+    )
+    displaced = tmp_path / "displaced-transition.json"
+    replacement = tmp_path / "replacement-transition.json"
+    replacement.write_bytes(trust.receipt_path.read_bytes())
+    replacement.chmod(0o444)
+    original_fstat = custody_transition_module.os.fstat
+    original_inode = trust.receipt_path.lstat().st_ino
+    replaced = False
+
+    def replacing_fstat(descriptor: int):
+        nonlocal replaced
+        metadata = original_fstat(descriptor)
+        if not replaced and metadata.st_ino == original_inode:
+            trust.receipt_path.rename(displaced)
+            replacement.rename(trust.receipt_path)
+            replaced = True
+        return metadata
+
+    monkeypatch.setattr(custody_transition_module.os, "fstat", replacing_fstat)
+
+    with pytest.raises(RegistryError, match="changed while being read"):
+        verify_custody_transition(trusted_paths, trust)
+
+
+def test_legacy_v1_observation_validates_only_through_signed_transition(
+    tmp_path: Path,
+) -> None:
+    (
+        paths,
+        trusted_paths,
+        _trust,
+        _payload,
+        source_identity,
+        _destination,
+    ) = _transition_fixture(tmp_path)
+    registry = load_registry(REGISTRY_PATH)
+    acquired = acquire_daily(
+        paths=paths,
+        registry=registry,
+        source_id="shfe-daily-market-data-v1",
+        trade_day="2026-07-28",
+        collector_version="issue355-test-v1",
+        observed_at=ATTESTED_AT,
+        transport=_OfficialTransport(_official_raw()),
+    )
+    receipt_path = (
+        paths.observations
+        / "shfe"
+        / "2026-07-28"
+        / "shfe-daily-market-data-v1"
+        / f"{acquired.observation_id}.json"
+    )
+    legacy = json.loads(receipt_path.read_bytes())
+    legacy.pop("custody_identity_scheme")
+    legacy["schema_version"] = OBSERVATION_SCHEMA
+    legacy["custody_identity_sha256"] = source_identity
+    legacy["observation_id"] = ""
+    legacy["observation_id"] = observation_id(legacy)
+    receipt_path.unlink()
+    legacy_path = receipt_path.with_name(f"{legacy['observation_id']}.json")
+    legacy_path.write_bytes(canonical_json_line(legacy))
+    legacy_path.chmod(0o600)
+
+    loaded = load_observations(
+        trusted_paths,
+        registry,
+        source_id="shfe-daily-market-data-v1",
+        trade_day="2026-07-28",
+    )
+
+    assert [item["observation_id"] for item in loaded] == [
+        legacy["observation_id"]
+    ]
+    assert loaded[0]["schema_version"] == OBSERVATION_SCHEMA

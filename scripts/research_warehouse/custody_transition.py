@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import stat
 from datetime import datetime
 from typing import Any
@@ -22,6 +23,8 @@ from .custody_locks import (
 from .custody_paths import CustodyTransitionTrust, WarehousePaths
 from .errors import RegistryError
 from .file_integrity import read_regular_strict
+from .m2_acl_custody import require_acl_free_fd
+from .m2_runtime_input import require_root_managed
 from .signing import load_public_key, public_key_sha256, sign_payload, verify_payload
 from .timeutil import format_utc, parse_utc, require_utc
 
@@ -46,6 +49,36 @@ TRANSITION_KEYS = {
     "authority",
     "signature",
 }
+
+
+def _validate_root_managed_transition_receipt_fd(descriptor: int) -> None:
+    """Require the opened receipt to retain the create-only root custody."""
+    info = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != 0
+        or info.st_nlink != 1
+        or stat.S_IMODE(info.st_mode) != 0o444
+    ):
+        raise RegistryError("custody transition receipt root custody is unsafe")
+    require_acl_free_fd(descriptor, "custody reboot transition receipt")
+
+
+def _read_root_managed_transition_receipt(trust: CustodyTransitionTrust) -> bytes:
+    """Read one root-published receipt with parent, path, and FD pinning."""
+    # This applies the same root-owner/non-writable plus ACL-free parent/path
+    # checks as the fixed M2 runtime input before opening the receipt.  The
+    # descriptor validator below repeats the sensitive object checks on the
+    # opened inode, and read_regular_strict binds path and FD identities across
+    # two reads to reject replacement races.
+    require_root_managed(trust.receipt_path)
+    return read_regular_strict(
+        trust.receipt_path,
+        "custody reboot transition receipt",
+        limit=1024 * 1024,
+        private=False,
+        descriptor_validator=_validate_root_managed_transition_receipt_fd,
+    )
 
 
 def _transition_id(payload: dict[str, Any]) -> str:
@@ -127,12 +160,7 @@ def verify_custody_transition(
     trust: CustodyTransitionTrust,
 ) -> dict[str, Any]:
     """Verify a root-pinned signed transition against the current stable root."""
-    raw = read_regular_strict(
-        trust.receipt_path,
-        "custody reboot transition receipt",
-        limit=1024 * 1024,
-        private=False,
-    )
+    raw = _read_root_managed_transition_receipt(trust)
     payload = parse_json_strict(raw, "custody reboot transition receipt")
     if not isinstance(payload, dict) or set(payload) != TRANSITION_KEYS:
         raise RegistryError("custody transition fields do not match v1")
