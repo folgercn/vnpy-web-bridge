@@ -26,6 +26,7 @@ from app.control_execution_client import (  # noqa: E402
     ExecutionClient,
     ExecutionClientError,
 )
+from app.execution.models import CommandEnvelope  # noqa: E402
 from app.execution.executable_target_adapter import (  # noqa: E402
     _without_terminal_execution_orders,
     build_static_core_equal_keyless_target_decision,
@@ -175,6 +176,29 @@ def _incomplete(
     if status is not None:
         response["execution_status"] = status
     return response
+
+
+def _accepted_start_receipt(
+    receipt: Any, *, command: Mapping[str, Any]
+) -> bool:
+    """Accept only the durable receipt for this exact start command."""
+
+    try:
+        envelope = CommandEnvelope.model_validate(command)
+    except (TypeError, ValueError):  # pragma: no cover - command is locally built
+        return False
+    if not isinstance(receipt, Mapping) or not isinstance(receipt.get("result"), Mapping):
+        return False
+    return (
+        receipt.get("service") == envelope.actor.service
+        and receipt.get("idempotency_key") == envelope.idempotency_key
+        and receipt.get("command_hash") == envelope.command_hash()
+        and receipt.get("command_id") == envelope.command_id
+        and receipt.get("correlation_id") == envelope.correlation_id
+        and receipt.get("actor") == envelope.actor.as_dict()
+        and receipt.get("status") == "COMPLETED"
+        and receipt["result"].get("accepted") is True
+    )
 
 
 def _completion_state(status: dict[str, Any], *, plan_id: str, plan_hash: str) -> str:
@@ -459,16 +483,39 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     leader = status["leader"]
     if not leader.get("held"):
         raise ValueError("Execution leader lease is not held; refusing start")
+    start_command = _command(
+        name="start",
+        suffix=f"start-{args.idempotency_suffix}",
+        version=status["state_version"],
+        actor=actor,
+        now=now,
+        fence={
+            "leader_epoch": int(leader["epoch"]),
+            "fencing_token": int(leader["fencing_token"]),
+        },
+        payload={
+            "plan_id": handoff.target_plan["plan_id"],
+            "plan_hash": handoff.target_plan["plan_hash"],
+            "reason": "start trusted keyless SIMNOW plan",
+        },
+    )
     try:
-        await execution.submit(_command(name="start", suffix=f"start-{args.idempotency_suffix}", version=status["state_version"], actor=actor, now=now, fence={"leader_epoch": int(leader["epoch"]), "fencing_token": int(leader["fencing_token"])}, payload={"plan_id": handoff.target_plan["plan_id"], "plan_hash": handoff.target_plan["plan_hash"], "reason": "start trusted keyless SIMNOW plan"}))
+        await execution.submit(start_command)
     except ExecutionClientError:
-        # Never resend the start/order path.  A later invocation must query the
-        # same durable receipts and reconcile its existing intents.
+        # Never resend the start/order path.  Resolve only this exact durable
+        # receipt before deciding whether completion polling may continue.
         try:
-            observed = (await execution.status()).as_dict()
+            recovered_receipt = await execution.receipt(
+                start_command["idempotency_key"], actor=actor
+            )
         except ExecutionClientError:
-            observed = None
-        return _incomplete(result, reason="start_outcome_unknown", status=observed)
+            recovered_receipt = None
+        if not _accepted_start_receipt(recovered_receipt, command=start_command):
+            try:
+                observed = (await execution.status()).as_dict()
+            except ExecutionClientError:
+                observed = None
+            return _incomplete(result, reason="start_outcome_unknown", status=observed)
     result["start_submitted"] = True
 
     deadline = asyncio.get_running_loop().time() + args.completion_timeout_seconds
