@@ -8,7 +8,11 @@ from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from .backup_contracts import false_authority
+from .backup_contracts import (
+    false_authority,
+    require_identifier,
+    require_sha256,
+)
 from .canonical import canonical_json, canonical_json_line, parse_json_strict, sha256
 from .custody_locks import (
     custody_identity,
@@ -73,16 +77,26 @@ def build_custody_transition(
         raise RegistryError("custody transition source device is invalid")
     if not isinstance(private_key, Ed25519PrivateKey):
         raise RegistryError("custody transition signing key is invalid")
-    if not isinstance(signer_key_id, str) or not signer_key_id:
-        raise RegistryError("custody transition signer key ID is invalid")
+    reviewed_source = require_sha256(
+        expected_source_legacy_identity_sha256,
+        "reviewed custody transition source identity",
+    )
+    reviewed_destination = require_sha256(
+        expected_destination_legacy_identity_sha256,
+        "reviewed custody transition destination identity",
+    )
+    trusted_signer_key_id = require_identifier(
+        signer_key_id,
+        "custody transition signer key ID",
+    )
     info = paths.root.lstat()
     if source_st_dev == info.st_dev:
         raise RegistryError("custody transition must change legacy device identity")
     source_identity = legacy_custody_identity_for_device(paths, source_st_dev)
     destination_identity = custody_identity(paths)
-    if source_identity != expected_source_legacy_identity_sha256:
+    if source_identity != reviewed_source:
         raise RegistryError("custody transition source identity does not match review")
-    if destination_identity != expected_destination_legacy_identity_sha256:
+    if destination_identity != reviewed_destination:
         raise RegistryError("custody transition destination identity does not match review")
     stable_identity = stable_custody_identity(paths)
     public_hash = public_key_sha256(private_key.public_key())
@@ -100,7 +114,7 @@ def build_custody_transition(
         "source_legacy_identity_sha256": source_identity,
         "destination_legacy_identity_sha256": destination_identity,
         "stable_identity_sha256": stable_identity,
-        "signer_key_id": signer_key_id,
+        "signer_key_id": trusted_signer_key_id,
         "signer_public_key_sha256": public_hash,
         "authority": false_authority(),
     }
@@ -126,13 +140,19 @@ def verify_custody_transition(
         raise RegistryError("custody transition schema mismatch")
     if payload["authority"] != false_authority():
         raise RegistryError("custody transition grants authority")
+    trusted_hash = require_sha256(
+        trust.expected_public_key_sha256,
+        "trusted custody transition public key",
+    )
     public_key = load_public_key(trust.public_key_path)
-    trusted_hash = trust.expected_public_key_sha256
+    require_identifier(payload["signer_key_id"], "custody transition signer key ID")
+    claimed_signer_hash = require_sha256(
+        payload["signer_public_key_sha256"],
+        "custody transition signer public key",
+    )
     if (
-        not isinstance(trusted_hash, str)
-        or len(trusted_hash) != 64
-        or public_key_sha256(public_key) != trusted_hash
-        or payload["signer_public_key_sha256"] != trusted_hash
+        public_key_sha256(public_key) != trusted_hash
+        or claimed_signer_hash != trusted_hash
     ):
         raise RegistryError("custody transition signer public key pin mismatch")
     unsigned = verify_payload(payload, public_key)
@@ -143,13 +163,25 @@ def verify_custody_transition(
     parse_utc(payload["attested_at"], "custody transition attested_at")
     info = paths.root.lstat()
     expected_stable = stable_custody_identity(paths)
+    claimed_source_identity = require_sha256(
+        payload["source_legacy_identity_sha256"],
+        "custody transition source legacy identity",
+    )
+    claimed_destination_identity = require_sha256(
+        payload["destination_legacy_identity_sha256"],
+        "custody transition destination legacy identity",
+    )
+    claimed_stable_identity = require_sha256(
+        payload["stable_identity_sha256"],
+        "custody transition stable identity",
+    )
     if (
         payload["root_path"] != str(paths.root)
         or payload["inode"] != info.st_ino
         or payload["uid"] != info.st_uid
         or payload["gid"] != info.st_gid
         or payload["mode"] != stat.S_IMODE(info.st_mode)
-        or payload["stable_identity_sha256"] != expected_stable
+        or claimed_stable_identity != expected_stable
     ):
         raise RegistryError("custody transition stable root binding mismatch")
     source_device = payload["source_st_dev"]
@@ -164,13 +196,13 @@ def verify_custody_transition(
         or source_device == destination_device
     ):
         raise RegistryError("custody transition device binding is invalid")
-    if payload["source_legacy_identity_sha256"] != legacy_custody_identity_for_device(
+    if claimed_source_identity != legacy_custody_identity_for_device(
         paths, source_device
     ):
         raise RegistryError("custody transition source legacy identity mismatch")
-    if payload[
-        "destination_legacy_identity_sha256"
-    ] != legacy_custody_identity_for_device(paths, destination_device):
+    if claimed_destination_identity != legacy_custody_identity_for_device(
+        paths, destination_device
+    ):
         raise RegistryError("custody transition destination legacy identity mismatch")
     return payload
 
