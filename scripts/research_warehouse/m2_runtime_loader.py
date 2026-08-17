@@ -11,8 +11,9 @@ from .calendar_anchors import (
 )
 from .calendar_models import OfficialCalendar
 from .errors import RegistryError
-from .filesystem import WarehousePaths
+from .filesystem import CustodyTransitionTrust, WarehousePaths
 from .m2_isolation_contracts import IsolationPolicy, load_isolation_policy
+from .m2_operator_defaults import DEFAULT_CUSTODY_TRANSITION_RECEIPT
 from .m2_runtime_input import RuntimeInput, load_runtime_input
 from .m2_runtime_paths import RuntimePaths
 from .models import SourceRegistry
@@ -52,10 +53,20 @@ def load_runtime_context(path: Path) -> RuntimeContext:
         Path(value["calendar_availability_anchor_path"]),
         expected_raw_sha256=(value["expected_calendar_availability_anchor_raw_sha256"]),
     )
+    transition = None
+    if DEFAULT_CUSTODY_TRANSITION_RECEIPT.exists():
+        transition = CustodyTransitionTrust(
+            receipt_path=DEFAULT_CUSTODY_TRANSITION_RECEIPT,
+            public_key_path=Path(value["backup_public_key_path"]),
+            expected_public_key_sha256=value["expected_backup_public_key_sha256"],
+        )
     return RuntimeContext(
         runtime_input=runtime_input,
         policy=policy,
-        paths=WarehousePaths.open(Path(policy.payload["custody_root"])),
+        paths=WarehousePaths.open(
+            Path(policy.payload["custody_root"]),
+            custody_transition=transition,
+        ),
         runtime=RuntimePaths.ensure(Path(policy.payload["runtime_root"])),
         registry=registry,
         calendar=calendar,
