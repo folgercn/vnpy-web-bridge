@@ -25,12 +25,12 @@ from app.execution.final_runtime import (
     FinalExecutionRuntime,
     InMemoryTargetPlanRepository,
 )
+from app.phase_c.adapters import WorkflowAdapterError
 from app.phase_c.custody_service import (
     ArtifactCustodyService,
     CustodyPolicy,
     CustodySettings,
 )
-from app.phase_c.adapters import WorkflowAdapterError
 from app.phase_c.models import TrustedKeylessTargetPlanUploadDTO
 
 from shared.artifact_contracts.v1 import new_artifact_envelope
@@ -48,18 +48,17 @@ from shared.commodity_execution import (
 )
 from shared.trust_contracts.v1 import canonical_json_line
 
-
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import commodity_static_core_equal_pure_producer as static_producer  # noqa: E402
-import commodity_relative_vol_snapshot_producer as thermostat_producer  # noqa: E402
-from test_commodity_static_core_equal_pure_producer import (  # noqa: E402
-    source_view as static_source_view,
-)
-from test_commodity_relative_vol_snapshot_producer import (  # noqa: E402
+import commodity_relative_vol_snapshot_producer as thermostat_producer
+import commodity_static_core_equal_pure_producer as static_producer
+from test_commodity_relative_vol_snapshot_producer import (
     source_view as thermostat_source_view,
+)
+from test_commodity_static_core_equal_pure_producer import (
+    source_view as static_source_view,
 )
 
 
@@ -254,9 +253,10 @@ def _decision(
     product: str = "ag",
     positions: dict[str, dict] | None = None,
     run_id: str = "issue353-run-0001",
+    selected: dict[str, int] | None = None,
 ):
     projection, freeze, target = _static_outputs()
-    manager = _position_manager_snapshot(target)
+    manager = _position_manager_snapshot(target, selected=selected)
     return build_static_core_equal_keyless_target_decision(
         static_core_equal_projection=projection,
         static_core_equal_freeze_contract=freeze,
@@ -580,11 +580,57 @@ def test_fresh_run_id_changes_only_execution_identity() -> None:
     )
 
 
-def test_stop_requires_no_abs_one_target_across_the_complete_universe() -> None:
-    # The fixture has eligible ag=+1 and au=-1. Selecting a non-eligible mask
-    # is an operator input error, not evidence that the full strategy must stop.
-    with pytest.raises(ExecutableTargetAdapterError, match="not an abs-one target"):
-        _decision(product="al")
+def test_minimum_nonzero_target_tie_is_masked_only_after_full_hash() -> None:
+    selected = {"ag": -2, "au": -2, "sc": 2}
+    ag = _decision(product="ag", selected=selected)
+    au = _decision(product="au", selected=selected)
+    sc = _decision(product="sc", selected=selected)
+
+    assert ag.handoff is not None and au.handoff is not None and sc.handoff is not None
+    assert ag.final_target_projection == au.final_target_projection == sc.final_target_projection
+    assert ag.final_target_sha256 == au.final_target_sha256 == sc.final_target_sha256
+    assert {ag.selected_target_quantity, au.selected_target_quantity, sc.selected_target_quantity} == {
+        -2,
+        2,
+    }
+    for decision in (ag, au, sc):
+        assert len(decision.handoff.target_plan["orders"]) == 2
+        assert {order["volume"] for order in decision.handoff.target_plan["orders"]} == {1}
+        references = [order["reference"] for order in decision.handoff.target_plan["orders"]]
+        assert len(references) == len(set(references)) == 2
+        assert {len(reference) for reference in references} == {64}
+    sc_order = sc.handoff.target_plan["orders"][0]
+    expected_sc_positions = {
+        f"{sc_order['symbol']}.{sc_order['exchange']}.{sc_order['direction']}.CTP.target-v1": {
+            "gateway_name": "CTP",
+            "symbol": sc_order["symbol"],
+            "exchange": sc_order["exchange"],
+            "direction": sc_order["direction"],
+            "volume": 2,
+        }
+    }
+    assert sc.handoff.target_plan["expected_after_position_hash"] == (
+        target_position_projection_hash(
+            expected_sc_positions,
+            account_scope="account:windows",
+            environment="SIMNOW",
+        )
+    )
+
+    with pytest.raises(
+        ExecutableTargetAdapterError, match="not a minimum nonzero target"
+    ):
+        _decision(product="al", selected=selected)
+
+
+def test_all_zero_final_target_stops_without_execution_mask() -> None:
+    zero_targets = {product: 0 for product in ("ag", "al", "au", "bu", "cu", "rb", "ru", "sc", "sp", "zn")}
+    decision = _decision(product="ag", selected=zero_targets)
+
+    assert decision.stopped is True
+    assert decision.stop_reason == "no_nonzero_target"
+    assert decision.handoff is None
+    assert len(decision.final_target_projection["targets"]) == 10
 
 
 def test_real_frozen_producers_form_one_deterministic_static_to_thermostat_chain() -> (
@@ -629,7 +675,7 @@ def test_real_frozen_producers_form_one_deterministic_static_to_thermostat_chain
     )
 
     projection, freeze, target = _static_outputs()
-    stopped = build_static_core_equal_keyless_target_decision(
+    decision = build_static_core_equal_keyless_target_decision(
         static_core_equal_projection=projection,
         static_core_equal_freeze_contract=freeze,
         static_core_equal_target_evidence=target,
@@ -637,15 +683,15 @@ def test_real_frozen_producers_form_one_deterministic_static_to_thermostat_chain
         position_manager_sha256=first.snapshot_draft_sha256,
         current_facts=_snapshot(),
         reconciliation={"state": "RECONCILED", "unknown_outcomes": 0},
-        product="ag",
+        product="au",
         run_id="issue353-run-0001",
         expires_at="2099-01-01T00:00:00Z",
         now=datetime(2030, 1, 1, tzinfo=timezone.utc),
     )
-    assert stopped.stopped is True
-    assert stopped.stop_reason == "no_abs_one_target"
-    assert stopped.handoff is None
-    assert stopped.selected_target_quantity == 14
+    assert decision.stopped is False
+    assert decision.handoff is not None
+    assert decision.selected_target_quantity == 3
+    assert len(decision.handoff.target_plan["orders"]) == 3
 
 
 def test_cross_splice_baseline_tamper_and_authority_promotion_fail_closed() -> None:
@@ -702,23 +748,38 @@ def test_cross_splice_baseline_tamper_and_authority_promotion_fail_closed() -> N
         )
 
 
-def test_matching_strategy_target_is_noop_without_plan_or_mutation() -> None:
+def test_matching_two_lot_strategy_target_is_noop_without_plan_or_mutation() -> None:
+    selected = {"ag": 2, "au": -2, "sc": 2}
     matching = {
         "ag2612.SHFE.LONG": {
             "gateway_name": "CTP",
             "symbol": "ag2612",
             "exchange": "SHFE",
             "direction": "LONG",
-            "volume": 1,
+            "volume": 2,
             "yd_volume": 0,
         }
     }
-    decision = _decision(product="ag", positions=matching)
+    decision = _decision(product="ag", positions=matching, selected=selected)
     assert decision.noop is True
     assert decision.handoff is None
-    assert decision.selected_target_quantity == 1
-    assert decision.current_quantity == 1
+    assert decision.selected_target_quantity == 2
+    assert decision.current_quantity == 2
     assert len(decision.final_target_projection["targets"]) == 10
+
+    one_lot = json.loads(canonical_json_line(matching))
+    one_lot["ag2612.SHFE.LONG"]["volume"] = 1
+    with pytest.raises(ExecutableTargetAdapterError, match="requires a flat account"):
+        _decision(product="ag", positions=one_lot, selected=selected)
+
+    split_lots = json.loads(canonical_json_line(matching))
+    split_lots["ag2612.SHFE.LONG"]["volume"] = 1
+    split_lots["ag2612.SHFE.LONG.second"] = {
+        **split_lots["ag2612.SHFE.LONG"],
+        "volume": 1,
+    }
+    with pytest.raises(ExecutableTargetAdapterError, match="canonical target position"):
+        _decision(product="ag", positions=split_lots, selected=selected)
 
 
 @pytest.mark.parametrize(
@@ -801,7 +862,7 @@ def test_formal_runner_non_action_performs_zero_custody_or_execution_mutation(
         lambda **_kwargs: SimpleNamespace(
             noop=decision_kind == "noop",
             stopped=decision_kind == "stopped",
-            stop_reason=("no_abs_one_target" if decision_kind == "stopped" else None),
+            stop_reason=("no_nonzero_target" if decision_kind == "stopped" else None),
             handoff=None,
             static_core_equal_sha256="a" * 64,
             position_manager_sha256="b" * 64,
@@ -864,7 +925,7 @@ def test_formal_runner_non_action_performs_zero_custody_or_execution_mutation(
         expected.update(
             {
                 "stopped": True,
-                "reason": "no_abs_one_target",
+                "reason": "no_nonzero_target",
                 "final_targets": stopped_targets,
             }
         )

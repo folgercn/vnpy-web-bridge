@@ -54,7 +54,7 @@ from .gateway_contracts import GatewaySnapshot
 
 
 class ExecutableTargetAdapterError(ValueError):
-    """The offline inputs cannot safely produce a one-lot TargetPlan."""
+    """The offline inputs cannot safely produce a TargetPlan."""
 
 
 _EXACT_CONTRACT = re.compile(r"^(CFFEX|CZCE|DCE|GFEX|INE|SHFE)\.([A-Za-z]+[0-9]{4})$")
@@ -930,7 +930,10 @@ def _after_positions(
     gateway_name: str,
     direction: str,
     offset: str,
+    quantity: int = 1,
 ) -> dict[str, Any]:
+    if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity < 1:
+        raise ExecutableTargetAdapterError("target position quantity is invalid")
     result = _mapping(positions, "current positions")
     if offset in _CLOSE_ORDER_OFFSETS:
         closing_direction = "SHORT" if direction == "LONG" else "LONG"
@@ -948,7 +951,9 @@ def _after_positions(
                 "close direction has no current position"
             )
         key, row = candidates[0]
-        row["volume"] -= 1
+        row["volume"] -= quantity
+        if row["volume"] < 0:
+            raise ExecutableTargetAdapterError("close target quantity exceeds position")
         result[key] = row
         return result
     candidates = sorted(
@@ -957,7 +962,7 @@ def _after_positions(
     )
     if candidates:
         key, row = candidates[0]
-        row["volume"] += 1
+        row["volume"] += quantity
         result[key] = row
         return result
     key = f"{symbol}.{exchange}.{direction}.{gateway_name}.target-v1"
@@ -968,7 +973,7 @@ def _after_positions(
         "symbol": symbol,
         "exchange": exchange,
         "direction": direction,
-        "volume": 1,
+        "volume": quantity,
     }
     return result
 
@@ -1294,11 +1299,11 @@ def build_static_core_equal_keyless_target_decision(
     """Replay and bind STATIC_CORE_EQUAL plus thermostat before masking.
 
     The full frozen ten-product final projection is built and hashed before
-    ``product`` is inspected.  Only a universe with no absolute-one target
-    returns a structured STOP; selecting a non-eligible product while another
-    eligible product exists fails closed.  A matching canonical one-lot current
-    position returns a NOOP decision without custody or Execution mutation.  A
-    real delta is admitted only from a flat account and produces one OPEN order.
+    ``product`` is inspected.  The execution mask may select only a product
+    with the smallest nonzero final target quantity; ties are explicit operator
+    choices.  A matching canonical target position returns a NOOP decision
+    without custody or Execution mutation.  A real delta is admitted only from
+    a flat account and produces one one-lot OPEN child order per target lot.
     """
 
     normalized_product = _require_text(product, "product").lower()
@@ -1332,7 +1337,16 @@ def build_static_core_equal_keyless_target_decision(
     eligible_products = tuple(
         product
         for product in _STATIC_CORE_EQUAL_PRODUCTS
-        if abs(final_rows[product]["target_quantity"]) == 1
+        if final_rows[product]["target_quantity"] != 0
+    )
+    minimum_target_quantity = min(
+        (abs(final_rows[product]["target_quantity"]) for product in eligible_products),
+        default=None,
+    )
+    minimum_target_products = tuple(
+        product
+        for product in eligible_products
+        if abs(final_rows[product]["target_quantity"]) == minimum_target_quantity
     )
     selected = final_rows[normalized_product]
     target_quantity = selected["target_quantity"]
@@ -1346,8 +1360,10 @@ def build_static_core_equal_keyless_target_decision(
         "selected_product": normalized_product,
         "selected_target_quantity": target_quantity,
     }
-    if eligible_products and normalized_product not in eligible_products:
-        raise ExecutableTargetAdapterError("selected product is not an abs-one target")
+    if minimum_target_products and normalized_product not in minimum_target_products:
+        raise ExecutableTargetAdapterError(
+            "selected product is not a minimum nonzero target"
+        )
     exchange, symbol = _contract(selected["exact_contract"])
     positions = _validate_snapshot(
         current_facts,
@@ -1362,11 +1378,11 @@ def build_static_core_equal_keyless_target_decision(
         gateway_name="CTP",
     )
     current_quantity = long_volume - short_volume
-    if not eligible_products:
+    if not minimum_target_products:
         return StaticCoreEqualKeylessDecision(
             handoff=None,
             current_quantity=current_quantity,
-            stop_reason="no_abs_one_target",
+            stop_reason="no_nonzero_target",
             **source_decision_fields,
         )
     delta = target_quantity - current_quantity
@@ -1382,18 +1398,26 @@ def build_static_core_equal_keyless_target_decision(
     )
     if delta == 0:
         if (
-            gross_position_volume != 1
-            or long_volume + short_volume != 1
-            or (target_quantity > 0 and (long_volume, short_volume) != (1, 0))
-            or (target_quantity < 0 and (long_volume, short_volume) != (0, 1))
+            len(positions) != 1
+            or len(matching) != 1
+            or gross_position_volume != abs(target_quantity)
+            or long_volume + short_volume != abs(target_quantity)
+            or (
+                target_quantity > 0
+                and (long_volume, short_volume) != (target_quantity, 0)
+            )
+            or (
+                target_quantity < 0
+                and (long_volume, short_volume) != (0, abs(target_quantity))
+            )
         ):
             raise ExecutableTargetAdapterError(
-                "NOOP requires the sole canonical one-lot target position"
+                "NOOP requires the sole canonical target position"
             )
         return StaticCoreEqualKeylessDecision(handoff=None, **decision_fields)
-    if gross_position_volume != 0 or abs(delta) != 1:
+    if gross_position_volume != 0:
         raise ExecutableTargetAdapterError(
-            "STATIC_CORE_EQUAL Run A requires a flat account and one-lot delta"
+            "STATIC_CORE_EQUAL Run A requires a flat account"
         )
 
     expected_before = before_position_projection_hash(
@@ -1410,6 +1434,7 @@ def build_static_core_equal_keyless_target_decision(
         gateway_name="CTP",
         direction=direction,
         offset="OPEN",
+        quantity=abs(delta),
     )
     expected_after = target_position_projection_hash(
         after_positions,
@@ -1453,9 +1478,12 @@ def build_static_core_equal_keyless_target_decision(
                     "volume": 1,
                     "price": selected["reference_open_price"],
                     "offset": "OPEN",
-                    "reference": identity,
+                    "reference": sha256_json(
+                        {"plan_identity": identity, "child_index": child_index}
+                    ),
                     "gateway_name": "CTP",
                 }
+                for child_index in range(1, abs(delta) + 1)
             ],
         )
     except CommodityExecutionContractError as exc:
