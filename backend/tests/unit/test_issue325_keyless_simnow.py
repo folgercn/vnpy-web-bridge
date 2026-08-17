@@ -820,7 +820,6 @@ def _runner_status(
         "state_version": version,
         "leader": {"held": True, "epoch": 1, "fencing_token": 1},
         "broker": {
-            "snapshot_id": f"snapshot-{version}",
             "connected": True,
             "active_order_count": active_orders,
             "position_snapshot_hash": "c" * 64,
@@ -858,7 +857,6 @@ def _runner_preflight_status() -> dict:
         "state_version": 0,
         "leader": {"held": True, "epoch": 1, "fencing_token": 1},
         "broker": {
-            "snapshot_id": "snapshot-preflight",
             "connected": True,
             "active_order_count": 0,
             "position_snapshot_hash": "c" * 64,
@@ -895,6 +893,7 @@ def _install_fake_runner_dependencies(
         trusted_keyless_custody_artifact=lambda: {"artifact": "trusted-keyless"},
     )
     calls: list[str] = []
+    commands: list[dict] = []
 
     class FakeCustody:
         def install_trusted_keyless_target_plan(self, _upload):
@@ -917,8 +916,12 @@ def _install_fake_runner_dependencies(
                 pass
             return SimpleNamespace(as_dict=lambda: self.latest)
 
+        async def ready(self):
+            return {"gateway_snapshot_id": f"gateway-ready-{len(commands):04d}"}
+
         async def submit(self, envelope):
             calls.append(envelope["command"])
+            commands.append(envelope)
             if envelope["command"] == "reconcile" and len(calls) == 6:
                 return final_response or _final_reconcile_response(
                     idempotency_key=envelope["idempotency_key"]
@@ -976,7 +979,7 @@ def _install_fake_runner_dependencies(
     monkeypatch.setattr(
         module, "_utc_clock", lambda: datetime(2030, 1, 1, tzinfo=timezone.utc)
     )
-    return SimpleNamespace(calls=calls)
+    return SimpleNamespace(calls=calls, commands=commands)
 
 
 def _final_reconcile_response(
@@ -1035,6 +1038,11 @@ def test_simnow_run_once_fake_e2e_final_reconcile_archives_after_terminal(
         "start",
         "reconcile",
     ]
+    assert [
+        command["payload"]["snapshot_id"]
+        for command in fake.commands
+        if command["command"] == "reconcile"
+    ] == ["gateway-ready-0001", "gateway-ready-0004"]
 
 
 @pytest.mark.parametrize(
