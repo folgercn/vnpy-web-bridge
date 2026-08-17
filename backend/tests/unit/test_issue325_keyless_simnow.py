@@ -881,6 +881,10 @@ def _install_fake_runner_dependencies(
     statuses: list[dict],
     *,
     final_response: dict | None = None,
+    start_submit_error: bool = False,
+    start_receipt_status: str = "COMPLETED",
+    start_receipt_command_hash: str | None = None,
+    start_receipt_error: bool = False,
 ) -> SimpleNamespace:
     plan = {
         "plan_id": "plan-0001",
@@ -894,6 +898,7 @@ def _install_fake_runner_dependencies(
     )
     calls: list[str] = []
     commands: list[dict] = []
+    receipt_queries: list[tuple[str, dict[str, str] | None]] = []
 
     class FakeCustody:
         def install_trusted_keyless_target_plan(self, _upload):
@@ -908,6 +913,7 @@ def _install_fake_runner_dependencies(
                 [_runner_preflight_status(), _runner_preflight_status(), *statuses]
             )
             self.latest = statuses[-1]
+            self.start_command: dict | None = None
 
         async def status(self):
             try:
@@ -922,11 +928,35 @@ def _install_fake_runner_dependencies(
         async def submit(self, envelope):
             calls.append(envelope["command"])
             commands.append(envelope)
+            if envelope["command"] == "start" and start_submit_error:
+                self.start_command = envelope
+                raise module.ExecutionClientError("start response lost")
             if envelope["command"] == "reconcile" and len(calls) == 6:
                 return final_response or _final_reconcile_response(
                     idempotency_key=envelope["idempotency_key"]
                 )
             return {"accepted": True}
+
+        async def receipt(self, idempotency_key, *, actor=None):
+            receipt_queries.append((idempotency_key, actor))
+            if start_receipt_error:
+                raise module.ExecutionClientError("start receipt unavailable")
+            if self.start_command is None:
+                raise AssertionError("receipt queried before start")
+            envelope = module.CommandEnvelope.model_validate(self.start_command)
+            receipt = {
+                "service": envelope.actor.service,
+                "idempotency_key": envelope.idempotency_key,
+                "command_hash": start_receipt_command_hash or envelope.command_hash(),
+                "command_id": envelope.command_id,
+                "correlation_id": envelope.correlation_id,
+                "actor": envelope.actor.as_dict(),
+                "status": start_receipt_status,
+                "state_version": envelope.expected.state_version,
+                "result": {"accepted": True},
+                "observed_at": "2030-01-01T00:00:00Z",
+            }
+            return receipt
 
     static_result = SimpleNamespace(
         producer_projection={},
@@ -979,7 +1009,9 @@ def _install_fake_runner_dependencies(
     monkeypatch.setattr(
         module, "_utc_clock", lambda: datetime(2030, 1, 1, tzinfo=timezone.utc)
     )
-    return SimpleNamespace(calls=calls, commands=commands)
+    return SimpleNamespace(
+        calls=calls, commands=commands, receipt_queries=receipt_queries
+    )
 
 
 def _final_reconcile_response(
@@ -1043,6 +1075,93 @@ def test_simnow_run_once_fake_e2e_final_reconcile_archives_after_terminal(
         for command in fake.commands
         if command["command"] == "reconcile"
     ] == ["gateway-ready-0001", "gateway-ready-0004"]
+
+
+def test_simnow_run_once_continues_after_start_error_when_exact_receipt_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _run_once_module("issue353_runner_start_receipt_recovery")
+    fake = _install_fake_runner_dependencies(
+        module,
+        monkeypatch,
+        [
+            _runner_status(version=0),
+            _runner_status(version=1),
+            _runner_status(version=2),
+            _runner_status(version=3),
+            _runner_status(version=4, intent_state="TERMINAL"),
+            _runner_status(version=5, intent_state="TERMINAL", terminal=True),
+        ],
+        start_submit_error=True,
+    )
+
+    result = asyncio.run(module.run(_run_once_args(module)))
+
+    assert result["executed"] is True
+    assert result["completed"] is True
+    assert fake.calls == [
+        "custody",
+        "preview",
+        "reconcile",
+        "enable",
+        "start",
+        "reconcile",
+    ]
+    assert fake.receipt_queries == [
+        (
+            "simnow-run-once-start-run-0001",
+            {
+                "service": "control-api",
+                "principal": "runner-admin",
+                "operator": "runner-admin",
+                "role": "admin",
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "label"),
+    [
+        ({"start_receipt_status": "REJECTED"}, "rejected"),
+        ({"start_receipt_error": True}, "unavailable"),
+        ({"start_receipt_command_hash": "f" * 64}, "binding-mismatch"),
+    ],
+)
+def test_simnow_run_once_stops_after_start_error_without_trusted_same_receipt(
+    monkeypatch: pytest.MonkeyPatch, kwargs: dict, label: str
+) -> None:
+    module = _run_once_module(f"issue353_runner_start_receipt_stop_{label}")
+    fake = _install_fake_runner_dependencies(
+        module,
+        monkeypatch,
+        [
+            _runner_status(version=0),
+            _runner_status(version=1),
+            _runner_status(version=2),
+            _runner_status(version=3),
+            _runner_status(version=4),
+        ],
+        start_submit_error=True,
+        **kwargs,
+    )
+
+    result = asyncio.run(module.run(_run_once_args(module)))
+
+    assert result["executed"] is False
+    assert result["reason"] == "start_outcome_unknown"
+    assert fake.calls == ["custody", "preview", "reconcile", "enable", "start"]
+    assert fake.receipt_queries == [
+        (
+            "simnow-run-once-start-run-0001",
+            {
+                "service": "control-api",
+                "principal": "runner-admin",
+                "operator": "runner-admin",
+                "role": "admin",
+            },
+        )
+    ]
 
 
 @pytest.mark.parametrize(
