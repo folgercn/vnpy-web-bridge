@@ -21,13 +21,21 @@ import commodity_static_core_equal_pure_producer as baseline_producer
 
 from .calendar_models import OfficialCalendar
 from .canonical import canonical_json, canonical_json_line, parse_json_strict, sha256
+from .file_integrity import read_regular_strict
 from .m2_isolation_contracts import false_authority
+from .m2_monitor_facts import verify_daily_run_receipt
+from .m2_receipts import validate_run_receipt
+from .m2_runtime_input import require_sha
+from .m2_runtime_loader import RuntimeContext
 from .pit_source_view import (
     PitSourceViewError,
     _official_month_boundary,
     _pit_main,
+    _safe_relative_path,
     contract_rows_from_daily_raw,
+    verified_daily_raw,
 )
+from .timeutil import parse_utc
 
 REGISTRY_SCHEMA = "vnpy_research_static_core_contract_registry_v1"
 RECEIPT_SCHEMA = "vnpy_research_static_core_baseline_evidence_v1"
@@ -36,6 +44,8 @@ SHFE_LAST_DAY_RULE = "SHFE_DELIVERY_MONTH_15TH_NEXT_OFFICIAL_V1"
 INE_SC_LAST_DAY_RULE = "INE_SC_PREVIOUS_MONTH_LAST_OFFICIAL_V1"
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 PLACEHOLDER_SIGNATURE = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+MAX_SOURCE_RAW_BYTES = 16 * 1024 * 1024
+MAX_AGGREGATE_RAW_BYTES = 512 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -44,6 +54,14 @@ class BuiltBaseline:
     artifacts: dict[str, bytes]
     unsigned_batch_raw: bytes
     evidence_raw: bytes
+
+
+@dataclass(frozen=True)
+class VerifiedStaticBaselineDailySources:
+    """Exact historical and normal-run bytes, including supplemental lineage."""
+
+    daily_raw: dict[str, dict[str, bytes]]
+    supplemental_daily_receipts: tuple[dict[str, Any], ...]
 
 
 def _logical_instant(day: date, value: time) -> str:
@@ -66,6 +84,145 @@ def _aggregate_raw_identity(
                 for day in days
             ]
         )
+    )
+
+
+def verified_static_baseline_daily_sources(
+    *,
+    context: RuntimeContext,
+    history: dict[str, Any],
+    chain: list[dict[str, Any]],
+    source_month: str,
+) -> VerifiedStaticBaselineDailySources:
+    """Load a baseline's exact bytes without applying the PIT month-end cutoff.
+
+    The fixed history receipt remains the authority for its own days.  Every
+    later official day needed through the baseline execution day must instead
+    have an independently verified *normal* run receipt and a committed,
+    root-pinned manifest revision.  The resulting receipt/manifest pins are
+    carried into the baseline evidence so an execution-day reference cannot be
+    misrepresented as history-receipt-only provenance.
+    """
+
+    _research_day, execution_day, _cutoff_day = _official_month_boundary(
+        context.calendar,
+        source_month=source_month,
+    )
+    history_days = sorted(
+        day
+        for day in history.get("official_days", [])
+        if day <= execution_day.isoformat()
+    )
+    if not history_days or history_days != sorted(set(history_days)):
+        raise PitSourceViewError("static baseline history days are invalid")
+    history_raw = verified_daily_raw(
+        context=context,
+        history=history,
+        chain=chain,
+        through_day=execution_day,
+    )
+    if set(history_raw) != set(history_days):
+        raise PitSourceViewError("static baseline history daily evidence is incomplete")
+
+    last_history_day = date.fromisoformat(history_days[-1])
+    supplemental_days = [
+        day
+        for day, row in context.calendar.days.items()
+        if row.is_official and last_history_day < day <= execution_day
+    ]
+    if supplemental_days and supplemental_days[-1] != execution_day:
+        raise PitSourceViewError("static baseline supplemental official days are incomplete")
+
+    manifests = {item["trade_day"]: item for item in chain}
+    result = dict(history_raw)
+    pins: list[dict[str, Any]] = []
+    aggregate = sum(len(raw) for sources in result.values() for raw in sources.values())
+    for day in supplemental_days:
+        raw_day = day.isoformat()
+        receipt_path = context.runtime.run_receipts / f"{raw_day}.json"
+        receipt_raw = read_regular_strict(
+            receipt_path,
+            "static baseline supplemental daily run receipt",
+        )
+        receipt = validate_run_receipt(
+            parse_json_strict(receipt_raw, "static baseline supplemental daily run receipt")
+        )
+        if (
+            receipt_raw != canonical_json_line(receipt)
+            or receipt_path.name != f"{receipt['trade_day']}.json"
+        ):
+            raise PitSourceViewError(
+                "static baseline supplemental receipt raw/path binding mismatch"
+            )
+        verify_daily_run_receipt(
+            receipt,
+            paths=context.paths,
+            registry=context.registry,
+            calendar=context.calendar,
+            calendar_availability_raw_sha256=context.availability.raw_sha256,
+        )
+        manifest = manifests.get(raw_day)
+        if manifest is None or manifest["commit_receipt"] is None:
+            raise PitSourceViewError(
+                "static baseline supplemental daily manifest is uncommitted"
+            )
+        revisions = {item["revision_id"]: item for item in manifest["revisions"]}
+        sources: dict[str, bytes] = {}
+        source_pins: list[dict[str, Any]] = []
+        for source in receipt["sources"]:
+            revision = revisions.get(source["revision_id"])
+            if revision is None or any(
+                revision[field] != source[field]
+                for field in ("raw_sha256", "raw_bytes", "raw_relative_path")
+            ):
+                raise PitSourceViewError(
+                    "static baseline supplemental manifest/receipt revision mismatch"
+                )
+            raw_path = _safe_relative_path(
+                context.paths.root,
+                source["raw_relative_path"],
+                "static baseline supplemental raw",
+            )
+            raw = read_regular_strict(
+                raw_path,
+                "static baseline supplemental exact raw",
+                limit=MAX_SOURCE_RAW_BYTES,
+            )
+            if len(raw) != source["raw_bytes"] or sha256(raw) != source["raw_sha256"]:
+                raise PitSourceViewError("static baseline supplemental raw bytes drifted")
+            aggregate += len(raw)
+            if aggregate > MAX_AGGREGATE_RAW_BYTES:
+                raise PitSourceViewError(
+                    "static baseline supplemental aggregate raw resource limit exceeded"
+                )
+            sources[source["exchange"]] = raw
+            source_pins.append(
+                {
+                    "exchange": source["exchange"],
+                    "raw_sha256": source["raw_sha256"],
+                    "raw_bytes": source["raw_bytes"],
+                    "revision_id": source["revision_id"],
+                }
+            )
+        if set(sources) != {"SHFE", "INE"}:
+            raise PitSourceViewError(
+                "static baseline supplemental exact source set mismatch"
+            )
+        result[raw_day] = sources
+        pins.append(
+            {
+                "trade_day": raw_day,
+                "run_receipt_raw_sha256": sha256(receipt_raw),
+                "completed_at": receipt["completed_at"],
+                "manifest_batch_id": manifest["batch_id"],
+                "manifest_batch_seal_sha256": manifest["batch_seal_sha256"],
+                "manifest_commit_seal_sha256": manifest["commit_seal_sha256"],
+                "sources": source_pins,
+            }
+        )
+    return VerifiedStaticBaselineDailySources(
+        daily_raw=result,
+        supplemental_daily_receipts=tuple(pins),
     )
 
 
@@ -266,6 +423,7 @@ def build_historical_baseline(
     source_month: str,
     signer_key_id: str,
     execution_lane: str,
+    supplemental_daily_receipts: tuple[dict[str, Any], ...] | list[dict[str, Any]] = (),
 ) -> BuiltBaseline:
     if execution_lane not in {"official_forward", "simnow_shakedown"}:
         raise PitSourceViewError("historical baseline execution lane is invalid")
@@ -274,13 +432,26 @@ def build_historical_baseline(
         calendar,
         source_month=source_month,
     )
-    history_days = [
+    history_receipt_days = [
         day
         for day in history_receipt.get("official_days", [])
         if day <= research_day.isoformat()
     ]
-    if len(history_days) < 127 or history_days != sorted(set(history_days)):
+    if (
+        len(history_receipt_days) < 127
+        or history_receipt_days != sorted(set(history_receipt_days))
+    ):
         raise PitSourceViewError("historical baseline lacks 127 official days")
+    fixed_history_through_execution = [
+        day
+        for day in history_receipt.get("official_days", [])
+        if day <= execution_day.isoformat()
+    ]
+    if (
+        not fixed_history_through_execution
+        or fixed_history_through_execution != sorted(set(fixed_history_through_execution))
+    ):
+        raise PitSourceViewError("historical baseline execution history is invalid")
     following = sorted(
         day
         for day, row in calendar.days.items()
@@ -288,6 +459,96 @@ def build_historical_baseline(
     )
     if not following:
         raise PitSourceViewError("calendar lacks following execution day")
+    last_history_day = date.fromisoformat(fixed_history_through_execution[-1])
+    required_supplemental_days = [
+        day.isoformat()
+        for day, row in calendar.days.items()
+        if row.is_official and last_history_day < day <= execution_day
+    ]
+    if required_supplemental_days and required_supplemental_days[-1] != (
+        execution_day.isoformat()
+    ):
+        raise PitSourceViewError("historical baseline supplemental days are incomplete")
+    supplied_supplemental = list(supplemental_daily_receipts)
+    if [item.get("trade_day") if isinstance(item, dict) else None for item in supplied_supplemental] != required_supplemental_days:
+        raise PitSourceViewError("historical baseline supplemental receipt days mismatch")
+    for receipt_pin in supplied_supplemental:
+        if not isinstance(receipt_pin, dict) or set(receipt_pin) != {
+            "trade_day",
+            "run_receipt_raw_sha256",
+            "completed_at",
+            "manifest_batch_id",
+            "manifest_batch_seal_sha256",
+            "manifest_commit_seal_sha256",
+            "sources",
+        }:
+            raise PitSourceViewError("historical baseline supplemental receipt shape mismatch")
+        require_sha(
+            receipt_pin["run_receipt_raw_sha256"],
+            "historical baseline supplemental receipt",
+        )
+        parse_utc(
+            receipt_pin["completed_at"],
+            "historical baseline supplemental receipt completion",
+        )
+        require_sha(
+            receipt_pin["manifest_batch_seal_sha256"],
+            "historical baseline supplemental manifest",
+        )
+        require_sha(
+            receipt_pin["manifest_commit_seal_sha256"],
+            "historical baseline supplemental commit",
+        )
+        if (
+            not isinstance(receipt_pin["manifest_batch_id"], str)
+            or not receipt_pin["manifest_batch_id"]
+            or not isinstance(receipt_pin["sources"], list)
+            or [item.get("exchange") if isinstance(item, dict) else None for item in receipt_pin["sources"]]
+            != ["SHFE", "INE"]
+        ):
+            raise PitSourceViewError("historical baseline supplemental source shape mismatch")
+        for source_pin in receipt_pin["sources"]:
+            if not isinstance(source_pin, dict) or set(source_pin) != {
+                "exchange",
+                "raw_sha256",
+                "raw_bytes",
+                "revision_id",
+            }:
+                raise PitSourceViewError(
+                    "historical baseline supplemental source pin shape mismatch"
+                )
+            if (
+                not isinstance(source_pin["revision_id"], str)
+                or not source_pin["revision_id"]
+                or not isinstance(source_pin["raw_bytes"], int)
+                or isinstance(source_pin["raw_bytes"], bool)
+                or source_pin["raw_bytes"] < 1
+            ):
+                raise PitSourceViewError(
+                    "historical baseline supplemental source pin is invalid"
+                )
+            require_sha(
+                source_pin["raw_sha256"],
+                "historical baseline supplemental source",
+            )
+            sources = daily_source_raw.get(receipt_pin["trade_day"])
+            if not isinstance(sources, dict) or source_pin["exchange"] not in sources:
+                raise PitSourceViewError("historical baseline raw days are incomplete")
+            raw = sources[source_pin["exchange"]]
+            if (
+                sha256(raw) != source_pin["raw_sha256"]
+                or len(raw) != source_pin["raw_bytes"]
+            ):
+                raise PitSourceViewError(
+                    "historical baseline supplemental source bytes mismatch"
+                )
+
+    research_supplemental_days = [
+        day for day in required_supplemental_days if day <= research_day.isoformat()
+    ]
+    history_days = [*history_receipt_days, *research_supplemental_days]
+    if history_days != sorted(set(history_days)):
+        raise PitSourceViewError("historical baseline calculation days are invalid")
     official_days = [*history_days, execution_day.isoformat(), following[0].isoformat()]
     required = set(history_days) | {execution_day.isoformat()}
     if required - set(daily_source_raw):
@@ -301,6 +562,26 @@ def build_historical_baseline(
     logical_at = _logical_instant(execution_day, time(18, 30))
     market_bindings: dict[str, dict[str, Any]] = {}
     reference_bindings: dict[str, dict[str, Any]] = {}
+    execution_day_receipt = next(
+        (
+            item
+            for item in supplied_supplemental
+            if item["trade_day"] == execution_day.isoformat()
+        ),
+        None,
+    )
+    execution_day_evidence = (
+        {
+            "evidence_kind": "NORMAL_RUN_RECEIPT",
+            "normal_run_receipt": execution_day_receipt,
+        }
+        if execution_day_receipt is not None
+        else {
+            "evidence_kind": "FIXED_HISTORY_RECEIPT",
+            "history_receipt_raw_sha256": history_receipt_raw_sha256,
+            "trade_day": execution_day.isoformat(),
+        }
+    )
     for exchange in ("SHFE", "INE"):
         market_sha = _aggregate_raw_identity(
             daily_source_raw,
@@ -321,6 +602,7 @@ def build_historical_baseline(
                 "operator_pins": operator_pins,
                 "exchange": exchange,
                 "days": history_days,
+                "supplemental_daily_receipts": supplied_supplemental,
             },
             history_receipt_sha256=history_receipt_raw_sha256,
         )
@@ -339,6 +621,7 @@ def build_historical_baseline(
                 "operator_pins": operator_pins,
                 "exchange": exchange,
                 "execution_day": execution_day.isoformat(),
+                "execution_day_evidence": execution_day_evidence,
             },
             history_receipt_sha256=history_receipt_raw_sha256,
         )
@@ -469,6 +752,7 @@ def build_historical_baseline(
         "warehouse_registry_raw_sha256": warehouse_registry_raw_sha256,
         "contract_registry_raw_sha256": contract_registry_sha,
         "operator_pins": operator_pins,
+        "supplemental_daily_receipts": supplied_supplemental,
         "source_month": source_month,
         "derivation_id": DERIVATION_ID,
     }

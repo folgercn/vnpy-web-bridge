@@ -11,11 +11,13 @@ from .m2_operator_state import load_operator_state, operator_state_lock
 from .m2_runtime_loader import load_runtime_context
 from .pit_source_view import (
     SourcePins,
-    _official_month_boundary,
-    verified_daily_raw,
     verify_root_pins,
 )
-from .static_core_baseline import build_historical_baseline, publish_built_baseline
+from .static_core_baseline import (
+    build_historical_baseline,
+    publish_built_baseline,
+    verified_static_baseline_daily_sources,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -57,15 +59,11 @@ def main(argv: list[str] | None = None) -> int:
             pins=pins,
             manifest_public_key_path=args.manifest_public_key,
         )
-        _research_day, execution_day, _cutoff_day = _official_month_boundary(
-            context.calendar,
-            source_month=args.source_month,
-        )
-        daily_raw = verified_daily_raw(
+        verified_sources = verified_static_baseline_daily_sources(
             context=context,
             history=history,
             chain=chain,
-            through_day=execution_day,
+            source_month=args.source_month,
         )
         built = build_historical_baseline(
             calendar=context.calendar,
@@ -88,7 +86,7 @@ def main(argv: list[str] | None = None) -> int:
                     "commit_anchor_ledger_raw_sha256"
                 ],
             },
-            daily_source_raw=daily_raw,
+            daily_source_raw=verified_sources.daily_raw,
             contract_registry_raw=read_regular_strict(
                 args.contract_registry,
                 "static-core contract registry",
@@ -97,6 +95,9 @@ def main(argv: list[str] | None = None) -> int:
             source_month=args.source_month,
             signer_key_id=args.signer_key_id,
             execution_lane=args.execution_lane,
+            supplemental_daily_receipts=(
+                verified_sources.supplemental_daily_receipts
+            ),
         )
         publish_built_baseline(args.output, built)
     print(
