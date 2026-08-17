@@ -13,6 +13,7 @@ import asyncio
 import json
 import sys
 from collections.abc import Mapping
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -28,7 +29,9 @@ from app.control_execution_client import (  # noqa: E402
 )
 from app.execution.models import CommandEnvelope  # noqa: E402
 from app.execution.executable_target_adapter import (  # noqa: E402
+    _contract,
     _without_terminal_execution_orders,
+    build_static_core_equal_keyless_safety_flat_decision,
     build_static_core_equal_keyless_target_decision,
     peek_current_facts_to_snapshot,
 )
@@ -43,7 +46,9 @@ from commodity_static_core_equal_pure_producer import (  # noqa: E402
     produce_research_artifacts as produce_static_core_equal,
 )
 from simnow_keyless_pilot import (  # noqa: E402
-    _require_execution_hard_gates,
+    _fresh_utc,
+    _formal_tick_binding,
+    _require_tick_boundary,
     _require_same_execution_binding,
     _utc_clock,
 )
@@ -54,6 +59,53 @@ from shared.trust_contracts.v1 import (  # noqa: E402
 )
 
 _TERMINAL_INTENT_STATES = frozenset({"TERMINAL", "RECONCILED", "CANCELLED"})
+
+
+def _safety_flat_protected_tick_price(
+    snapshot: Mapping[str, Any], *, product: str
+) -> tuple[float, tuple[str, str, int, str, str, float], str, str]:
+    """Derive the one reduce-only close price from the formal tick journal."""
+
+    targets = snapshot.get("targets")
+    if not isinstance(targets, list):
+        raise ValueError("position-manager targets are invalid for SAFETY FLAT")
+    rows = [row for row in targets if isinstance(row, Mapping) and row.get("product") == product]
+    if len(rows) != 1:
+        raise ValueError("selected SAFETY FLAT target is not unique")
+    row = rows[0]
+    target_quantity = row.get("shadow_target_quantity")
+    exact_contract = row.get("exact_contract")
+    price_tick = row.get("price_tick")
+    if (
+        isinstance(target_quantity, bool)
+        or not isinstance(target_quantity, int)
+        or target_quantity == 0
+        or not isinstance(exact_contract, str)
+    ):
+        raise ValueError("selected SAFETY FLAT target is invalid")
+    try:
+        exchange, symbol = _contract(exact_contract)
+    except Exception as exc:  # noqa: BLE001 - adapter owns canonical contract grammar
+        raise ValueError("selected SAFETY FLAT contract is invalid") from exc
+    try:
+        tick = Decimal(str(price_tick))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError("selected SAFETY FLAT price tick is invalid") from exc
+    if not tick.is_finite() or tick <= 0:
+        raise ValueError("selected SAFETY FLAT price tick is invalid")
+    vt_symbol = f"{symbol}.{exchange}"
+    price_field = "ask" if target_quantity < 0 else "bid"
+    binding = _formal_tick_binding(
+        clock=_utc_clock, vt_symbol=vt_symbol, price_field=price_field
+    )
+    try:
+        quote = Decimal(str(binding[5]))
+    except (InvalidOperation, ValueError) as exc:  # pragma: no cover - verifier validates
+        raise ValueError("formal CTP protected quote is invalid") from exc
+    protected = quote + tick if price_field == "ask" else quote - tick
+    if not protected.is_finite() or protected <= 0 or protected % tick != 0:
+        raise ValueError("formal CTP protected close price is invalid")
+    return float(protected), binding, vt_symbol, price_field
 
 
 def _object(path: Path, label: str) -> dict[str, Any]:
@@ -161,6 +213,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--idempotency-suffix", required=True)
     parser.add_argument("--expected-custody-version", required=True, type=int)
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument(
+        "--safety-flat",
+        action="store_true",
+        help=(
+            "derive a reduce-only zero target only from the selected product's "
+            "fresh current position"
+        ),
+    )
     parser.add_argument("--completion-timeout-seconds", type=float, default=60.0)
     parser.add_argument("--completion-poll-seconds", type=float, default=1.0)
     return parser
@@ -238,6 +298,7 @@ def _completed(status: dict[str, Any], *, plan_id: str, plan_hash: str) -> bool:
         and status.get("plan", {}).get("plan_id") == plan_id
         and status.get("plan", {}).get("plan_hash") == plan_hash
         and status.get("authority", {}).get("state") == "REVOKED"
+        and status.get("leader", {}).get("held") is False
         and status.get("reconciliation", {}).get("state") == "RECONCILED"
         and status.get("reconciliation", {}).get("unknown_outcomes") == 0
         and status.get("broker", {}).get("active_order_count") == 0
@@ -247,19 +308,57 @@ def _completed(status: dict[str, Any], *, plan_id: str, plan_hash: str) -> bool:
     )
 
 
-def _execution_binding(
-    status: dict[str, Any], *, expected_position_snapshot_hash: str
-) -> tuple[Any, ...]:
+def _execution_binding(status: dict[str, Any]) -> tuple[Any, ...]:
+    """Bind the runner to fresh Execution facts, not a stale local raw hash.
+
+    The local peek is still canonically committed as TargetPlan's expected
+    before-position projection.  Execution's broker snapshot is independently
+    required to remain present, fresh, reconciled and unchanged throughout
+    preview/custody/start admission.  The two snapshots are collected at
+    distinct controlled times and need not have identical raw JSON hashes.
+    """
+
     intents = status.get("send_intents", [])
     if not isinstance(intents, list) or any(
         not isinstance(item, dict) or item.get("state") not in _TERMINAL_INTENT_STATES
         for item in intents
     ):
         raise ValueError("Execution has a pending or invalid send intent")
-    return _require_execution_hard_gates(
-        status,
-        expected_position_snapshot_hash=expected_position_snapshot_hash,
-        clock=_utc_clock,
+    now = _utc_clock()
+    if now.tzinfo is None or now.utcoffset() != timezone.utc.utcoffset(now):
+        raise ValueError("Execution status clock must be explicit UTC")
+    broker = status.get("broker")
+    reconciliation = status.get("reconciliation")
+    if (
+        not isinstance(broker, Mapping)
+        or status.get("lifecycle") != "READY"
+        or broker.get("connected") is not True
+        or broker.get("active_order_count") != 0
+        or not isinstance(broker.get("position_snapshot_hash"), str)
+        or not broker["position_snapshot_hash"]
+        or not isinstance(reconciliation, Mapping)
+        or reconciliation.get("state") != "RECONCILED"
+        or reconciliation.get("unknown_outcomes") != 0
+        or isinstance(status.get("state_version"), bool)
+        or not isinstance(status.get("state_version"), int)
+    ):
+        raise ValueError("Execution hard gates/snapshot binding are not clean")
+    last_snapshot_at = _fresh_utc(
+        broker.get("last_snapshot_at"), label="Execution broker snapshot", now=now
+    )
+    last_completed_at = _fresh_utc(
+        reconciliation.get("last_completed_at"),
+        label="Execution reconciliation",
+        now=now,
+    )
+    return (
+        status["state_version"],
+        status["lifecycle"],
+        broker["position_snapshot_hash"],
+        last_snapshot_at,
+        reconciliation["state"],
+        str(reconciliation["unknown_outcomes"]),
+        last_completed_at,
     )
 
 
@@ -335,7 +434,23 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     peek = peek_current_facts_to_snapshot(
         _without_terminal_execution_orders(facts), account_scope="account:windows"
     )
-    decision = build_static_core_equal_keyless_target_decision(
+    position_manager_snapshot = _generated_object(
+        position_result.snapshot_draft,
+        "position-manager snapshot",
+    )
+    safety_flat_tick: tuple[
+        float, tuple[str, str, int, str, str, float], str, str
+    ] | None = None
+    if args.safety_flat:
+        safety_flat_tick = _safety_flat_protected_tick_price(
+            position_manager_snapshot, product=args.product
+        )
+    decision_builder = (
+        build_static_core_equal_keyless_safety_flat_decision
+        if args.safety_flat
+        else build_static_core_equal_keyless_target_decision
+    )
+    decision = decision_builder(
         static_core_equal_projection=static_result.producer_projection,
         static_core_equal_freeze_contract=_generated_object(
             static_result.artifacts["freeze_contract"],
@@ -345,16 +460,18 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             static_result.artifacts["target_evidence"],
             "STATIC_CORE_EQUAL target evidence",
         ),
-        position_manager_snapshot=_generated_object(
-            position_result.snapshot_draft,
-            "position-manager snapshot",
-        ),
+        position_manager_snapshot=position_manager_snapshot,
         position_manager_sha256=position_result.snapshot_draft_sha256,
         current_facts=peek.snapshot,
         reconciliation=reconciliation,
         product=args.product,
         run_id=args.idempotency_suffix,
         expires_at=args.expires_at,
+        **(
+            {"safety_flat_limit_price": safety_flat_tick[0]}
+            if safety_flat_tick is not None
+            else {}
+        ),
         now=datetime.fromisoformat(now.replace("Z", "+00:00")),
     )
     lineage_result = {
@@ -373,10 +490,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             preflight_status = (await execution.status()).as_dict()
         except ExecutionClientError as exc:
             raise ValueError("Execution preflight is unavailable") from exc
-        initial_binding = _execution_binding(
-            preflight_status,
-            expected_position_snapshot_hash=peek.snapshot.position_snapshot_hash,
-        )
+        initial_binding = _execution_binding(preflight_status)
     if getattr(decision, "stopped", False):
         return {
             **lineage_result,
@@ -399,7 +513,11 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         return {
             **lineage_result,
             "noop": True,
-            "reason": "target_already_satisfied",
+            "reason": (
+                "safety_flat_already_satisfied"
+                if args.safety_flat
+                else "target_already_satisfied"
+            ),
             "executed": False,
             "completed": args.execute,
             "actual_execution_validated": args.execute,
@@ -420,10 +538,14 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError("Execution pre-custody status is unavailable") from exc
         _require_same_execution_binding(
             initial_binding,
-            _execution_binding(
-                before_custody,
-                expected_position_snapshot_hash=peek.snapshot.position_snapshot_hash,
-            ),
+            _execution_binding(before_custody),
+        )
+    if safety_flat_tick is not None:
+        _require_tick_boundary(
+            safety_flat_tick[1],
+            clock=_utc_clock,
+            vt_symbol=safety_flat_tick[2],
+            price_field=safety_flat_tick[3],
         )
     artifact = handoff.trusted_keyless_custody_artifact()
     custody = RemotePhaseCWorkflowClient()
@@ -456,10 +578,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("Execution preflight binding is unavailable")
     _require_same_execution_binding(
         initial_binding,
-        _execution_binding(
-            status,
-            expected_position_snapshot_hash=peek.snapshot.position_snapshot_hash,
-        ),
+        _execution_binding(status),
     )
     await execution.submit(_command(name="preview", suffix=f"preview-{args.idempotency_suffix}", version=status["state_version"], actor=actor, now=now, payload={"plan_hash": handoff.target_plan["plan_hash"], "artifact_hash": receipt.artifact_sha256, "mode": "simnow_preview", "receipt_id": receipt.receipt_id}))
     status = (await execution.status()).as_dict()
@@ -475,11 +594,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     status = (await execution.status()).as_dict()
     await execution.submit(_command(name="enable", suffix=f"enable-{args.idempotency_suffix}", version=status["state_version"], actor=actor, now=now, payload={"authority_artifact_id": handoff.target_plan["plan_id"], "authority_hash": handoff.target_plan["plan_hash"], "expires_at": handoff.target_plan["expires_at"], "reason": "trusted keyless custody"}))
     status = (await execution.status()).as_dict()
-    _require_execution_hard_gates(
-        status,
-        expected_position_snapshot_hash=peek.snapshot.position_snapshot_hash,
-        clock=_utc_clock,
-    )
+    _execution_binding(status)
     leader = status["leader"]
     if not leader.get("held"):
         raise ValueError("Execution leader lease is not held; refusing start")
@@ -519,6 +634,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     result["start_submitted"] = True
 
     deadline = asyncio.get_running_loop().time() + args.completion_timeout_seconds
+    reconciled_pending_versions: set[int] = set()
     while True:
         try:
             status = (await execution.status()).as_dict()
@@ -533,6 +649,78 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             return _incomplete(result, reason=state, status=status)
         if state == "ready_for_final_reconcile":
             break
+        if state == "pending_intents":
+            state_version = status.get("state_version")
+            if isinstance(state_version, bool) or not isinstance(state_version, int):
+                return _incomplete(
+                    result, reason="completion_status_invalid", status=status
+                )
+            if state_version not in reconciled_pending_versions:
+                # This is query-only reconciliation of the exact started plan;
+                # it never recreates or resends its start/send intent.  One
+                # probe per observed durable state prevents polling from
+                # becoming a command retry loop.
+                try:
+                    completion_command, completion_response = (
+                        await _submit_reconcile_with_ready_snapshot(
+                            execution,
+                            suffix=(
+                                f"completion-reconcile-{args.idempotency_suffix}-"
+                                f"{state_version}"
+                            ),
+                            version=state_version,
+                            actor=actor,
+                            now=_now(),
+                            reconciliation_run_id=(
+                                "simnow-run-once-completion-reconcile-"
+                                f"{args.idempotency_suffix}-{state_version}"
+                            ),
+                            reason=(
+                                "query-only pending SIMNOW send-intent "
+                                "reconciliation"
+                            ),
+                        )
+                    )
+                    completion_status = (await execution.status()).as_dict()
+                except (ExecutionClientError, ValueError):
+                    return _incomplete(
+                        result,
+                        reason="completion_reconcile_outcome_unknown",
+                        status=status,
+                    )
+                reconciled_pending_versions.add(state_version)
+                # Reconciliation may atomically resolve the final pending
+                # intent and archive the plan.  Its own durable receipt is
+                # then the required final evidence; do not issue a second
+                # reconcile command merely because polling observed SUBMITTED.
+                if _final_reconcile_completed(
+                    completion_response,
+                    plan_id=handoff.target_plan["plan_id"],
+                    plan_hash=handoff.target_plan["plan_hash"],
+                    expected_after_position_hash=handoff.target_plan[
+                        "expected_after_position_hash"
+                    ],
+                    final_status=completion_status,
+                    idempotency_key=completion_command["idempotency_key"],
+                ):
+                    if not _completed(
+                        completion_status,
+                        plan_id=handoff.target_plan["plan_id"],
+                        plan_hash=handoff.target_plan["plan_hash"],
+                    ):
+                        return _incomplete(
+                            result,
+                            reason="completion_reconcile_not_completed",
+                            status=completion_status,
+                        )
+                    return {
+                        **result,
+                        "executed": True,
+                        "completed": True,
+                        "archived": True,
+                        "execution_status": completion_status,
+                    }
+                continue
         if asyncio.get_running_loop().time() >= deadline:
             return _incomplete(result, reason=f"completion_timeout:{state}", status=status)
         await asyncio.sleep(args.completion_poll_seconds)

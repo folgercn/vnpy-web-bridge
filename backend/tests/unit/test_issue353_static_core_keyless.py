@@ -1,3 +1,5 @@
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import asyncio
@@ -5,6 +7,7 @@ import hashlib
 import importlib.util
 import json
 import sys
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -19,6 +22,7 @@ from app.execution import (
 )
 from app.execution.executable_target_adapter import (
     ExecutableTargetAdapterError,
+    build_static_core_equal_keyless_safety_flat_decision,
     build_static_core_equal_keyless_target_decision,
 )
 from app.execution.final_runtime import (
@@ -268,6 +272,42 @@ def _decision(
         product=product,
         run_id=run_id,
         expires_at="2099-01-01T00:00:00Z",
+        now=datetime(2030, 1, 1, tzinfo=timezone.utc),
+    )
+
+
+def _safety_flat_decision(
+    *,
+    product: str = "ag",
+    positions: dict[str, dict] | None = None,
+    selected: dict[str, int] | None = None,
+    snapshot: GatewaySnapshot | None = None,
+    reconciliation: dict[str, object] | None = None,
+    limit_price: float | None = None,
+):
+    projection, freeze, target = _static_outputs()
+    manager = _position_manager_snapshot(target, selected=selected)
+    selected_row = next(row for row in manager["targets"] if row["product"] == product)
+    return build_static_core_equal_keyless_safety_flat_decision(
+        static_core_equal_projection=projection,
+        static_core_equal_freeze_contract=freeze,
+        static_core_equal_target_evidence=target,
+        position_manager_snapshot=manager,
+        position_manager_sha256=sha256_json(manager),
+        current_facts=_snapshot(positions) if snapshot is None else snapshot,
+        reconciliation=(
+            {"state": "RECONCILED", "unknown_outcomes": 0}
+            if reconciliation is None
+            else reconciliation
+        ),
+        product=product,
+        run_id="issue353-safety-flat-0001",
+        expires_at="2099-01-01T00:00:00Z",
+        safety_flat_limit_price=(
+            selected_row["reference_open_price"]
+            if limit_price is None
+            else limit_price
+        ),
         now=datetime(2030, 1, 1, tzinfo=timezone.utc),
     )
 
@@ -621,6 +661,160 @@ def test_minimum_nonzero_target_tie_is_masked_only_after_full_hash() -> None:
         ExecutableTargetAdapterError, match="not a minimum nonzero target"
     ):
         _decision(product="al", selected=selected)
+
+
+def test_safety_flat_derives_n_one_lot_reduce_only_closes_from_exact_selected_position(
+) -> None:
+    selected = {"ag": -2, "au": -2, "sc": 2}
+    positions = {
+        "ag2612.SHFE.SHORT": {
+            "gateway_name": "CTP",
+            "symbol": "ag2612",
+            "exchange": "SHFE",
+            "direction": "SHORT",
+            "volume": 2,
+            "yd_volume": 0,
+        }
+    }
+
+    decision = _safety_flat_decision(positions=positions, selected=selected)
+
+    assert decision.handoff is not None
+    assert decision.selected_target_quantity == -2
+    assert decision.current_quantity == -2
+    assert decision.final_target_sha256 == _decision(
+        product="ag", selected=selected
+    ).final_target_sha256
+    plan = decision.handoff.target_plan
+    assert plan["schema_version"] == KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION
+    assert plan["phase"] == "CLOSE"
+    assert len(plan["orders"]) == 2
+    assert {order["direction"] for order in plan["orders"]} == {"LONG"}
+    assert {order["offset"] for order in plan["orders"]} == {"CLOSETODAY"}
+    assert {order["volume"] for order in plan["orders"]} == {1}
+    references = [order["reference"] for order in plan["orders"]]
+    assert len(references) == len(set(references)) == 2
+    assert {len(reference) for reference in references} == {64}
+    assert plan["expected_after_position_hash"] == target_position_projection_hash(
+        {}, account_scope="account:windows", environment="SIMNOW"
+    )
+
+
+@pytest.mark.parametrize(
+    ("direction", "volume"),
+    [("SHORT", 1), ("SHORT", 3), ("LONG", 2)],
+)
+def test_safety_flat_rejects_partial_oversize_or_reverse_strategy_position(
+    direction: str, volume: int
+) -> None:
+    positions = {
+        f"ag2612.SHFE.{direction}": {
+            "gateway_name": "CTP",
+            "symbol": "ag2612",
+            "exchange": "SHFE",
+            "direction": direction,
+            "volume": volume,
+            "yd_volume": 0,
+        }
+    }
+
+    with pytest.raises(ExecutableTargetAdapterError, match="exact selected strategy"):
+        _safety_flat_decision(
+            positions=positions, selected={"ag": -2, "au": -2, "sc": 2}
+        )
+
+
+def test_safety_flat_plans_shfe_td_then_yd_offsets_per_child() -> None:
+    selected = {"ag": -3, "au": -3, "sc": 3}
+    positions = {
+        "ag2612.SHFE.SHORT": {
+            "gateway_name": "CTP",
+            "symbol": "ag2612",
+            "exchange": "SHFE",
+            "direction": "SHORT",
+            "volume": 3,
+            "yd_volume": 2,
+        }
+    }
+
+    decision = _safety_flat_decision(positions=positions, selected=selected)
+
+    assert decision.handoff is not None
+    assert [order["offset"] for order in decision.handoff.target_plan["orders"]] == [
+        "CLOSETODAY",
+        "CLOSEYESTERDAY",
+        "CLOSEYESTERDAY",
+    ]
+
+
+def test_safety_flat_verified_protected_limit_price_is_committed_into_plan_hash() -> None:
+    selected = {"ag": -2, "au": -2, "sc": 2}
+    positions = {
+        "ag2612.SHFE.SHORT": {
+            "gateway_name": "CTP",
+            "symbol": "ag2612",
+            "exchange": "SHFE",
+            "direction": "SHORT",
+            "volume": 2,
+            "yd_volume": 0,
+        }
+    }
+    protected = _safety_flat_decision(
+        positions=positions, selected=selected, limit_price=9342.0
+    )
+    different_protected = _safety_flat_decision(
+        positions=positions, selected=selected, limit_price=9343.0
+    )
+
+    assert protected.handoff is not None
+    assert all(order["price"] == 9342.0 for order in protected.handoff.target_plan["orders"])
+    assert protected.handoff.target_plan["plan_hash"] != different_protected.handoff.target_plan["plan_hash"]
+
+
+@pytest.mark.parametrize("failure", ["other", "mixed", "active", "incomplete"])
+def test_safety_flat_rejects_other_positions_or_untrusted_facts(failure: str) -> None:
+    positions = {
+        "ag2612.SHFE.SHORT": {
+            "gateway_name": "CTP",
+            "symbol": "ag2612",
+            "exchange": "SHFE",
+            "direction": "SHORT",
+            "volume": 2,
+            "yd_volume": 0,
+        }
+    }
+    snapshot = None
+    reconciliation = None
+    if failure == "other":
+        positions["au2612.SHFE.LONG"] = {
+            "gateway_name": "CTP",
+            "symbol": "au2612",
+            "exchange": "SHFE",
+            "direction": "LONG",
+            "volume": 1,
+            "yd_volume": 0,
+        }
+    elif failure == "mixed":
+        positions["ag2612.SHFE.LONG"] = {
+            "gateway_name": "CTP",
+            "symbol": "ag2612",
+            "exchange": "SHFE",
+            "direction": "LONG",
+            "volume": 1,
+            "yd_volume": 0,
+        }
+    elif failure == "active":
+        snapshot = replace(_snapshot(positions), active_order_count=1)
+    else:
+        reconciliation = {"state": "RECONCILE_REQUIRED", "unknown_outcomes": 0}
+
+    with pytest.raises(ExecutableTargetAdapterError):
+        _safety_flat_decision(
+            positions=positions,
+            selected={"ag": -2, "au": -2, "sc": 2},
+            snapshot=snapshot,
+            reconciliation=reconciliation,
+        )
 
 
 def test_all_zero_final_target_stops_without_execution_mask() -> None:

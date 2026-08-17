@@ -46,6 +46,29 @@ def _command(
     }
 
 
+def test_execution_status_projection_accepts_existing_cancelled_terminal_intent() -> None:
+    from app.schemas.control_execution import ExecutionStatusProjection
+
+    status = asyncio.run(FakeExecutionClient().status()).as_dict()
+    status["send_intents"] = [
+        {
+            "intent_id": "intent-cancelled-0001",
+            "idempotency_key": "idem-cancelled-intent-0001",
+            "state": "CANCELLED",
+            "plan_id": "plan-test-00",
+            "plan_hash": _hash("b"),
+            "leader_epoch": 1,
+            "fencing_token": 1,
+            "created_at": "2026-08-05T00:00:00Z",
+        }
+    ]
+
+    assert ExecutionStatusProjection.model_validate(status).as_dict() == status
+    status["send_intents"][0]["state"] = "NOT_A_REAL_INTENT_STATE"
+    with pytest.raises(ValueError, match="invalid execution status projection"):
+        ExecutionStatusProjection.model_validate(status)
+
+
 class FakeExecutionClient:
     def __init__(self) -> None:
         self.commands: list[CommandEnvelope] = []

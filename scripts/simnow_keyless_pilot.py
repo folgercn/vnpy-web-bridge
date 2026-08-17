@@ -537,9 +537,21 @@ def _checkpoint_progressed(
 
 
 def _formal_tick_binding(
-    *, clock: Callable[[], datetime]
+    *,
+    clock: Callable[[], datetime],
+    vt_symbol: str = _FIXED_VT_SYMBOL,
+    price_field: str = "last",
 ) -> tuple[str, str, int, str, str, float]:
-    """Read one fixed-path, source-fenced, bounded-tail CTP tick."""
+    """Read one source-fenced, bounded-tail CTP tick from the formal journal.
+
+    The pilot keeps its fixed RU/last-price defaults.  The one-shot safety-flat
+    runner may select an exact verified contract and protected bid/ask side.
+    """
+
+    if not isinstance(vt_symbol, str) or not vt_symbol:
+        raise ValueError("formal CTP tick contract is invalid")
+    if price_field not in {"last", "bid", "ask"}:
+        raise ValueError("formal CTP tick reference price is invalid")
 
     try:
         tick: VerifiedTick | None = None
@@ -585,7 +597,7 @@ def _formal_tick_binding(
                     item
                     for item in reversed(tail_ticks)
                     if item.source == "windows-tick-wire-v1"
-                    and item.vt_symbol == _FIXED_VT_SYMBOL
+                    and item.vt_symbol == vt_symbol
                     and item.stream_generation == generation
                     and item.ingest_seq <= frontier
                 ),
@@ -660,8 +672,8 @@ def _formal_tick_binding(
         raise ValueError("formal CTP durable tick state is invalid") from exc
     if tick.source != "windows-tick-wire-v1":
         raise ValueError("formal CTP tick source is invalid")
-    if tick.vt_symbol != _FIXED_VT_SYMBOL:
-        raise ValueError("formal CTP tick contract is not fixed ru2609.SHFE")
+    if tick.vt_symbol != vt_symbol:
+        raise ValueError("formal CTP tick contract is invalid")
     now = clock()
     if now.tzinfo is None or now.utcoffset() != timezone.utc.utcoffset(now):
         raise ValueError("tick clock must be explicit UTC")
@@ -669,7 +681,7 @@ def _formal_tick_binding(
     age = (now - received_at).total_seconds()
     if age < -_QUOTE_FUTURE_SKEW_SECONDS or age > _QUOTE_MAX_AGE_SECONDS:
         raise ValueError("formal CTP tick is stale or from the future")
-    price = tick.last_price
+    price = getattr(tick, f"{price_field}_price")
     if isinstance(price, bool) or not isinstance(price, (int, float)):
         raise ValueError("formal CTP tick reference price is invalid")  # noqa: TRY004
     normalized = float(price)
@@ -708,10 +720,19 @@ def _require_current_tick_binding(
 
 
 def _require_tick_boundary(
-    expected: tuple[str, str, int, str, str, float], *, clock: Callable[[], datetime]
+    expected: tuple[str, str, int, str, str, float],
+    *,
+    clock: Callable[[], datetime],
+    vt_symbol: str = _FIXED_VT_SYMBOL,
+    price_field: str = "last",
 ) -> None:
     _require_tick_fresh(expected, clock=clock)
-    _require_current_tick_binding(expected, _formal_tick_binding(clock=clock))
+    _require_current_tick_binding(
+        expected,
+        _formal_tick_binding(
+            clock=clock, vt_symbol=vt_symbol, price_field=price_field
+        ),
+    )
 
 
 def _pilot_target_plan(

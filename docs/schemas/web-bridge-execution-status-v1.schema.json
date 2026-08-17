@@ -223,6 +223,7 @@
             "UNKNOWN_OUTCOME",
             "RECONCILED",
             "CANCEL_REQUESTED",
+            "CANCELLED",
             "TERMINAL"
           ]
         },

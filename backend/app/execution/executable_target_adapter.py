@@ -1017,6 +1017,68 @@ def _close_order_offset(
     )
 
 
+def _after_safety_flat_close(
+    positions: Mapping[str, Any],
+    matching: list[tuple[str, dict[str, Any]]],
+    *,
+    direction: str,
+    offset: str,
+) -> dict[str, Any]:
+    """Consume precisely one selected-contract lot for SAFETY FLAT planning.
+
+    Unlike the generic one-lot projection helper, this keeps SHFE/INE's
+    ``yd_volume`` inventory coherent across more than one generated child.
+    It is planning-only and never alters the broker facts it was derived from.
+    """
+
+    closing_direction = "SHORT" if direction == "LONG" else "LONG"
+    candidates = sorted(
+        (
+            item
+            for item in matching
+            if item[1]["direction"].upper() == closing_direction
+            and item[1]["volume"] > 0
+        ),
+        key=lambda item: item[0],
+    )
+    if len(candidates) != 1:
+        raise ExecutableTargetAdapterError("SAFETY FLAT close position is invalid")
+    key, row = candidates[0]
+    result = _mapping(positions, "current positions")
+    updated = _mapping(row, "current position row")
+    if offset == "CLOSETODAY":
+        yd_volume = updated.get("yd_volume")
+        if (
+            isinstance(yd_volume, bool)
+            or not isinstance(yd_volume, int)
+            or yd_volume < 0
+            or yd_volume > updated["volume"]
+            or updated["volume"] - yd_volume < 1
+        ):
+            raise ExecutableTargetAdapterError(
+                "SHFE/INE current position yd_volume is missing or inconsistent"
+            )
+    elif offset == "CLOSEYESTERDAY":
+        yd_volume = updated.get("yd_volume")
+        if (
+            isinstance(yd_volume, bool)
+            or not isinstance(yd_volume, int)
+            or yd_volume < 1
+            or yd_volume > updated["volume"]
+        ):
+            raise ExecutableTargetAdapterError(
+                "SHFE/INE current position yd_volume is missing or inconsistent"
+            )
+        updated["yd_volume"] = yd_volume - 1
+    elif offset != "CLOSE":
+        raise ExecutableTargetAdapterError("SAFETY FLAT would not close")
+    updated["volume"] -= 1
+    if updated["volume"] < 0:  # pragma: no cover - guarded above
+        raise ExecutableTargetAdapterError("SAFETY FLAT close exceeds position")
+    result[key] = updated
+    return result
+
+
 def _require_single_reduce_only_position(
     positions: Mapping[str, Any],
     matching: list[tuple[str, dict[str, Any]]],
@@ -1499,12 +1561,244 @@ def build_static_core_equal_keyless_target_decision(
     return StaticCoreEqualKeylessDecision(handoff=handoff, **decision_fields)
 
 
+def build_static_core_equal_keyless_safety_flat_decision(
+    *,
+    static_core_equal_projection: Mapping[str, Any],
+    static_core_equal_freeze_contract: Mapping[str, Any],
+    static_core_equal_target_evidence: Mapping[str, Any],
+    position_manager_snapshot: Mapping[str, Any],
+    position_manager_sha256: str,
+    current_facts: GatewaySnapshot,
+    reconciliation: Mapping[str, Any],
+    product: str,
+    run_id: str,
+    expires_at: str,
+    safety_flat_limit_price: float,
+    now: datetime | None = None,
+) -> StaticCoreEqualKeylessDecision:
+    """Build the formal, selected-product-only SAFETY FLAT TargetPlan v2.
+
+    The full STATIC_CORE_EQUAL/thermostat target remains verified and hashed
+    before selecting the execution product.  This path never changes that
+    strategy target: it can only derive a zero target from the fresh current
+    position for the selected, minimum nonzero strategy product.  It therefore
+    cannot open, reverse, resize, or close an unrelated position.
+    """
+
+    normalized_product = _require_text(product, "product").lower()
+    if normalized_product not in _STATIC_CORE_EQUAL_PRODUCTS:
+        raise ExecutableTargetAdapterError("product is outside the frozen universe")
+    normalized_run_id = _require_text(run_id, "run id")
+    if _RUN_ID.fullmatch(normalized_run_id) is None:
+        raise ExecutableTargetAdapterError("run id is invalid")
+    current_time = utc_now() if now is None else now
+    if current_time.tzinfo is None or current_time.utcoffset() is None:
+        raise ExecutableTargetAdapterError("adapter clock must be timezone-aware")
+    try:
+        normalized_expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    except (AttributeError, ValueError) as exc:
+        raise ExecutableTargetAdapterError("trusted keyless expiry is invalid") from exc
+    if normalized_expiry.tzinfo is None or normalized_expiry <= current_time:
+        raise ExecutableTargetAdapterError("trusted keyless expiry is invalid")
+
+    static_sha256, static_rows, static_execution_day = _static_core_equal_outputs(
+        producer_projection=static_core_equal_projection,
+        freeze_contract=static_core_equal_freeze_contract,
+        target_evidence=static_core_equal_target_evidence,
+    )
+    final_projection, final_rows = _position_manager_final_projection(
+        snapshot=position_manager_snapshot,
+        expected_sha256=position_manager_sha256,
+        static_rows=static_rows,
+        static_execution_day=static_execution_day,
+    )
+    final_target_sha256 = sha256_json(final_projection)
+    eligible_products = tuple(
+        item
+        for item in _STATIC_CORE_EQUAL_PRODUCTS
+        if final_rows[item]["target_quantity"] != 0
+    )
+    minimum_target_quantity = min(
+        (abs(final_rows[item]["target_quantity"]) for item in eligible_products),
+        default=None,
+    )
+    minimum_target_products = tuple(
+        item
+        for item in eligible_products
+        if abs(final_rows[item]["target_quantity"]) == minimum_target_quantity
+    )
+    selected = final_rows[normalized_product]
+    target_quantity = selected["target_quantity"]
+    protected_limit_price = _reduce_only_limit_price(
+        safety_flat_limit_price, price_tick=selected["price_tick"]
+    )
+    source_decision_fields = {
+        "static_core_equal_sha256": static_sha256,
+        "position_manager_sha256": _sha(
+            position_manager_sha256, "position-manager snapshot hash"
+        ),
+        "final_target_sha256": final_target_sha256,
+        "final_target_projection": final_projection,
+        "selected_product": normalized_product,
+        "selected_target_quantity": target_quantity,
+    }
+    if not minimum_target_products:
+        return StaticCoreEqualKeylessDecision(
+            handoff=None,
+            current_quantity=None,
+            stop_reason="no_nonzero_target",
+            **source_decision_fields,
+        )
+    if normalized_product not in minimum_target_products:
+        raise ExecutableTargetAdapterError(
+            "selected product is not a minimum nonzero target"
+        )
+
+    exchange, symbol = _contract(selected["exact_contract"])
+    positions = _validate_snapshot(
+        current_facts,
+        account_scope="account:windows",
+        environment="SIMNOW",
+        reconciliation=reconciliation,
+    )
+    long_volume, short_volume, matching = _current_contract_positions(
+        positions,
+        exchange=exchange,
+        symbol=symbol,
+        gateway_name="CTP",
+    )
+    current_quantity = long_volume - short_volume
+    decision_fields = {
+        **source_decision_fields,
+        "current_quantity": current_quantity,
+        "stop_reason": None,
+    }
+    if current_quantity != target_quantity:
+        raise ExecutableTargetAdapterError(
+            "SAFETY FLAT requires the exact selected strategy target position"
+        )
+    gross_position_volume = sum(
+        int(row.get("volume", 0))
+        for row in positions.values()
+        if isinstance(row, Mapping)
+    )
+    if gross_position_volume == 0:
+        if positions:
+            raise ExecutableTargetAdapterError("SAFETY FLAT positions are invalid")
+        return StaticCoreEqualKeylessDecision(handoff=None, **decision_fields)
+    if (
+        len(positions) != 1
+        or len(matching) != 1
+        or long_volume + short_volume != gross_position_volume
+        or (long_volume > 0 and short_volume > 0)
+        or current_quantity == 0
+    ):
+        raise ExecutableTargetAdapterError(
+            "SAFETY FLAT requires one directional selected-product position"
+        )
+
+    expected_before = before_position_projection_hash(
+        positions,
+        account_scope="account:windows",
+        environment="SIMNOW",
+    )
+    direction = "SHORT" if long_volume else "LONG"
+    child_count = abs(current_quantity)
+    working_positions = _mapping(positions, "current positions")
+    offsets: list[str] = []
+    for _child_index in range(1, child_count + 1):
+        _working_long, _working_short, working_matching = _current_contract_positions(
+            working_positions,
+            exchange=exchange,
+            symbol=symbol,
+            gateway_name="CTP",
+        )
+        offset = _close_order_offset(
+            working_matching, exchange=exchange, direction=direction
+        )
+        if offset not in _CLOSE_ORDER_OFFSETS:  # pragma: no cover - defensive
+            raise ExecutableTargetAdapterError("SAFETY FLAT would not close")
+        working_positions = _after_safety_flat_close(
+            working_positions,
+            working_matching,
+            direction=direction,
+            offset=offset,
+        )
+        offsets.append(offset)
+    expected_after = target_position_projection_hash(
+        working_positions,
+        account_scope="account:windows",
+        environment="SIMNOW",
+    )
+    identity = sha256_json(
+        {
+            "static_core_equal_sha256": static_sha256,
+            "position_manager_sha256": position_manager_sha256,
+            "final_target_sha256": final_target_sha256,
+            "expected_before_position_hash": expected_before,
+            "product": normalized_product,
+            "gateway_name": "CTP",
+            "run_id": normalized_run_id,
+            "mode": "SAFETY_FLAT",
+            "protected_limit_price": protected_limit_price,
+        }
+    )
+    try:
+        plan = build_trusted_keyless_target_plan_v2(
+            plan_id=f"static-core-equal-safety-flat-plan-v2-{identity}",
+            account_scope="account:windows",
+            environment="SIMNOW",
+            gateway_name="CTP",
+            lineage={
+                "static_core_equal_sha256": static_sha256,
+                "position_manager_sha256": position_manager_sha256,
+                "final_target_sha256": final_target_sha256,
+            },
+            scope=dict(TRUSTED_KEYLESS_SIMNOW_SCOPE),
+            generated_at=current_time.isoformat().replace("+00:00", "Z"),
+            expires_at=expires_at,
+            phase="CLOSE",
+            expected_before_position_hash=expected_before,
+            expected_after_position_hash=expected_after,
+            orders=[
+                {
+                    "symbol": symbol,
+                    "exchange": exchange,
+                    "direction": direction,
+                    "type": "LIMIT",
+                    "volume": 1,
+                    "price": protected_limit_price,
+                    "offset": offset,
+                    "reference": sha256_json(
+                        {"plan_identity": identity, "child_index": child_index}
+                    ),
+                    "gateway_name": "CTP",
+                }
+                for child_index, offset in enumerate(offsets, start=1)
+            ],
+        )
+    except CommodityExecutionContractError as exc:
+        raise ExecutableTargetAdapterError(
+            f"STATIC_CORE_EQUAL SAFETY FLAT TargetPlan v2 is invalid: {exc}"
+        ) from exc
+    return StaticCoreEqualKeylessDecision(
+        handoff=ExecutableTargetPlanHandoff(
+            target_plan=plan,
+            lineage=(static_sha256, position_manager_sha256, final_target_sha256),
+            scope=dict(TRUSTED_KEYLESS_SIMNOW_SCOPE),
+            expires_at=str(plan["expires_at"]),
+        ),
+        **decision_fields,
+    )
+
+
 __all__ = [
     "ExecutableTargetAdapterError",
     "ExecutableTargetPlanHandoff",
     "PeekCurrentFacts",
     "StaticCoreEqualKeylessDecision",
     "build_executable_target_plan",
+    "build_static_core_equal_keyless_safety_flat_decision",
     "build_static_core_equal_keyless_target_decision",
     "build_trusted_keyless_executable_target_plan",
     "peek_current_facts_to_snapshot",
