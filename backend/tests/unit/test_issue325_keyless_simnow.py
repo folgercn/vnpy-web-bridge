@@ -705,6 +705,33 @@ def test_simnow_run_once_accepts_canonical_sources_and_rejects_candidate_inputs(
     )
     assert args.static_core_source == Path("static-core-source.json")
     assert args.position_manager_source == Path("position-manager-source.json")
+    assert args.safety_flat is False
+    flat_args = parser.parse_args(
+        [
+            "--static-core-source",
+            "static-core-source.json",
+            "--position-manager-source",
+            "position-manager-source.json",
+            "--peek-current-facts",
+            "peek.json",
+            "--reconciliation-state",
+            "reconcile.json",
+            "--product",
+            "rb",
+            "--expires-at",
+            "2099-01-01T00:00:00Z",
+            "--principal",
+            "runner-admin",
+            "--operator",
+            "runner-admin",
+            "--idempotency-suffix",
+            "run-flat-0001",
+            "--expected-custody-version",
+            "0",
+            "--safety-flat",
+        ]
+    )
+    assert flat_args.safety_flat is True
     with pytest.raises(SystemExit):
         parser.parse_args(["--map-candidate", "arbitrary.json"])
 
@@ -751,6 +778,16 @@ def test_simnow_run_once_completion_fails_closed_for_pending_unknown_and_active(
         module._completion_state(base, plan_id="plan-0001", plan_hash="a" * 64)
         == "pending_intents"
     )
+    cancelled = {
+        **base,
+        "send_intents": [
+            {"plan_id": "plan-0001", "plan_hash": "a" * 64, "state": "CANCELLED"}
+        ],
+    }
+    assert (
+        module._completion_state(cancelled, plan_id="plan-0001", plan_hash="a" * 64)
+        == "ready_for_final_reconcile"
+    )
     unknown = {**base, "reconciliation": {"state": "UNKNOWN", "unknown_outcomes": 1}}
     assert (
         module._completion_state(unknown, plan_id="plan-0001", plan_hash="a" * 64)
@@ -772,36 +809,128 @@ def _run_once_module(name: str):
     return module
 
 
-def _run_once_args(module, *, timeout: float = 1.0) -> object:
-    return module.build_parser().parse_args(
-        [
-            "--static-core-source",
-            "static-core-source.json",
-            "--position-manager-source",
-            "position-manager-source.json",
-            "--peek-current-facts",
-            "peek.json",
-            "--reconciliation-state",
-            "reconcile.json",
-            "--product",
-            "rb",
-            "--expires-at",
-            "2099-01-01T00:00:00Z",
-            "--principal",
-            "runner-admin",
-            "--operator",
-            "runner-admin",
-            "--idempotency-suffix",
-            "run-0001",
-            "--expected-custody-version",
-            "0",
-            "--execute",
-            "--completion-timeout-seconds",
-            str(timeout),
-            "--completion-poll-seconds",
-            "0.001",
+def _run_once_args(
+    module, *, timeout: float = 1.0, safety_flat: bool = False
+) -> object:
+    argv = [
+        "--static-core-source",
+        "static-core-source.json",
+        "--position-manager-source",
+        "position-manager-source.json",
+        "--peek-current-facts",
+        "peek.json",
+        "--reconciliation-state",
+        "reconcile.json",
+        "--product",
+        "rb",
+        "--expires-at",
+        "2099-01-01T00:00:00Z",
+        "--principal",
+        "runner-admin",
+        "--operator",
+        "runner-admin",
+        "--idempotency-suffix",
+        "run-0001",
+        "--expected-custody-version",
+        "0",
+        "--execute",
+        "--completion-timeout-seconds",
+        str(timeout),
+        "--completion-poll-seconds",
+        "0.001",
+    ]
+    if safety_flat:
+        argv.append("--safety-flat")
+    return module.build_parser().parse_args(argv)
+
+
+def test_safety_flat_protected_price_uses_verified_ask_or_bid_plus_one_tick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _run_once_module("issue353_runner_verified_safety_flat_price")
+    snapshot = {
+        "targets": [
+            {
+                "product": "ag",
+                "shadow_target_quantity": -2,
+                "exact_contract": "SHFE.ag2612",
+                "price_tick": 1.0,
+            },
+            {
+                "product": "sc",
+                "shadow_target_quantity": 2,
+                "exact_contract": "INE.sc2609",
+                "price_tick": 0.1,
+            },
         ]
+    }
+    observed: list[tuple[str, str]] = []
+
+    def verified_tick(*, clock, vt_symbol, price_field):
+        del clock
+        observed.append((vt_symbol, price_field))
+        return ("generation", "ingest", 4, "a" * 64, "2030-01-01T00:00:00Z", 100.0)
+
+    monkeypatch.setattr(module, "_formal_tick_binding", verified_tick)
+
+    short_price, _short_binding, short_vt, short_side = (
+        module._safety_flat_protected_tick_price(snapshot, product="ag")
     )
+    long_price, _long_binding, long_vt, long_side = (
+        module._safety_flat_protected_tick_price(snapshot, product="sc")
+    )
+
+    assert (short_vt, short_side, short_price) == ("ag2612.SHFE", "ask", 101.0)
+    assert (long_vt, long_side, long_price) == ("sc2609.INE", "bid", 99.9)
+    assert observed == [("ag2612.SHFE", "ask"), ("sc2609.INE", "bid")]
+
+
+@pytest.mark.parametrize("exact_contract", ["NASDAQ.ag2610", "SHFE.ag26x0"])
+def test_safety_flat_rejects_noncanonical_or_unknown_exact_contract(
+    exact_contract: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _run_once_module("issue353_runner_bad_safety_flat_contract")
+    snapshot = {
+        "targets": [
+            {
+                "product": "ag",
+                "shadow_target_quantity": -2,
+                "exact_contract": exact_contract,
+                "price_tick": 1.0,
+            }
+        ]
+    }
+    monkeypatch.setattr(
+        module,
+        "_formal_tick_binding",
+        lambda **_kwargs: pytest.fail("invalid contract must not query tick journal"),
+    )
+
+    with pytest.raises(ValueError, match="selected SAFETY FLAT contract"):
+        module._safety_flat_protected_tick_price(snapshot, product="ag")
+
+
+@pytest.mark.parametrize("reason", ["stale", "wrong contract", "bad acknowledgement"])
+def test_safety_flat_rejects_invalid_verified_tick(reason: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _run_once_module(f"issue353_runner_bad_safety_flat_tick_{reason}")
+    snapshot = {
+        "targets": [
+            {
+                "product": "ag",
+                "shadow_target_quantity": -2,
+                "exact_contract": "SHFE.ag2612",
+                "price_tick": 1.0,
+            }
+        ]
+    }
+
+    def reject(*, clock, vt_symbol, price_field):
+        del clock, vt_symbol, price_field
+        raise ValueError(f"formal CTP tick {reason}")
+
+    monkeypatch.setattr(module, "_formal_tick_binding", reject)
+    with pytest.raises(ValueError, match="formal CTP tick"):
+        module._safety_flat_protected_tick_price(snapshot, product="ag")
 
 
 def _runner_status(
@@ -818,7 +947,7 @@ def _runner_status(
 ) -> dict:
     return {
         "state_version": version,
-        "leader": {"held": True, "epoch": 1, "fencing_token": 1},
+        "leader": {"held": not terminal, "epoch": 1, "fencing_token": 1},
         "broker": {
             "connected": True,
             "active_order_count": active_orders,
@@ -885,6 +1014,9 @@ def _install_fake_runner_dependencies(
     start_receipt_status: str = "COMPLETED",
     start_receipt_command_hash: str | None = None,
     start_receipt_error: bool = False,
+    completion_reconcile_error: bool = False,
+    completion_reconcile_response: dict | None = None,
+    local_position_snapshot_hash: str = "c" * 64,
 ) -> SimpleNamespace:
     plan = {
         "plan_id": "plan-0001",
@@ -931,7 +1063,33 @@ def _install_fake_runner_dependencies(
             if envelope["command"] == "start" and start_submit_error:
                 self.start_command = envelope
                 raise module.ExecutionClientError("start response lost")
-            if envelope["command"] == "reconcile" and len(calls) == 6:
+            if (
+                envelope["command"] == "reconcile"
+                and envelope["idempotency_key"].startswith(
+                    "simnow-run-once-completion-reconcile-"
+                )
+                and completion_reconcile_error
+            ):
+                raise module.ExecutionClientError("completion reconciliation unavailable")
+            if (
+                envelope["command"] == "reconcile"
+                and envelope["idempotency_key"].startswith(
+                    "simnow-run-once-completion-reconcile-"
+                )
+                and completion_reconcile_response is not None
+            ):
+                return completion_reconcile_response | {
+                    "receipt": (
+                        completion_reconcile_response["receipt"]
+                        | {"idempotency_key": envelope["idempotency_key"]}
+                    )
+                }
+            if (
+                envelope["command"] == "reconcile"
+                and envelope["idempotency_key"].startswith(
+                    "simnow-run-once-final-reconcile-"
+                )
+            ):
                 return final_response or _final_reconcile_response(
                     idempotency_key=envelope["idempotency_key"]
                 )
@@ -996,7 +1154,9 @@ def _install_fake_runner_dependencies(
         module,
         "peek_current_facts_to_snapshot",
         lambda *_args, **_kwargs: SimpleNamespace(
-            snapshot=SimpleNamespace(position_snapshot_hash="c" * 64)
+            snapshot=SimpleNamespace(
+                position_snapshot_hash=local_position_snapshot_hash
+            )
         ),
     )
     monkeypatch.setattr(
@@ -1004,11 +1164,27 @@ def _install_fake_runner_dependencies(
         "build_static_core_equal_keyless_target_decision",
         lambda **_kwargs: decision,
     )
+    monkeypatch.setattr(
+        module,
+        "build_static_core_equal_keyless_safety_flat_decision",
+        lambda **_kwargs: decision,
+    )
     monkeypatch.setattr(module, "RemotePhaseCWorkflowClient", FakeCustody)
     monkeypatch.setattr(module, "ExecutionClient", FakeExecution)
     monkeypatch.setattr(
         module, "_utc_clock", lambda: datetime(2030, 1, 1, tzinfo=timezone.utc)
     )
+    monkeypatch.setattr(
+        module,
+        "_safety_flat_protected_tick_price",
+        lambda *_args, **_kwargs: (
+            101.0,
+            ("generation-1", "ingest-1", 1, "f" * 64, "2030-01-01T00:00:00Z", 100.0),
+            "rb2601.SHFE",
+            "ask",
+        ),
+    )
+    monkeypatch.setattr(module, "_require_tick_boundary", lambda *_args, **_kwargs: None)
     return SimpleNamespace(
         calls=calls, commands=commands, receipt_queries=receipt_queries
     )
@@ -1077,6 +1253,80 @@ def test_simnow_run_once_fake_e2e_final_reconcile_archives_after_terminal(
     ] == ["gateway-ready-0001", "gateway-ready-0004"]
 
 
+def test_simnow_run_once_safety_flat_uses_existing_custody_execution_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _run_once_module("issue353_runner_safety_flat_passthrough")
+    fake = _install_fake_runner_dependencies(
+        module,
+        monkeypatch,
+        [
+            _runner_status(version=0),
+            _runner_status(version=1),
+            _runner_status(version=2),
+            _runner_status(version=3),
+            _runner_status(version=4, intent_state="TERMINAL"),
+            _runner_status(version=5, intent_state="TERMINAL", terminal=True),
+        ],
+    )
+
+    result = asyncio.run(module.run(_run_once_args(module, safety_flat=True)))
+
+    assert result["executed"] is True
+    assert result["completed"] is True
+    assert fake.calls == [
+        "custody",
+        "preview",
+        "reconcile",
+        "enable",
+        "start",
+        "reconcile",
+    ]
+
+
+def test_simnow_run_once_allows_distinct_fresh_local_and_execution_raw_hashes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _run_once_module("issue353_runner_distinct_raw_hashes")
+    _install_fake_runner_dependencies(
+        module,
+        monkeypatch,
+        [
+            _runner_status(version=0),
+            _runner_status(version=1),
+            _runner_status(version=2),
+            _runner_status(version=3),
+            _runner_status(version=4, intent_state="TERMINAL"),
+            _runner_status(version=5, intent_state="TERMINAL", terminal=True),
+        ],
+        local_position_snapshot_hash="d" * 64,
+    )
+
+    result = asyncio.run(module.run(_run_once_args(module)))
+
+    assert result["executed"] is True
+
+
+@pytest.mark.parametrize("dirty", ["active", "unknown", "reconcile"])
+def test_simnow_run_once_execution_binding_keeps_active_unknown_and_dirty_reconcile_blocked(
+    monkeypatch: pytest.MonkeyPatch, dirty: str
+) -> None:
+    module = _run_once_module(f"issue353_runner_binding_{dirty}")
+    monkeypatch.setattr(
+        module, "_utc_clock", lambda: datetime(2030, 1, 1, tzinfo=timezone.utc)
+    )
+    status = _runner_preflight_status()
+    if dirty == "active":
+        status["broker"]["active_order_count"] = 1
+    elif dirty == "unknown":
+        status["reconciliation"]["unknown_outcomes"] = 1
+    else:
+        status["reconciliation"]["state"] = "RECONCILE_REQUIRED"
+
+    with pytest.raises(ValueError, match="hard gates/snapshot binding"):
+        module._execution_binding(status)
+
+
 def test_simnow_run_once_continues_after_start_error_when_exact_receipt_accepted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1118,6 +1368,116 @@ def test_simnow_run_once_continues_after_start_error_when_exact_receipt_accepted
             },
         )
     ]
+
+
+def test_simnow_run_once_query_only_reconciles_pending_intent_before_finalization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _run_once_module("issue353_runner_pending_reconcile")
+    fake = _install_fake_runner_dependencies(
+        module,
+        monkeypatch,
+        [
+            _runner_status(version=0),
+            _runner_status(version=1),
+            _runner_status(version=2),
+            _runner_status(version=3),
+            _runner_status(version=4, intent_state="SUBMITTED", lifecycle="ACTIVE"),
+            _runner_status(version=5, intent_state="TERMINAL"),
+            _runner_status(version=6, intent_state="TERMINAL", terminal=True),
+        ],
+    )
+
+    result = asyncio.run(module.run(_run_once_args(module)))
+
+    assert result["executed"] is True
+    assert result["completed"] is True
+    assert fake.calls == [
+        "custody",
+        "preview",
+        "reconcile",
+        "enable",
+        "start",
+        "reconcile",
+        "reconcile",
+    ]
+    start_commands = [
+        command for command in fake.commands if command["command"] == "start"
+    ]
+    assert len(start_commands) == 1
+    completion_reconcile = next(
+        command
+        for command in fake.commands
+        if command["idempotency_key"].startswith(
+            "simnow-run-once-completion-reconcile-"
+        )
+    )
+    assert completion_reconcile["payload"]["reconciliation_run_id"].endswith("-4")
+    assert completion_reconcile["payload"]["snapshot_id"] == "gateway-ready-0004"
+
+
+def test_simnow_run_once_uses_completion_reconcile_final_receipt_without_second_reconcile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _run_once_module("issue353_runner_completion_reconcile_final")
+    fake = _install_fake_runner_dependencies(
+        module,
+        monkeypatch,
+        [
+            _runner_status(version=0),
+            _runner_status(version=1),
+            _runner_status(version=2),
+            _runner_status(version=3),
+            _runner_status(version=4, intent_state="SUBMITTED", lifecycle="ACTIVE"),
+            _runner_status(version=5, intent_state="TERMINAL", terminal=True),
+        ],
+        completion_reconcile_response=_final_reconcile_response(),
+    )
+
+    result = asyncio.run(module.run(_run_once_args(module)))
+
+    assert result["executed"] is True
+    assert result["completed"] is True
+    reconcile_commands = [
+        command for command in fake.commands if command["command"] == "reconcile"
+    ]
+    assert len(reconcile_commands) == 2
+    assert reconcile_commands[-1]["idempotency_key"].startswith(
+        "simnow-run-once-completion-reconcile-"
+    )
+    assert [command["command"] for command in fake.commands].count("start") == 1
+
+
+def test_simnow_run_once_stops_when_pending_intent_reconcile_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _run_once_module("issue353_runner_pending_reconcile_unknown")
+    fake = _install_fake_runner_dependencies(
+        module,
+        monkeypatch,
+        [
+            _runner_status(version=0),
+            _runner_status(version=1),
+            _runner_status(version=2),
+            _runner_status(version=3),
+            _runner_status(version=4, intent_state="SUBMITTED", lifecycle="ACTIVE"),
+        ],
+        completion_reconcile_error=True,
+    )
+
+    result = asyncio.run(module.run(_run_once_args(module)))
+
+    assert result["executed"] is False
+    assert result["reason"] == "completion_reconcile_outcome_unknown"
+    assert fake.calls == [
+        "custody",
+        "preview",
+        "reconcile",
+        "enable",
+        "start",
+        "reconcile",
+    ]
+    assert [command["command"] for command in fake.commands].count("start") == 1
 
 
 @pytest.mark.parametrize(
@@ -1305,4 +1665,7 @@ def test_simnow_run_once_does_not_replay_or_finalize_unknown_or_pending(
     assert result["archived"] is False
     assert result["executed"] is False
     assert result["reason"] == reason
-    assert fake.calls == ["custody", "preview", "reconcile", "enable", "start"]
+    expected_calls = ["custody", "preview", "reconcile", "enable", "start"]
+    if reason == "completion_timeout:pending_intents":
+        expected_calls.append("reconcile")
+    assert fake.calls == expected_calls

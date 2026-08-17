@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timezone
 from threading import RLock
 from typing import Any
@@ -776,9 +777,15 @@ class ExecutionOrchestrator:
                         "gateway cancellation did not reach a terminal state"
                     )
         try:
-            snapshot = self._coerce_snapshot(self.gateway.snapshot())
+            snapshot = self._coerce_snapshot(self.gateway.readiness_snapshot())
             state_after = self.repository.snapshot()
-            self._validate_reconcile_snapshot(state_after, snapshot)
+            self._validate_reconcile_snapshot(
+                state_after,
+                snapshot,
+                require_generation_advance=(
+                    self.gateway.readiness_snapshot_uses_durable_generation()
+                ),
+            )
             if snapshot.active_order_count != 0:
                 raise SnapshotRejected(
                     "broker still reports active orders after cancellation"
@@ -1760,6 +1767,20 @@ class ExecutionOrchestrator:
         if not isinstance(raw, Mapping):
             raise MutationRejected("intent does not exist")
         intent = self._intent_from_dict(raw)
+        # A cancel result can become UNKNOWN after Windows accepted its target
+        # order id but before it returned a cancel receipt.  Query only needs
+        # that durable target id as a hint; the mutation context deliberately
+        # remains the cancel intent, and this path never sends or cancels.
+        if (
+            intent.action == "cancel"
+            and intent.broker_order_id is None
+            and intent.target_intent_id is not None
+        ):
+            target_raw = state.get("send_intents", {}).get(intent.target_intent_id)
+            if isinstance(target_raw, Mapping):
+                target_broker_order_id = target_raw.get("broker_order_id")
+                if isinstance(target_broker_order_id, str) and target_broker_order_id:
+                    intent = replace(intent, broker_order_id=target_broker_order_id)
         context = self._context_from_intent(intent)
         try:
             result = dict(self.gateway.query_intent(intent, context) or {})

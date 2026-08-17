@@ -155,6 +155,86 @@ def test_timeout_is_unknown_and_never_replayed() -> None:
             token=token,
         )
     assert len(gateway.send_calls) == 1
+
+
+def test_cancel_unknown_query_uses_durable_target_broker_id_as_query_hint_only() -> None:
+    service, repo, gateway, token = prepare()
+    sent = service.send_order(
+        {"symbol": "RB", "volume": 1},
+        idempotency_key="send-key-0000012",
+        plan_id="plan-000001",
+        plan_hash=HASH,
+        leader_epoch=token.epoch,
+        fencing_token=token.fencing_token,
+        token=token,
+    )
+    gateway.fail_cancel = TimeoutError("cancel response lost")
+    with pytest.raises(GatewayTimeout):
+        service.cancel_order(
+            sent["intent_id"],
+            idempotency_key="cancel-key-00012",
+            leader_epoch=token.epoch,
+            fencing_token=token.fencing_token,
+            token=token,
+        )
+    cancel_intent_id = next(
+        intent_id
+        for intent_id, raw in repo.snapshot()["send_intents"].items()
+        if raw["action"] == "cancel"
+    )
+    seen: dict[str, object] = {}
+
+    def terminal_query(intent, context):
+        seen["intent"] = intent
+        seen["context"] = context
+        return {"state": "TERMINAL", "broker_order_id": intent.broker_order_id}
+
+    gateway.query_intent = terminal_query
+    send_count, cancel_count = len(gateway.send_calls), len(gateway.cancel_calls)
+    result = service.query_intent(cancel_intent_id)
+
+    assert result["state"] == "TERMINAL"
+    assert seen["intent"].broker_order_id == sent["broker_order_id"]
+    assert seen["context"].intent_id == cancel_intent_id
+    assert seen["context"].action == "cancel"
+    assert len(gateway.send_calls) == send_count
+    assert len(gateway.cancel_calls) == cancel_count
+
+
+def test_cancel_unknown_query_remains_fail_closed_without_mutation() -> None:
+    service, repo, gateway, token = prepare()
+    sent = service.send_order(
+        {"symbol": "RB", "volume": 1},
+        idempotency_key="send-key-0000013",
+        plan_id="plan-000001",
+        plan_hash=HASH,
+        leader_epoch=token.epoch,
+        fencing_token=token.fencing_token,
+        token=token,
+    )
+    gateway.fail_cancel = TimeoutError("cancel response lost")
+    with pytest.raises(GatewayTimeout):
+        service.cancel_order(
+            sent["intent_id"],
+            idempotency_key="cancel-key-00013",
+            leader_epoch=token.epoch,
+            fencing_token=token.fencing_token,
+            token=token,
+        )
+    cancel_intent_id = next(
+        intent_id
+        for intent_id, raw in repo.snapshot()["send_intents"].items()
+        if raw["action"] == "cancel"
+    )
+    gateway.query_intent = lambda _intent, _context: {"state": "UNKNOWN_OUTCOME"}
+    send_count, cancel_count = len(gateway.send_calls), len(gateway.cancel_calls)
+
+    result = service.query_intent(cancel_intent_id)
+
+    assert result["state"] == "UNKNOWN_OUTCOME"
+    assert repo.snapshot()["send_intents"][cancel_intent_id]["state"] == "UNKNOWN_OUTCOME"
+    assert len(gateway.send_calls) == send_count
+    assert len(gateway.cancel_calls) == cancel_count
     assert service.status()["lifecycle"] == "HALTED_UNKNOWN_OUTCOME"
     with pytest.raises(UnknownOutcomeError):
         service.send_order(
@@ -1175,6 +1255,95 @@ def test_control_stop_requires_explicit_terminal_cancel_and_closed_snapshot() ->
     state = repo.snapshot()
     assert state["plan"]["state"] == "ACTIVE"
     assert state["lifecycle"] == "HALTED_RECONCILE_REQUIRED"
+
+
+@pytest.mark.parametrize("control_command", ["revoke", "stop"])
+def test_control_cancellation_uses_readiness_facts_not_historical_terminal_orders(
+    control_command: str,
+) -> None:
+    service, repo, gateway, _token = prepare()
+    current_generation = int(service.status()["broker"]["generation"])
+    baseline_readiness = gateway.readiness_snapshot()
+    readiness = GatewaySnapshot(
+        snapshot_id="snapshot-readiness-same-generation",
+        generation=current_generation,
+        connected=True,
+        active_order_count=0,
+        position_snapshot_hash=baseline_readiness.position_snapshot_hash,
+        orders={},
+        positions={},
+        account_scope="account:default",
+        environment="test",
+    )
+    historical = GatewaySnapshot(
+        snapshot_id="snapshot-historical-terminal",
+        generation=current_generation,
+        connected=True,
+        active_order_count=0,
+        position_snapshot_hash=readiness.position_snapshot_hash,
+        orders={"historical-alltraded": {"status": "ALLTRADED"}},
+        positions=readiness.positions,
+        account_scope=readiness.account_scope,
+        environment=readiness.environment,
+    )
+    gateway.snapshot = lambda: historical  # type: ignore[method-assign]
+    gateway.readiness_snapshot = lambda: readiness  # type: ignore[method-assign]
+    gateway.readiness_snapshot_uses_durable_generation = (  # type: ignore[method-assign]
+        lambda: False
+    )
+
+    response = service.process_command(
+        command(
+            control_command,
+            f"{control_command}-historical-001",
+            repo.state_version,
+            {"reason": "historical terminal order must not block control closeout"},
+        )
+    )
+
+    assert response.result["accepted"] is True
+    status = service.status()
+    if control_command == "revoke":
+        assert status["authority"]["state"] == "REVOKED"
+    else:
+        assert status["plan"]["state"] == "TERMINAL"
+
+
+def test_control_cancellation_still_rejects_a_real_active_readiness_order() -> None:
+    service, repo, gateway, token = prepare()
+    service.send_order(
+        {"symbol": "RB", "volume": 1},
+        idempotency_key="send-key-readiness-active",
+        plan_id="plan-000001",
+        plan_hash=HASH,
+        leader_epoch=token.epoch,
+        fencing_token=token.fencing_token,
+        token=token,
+    )
+    readiness = GatewaySnapshot(
+        snapshot_id="snapshot-readiness-active",
+        generation=99,
+        connected=True,
+        active_order_count=1,
+        position_snapshot_hash=HASH,
+        orders={"broker-active": {"broker_order_id": "broker-active"}},
+        positions={},
+        account_scope="account:default",
+        environment="test",
+    )
+    gateway.readiness_snapshot = lambda: readiness  # type: ignore[method-assign]
+
+    with pytest.raises(Exception, match="active orders|durable send intent"):
+        service.process_command(
+            command(
+                "stop",
+                "stop-readiness-active",
+                repo.state_version,
+                {"reason": "active readiness order must block terminal stop"},
+            )
+    )
+
+    assert len(gateway.cancel_calls) == 1
 
 
 def test_emergency_stop_only_completes_after_cancel_and_reconcile_closure() -> None:
