@@ -6,19 +6,19 @@ from pathlib import Path
 from typing import Any
 
 from .canonical import sha256
+from .custody_locks import stable_custody_identity
+from .custody_transition import legacy_custody_identity_is_authorized
 from .errors import RegistryError
-from .filesystem import (
-    SAFE_COMPONENT,
-    WarehousePaths,
-    custody_identity,
-    read_regular_strict,
-)
+from .filesystem import SAFE_COMPONENT, WarehousePaths, read_regular_strict
 from .models import SourceEndpoint, SourceRegistry
 from .observation_contracts import (
+    CUSTODY_IDENTITY_SCHEME_V2,
     HTTP_METADATA_KEYS,
     ID_PATTERN,
     OBSERVATION_KEYS,
     OBSERVATION_SCHEMA,
+    OBSERVATION_SCHEMA_V2,
+    OBSERVATION_V2_KEYS,
     SHA256_PATTERN,
     observation_id,
     raw_object_id,
@@ -97,15 +97,46 @@ def _validate_http_metadata(
         raise RegistryError("observation HTTP content-type binding mismatch")
 
 
+def _observation_schema(payload: dict[str, Any]) -> str:
+    schema = payload.get("schema_version")
+    if schema == OBSERVATION_SCHEMA:
+        if set(payload) != OBSERVATION_KEYS:
+            raise RegistryError("observation fields do not match v1 schema")
+        return schema
+    if schema == OBSERVATION_SCHEMA_V2:
+        if (
+            set(payload) != OBSERVATION_V2_KEYS
+            or payload.get("custody_identity_scheme") != CUSTODY_IDENTITY_SCHEME_V2
+        ):
+            raise RegistryError("observation fields do not match v2 schema")
+        return schema
+    raise RegistryError("observation schema mismatch")
+
+
+def _validate_custody_identity(
+    paths: WarehousePaths,
+    payload: dict[str, Any],
+    schema: str,
+) -> None:
+    claimed = payload["custody_identity_sha256"]
+    if not isinstance(claimed, str) or SHA256_PATTERN.fullmatch(claimed) is None:
+        raise RegistryError("observation custody_identity_sha256 is invalid")
+    if schema == OBSERVATION_SCHEMA:
+        if not legacy_custody_identity_is_authorized(paths, claimed):
+            raise RegistryError("observation custody identity binding mismatch")
+        return
+    if claimed != stable_custody_identity(paths):
+        raise RegistryError("observation stable custody identity binding mismatch")
+
+
 def validate_observation(
     paths: WarehousePaths,
     payload: object,
     registry: SourceRegistry,
 ) -> dict[str, Any]:
-    if not isinstance(payload, dict) or set(payload) != OBSERVATION_KEYS:
-        raise RegistryError("observation fields do not match v1 schema")
-    if payload["schema_version"] != OBSERVATION_SCHEMA:
-        raise RegistryError("observation schema mismatch")
+    if not isinstance(payload, dict):
+        raise RegistryError("observation payload must be an object")
+    schema = _observation_schema(payload)
     claimed = payload["observation_id"]
     if not isinstance(claimed, str) or claimed != observation_id(payload):
         raise RegistryError("observation ID binding mismatch")
@@ -169,12 +200,11 @@ def validate_observation(
     expected_object_id = raw_object_id(source, payload["trade_day"], digest)
     if payload["object_id"] != expected_object_id:
         raise RegistryError("observation object ID binding mismatch")
-    if payload["custody_identity_sha256"] != custody_identity(paths):
-        raise RegistryError("observation custody identity binding mismatch")
     for field in ("registry_raw_sha256", "custody_identity_sha256"):
         value = payload[field]
         if not isinstance(value, str) or SHA256_PATTERN.fullmatch(value) is None:
             raise RegistryError(f"observation {field} is invalid")
+    _validate_custody_identity(paths, payload, schema)
     _validate_http_metadata(payload, source)
     raw = read_regular_strict(raw_path, "observation raw object")
     if len(raw) != payload["raw_bytes"] or sha256(raw) != digest:
