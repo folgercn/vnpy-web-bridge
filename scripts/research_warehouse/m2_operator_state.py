@@ -17,6 +17,7 @@ from .commit_anchors import ANCHOR_SCHEMA, load_commit_anchor_ledger
 from .custody_paths import normalized_absolute
 from .errors import RegistryError
 from .file_integrity import fsync_dir, read_regular_strict, write_all
+from .m2_acl_custody import require_acl_free_path
 from .m2_isolation_contracts import false_authority, load_isolation_policy
 from .m2_runtime_input import (
     load_runtime_input,
@@ -131,6 +132,7 @@ def _require_root_parent(path: Path) -> None:
         or stat.S_IMODE(info.st_mode) & 0o022
     ):
         raise RegistryError("M2 operator state parent is unsafe")
+    require_acl_free_path(absolute, "M2 operator state parent")
 
 
 def _prepare_public_root_directory(path: Path) -> None:

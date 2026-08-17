@@ -17,6 +17,13 @@ LAYOUT_DIRS = ("raw", "observations", "manifests", "tmp", "locks")
 
 
 @dataclass(frozen=True)
+class CustodyTransitionTrust:
+    receipt_path: Path
+    public_key_path: Path
+    expected_public_key_sha256: str
+
+
+@dataclass(frozen=True)
 class WarehousePaths:
     root: Path
     raw: Path
@@ -24,6 +31,7 @@ class WarehousePaths:
     manifests: Path
     temporary: Path
     locks: Path
+    custody_transition: CustodyTransitionTrust | None = None
 
     @classmethod
     def initialize(cls, root: Path) -> WarehousePaths:
@@ -40,7 +48,12 @@ class WarehousePaths:
         return cls.open(absolute)
 
     @classmethod
-    def open(cls, root: Path) -> WarehousePaths:
+    def open(
+        cls,
+        root: Path,
+        *,
+        custody_transition: CustodyTransitionTrust | None = None,
+    ) -> WarehousePaths:
         absolute = normalized_absolute(root)
         require_private_dir(absolute, "warehouse root")
         values = {name: absolute / name for name in LAYOUT_DIRS}
@@ -57,6 +70,7 @@ class WarehousePaths:
             manifests=values["manifests"],
             temporary=values["tmp"],
             locks=values["locks"],
+            custody_transition=custody_transition,
         )
 
     def private_subdir(self, base: Path, *components: str) -> Path:

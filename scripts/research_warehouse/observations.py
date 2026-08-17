@@ -12,14 +12,15 @@ from .errors import RegistryError
 from .filesystem import (
     WarehousePaths,
     create_only_bytes,
-    custody_identity,
     custody_lock,
     read_regular_strict,
     recover_atomic_publishes,
+    stable_custody_identity,
 )
 from .models import SourceEndpoint, SourceRegistry
 from .observation_contracts import (
-    OBSERVATION_SCHEMA,
+    CUSTODY_IDENTITY_SCHEME_V2,
+    OBSERVATION_SCHEMA_V2,
     observation_id,
     raw_object_id,
     revision_occurrence_id,
@@ -208,7 +209,7 @@ def _create_observation_unlocked(
         first_seen = format_utc(observed_at, "observed_at")
     relative = raw_path.relative_to(paths.root)
     payload: dict[str, Any] = {
-        "schema_version": OBSERVATION_SCHEMA,
+        "schema_version": OBSERVATION_SCHEMA_V2,
         "observation_id": "",
         "observation_sequence": sequence,
         "revision_id": revision_id,
@@ -230,7 +231,8 @@ def _create_observation_unlocked(
         "collector_version": collector_version,
         "registry_raw_sha256": registry.raw_sha256,
         "endpoint_schema_version": source.endpoint_schema_version,
-        "custody_identity_sha256": custody_identity(paths),
+        "custody_identity_scheme": CUSTODY_IDENTITY_SCHEME_V2,
+        "custody_identity_sha256": stable_custody_identity(paths),
         "authority": "RESEARCH_EVIDENCE_ONLY",
     }
     payload["observation_id"] = observation_id(payload)

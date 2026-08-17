@@ -11,6 +11,8 @@ from .errors import RegistryError
 from .models import SourceEndpoint
 
 OBSERVATION_SCHEMA = "vnpy_research_raw_observation_v1"
+OBSERVATION_SCHEMA_V2 = "vnpy_research_raw_observation_v2"
+CUSTODY_IDENTITY_SCHEME_V2 = "vnpy_research_custody_identity_stable_v2"
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{8,128}$")
 HTTP_METADATA_KEYS = {
@@ -45,6 +47,7 @@ OBSERVATION_KEYS = {
     "custody_identity_sha256",
     "authority",
 }
+OBSERVATION_V2_KEYS = OBSERVATION_KEYS | {"custody_identity_scheme"}
 
 
 def validate_trade_day(value: str) -> str:

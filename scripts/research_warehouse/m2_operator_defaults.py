@@ -9,6 +9,7 @@ from .file_integrity import read_regular_strict
 LIBEXEC = Path("/usr/local/libexec/vnpyresearch")
 RELEASE = LIBEXEC / "release"
 DEFAULT_OPERATOR_STATE = LIBEXEC / "operator-state-v1.json"
+DEFAULT_CUSTODY_TRANSITION_RECEIPT = LIBEXEC / "custody-transition-v1.json"
 DEFAULT_MANIFEST_PRIVATE_KEY = Path(
     "/private/var/root/vnpyresearch-keys/manifest-private.raw"
 )
