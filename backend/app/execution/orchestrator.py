@@ -833,7 +833,7 @@ class ExecutionOrchestrator:
     @staticmethod
     def _validated_finalization_evidence(
         envelope: CommandEnvelope, evidence: Mapping[str, Any] | None
-    ) -> dict[str, str] | None:
+    ) -> dict[str, Any] | None:
         if evidence is None:
             return None
         if envelope.command != "reconcile":
@@ -855,6 +855,7 @@ class ExecutionOrchestrator:
             "preview_receipt_sha256",
             "preview_artifact_id",
             "preview_artifact_sha256",
+            "expected_send_intent_bindings",
         }
         if set(raw) != fields:
             raise MutationRejected(
@@ -875,16 +876,68 @@ class ExecutionOrchestrator:
                 "authority_receipt_id",
                 "preview_receipt_id",
                 "preview_artifact_id",
+                "expected_send_intent_bindings",
             }
         ):
             validate_sha256(raw[field], f"finalization_evidence.{field}")
+        expected_bindings = raw["expected_send_intent_bindings"]
+        binding_fields = {
+            "intent_id",
+            "idempotency_key",
+            "request_hash",
+            "receipt_id",
+            "receipt_hash",
+            "action",
+            "target_intent_id",
+            "plan_id",
+            "plan_hash",
+        }
+        if (
+            not isinstance(expected_bindings, list)
+            or not expected_bindings
+            or any(
+                not isinstance(binding, Mapping) or set(binding) != binding_fields
+                for binding in expected_bindings
+            )
+        ):
+            raise MutationRejected(
+                "internal finalization expected intent bindings are invalid"
+            )
+        intent_ids: list[str] = []
+        idempotency_keys: list[str] = []
+        for binding in expected_bindings:
+            for field in ("intent_id", "receipt_id"):
+                validate_identifier(binding[field], f"finalization_evidence.{field}")
+            validate_idempotency_key(binding["idempotency_key"])
+            for field in ("request_hash", "receipt_hash", "plan_hash"):
+                validate_sha256(binding[field], f"finalization_evidence.{field}")
+            if (
+                binding["action"] != "send"
+                or binding["target_intent_id"] is not None
+                or binding["plan_id"] != raw["plan_id"]
+                or binding["plan_hash"] != raw["plan_hash"]
+            ):
+                raise MutationRejected(
+                    "internal finalization expected intent binding mismatches plan"
+                )
+            validate_identifier(
+                binding["plan_id"], "finalization_evidence.binding.plan_id"
+            )
+            intent_ids.append(str(binding["intent_id"]))
+            idempotency_keys.append(str(binding["idempotency_key"]))
+        if len(set(intent_ids)) != len(intent_ids) or len(set(idempotency_keys)) != len(
+            idempotency_keys
+        ):
+            raise MutationRejected(
+                "internal finalization expected intent bindings are not unique"
+            )
         return raw
 
     def _process_envelope(
         self,
         envelope: CommandEnvelope,
         preview_evidence: Mapping[str, str] | None,
-        finalization_evidence: Mapping[str, str] | None,
+        finalization_evidence: Mapping[str, Any] | None,
     ) -> CommandResponse:
         command_key = f"{envelope.actor.service}:{envelope.idempotency_key}"
         command_hash = envelope.command_hash()
@@ -1293,7 +1346,7 @@ class ExecutionOrchestrator:
     def _reconcile_command(
         self,
         envelope: CommandEnvelope,
-        finalization_evidence: Mapping[str, str] | None = None,
+        finalization_evidence: Mapping[str, Any] | None = None,
     ) -> CommandResponse:
         # Read-only snapshot/query calls are safe without a leader token.  They
         # never construct a new send/cancel intent.  Reuse the readiness
@@ -1453,7 +1506,7 @@ class ExecutionOrchestrator:
         )
 
     def _apply_finalization_evidence(
-        self, state: dict[str, Any], evidence: Mapping[str, str]
+        self, state: dict[str, Any], evidence: Mapping[str, Any]
     ) -> dict[str, Any]:
         """Apply final-plan completion in the same durable reconcile write."""
 
@@ -1479,16 +1532,35 @@ class ExecutionOrchestrator:
                 "internal finalization evidence does not bind active plan"
             )
         terminal_states = {"TERMINAL", "RECONCILED", "CANCELLED"}
-        plan_intents = [
-            raw
-            for raw in state["send_intents"].values()
+        plan_send_intents = {
+            str(intent_id): raw
+            for intent_id, raw in state["send_intents"].items()
             if isinstance(raw, Mapping)
+            and raw.get("action") == "send"
             and raw.get("plan_id") == evidence["plan_id"]
             and raw.get("plan_hash") == evidence["plan_hash"]
-        ]
+        }
+        expected_bindings = {
+            str(binding["intent_id"]): binding
+            for binding in evidence["expected_send_intent_bindings"]
+        }
+        expected_intent_ids = set(expected_bindings)
+        actual_intent_ids = set(plan_send_intents)
+        if not actual_intent_ids.issubset(expected_intent_ids):
+            raise PlanRejected("active plan contains a non-deterministic send intent")
         if (
-            not plan_intents
-            or any(raw.get("state") not in terminal_states for raw in plan_intents)
+            actual_intent_ids != expected_intent_ids
+            or any(
+                any(
+                    plan_send_intents[intent_id].get(field) != value
+                    for field, value in expected_bindings[intent_id].items()
+                )
+                for intent_id in expected_intent_ids
+            )
+            or any(
+                plan_send_intents[intent_id].get("state") not in terminal_states
+                for intent_id in expected_intent_ids
+            )
             or int(state["broker"].get("active_order_count", 0)) != 0
         ):
             return {"state": "PENDING"}

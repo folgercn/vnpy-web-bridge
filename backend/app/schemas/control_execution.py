@@ -982,6 +982,177 @@ class ExecutionReconciliationSnapshotProjection:
         return self.model_dump()
 
 
+_ACTIVE_PLAN_RESUME_REQUEST_FIELDS = frozenset(
+    {
+        "schema_version",
+        "plan_id",
+        "plan_hash",
+        "leader_token",
+        "reconciliation_snapshot",
+    }
+)
+_ACTIVE_PLAN_RESUME_FIELDS = frozenset(
+    {
+        "schema_version",
+        "plan_id",
+        "plan_hash",
+        "state",
+        "expected_intent_count",
+        "terminal_intent_count",
+        "queried_intent_count",
+        "new_intent_count",
+        "reused_intent_count",
+        "intents",
+        "production_allowed",
+        "live_trading_authorized",
+        "countable_forward",
+        "resume_sha256",
+    }
+)
+_ACTIVE_PLAN_RESUME_INTENT_FIELDS = frozenset({"intent_id", "state", "resume_action"})
+_ACTIVE_PLAN_RESUME_INTENT_STATES = frozenset(
+    {
+        "PERSISTED",
+        "SUBMITTED",
+        "ACKNOWLEDGED",
+        "UNKNOWN_OUTCOME",
+        "TERMINAL",
+        "RECONCILED",
+        "CANCELLED",
+    }
+)
+_ACTIVE_PLAN_RESUME_TERMINAL_STATES = frozenset({"TERMINAL", "RECONCILED", "CANCELLED"})
+_ACTIVE_PLAN_RESUME_ACTIONS = frozenset(
+    {"TERMINAL_REUSED", "REUSED", "QUERY_ONLY", "FIRST_SEND"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionActivePlanResumeRequest:
+    """Strict high-level request for one installed ACTIVE plan.
+
+    The request intentionally carries no order payload.  Execution derives the
+    complete deterministic intent set from its create-only TargetPlan copy.
+    """
+
+    value: dict[str, Any]
+
+    @classmethod
+    def from_mapping(cls, value: Any) -> ExecutionActivePlanResumeRequest:
+        candidate = _detached_object(value, name="execution active plan resume")
+        if set(candidate) != _ACTIVE_PLAN_RESUME_REQUEST_FIELDS:
+            raise ValueError("execution active plan resume fields are not exact")
+        if (
+            candidate["schema_version"]
+            != "web_bridge_execution_active_plan_resume_request_v1"
+            or not isinstance(candidate["plan_id"], str)
+            or IDENTIFIER_RE.fullmatch(candidate["plan_id"]) is None
+        ):
+            raise ValueError("execution active plan resume identity is invalid")
+        _strict_sha(candidate["plan_hash"], field="plan_hash")
+        leader = ExecutionLeaderTokenProjection.from_mapping(candidate["leader_token"])
+        snapshot = ExecutionReconciliationSnapshotProjection.from_mapping(
+            candidate["reconciliation_snapshot"]
+        )
+        candidate["leader_token"] = leader.model_dump()
+        candidate["reconciliation_snapshot"] = snapshot.model_dump()
+        return cls(candidate)
+
+    @classmethod
+    def model_validate(cls, value: Any) -> ExecutionActivePlanResumeRequest:
+        return cls.from_mapping(value)
+
+    def model_dump(self, *, mode: str = "python") -> dict[str, Any]:
+        del mode
+        return json.loads(json.dumps(self.value, ensure_ascii=False))
+
+    def as_dict(self) -> dict[str, Any]:
+        return self.model_dump()
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionActivePlanResumeProjection:
+    """Order-free result of exact deterministic ACTIVE-plan recovery."""
+
+    value: dict[str, Any]
+
+    @classmethod
+    def from_mapping(cls, value: Any) -> ExecutionActivePlanResumeProjection:
+        candidate = _detached_object(value, name="execution active plan resume result")
+        if set(candidate) != _ACTIVE_PLAN_RESUME_FIELDS:
+            raise ValueError("execution active plan resume result fields are not exact")
+        if (
+            candidate["schema_version"] != "web_bridge_execution_active_plan_resume_v1"
+            or candidate["state"] not in {"ACTIVE", "TERMINAL"}
+            or not isinstance(candidate["plan_id"], str)
+            or IDENTIFIER_RE.fullmatch(candidate["plan_id"]) is None
+            or any(
+                candidate[field] is not False
+                for field in (
+                    "production_allowed",
+                    "live_trading_authorized",
+                    "countable_forward",
+                )
+            )
+        ):
+            raise ValueError("execution active plan resume result identity is invalid")
+        for field in ("plan_hash", "resume_sha256"):
+            _strict_sha(candidate[field], field=field)
+        for field in (
+            "expected_intent_count",
+            "terminal_intent_count",
+            "queried_intent_count",
+            "new_intent_count",
+            "reused_intent_count",
+        ):
+            _strict_nonnegative_int(candidate[field], field=field)
+        intents = candidate["intents"]
+        if not isinstance(intents, list) or any(
+            not isinstance(row, Mapping)
+            or set(row) != _ACTIVE_PLAN_RESUME_INTENT_FIELDS
+            or not isinstance(row["intent_id"], str)
+            or IDENTIFIER_RE.fullmatch(row["intent_id"]) is None
+            or row["state"] not in _ACTIVE_PLAN_RESUME_INTENT_STATES
+            or row["resume_action"] not in _ACTIVE_PLAN_RESUME_ACTIONS
+            for row in intents
+        ):
+            raise ValueError("execution active plan resume intents are invalid")
+        intent_ids = [str(row["intent_id"]) for row in intents]
+        terminal_count = sum(
+            row["state"] in _ACTIVE_PLAN_RESUME_TERMINAL_STATES for row in intents
+        )
+        queried_count = sum(row["resume_action"] == "QUERY_ONLY" for row in intents)
+        new_count = sum(row["resume_action"] == "FIRST_SEND" for row in intents)
+        expected_count = candidate["expected_intent_count"]
+        if (
+            expected_count < 1
+            or len(intents) != expected_count
+            or len(set(intent_ids)) != expected_count
+            or candidate["terminal_intent_count"] != terminal_count
+            or candidate["queried_intent_count"] != queried_count
+            or candidate["new_intent_count"] != new_count
+            or candidate["reused_intent_count"] != expected_count - new_count
+            or (candidate["state"] == "TERMINAL")
+            is not (terminal_count == expected_count)
+        ):
+            raise ValueError("execution active plan resume counts do not close")
+        preimage = {key: candidate[key] for key in candidate if key != "resume_sha256"}
+        if candidate["resume_sha256"] != sha256_json(preimage):
+            raise ValueError("execution active plan resume hash does not close")
+        return cls(candidate)
+
+    @classmethod
+    def model_validate(cls, value: Any) -> ExecutionActivePlanResumeProjection:
+        return cls.from_mapping(value)
+
+    def model_dump(self, *, mode: str = "python") -> dict[str, Any]:
+        del mode
+        return json.loads(json.dumps(self.value, ensure_ascii=False))
+
+    def as_dict(self) -> dict[str, Any]:
+        return self.model_dump()
+
+
 _RECOVERY_BEFORE_CUSTODY_FIELDS = frozenset(
     {
         "schema_version",
@@ -1169,6 +1340,8 @@ ExecutionAccountFactsDTO = ExecutionAccountFactsProjectionV2
 ExecutionAccountFactsV1DTO = ExecutionAccountFactsProjection
 ExecutionAccountFactsV2DTO = ExecutionAccountFactsProjectionV2
 ExecutionReconciliationSnapshotDTO = ExecutionReconciliationSnapshotProjection
+ExecutionActivePlanResumeRequestDTO = ExecutionActivePlanResumeRequest
+ExecutionActivePlanResumeDTO = ExecutionActivePlanResumeProjection
 ExecutionTargetPlanRecoveryDTO = ExecutionTargetPlanRecoveryProjection
 ExecutionLeaderStatusDTO = ExecutionLeaderStatusProjection
 ExecutionLeaderTokenDTO = ExecutionLeaderTokenProjection
@@ -1186,6 +1359,10 @@ __all__ = [
     "ExecutionAccountFactsProjectionV2",
     "ExecutionAccountFactsV1DTO",
     "ExecutionAccountFactsV2DTO",
+    "ExecutionActivePlanResumeDTO",
+    "ExecutionActivePlanResumeProjection",
+    "ExecutionActivePlanResumeRequest",
+    "ExecutionActivePlanResumeRequestDTO",
     "ExecutionLeaderStatusDTO",
     "ExecutionLeaderStatusProjection",
     "ExecutionLeaderTokenDTO",

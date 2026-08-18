@@ -26,6 +26,8 @@ from app.execution.errors import CommandValidationError
 from app.execution.models import CommandEnvelope, validate_identifier
 from app.schemas.control_execution import (
     ExecutionAccountFactsProjectionV2,
+    ExecutionActivePlanResumeProjection,
+    ExecutionActivePlanResumeRequest,
     ExecutionCompletionProjection,
     ExecutionLeaderStatusProjection,
     ExecutionLeaderTokenProjection,
@@ -120,6 +122,7 @@ class ExecutionClient:
     status_path = "/internal/v1/status"
     account_facts_path = "/internal/v1/account-facts"
     reconciliation_snapshot_path = "/internal/v1/reconciliation-snapshot"
+    active_plan_resume_path = "/internal/v1/active-plans/resume"
     completion_path = "/internal/v1/completions/latest"
     recovery_path = "/internal/v1/recovery/target-plans/by-custody-idempotency"
     receipt_path = "/internal/v1/receipts"
@@ -429,6 +432,109 @@ class ExecutionClient:
                 "Execution reconciliation snapshot 不符合冻结合同",
                 detail={"error": str(exc)},
             ) from exc
+
+    async def resume_active_plan(
+        self,
+        *,
+        plan_id: str,
+        plan_hash: str,
+        leader_token: ExecutionLeaderTokenProjection | Mapping[str, Any],
+        reconciliation_snapshot: (
+            ExecutionReconciliationSnapshotProjection | Mapping[str, Any]
+        ),
+    ) -> ExecutionActivePlanResumeProjection:
+        """Resume one exact ACTIVE plan; timeout retries must reuse this body."""
+
+        token = (
+            leader_token
+            if isinstance(leader_token, ExecutionLeaderTokenProjection)
+            else self._leader_token(leader_token)
+        )
+        try:
+            snapshot = (
+                reconciliation_snapshot
+                if isinstance(
+                    reconciliation_snapshot,
+                    ExecutionReconciliationSnapshotProjection,
+                )
+                else ExecutionReconciliationSnapshotProjection.model_validate(
+                    reconciliation_snapshot
+                )
+            )
+            request = ExecutionActivePlanResumeRequest.from_mapping(
+                {
+                    "schema_version": (
+                        "web_bridge_execution_active_plan_resume_request_v1"
+                    ),
+                    "plan_id": plan_id,
+                    "plan_hash": plan_hash,
+                    "leader_token": token.model_dump(),
+                    "reconciliation_snapshot": snapshot.model_dump(),
+                }
+            )
+        except (TypeError, ValueError) as exc:
+            raise ExecutionProtocolError(
+                "Execution ACTIVE plan resume request 不符合冻结合同",
+                detail={"error": str(exc)},
+            ) from exc
+        try:
+            body = await self._request(
+                "POST",
+                self.active_plan_resume_path,
+                json_body=request.as_dict(),
+            )
+        except ExecutionTimeoutError as exc:
+            raise ExecutionTimeoutError(
+                "Execution ACTIVE plan resume 结果未知；只能原样重试同一 request",
+                detail={
+                    "path": self.active_plan_resume_path,
+                    "plan_id": plan_id,
+                    "plan_hash": plan_hash,
+                    "retry_exact_resume_only": True,
+                },
+            ) from exc
+        except ExecutionRejectedError as exc:
+            detail = exc.detail
+            if (
+                exc.status_code == 503
+                and isinstance(detail, Mapping)
+                and detail.get("code") == "EXECUTION_ACTIVE_PLAN_RESUME_OUTCOME_UNKNOWN"
+                and detail.get("retryable") is True
+            ):
+                preserved = dict(detail)
+                preserved.update(
+                    {
+                        "plan_id": plan_id,
+                        "plan_hash": plan_hash,
+                        "retry_exact_resume_only": True,
+                    }
+                )
+                raise ExecutionUnknownOutcomeError(
+                    "Execution ACTIVE plan resume 结果未知；只能原样重试同一 request",
+                    detail=preserved,
+                ) from exc
+            raise
+        try:
+            projection = ExecutionActivePlanResumeProjection.model_validate(body)
+        except (TypeError, ValueError) as exc:
+            raise ExecutionProtocolError(
+                "Execution ACTIVE plan resume response 不符合冻结合同",
+                detail={"error": str(exc)},
+            ) from exc
+        if (
+            projection.value["plan_id"] != plan_id
+            or projection.value["plan_hash"] != plan_hash
+        ):
+            raise ExecutionProtocolError(
+                "Execution ACTIVE plan resume response 未回绑 request plan identity",
+                detail={
+                    "requested_plan_id": plan_id,
+                    "requested_plan_hash": plan_hash,
+                    "response_plan_id": projection.value["plan_id"],
+                    "response_plan_hash": projection.value["plan_hash"],
+                },
+            )
+        return projection
 
     async def latest_completion(self) -> ExecutionCompletionProjection | None:
         """Read the latest immutable completion identity without mutation."""
