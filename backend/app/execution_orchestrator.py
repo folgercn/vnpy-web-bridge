@@ -514,6 +514,36 @@ def create_app(
                 },
             ) from exc
 
+    @app.get("/internal/v1/reconciliation-snapshot")
+    def reconciliation_snapshot(request: Request) -> dict[str, Any]:
+        """Expose a fresh, full, read-only snapshot for interrupted-plan recovery."""
+
+        authenticate(request)
+        if request.headers.get("X-Control-Service", "") != "control-api":
+            raise HTTPException(
+                status_code=403, detail="canonical control service header required"
+            )
+        try:
+            if readiness_probe is None:
+                raise GatewayUnavailable("gateway readiness probe is unavailable")
+            return require_core().stable_reconciliation_snapshot_projection(
+                readiness_probe.probe
+            )
+        except (
+            GatewayTimeout,
+            GatewayUnavailable,
+            SnapshotRejected,
+            RepositoryUnavailableError,
+        ) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "EXECUTION_RECONCILIATION_SNAPSHOT_UNAVAILABLE",
+                    "message": str(exc),
+                    "retryable": True,
+                },
+            ) from exc
+
     @app.get("/internal/v1/completions/latest")
     def latest_completion(request: Request) -> dict[str, Any] | None:
         authenticate(request)

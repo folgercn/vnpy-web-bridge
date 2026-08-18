@@ -45,6 +45,8 @@ MODES = ("offline_preview", "simnow_preview")
 ZERO_HASH = "0" * 64
 UNKNOWN_ID = "unknown00"
 EPOCH_TIMESTAMP = "1970-01-01T00:00:00Z"
+FUTURE_SKEW_SECONDS = 2
+SNAPSHOT_STALE_SECONDS = 60
 
 
 def utc_now() -> datetime:
