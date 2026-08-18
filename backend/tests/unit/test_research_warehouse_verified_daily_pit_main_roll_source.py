@@ -151,6 +151,7 @@ def _verified_input(
         manifest_raw_sha256="2" * 64,
         commit_receipt_raw_sha256="3" * 64,
         expected_genesis_baseline=expected_genesis_baseline,
+        predecessor_entry=None,
     )
 
 
@@ -534,7 +535,7 @@ def test_signed_monthly_batch_execution_day_must_equal_artifact_day(
         verified_roll.build_verified_daily_pit_main_roll_source(**kwargs)
 
 
-def test_missing_genesis_and_all_predecessor_inputs_fail_closed(
+def test_continuity_mode_must_be_exclusive(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -542,37 +543,17 @@ def test_missing_genesis_and_all_predecessor_inputs_fail_closed(
     missing = {**kwargs, "genesis": None}
     with pytest.raises(
         verified_roll.VerifiedDailyPitMainRollSourceError,
-        match="requires GenesisContinuity",
+        match="requires exactly one continuity mode",
     ):
         verified_roll.build_verified_daily_pit_main_roll_source(**missing)
 
-    for raw in (b"{}\n", b'{"forged":"self-consistent"}\n'):
-        linked = {
-            **kwargs,
-            "genesis": None,
-            "predecessor": verified_roll.PredecessorContinuity(
-                artifact_raw=raw,
-                expected_artifact_id="verified-daily-roll-" + "0" * 64,
-                expected_official_day="2026-06-29",
-            ),
-        }
-        with pytest.raises(
-            verified_roll.VerifiedDailyPitMainRollSourceError,
-            match="PREDECESSOR_ARTIFACT_CUSTODY_PIN_REQUIRED",
-        ):
-            verified_roll.build_verified_daily_pit_main_roll_source(**linked)
-
     both = {
         **kwargs,
-        "predecessor": verified_roll.PredecessorContinuity(
-            artifact_raw=b"{}\n",
-            expected_artifact_id="verified-daily-roll-" + "0" * 64,
-            expected_official_day="2026-06-29",
-        ),
+        "predecessor": verified_roll.PredecessorContinuity(),
     }
     with pytest.raises(
         verified_roll.VerifiedDailyPitMainRollSourceError,
-        match="PREDECESSOR_ARTIFACT_CUSTODY_PIN_REQUIRED",
+        match="requires exactly one continuity mode",
     ):
         verified_roll.build_verified_daily_pit_main_roll_source(**both)
 

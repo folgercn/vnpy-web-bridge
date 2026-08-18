@@ -428,9 +428,12 @@ PHASE_A_PHASE_C_PRESERVED_PREFIXES = (
 # These exact paths neither enter a Phase A image nor authorize a runtime
 # consumer.  Keep the list narrow until a separately reviewed installer exists.
 PHASE_A_ISSUE362_RESEARCH_FOUNDATION_EXACT = (
+    "backend/tests/unit/test_research_warehouse_daily_roll_predecessor_catalog.py",
+    "backend/tests/unit/test_research_warehouse_verified_daily_pit_main_roll_source.py",
     "deployments/research-warehouse/daily-pit-main-roll-source-v1.schema.json",
     "deployments/research-warehouse/verified-daily-pit-main-roll-source-v2.schema.json",
     "scripts/research_warehouse/daily_pit_main_roll_source.py",
+    "scripts/research_warehouse/daily_roll_predecessor_catalog.py",
     "scripts/research_warehouse/verified_daily_pit_main_roll_source.py",
 )
 

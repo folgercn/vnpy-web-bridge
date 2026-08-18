@@ -6,9 +6,9 @@ runtime, receipt, manifest-chain, calendar and registry verifiers.  This
 foundation permits only a signed delayed ``STATIC_CORE_EQUAL`` genesis batch:
 the artifact official day must be that monthly batch's execution day, after
 the month-end research panel and execution-day official open are both sealed
-in the current Warehouse root.  Linked-day construction fails closed until
-Warehouse owns an immutable predecessor artifact receipt/catalog;
-caller-supplied artifact bytes and IDs do not establish custody.
+in the current Warehouse root.  Linked-day construction reads the immediately
+preceding artifact only from the root-managed immutable predecessor catalog;
+caller-supplied artifact bytes and IDs are never accepted.
 
 The result remains Research-Plane source evidence.  It cannot install a
 target, create an executable event, dispatch, submit an order, or authorize
@@ -86,7 +86,7 @@ SCHEMA_PATH = (
     Path(__file__).resolve().parents[2]
     / "deployments/research-warehouse/verified-daily-pit-main-roll-source-v2.schema.json"
 )
-SCHEMA_RAW_SHA256 = "89104404ddf53df4ac50db1330e0b49e70f993fe7b0d484221394a4cf2c77e7e"
+SCHEMA_RAW_SHA256 = "7457bda8f9541fa2445ef23e3be6f4908c66752812fa9c3a84bc72336d7c9683"
 
 ROOT_KEYS = {
     "schema_version",
@@ -222,6 +222,18 @@ GENESIS_CONTINUITY_KEYS = {
     "baseline_public_key_sha256",
     "predecessor_exact_contract_map_sha256",
 }
+LINKED_CONTINUITY_KEYS = {
+    "mode",
+    "catalog_receipt_id",
+    "catalog_receipt_raw_sha256",
+    "catalog_sequence",
+    "predecessor_artifact_id",
+    "predecessor_artifact_raw_sha256",
+    "predecessor_artifact_raw_bytes",
+    "predecessor_official_day",
+    "predecessor_execution_day",
+    "predecessor_exact_contract_map_sha256",
+}
 
 
 class VerifiedDailyPitMainRollSourceError(RegistryError):
@@ -239,11 +251,7 @@ class GenesisContinuity:
 
 @dataclass(frozen=True)
 class PredecessorContinuity:
-    """Unavailable linked-mode input retained to make fail-closed use explicit."""
-
-    artifact_raw: bytes
-    expected_artifact_id: str
-    expected_official_day: str
+    """Request linked continuity from the fixed root-managed catalog."""
 
 
 @dataclass(frozen=True)
@@ -261,7 +269,8 @@ class _VerifiedDailyInput:
     manifest: dict[str, Any]
     manifest_raw_sha256: str
     commit_receipt_raw_sha256: str
-    expected_genesis_baseline: BuiltBaseline
+    expected_genesis_baseline: BuiltBaseline | None
+    predecessor_entry: Any | None
 
 
 def _bounded_bytes(raw: object, label: str, maximum: int) -> bytes:
@@ -536,8 +545,10 @@ def _verify_daily_input_locked(
     official_day: date,
     execution_day: date,
     contract_registry_raw: bytes,
-    genesis_signer_key_id: str,
-    baseline_source_month: str,
+    contract_registry_raw_sha256: str,
+    genesis_signer_key_id: str | None,
+    baseline_source_month: str | None,
+    linked: bool,
 ) -> _VerifiedDailyInput:
     history, chain = verify_root_pins(
         context=context,
@@ -646,16 +657,38 @@ def _verify_daily_input_locked(
         raise VerifiedDailyPitMainRollSourceError(
             "daily v2 commit receipt bytes drifted"
         )
-    expected_genesis_baseline = _root_replayed_genesis_baseline(
-        context=context,
-        operator_state=operator_state,
-        history=history,
-        chain=chain,
-        pins=pins,
-        contract_registry_raw=contract_registry_raw,
-        source_month=baseline_source_month,
-        signer_key_id=genesis_signer_key_id,
-    )
+    expected_genesis_baseline = None
+    predecessor_entry = None
+    if linked:
+        from .daily_roll_predecessor_catalog import _load_linked_predecessor_locked
+
+        predecessor_entry = _load_linked_predecessor_locked(
+            operator_state=operator_state,
+            current_official_day=official_day,
+            current_execution_day=execution_day,
+            current_manifest=manifest,
+            runtime_input_raw_sha256=context.runtime_input.raw_sha256,
+            calendar_raw_sha256=context.calendar.raw_sha256,
+            calendar_availability_anchor_raw_sha256=context.availability.raw_sha256,
+            isolation_policy_raw_sha256=context.policy.raw_sha256,
+            warehouse_registry_raw_sha256=context.registry.raw_sha256,
+            contract_registry_raw_sha256=contract_registry_raw_sha256,
+        )
+    else:
+        if baseline_source_month is None or genesis_signer_key_id is None:
+            raise VerifiedDailyPitMainRollSourceError(
+                "daily v2 Genesis replay inputs are incomplete"
+            )
+        expected_genesis_baseline = _root_replayed_genesis_baseline(
+            context=context,
+            operator_state=operator_state,
+            history=history,
+            chain=chain,
+            pins=pins,
+            contract_registry_raw=contract_registry_raw,
+            source_month=baseline_source_month,
+            signer_key_id=genesis_signer_key_id,
+        )
     return _VerifiedDailyInput(
         receipt_raw=receipt_raw,
         receipt=receipt,
@@ -664,6 +697,7 @@ def _verify_daily_input_locked(
         manifest_raw_sha256=sha256(manifest_raw),
         commit_receipt_raw_sha256=sha256(commit_raw),
         expected_genesis_baseline=expected_genesis_baseline,
+        predecessor_entry=predecessor_entry,
     )
 
 
@@ -677,8 +711,10 @@ def _verify_daily_input(
     official_day: date,
     execution_day: date,
     contract_registry_raw: bytes,
-    genesis_signer_key_id: str,
-    baseline_source_month: str,
+    contract_registry_raw_sha256: str,
+    genesis_signer_key_id: str | None,
+    baseline_source_month: str | None,
+    linked: bool,
 ) -> _VerifiedDailyInput:
     """Hold the operator-state lock across daily and baseline root replay."""
 
@@ -700,8 +736,10 @@ def _verify_daily_input(
             official_day=official_day,
             execution_day=execution_day,
             contract_registry_raw=contract_registry_raw,
+            contract_registry_raw_sha256=contract_registry_raw_sha256,
             genesis_signer_key_id=genesis_signer_key_id,
             baseline_source_month=baseline_source_month,
+            linked=linked,
         )
 
 
@@ -857,6 +895,35 @@ def _genesis_map(
     }
 
 
+def _linked_map(entry: Any) -> tuple[dict[str, str], dict[str, Any]]:
+    if entry is None:
+        raise VerifiedDailyPitMainRollSourceError(
+            "daily v2 linked predecessor catalog entry is unavailable"
+        )
+    try:
+        artifact = entry.artifact
+        artifact_raw = entry.artifact_raw
+        receipt = entry.receipt
+        receipt_raw = entry.receipt_raw
+    except AttributeError as exc:
+        raise VerifiedDailyPitMainRollSourceError(
+            "daily v2 linked predecessor catalog entry is invalid"
+        ) from exc
+    predecessor = _exact_contract_map(artifact["mains"], "exact_contract")
+    return predecessor, {
+        "mode": "LINKED_ROOT_CATALOG",
+        "catalog_receipt_id": receipt["receipt_id"],
+        "catalog_receipt_raw_sha256": sha256(receipt_raw),
+        "catalog_sequence": receipt["sequence"],
+        "predecessor_artifact_id": artifact["artifact_id"],
+        "predecessor_artifact_raw_sha256": sha256(artifact_raw),
+        "predecessor_artifact_raw_bytes": len(artifact_raw),
+        "predecessor_official_day": artifact["official_day"],
+        "predecessor_execution_day": artifact["execution_day"],
+        "predecessor_exact_contract_map_sha256": _map_sha(predecessor),
+    }
+
+
 def _map_sha(value: dict[str, str]) -> str:
     return sha256(
         canonical_json(
@@ -1008,28 +1075,21 @@ def build_verified_daily_pit_main_roll_source(
     genesis: GenesisContinuity | None = None,
     predecessor: PredecessorContinuity | None = None,
 ) -> BuiltVerifiedDailyPitMainRollSource:
-    """Construct one verified Genesis detector artifact with no authority.
-
-    ``predecessor`` is deliberately unavailable.  A future linked producer
-    must verify a Warehouse-owned immutable predecessor receipt/catalog rather
-    than accepting caller-supplied artifact identity.
-    """
+    """Construct one Genesis or root-catalog-linked no-authority artifact."""
 
     try:
-        if predecessor is not None:
+        if (genesis is None) == (predecessor is None):
             raise VerifiedDailyPitMainRollSourceError(
-                "PREDECESSOR_ARTIFACT_CUSTODY_PIN_REQUIRED"
+                "daily v2 requires exactly one continuity mode"
             )
-        if genesis is None:
-            raise VerifiedDailyPitMainRollSourceError(
-                "daily v2 requires GenesisContinuity"
-            )
-        if not isinstance(genesis.built_baseline, BuiltBaseline):
-            raise VerifiedDailyPitMainRollSourceError(
-                "daily v2 genesis requires one complete BuiltBaseline"
-            )
-        _bounded_verified_baseline(genesis.built_baseline)
-        source_month = _source_month(genesis.source_month)
+        source_month = None
+        if genesis is not None:
+            if not isinstance(genesis.built_baseline, BuiltBaseline):
+                raise VerifiedDailyPitMainRollSourceError(
+                    "daily v2 genesis requires one complete BuiltBaseline"
+                )
+            _bounded_verified_baseline(genesis.built_baseline)
+            source_month = _source_month(genesis.source_month)
         registry_raw = _bounded_bytes(
             contract_registry_raw,
             "daily v2 contract registry",
@@ -1044,16 +1104,17 @@ def build_verified_daily_pit_main_roll_source(
                 "daily v2 contract registry root pin mismatch"
             )
         day = _day(official_day, "daily v2 official day")
-        _baseline_research_day, baseline_execution_day, _baseline_cutoff_day = (
-            _official_month_boundary(
-                context.calendar,
-                source_month=source_month,
+        if genesis is not None:
+            _baseline_research_day, baseline_execution_day, _baseline_cutoff_day = (
+                _official_month_boundary(
+                    context.calendar,
+                    source_month=source_month,
+                )
             )
-        )
-        if baseline_execution_day != day:
-            raise VerifiedDailyPitMainRollSourceError(
-                "daily v2 Genesis source month does not execute on artifact official day"
-            )
+            if baseline_execution_day != day:
+                raise VerifiedDailyPitMainRollSourceError(
+                    "daily v2 Genesis source month does not execute on artifact official day"
+                )
         execution_day, following_day = _following_days(context, day)
         verified = _verify_daily_input(
             context=context,
@@ -1064,8 +1125,12 @@ def build_verified_daily_pit_main_roll_source(
             official_day=day,
             execution_day=execution_day,
             contract_registry_raw=registry_raw,
-            genesis_signer_key_id=genesis.expected_business_signer_key_id,
+            contract_registry_raw_sha256=registry_sha,
+            genesis_signer_key_id=(
+                genesis.expected_business_signer_key_id if genesis is not None else None
+            ),
             baseline_source_month=source_month,
+            linked=predecessor is not None,
         )
         _recheck_verified_input(
             context=context,
@@ -1073,15 +1138,22 @@ def build_verified_daily_pit_main_roll_source(
             official_day=day,
             value=verified,
         )
-        predecessor_map, continuity = _genesis_map(
-            genesis=genesis,
-            expected_built=verified.expected_genesis_baseline,
-            context=context,
-            operator_state=operator_state,
-            pins=pins,
-            official_day=day,
-            contract_registry_sha256=registry_sha,
-        )
+        if genesis is not None:
+            if verified.expected_genesis_baseline is None:
+                raise VerifiedDailyPitMainRollSourceError(
+                    "daily v2 Genesis root replay is unavailable"
+                )
+            predecessor_map, continuity = _genesis_map(
+                genesis=genesis,
+                expected_built=verified.expected_genesis_baseline,
+                context=context,
+                operator_state=operator_state,
+                pins=pins,
+                official_day=day,
+                contract_registry_sha256=registry_sha,
+            )
+        else:
+            predecessor_map, continuity = _linked_map(verified.predecessor_entry)
         mains = _mains(
             context=context,
             official_day=day,
@@ -1338,30 +1410,90 @@ def _validate_structural_daily_pit_main_roll_source(raw: bytes) -> dict[str, Any
     continuity = lineage["continuity"]
     if not isinstance(continuity, dict):
         raise VerifiedDailyPitMainRollSourceError("daily v2 continuity mode mismatch")
-    if (
-        continuity.get("mode") != "GENESIS_STATIC_CORE_EQUAL"
-        or set(continuity) != GENESIS_CONTINUITY_KEYS
-    ):
-        raise VerifiedDailyPitMainRollSourceError("daily v2 continuity mode mismatch")
-    continuity_hash_fields = (
-        "baseline_batch_raw_sha256",
-        "baseline_unsigned_sha256",
-        "baseline_public_key_sha256",
-        "baseline_source_view_raw_sha256",
-        "baseline_unsigned_batch_raw_sha256",
-        "baseline_replay_evidence_raw_sha256",
-        "predecessor_exact_contract_map_sha256",
-    )
-    for field in continuity_hash_fields:
-        require_sha(continuity[field], f"daily v2 continuity {field}")
-    if continuity.get("baseline_execution_day") != payload[
-        "official_day"
-    ] or continuity.get("predecessor_exact_contract_map_sha256") != _map_sha(
-        previous_map
-    ):
-        raise VerifiedDailyPitMainRollSourceError(
-            "daily v2 Genesis continuity binding mismatch"
+    if continuity.get("mode") == "GENESIS_STATIC_CORE_EQUAL":
+        if set(continuity) != GENESIS_CONTINUITY_KEYS:
+            raise VerifiedDailyPitMainRollSourceError(
+                "daily v2 continuity mode mismatch"
+            )
+        continuity_hash_fields = (
+            "baseline_batch_raw_sha256",
+            "baseline_unsigned_sha256",
+            "baseline_public_key_sha256",
+            "baseline_source_view_raw_sha256",
+            "baseline_unsigned_batch_raw_sha256",
+            "baseline_replay_evidence_raw_sha256",
+            "predecessor_exact_contract_map_sha256",
         )
+        for field in continuity_hash_fields:
+            require_sha(continuity[field], f"daily v2 continuity {field}")
+        if continuity.get("baseline_execution_day") != payload[
+            "official_day"
+        ] or continuity.get("predecessor_exact_contract_map_sha256") != _map_sha(
+            previous_map
+        ):
+            raise VerifiedDailyPitMainRollSourceError(
+                "daily v2 Genesis continuity binding mismatch"
+            )
+    elif continuity.get("mode") == "LINKED_ROOT_CATALOG":
+        if set(continuity) != LINKED_CONTINUITY_KEYS:
+            raise VerifiedDailyPitMainRollSourceError(
+                "daily v2 continuity mode mismatch"
+            )
+        for field in (
+            "catalog_receipt_raw_sha256",
+            "predecessor_artifact_raw_sha256",
+            "predecessor_exact_contract_map_sha256",
+        ):
+            require_sha(continuity[field], f"daily v2 continuity {field}")
+        predecessor_day = _day(
+            continuity["predecessor_official_day"],
+            "daily v2 predecessor official day",
+        )
+        predecessor_execution = _day(
+            continuity["predecessor_execution_day"],
+            "daily v2 predecessor execution day",
+        )
+        if (
+            not isinstance(continuity["catalog_receipt_id"], str)
+            or not continuity["catalog_receipt_id"].startswith(
+                "daily-roll-catalog-receipt-"
+            )
+            or len(continuity["catalog_receipt_id"])
+            != len("daily-roll-catalog-receipt-") + 64
+            or not isinstance(continuity["predecessor_artifact_id"], str)
+            or not continuity["predecessor_artifact_id"].startswith(
+                "verified-daily-roll-"
+            )
+            or len(continuity["predecessor_artifact_id"])
+            != len("verified-daily-roll-") + 64
+            or isinstance(continuity["catalog_sequence"], bool)
+            or not isinstance(continuity["catalog_sequence"], int)
+            or continuity["catalog_sequence"] < 1
+            or isinstance(continuity["predecessor_artifact_raw_bytes"], bool)
+            or not isinstance(continuity["predecessor_artifact_raw_bytes"], int)
+            or not 1
+            <= continuity["predecessor_artifact_raw_bytes"]
+            <= MAX_ARTIFACT_RAW_BYTES
+            or not predecessor_day < predecessor_execution
+            or predecessor_execution != official
+            or continuity["predecessor_exact_contract_map_sha256"]
+            != _map_sha(previous_map)
+        ):
+            raise VerifiedDailyPitMainRollSourceError(
+                "daily v2 linked continuity binding mismatch"
+            )
+        require_sha(
+            continuity["catalog_receipt_id"].removeprefix(
+                "daily-roll-catalog-receipt-"
+            ),
+            "daily v2 catalog receipt ID",
+        )
+        require_sha(
+            continuity["predecessor_artifact_id"].removeprefix("verified-daily-roll-"),
+            "daily v2 predecessor artifact ID",
+        )
+    else:
+        raise VerifiedDailyPitMainRollSourceError("daily v2 continuity mode mismatch")
     if payload["artifact_id"] != _artifact_id(payload):
         raise VerifiedDailyPitMainRollSourceError("daily v2 artifact ID mismatch")
     return payload
