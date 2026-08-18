@@ -262,13 +262,17 @@ def test_unknown_phase_a_deployment_asset_fails_closed() -> None:
         "backend/tests/unit/test_research_warehouse_daily_roll_predecessor_catalog.py",
         "backend/tests/unit/test_research_warehouse_continuous_event_selector.py",
         "backend/tests/unit/test_research_warehouse_verified_daily_pit_main_roll_source.py",
+        "backend/tests/unit/test_research_warehouse_verified_monthly_final_target.py",
         "deployments/research-warehouse/daily-pit-main-roll-source-v1.schema.json",
         "deployments/research-warehouse/daily-roll-predecessor-catalog-receipt-v1.schema.json",
         "deployments/research-warehouse/verified-daily-pit-main-roll-source-v2.schema.json",
         "scripts/research_warehouse/continuous_event_selector.py",
         "scripts/research_warehouse/daily_pit_main_roll_source.py",
         "scripts/research_warehouse/daily_roll_predecessor_catalog.py",
+        "scripts/research_warehouse/m2_runtime_loader.py",
+        "scripts/research_warehouse/m2_runtime_paths.py",
         "scripts/research_warehouse/verified_daily_pit_main_roll_source.py",
+        "scripts/research_warehouse/verified_monthly_final_target.py",
     ],
 )
 def test_issue362_research_foundations_are_preserved_exactly(

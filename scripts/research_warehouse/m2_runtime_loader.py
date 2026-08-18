@@ -33,7 +33,7 @@ class RuntimeContext:
     availability: CalendarAvailabilityAnchor
 
 
-def load_runtime_context(path: Path) -> RuntimeContext:
+def _load_runtime_context(path: Path, *, create_runtime_paths: bool) -> RuntimeContext:
     policy = load_isolation_policy(path.parent / "isolation-policy-v1.json")
     runtime_input = load_runtime_input(path, policy=policy)
     value = runtime_input.payload
@@ -67,8 +67,24 @@ def load_runtime_context(path: Path) -> RuntimeContext:
             Path(policy.payload["custody_root"]),
             custody_transition=transition,
         ),
-        runtime=RuntimePaths.ensure(Path(policy.payload["runtime_root"])),
+        runtime=(
+            RuntimePaths.ensure(Path(policy.payload["runtime_root"]))
+            if create_runtime_paths
+            else RuntimePaths.open(Path(policy.payload["runtime_root"]))
+        ),
         registry=registry,
         calendar=calendar,
         availability=availability,
     )
+
+
+def load_runtime_context(path: Path) -> RuntimeContext:
+    """Load a runtime context, retaining the operational create-if-missing API."""
+
+    return _load_runtime_context(path, create_runtime_paths=True)
+
+
+def load_runtime_context_readonly(path: Path) -> RuntimeContext:
+    """Load only an already-complete runtime layout and perform zero writes."""
+
+    return _load_runtime_context(path, create_runtime_paths=False)

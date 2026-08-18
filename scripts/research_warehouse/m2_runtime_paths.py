@@ -19,6 +19,36 @@ class RuntimePaths:
     temporary: Path
 
     @classmethod
+    def open(cls, root: Path) -> RuntimePaths:
+        """Open the complete private runtime layout without creating it."""
+
+        absolute = normalized_absolute(root)
+        require_private_dir(absolute, "M2 runtime root")
+        values = {
+            name: absolute / name
+            for name in (
+                "run-receipts",
+                "history-run-receipts",
+                "backfill-receipts",
+                "monitor-receipts",
+                "tmp",
+            )
+        }
+        root_device = absolute.lstat().st_dev
+        for path in values.values():
+            info = require_private_dir(path, "M2 runtime directory")
+            if info.st_dev != root_device:
+                raise RegistryError("M2 runtime paths must share one filesystem")
+        return cls(
+            root=absolute,
+            run_receipts=values["run-receipts"],
+            history_run_receipts=values["history-run-receipts"],
+            backfill_receipts=values["backfill-receipts"],
+            monitor_receipts=values["monitor-receipts"],
+            temporary=values["tmp"],
+        )
+
+    @classmethod
     def ensure(cls, root: Path) -> RuntimePaths:
         absolute = normalized_absolute(root)
         if not absolute.exists():
