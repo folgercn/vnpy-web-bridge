@@ -14,7 +14,7 @@ import json
 import math
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -55,6 +55,7 @@ from ..core.commodity_strategy_identity import (
     COMMODITY_FROZEN_SECTOR_MAP_V1_ID,
     COMMODITY_MAP_STRATEGY_IDENTITY_V1,
 )
+from .formal_tick_reader import FormalTickRequest
 from .gateway_contracts import GatewaySnapshot
 
 
@@ -537,6 +538,244 @@ class StaticCoreEqualFullPortfolioDecision:
             for handoff in (self.close_handoff, self.open_handoff)
             if handoff is not None
         )
+
+
+@dataclass(frozen=True, slots=True)
+class StaticCoreEqualFullPortfolioQuoteRequirement:
+    """One exact read-only quote request and the phase orders that consume it."""
+
+    phase: str
+    product: str
+    exact_contract: str
+    request: FormalTickRequest
+    order_references: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.phase) is not str or self.phase not in {"CLOSE", "OPEN"}:
+            raise ValueError("full-portfolio quote requirement phase is invalid")
+        if type(self.product) is not str or self.product not in (
+            _STATIC_CORE_EQUAL_PRODUCTS
+        ):
+            raise ValueError("full-portfolio quote requirement product is invalid")
+        if type(self.exact_contract) is not str:
+            raise ValueError("full-portfolio quote requirement contract is invalid")
+        if type(self.request) is not FormalTickRequest:
+            raise ValueError("full-portfolio quote requirement request is invalid")
+        if type(self.order_references) is not tuple:
+            raise ValueError("full-portfolio quote requirement orders are invalid")
+        try:
+            expected_request = _full_portfolio_quote_request(
+                exact_contract=self.exact_contract,
+                product=self.product,
+                price_side=self.request.price_side,
+                expected_price_tick=self.request.price_tick,
+            )
+        except ExecutableTargetAdapterError as exc:
+            raise ValueError(
+                "full-portfolio quote requirement request is invalid"
+            ) from exc
+        if self.request != expected_request:
+            raise ValueError("full-portfolio quote requirement contract mismatches")
+        if not self.order_references or len(set(self.order_references)) != len(
+            self.order_references
+        ):
+            raise ValueError("full-portfolio quote requirement orders are invalid")
+        for reference in self.order_references:
+            _sha(reference, "full-portfolio quote requirement order reference")
+
+
+@dataclass(frozen=True, slots=True)
+class StaticCoreEqualFullPortfolioQuoteInputBinding:
+    """Canonical immutable inputs that produced one quote-request batch."""
+
+    static_core_equal_projection_sha256: str
+    static_core_equal_freeze_contract_sha256: str
+    static_core_equal_target_evidence_sha256: str
+    position_manager_sha256: str
+    current_before_position_hash: str
+    desired_target_sha256: str
+    reconciliation_sha256: str
+    phase_boundary_sha256: str
+    deferred_open_intent_sha256: str | None
+    run_id: str
+    event_generated_at: str
+    target_plan_version: int
+    input_binding_sha256: str = dataclass_field(init=False)
+
+    def __post_init__(self) -> None:
+        for value, label in (
+            (
+                self.static_core_equal_projection_sha256,
+                "quote input STATIC_CORE_EQUAL projection hash",
+            ),
+            (
+                self.static_core_equal_freeze_contract_sha256,
+                "quote input STATIC_CORE_EQUAL freeze hash",
+            ),
+            (
+                self.static_core_equal_target_evidence_sha256,
+                "quote input STATIC_CORE_EQUAL target hash",
+            ),
+            (self.position_manager_sha256, "quote input position-manager hash"),
+            (
+                self.current_before_position_hash,
+                "quote input current before-position hash",
+            ),
+            (self.desired_target_sha256, "quote input desired-target hash"),
+            (self.reconciliation_sha256, "quote input reconciliation hash"),
+            (self.phase_boundary_sha256, "quote input phase-boundary hash"),
+        ):
+            _sha(value, label)
+        if self.deferred_open_intent_sha256 is not None:
+            _sha(
+                self.deferred_open_intent_sha256,
+                "quote input deferred OPEN intent hash",
+            )
+        if type(self.run_id) is not str or _RUN_ID.fullmatch(self.run_id) is None:
+            raise ValueError("quote input run id is invalid")
+        if type(
+            self.event_generated_at
+        ) is not str or not self.event_generated_at.endswith("Z"):
+            raise ValueError("quote input event generated_at is invalid")
+        try:
+            generated_at = datetime.fromisoformat(
+                self.event_generated_at[:-1] + "+00:00"
+            )
+        except ValueError as exc:
+            raise ValueError("quote input event generated_at is invalid") from exc
+        if generated_at.utcoffset() != timezone.utc.utcoffset(generated_at):
+            raise ValueError("quote input event generated_at is invalid")
+        if type(
+            self.target_plan_version
+        ) is not int or self.target_plan_version not in {
+            2,
+            3,
+        }:
+            raise ValueError("quote input target-plan version is invalid")
+        object.__setattr__(
+            self,
+            "input_binding_sha256",
+            sha256_json(_full_portfolio_quote_input_binding_payload(self)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class StaticCoreEqualFullPortfolioQuoteRequirements:
+    """The only formal-tick batch admitted for the next executable phase.
+
+    A CLOSE phase suppresses all future OPEN requests.  OPEN requirements are
+    produced only when fresh post-close facts make OPEN the immediate phase.
+    An empty tuple is a true full-portfolio NOOP and consumes no quote.
+    """
+
+    phase: str | None
+    requirements: tuple[StaticCoreEqualFullPortfolioQuoteRequirement, ...]
+    deferred_open_order_count: int
+    input_binding: StaticCoreEqualFullPortfolioQuoteInputBinding
+    quote_requirements_sha256: str = dataclass_field(init=False)
+
+    def __post_init__(self) -> None:
+        if self.phase is not None and (
+            type(self.phase) is not str or self.phase not in {"CLOSE", "OPEN"}
+        ):
+            raise ValueError("full-portfolio quote requirements phase is invalid")
+        if type(self.requirements) is not tuple or any(
+            type(row) is not StaticCoreEqualFullPortfolioQuoteRequirement
+            for row in self.requirements
+        ):
+            raise ValueError("full-portfolio quote requirements are invalid")
+        if (
+            type(self.input_binding)
+            is not StaticCoreEqualFullPortfolioQuoteInputBinding
+        ):
+            raise ValueError("full-portfolio quote input binding is invalid")
+        if type(self.deferred_open_order_count) is not int:
+            raise ValueError("full-portfolio deferred OPEN count is invalid")
+        if self.deferred_open_order_count < 0:
+            raise ValueError("full-portfolio deferred OPEN count is invalid")
+        if self.phase != "CLOSE" and self.deferred_open_order_count != 0:
+            raise ValueError(
+                "full-portfolio deferred OPEN count requires a CLOSE phase"
+            )
+        if (self.deferred_open_order_count == 0) is not (
+            self.input_binding.deferred_open_intent_sha256 is None
+        ):
+            raise ValueError(
+                "full-portfolio deferred OPEN intent binding is inconsistent"
+            )
+        if (self.phase is None) is not (not self.requirements):
+            raise ValueError("full-portfolio quote requirements phase is inconsistent")
+        if any(row.phase != self.phase for row in self.requirements):
+            raise ValueError("full-portfolio quote requirement phases are mixed")
+        contracts = tuple(row.exact_contract for row in self.requirements)
+        if contracts != tuple(sorted(contracts)) or len(set(contracts)) != len(
+            contracts
+        ):
+            raise ValueError("full-portfolio quote requirements are not canonical")
+        object.__setattr__(
+            self,
+            "quote_requirements_sha256",
+            sha256_json(_full_portfolio_quote_requirements_payload(self)),
+        )
+
+    @property
+    def requests(self) -> tuple[FormalTickRequest, ...]:
+        return tuple(row.request for row in self.requirements)
+
+    @property
+    def noop(self) -> bool:
+        return self.phase is None
+
+
+def _full_portfolio_quote_input_binding_payload(
+    binding: StaticCoreEqualFullPortfolioQuoteInputBinding,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "static_core_equal_quote_input_binding_v1",
+        "static_core_equal_projection_sha256": (
+            binding.static_core_equal_projection_sha256
+        ),
+        "static_core_equal_freeze_contract_sha256": (
+            binding.static_core_equal_freeze_contract_sha256
+        ),
+        "static_core_equal_target_evidence_sha256": (
+            binding.static_core_equal_target_evidence_sha256
+        ),
+        "position_manager_sha256": binding.position_manager_sha256,
+        "current_before_position_hash": binding.current_before_position_hash,
+        "desired_target_sha256": binding.desired_target_sha256,
+        "reconciliation_sha256": binding.reconciliation_sha256,
+        "phase_boundary_sha256": binding.phase_boundary_sha256,
+        "deferred_open_intent_sha256": binding.deferred_open_intent_sha256,
+        "run_id": binding.run_id,
+        "event_generated_at": binding.event_generated_at,
+        "target_plan_version": binding.target_plan_version,
+    }
+
+
+def _full_portfolio_quote_requirements_payload(
+    value: StaticCoreEqualFullPortfolioQuoteRequirements,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "static_core_equal_quote_requirements_v1",
+        "phase": value.phase,
+        "requirements": [
+            {
+                "phase": row.phase,
+                "product": row.product,
+                "exact_contract": row.exact_contract,
+                "request": {
+                    "vt_symbol": row.request.vt_symbol,
+                    "price_side": row.request.price_side,
+                    "price_tick": row.request.price_tick,
+                },
+                "order_references": list(row.order_references),
+            }
+            for row in value.requirements
+        ],
+        "deferred_open_order_count": value.deferred_open_order_count,
+        "input_binding_sha256": value.input_binding.input_binding_sha256,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -1942,6 +2181,41 @@ def _full_portfolio_target_positions(
     return result
 
 
+def _full_portfolio_quote_request(
+    *,
+    exact_contract: str,
+    product: str,
+    price_side: str,
+    expected_price_tick: Any,
+) -> FormalTickRequest:
+    exchange, symbol = _contract(exact_contract)
+    match = re.fullmatch(r"([A-Za-z]+)[0-9]{4}", symbol)
+    if (
+        product not in _STATIC_CORE_EQUAL_PRODUCTS
+        or match is None
+        or match.group(1).lower() != product
+        or exchange != _STATIC_CORE_EQUAL_EXCHANGE_BY_PRODUCT[product]
+        or price_side not in {"bid", "ask"}
+    ):
+        raise ExecutableTargetAdapterError(
+            f"full-portfolio formal quote request is invalid: {exact_contract}"
+        )
+    if isinstance(expected_price_tick, bool):
+        raise ExecutableTargetAdapterError(
+            f"full-portfolio frozen product price tick mismatch: {exact_contract}"
+        )
+    try:
+        return FormalTickRequest(
+            vt_symbol=f"{symbol}.{exchange}",
+            price_side=price_side,
+            price_tick=float(expected_price_tick),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ExecutableTargetAdapterError(
+            f"full-portfolio frozen product price tick mismatch: {exact_contract}"
+        ) from exc
+
+
 def _full_portfolio_formal_quote(
     values: Mapping[str, Any] | None,
     *,
@@ -1950,7 +2224,16 @@ def _full_portfolio_formal_quote(
     price_side: str,
     expected_price_tick: Any,
     now: datetime,
-) -> tuple[float, dict[str, Any]]:
+    requirements_only: bool = False,
+) -> tuple[float, dict[str, Any], FormalTickRequest]:
+    request = _full_portfolio_quote_request(
+        exact_contract=exact_contract,
+        product=product,
+        price_side=price_side,
+        expected_price_tick=expected_price_tick,
+    )
+    if requirements_only:
+        return request.price_tick, {}, request
     if not isinstance(values, Mapping):
         raise ExecutableTargetAdapterError(
             "full-portfolio formal quote bindings must be an object"
@@ -1978,11 +2261,9 @@ def _full_portfolio_formal_quote(
         )
     exchange, symbol = _contract(exact_contract)
     if (
-        product not in _STATIC_CORE_EQUAL_PRODUCTS
-        or quote.get("source") != "windows-tick-wire-v1"
-        or quote.get("vt_symbol") != f"{symbol}.{exchange}"
-        or price_side not in {"bid", "ask"}
-        or quote.get("price_side") != price_side
+        quote.get("source") != "windows-tick-wire-v1"
+        or quote.get("vt_symbol") != request.vt_symbol
+        or quote.get("price_side") != request.price_side
     ):
         raise ExecutableTargetAdapterError(
             f"full-portfolio formal quote identity is invalid: {exact_contract}"
@@ -2028,7 +2309,7 @@ def _full_portfolio_formal_quote(
         )
     try:
         quote_tick = Decimal(str(quote["price_tick"]))
-        frozen_tick = Decimal(str(expected_price_tick))
+        frozen_tick = Decimal(str(request.price_tick))
         reference = Decimal(str(quote["reference_price"]))
     except (InvalidOperation, ValueError) as exc:
         raise ExecutableTargetAdapterError(
@@ -2055,7 +2336,11 @@ def _full_portfolio_formal_quote(
         raise ExecutableTargetAdapterError(
             f"full-portfolio protected limit price is invalid: {exact_contract}"
         )
-    return float(protected), _mapping(quote, "full-portfolio formal quote binding")
+    return (
+        float(protected),
+        _mapping(quote, "full-portfolio formal quote binding"),
+        request,
+    )
 
 
 def full_portfolio_phase_plan_id_from_preimage(
@@ -2255,7 +2540,7 @@ def _full_portfolio_deferred_open_intent(
     )
 
 
-def build_static_core_equal_full_portfolio_keyless_decision(
+def _build_static_core_equal_full_portfolio(
     *,
     static_core_equal_projection: Mapping[str, Any],
     static_core_equal_freeze_contract: Mapping[str, Any],
@@ -2270,7 +2555,11 @@ def build_static_core_equal_full_portfolio_keyless_decision(
     expires_at: str | None = None,
     now: datetime | None = None,
     target_plan_version: int = 2,
-) -> StaticCoreEqualFullPortfolioDecision:
+    requirements_only: bool = False,
+    quote_requirements: StaticCoreEqualFullPortfolioQuoteRequirements | None = None,
+) -> (
+    StaticCoreEqualFullPortfolioDecision | StaticCoreEqualFullPortfolioQuoteRequirements
+):
     """Build at most one immutable phase plan for the complete portfolio.
 
     The caller must prove that the complete account portfolio is owned by the
@@ -2285,6 +2574,20 @@ def build_static_core_equal_full_portfolio_keyless_decision(
     v3 is an explicit foundation-only opt-in until Execution gains independent
     journal authentication and fresh start admission.
     """
+
+    if requirements_only:
+        if quote_requirements is not None:
+            raise ExecutableTargetAdapterError(
+                "quote-only planning cannot consume quote requirements"
+            )
+    elif type(quote_requirements) is not StaticCoreEqualFullPortfolioQuoteRequirements:
+        raise ExecutableTargetAdapterError(
+            "full-portfolio quote requirements are required"
+        )
+    if type(target_plan_version) is not int or target_plan_version not in {2, 3}:
+        raise ExecutableTargetAdapterError(
+            "full-portfolio target-plan version is invalid"
+        )
 
     normalized_run_id = _require_text(run_id, "run id")
     if _RUN_ID.fullmatch(normalized_run_id) is None:
@@ -2317,6 +2620,18 @@ def build_static_core_equal_full_portfolio_keyless_decision(
         freeze_contract=static_core_equal_freeze_contract,
         target_evidence=static_core_equal_target_evidence,
     )
+    static_freeze_sha256 = sha256_json(
+        _mapping(
+            static_core_equal_freeze_contract,
+            "STATIC_CORE_EQUAL freeze contract",
+        )
+    )
+    static_target_sha256 = sha256_json(
+        _mapping(
+            static_core_equal_target_evidence,
+            "STATIC_CORE_EQUAL target evidence",
+        )
+    )
     final_projection, final_rows = _position_manager_final_projection(
         snapshot=position_manager_snapshot,
         expected_sha256=position_manager_sha256,
@@ -2332,6 +2647,9 @@ def build_static_core_equal_full_portfolio_keyless_decision(
         account_scope="account:windows",
         environment="SIMNOW",
         reconciliation=reconciliation,
+    )
+    reconciliation_sha256 = sha256_json(
+        _mapping(reconciliation, "full-portfolio reconciliation")
     )
     current_positions, current_by_product = _canonical_strategy_portfolio_positions(
         positions
@@ -2368,6 +2686,7 @@ def build_static_core_equal_full_portfolio_keyless_decision(
 
     close_orders: list[dict[str, Any]] = []
     close_formal_quote_bindings: dict[str, Any] = {}
+    close_quote_uses: list[tuple[str, str, FormalTickRequest, str]] = []
     after_close = current_positions
     for product in _STATIC_CORE_EQUAL_PRODUCTS:
         after_close, current_by_product = _canonical_strategy_portfolio_positions(
@@ -2410,13 +2729,16 @@ def build_static_core_equal_full_portfolio_keyless_decision(
                 direction=direction,
             )
             price_side = "ask" if direction == "LONG" else "bid"
-            price, formal_quote_binding = _full_portfolio_formal_quote(
-                formal_quotes_by_exact_contract,
-                exact_contract=current_contract,
-                product=product,
-                price_side=price_side,
-                expected_price_tick=target["price_tick"],
-                now=current_time,
+            price, formal_quote_binding, formal_tick_request = (
+                _full_portfolio_formal_quote(
+                    formal_quotes_by_exact_contract,
+                    exact_contract=current_contract,
+                    product=product,
+                    price_side=price_side,
+                    expected_price_tick=target["price_tick"],
+                    now=current_time,
+                    requirements_only=requirements_only,
+                )
             )
             close_formal_quote_bindings.setdefault(
                 current_contract, formal_quote_binding
@@ -2430,6 +2752,9 @@ def build_static_core_equal_full_portfolio_keyless_decision(
                     "exact_contract": current_contract,
                     "child_index": child_index,
                 }
+            )
+            close_quote_uses.append(
+                (product, current_contract, formal_tick_request, reference)
             )
             close_orders.append(
                 {
@@ -2568,6 +2893,7 @@ def build_static_core_equal_full_portfolio_keyless_decision(
 
     open_orders: list[dict[str, Any]] = []
     open_formal_quote_bindings: dict[str, Any] = {}
+    open_quote_uses: list[tuple[str, str, FormalTickRequest, str]] = []
     deferred_open_intent = None
     if close_orders and open_intents:
         deferred_open_intent = _full_portfolio_deferred_open_intent(
@@ -2587,16 +2913,32 @@ def build_static_core_equal_full_portfolio_keyless_decision(
             direction = str(intent["direction"])
             price_side = str(intent["price_side"])
             exchange, symbol = _contract(exact_contract)
-            price, formal_quote_binding = _full_portfolio_formal_quote(
-                formal_quotes_by_exact_contract,
-                exact_contract=exact_contract,
-                product=product,
-                price_side=price_side,
-                expected_price_tick=intent["frozen_product_price_tick"],
-                now=current_time,
+            price, formal_quote_binding, formal_tick_request = (
+                _full_portfolio_formal_quote(
+                    formal_quotes_by_exact_contract,
+                    exact_contract=exact_contract,
+                    product=product,
+                    price_side=price_side,
+                    expected_price_tick=intent["frozen_product_price_tick"],
+                    now=current_time,
+                    requirements_only=requirements_only,
+                )
             )
             open_formal_quote_bindings.setdefault(exact_contract, formal_quote_binding)
             for child_index in range(1, int(intent["volume"]) + 1):
+                reference = sha256_json(
+                    {
+                        "strategy_id": "STATIC_CORE_EQUAL",
+                        "run_id": normalized_run_id,
+                        "phase": "OPEN",
+                        "product": product,
+                        "exact_contract": exact_contract,
+                        "child_index": child_index,
+                    }
+                )
+                open_quote_uses.append(
+                    (product, exact_contract, formal_tick_request, reference)
+                )
                 open_orders.append(
                     {
                         "symbol": symbol,
@@ -2606,16 +2948,7 @@ def build_static_core_equal_full_portfolio_keyless_decision(
                         "volume": 1,
                         "price": price,
                         "offset": "OPEN",
-                        "reference": sha256_json(
-                            {
-                                "strategy_id": "STATIC_CORE_EQUAL",
-                                "run_id": normalized_run_id,
-                                "phase": "OPEN",
-                                "product": product,
-                                "exact_contract": exact_contract,
-                                "child_index": child_index,
-                            }
-                        ),
+                        "reference": reference,
                         "gateway_name": "CTP",
                     }
                 )
@@ -2640,12 +2973,80 @@ def build_static_core_equal_full_portfolio_keyless_decision(
             deferred_open_intent.order_count if deferred_open_intent is not None else 0
         ),
     }
-    if not close_orders and not open_orders and deferred_open_intent is None:
-        return StaticCoreEqualFullPortfolioDecision(**decision_fields)
-
-    required_quote_contracts = set(close_formal_quote_bindings) | set(
-        open_formal_quote_bindings
+    selected_phase = (
+        "CLOSE" if close_quote_uses else ("OPEN" if open_quote_uses else None)
     )
+    selected_uses = close_quote_uses if close_quote_uses else open_quote_uses
+    by_contract: dict[str, tuple[str, FormalTickRequest, list[str]]] = {}
+    for product, exact_contract, request, reference in selected_uses:
+        prior = by_contract.get(exact_contract)
+        if prior is None:
+            by_contract[exact_contract] = (product, request, [reference])
+            continue
+        prior_product, prior_request, references = prior
+        if prior_product != product or prior_request != request:
+            raise ExecutableTargetAdapterError(
+                "full-portfolio quote requirements conflict"
+            )
+        references.append(reference)
+    computed_quote_requirements = StaticCoreEqualFullPortfolioQuoteRequirements(
+        phase=selected_phase,
+        requirements=tuple(
+            StaticCoreEqualFullPortfolioQuoteRequirement(
+                phase=str(selected_phase),
+                product=product,
+                exact_contract=exact_contract,
+                request=request,
+                order_references=tuple(references),
+            )
+            for exact_contract, (product, request, references) in sorted(
+                by_contract.items()
+            )
+        ),
+        deferred_open_order_count=(
+            deferred_open_intent.order_count if deferred_open_intent is not None else 0
+        ),
+        input_binding=StaticCoreEqualFullPortfolioQuoteInputBinding(
+            static_core_equal_projection_sha256=static_sha256,
+            static_core_equal_freeze_contract_sha256=static_freeze_sha256,
+            static_core_equal_target_evidence_sha256=static_target_sha256,
+            position_manager_sha256=normalized_position_manager_sha256,
+            current_before_position_hash=current_before_position_hash,
+            desired_target_sha256=final_target_sha256,
+            reconciliation_sha256=reconciliation_sha256,
+            phase_boundary_sha256=sha256_json(
+                {
+                    "positions": boundary.positions,
+                    "target_projection": boundary.target_projection,
+                    "before_projection": boundary.before_projection,
+                    "close_expected_after_position_hash": (
+                        boundary.close_expected_after_position_hash
+                    ),
+                    "open_expected_before_position_hash": (
+                        boundary.open_expected_before_position_hash
+                    ),
+                }
+            ),
+            deferred_open_intent_sha256=(
+                sha256_json(deferred_open_intent.template)
+                if deferred_open_intent is not None
+                else None
+            ),
+            run_id=normalized_run_id,
+            event_generated_at=event_generated_at,
+            target_plan_version=target_plan_version,
+        ),
+    )
+    if requirements_only:
+        return computed_quote_requirements
+    if quote_requirements != computed_quote_requirements:
+        raise ExecutableTargetAdapterError(
+            "full-portfolio quote requirements do not match planner inputs"
+        )
+
+    required_quote_contracts = {
+        row.exact_contract for row in computed_quote_requirements.requirements
+    }
     if (
         not isinstance(formal_quotes_by_exact_contract, Mapping)
         or set(formal_quotes_by_exact_contract) != required_quote_contracts
@@ -2653,6 +3054,8 @@ def build_static_core_equal_full_portfolio_keyless_decision(
         raise ExecutableTargetAdapterError(
             "full-portfolio formal quote contract set is not exact"
         )
+    if not close_orders and not open_orders and deferred_open_intent is None:
+        return StaticCoreEqualFullPortfolioDecision(**decision_fields)
     if not isinstance(expires_at, str) or not expires_at.endswith("Z"):
         raise ExecutableTargetAdapterError("trusted keyless expiry is invalid")
     try:
@@ -2707,6 +3110,94 @@ def build_static_core_equal_full_portfolio_keyless_decision(
     decision_fields["close_handoff"] = close_handoff
     decision_fields["open_handoff"] = open_handoff
     return StaticCoreEqualFullPortfolioDecision(**decision_fields)
+
+
+def build_full_portfolio_quote_requests(
+    *,
+    static_core_equal_projection: Mapping[str, Any],
+    static_core_equal_freeze_contract: Mapping[str, Any],
+    static_core_equal_target_evidence: Mapping[str, Any],
+    position_manager_snapshot: Mapping[str, Any],
+    position_manager_sha256: str,
+    current_facts: GatewaySnapshot,
+    reconciliation: Mapping[str, Any],
+    run_id: str,
+    event_generated_at: str,
+    now: datetime | None = None,
+    target_plan_version: int = 2,
+) -> StaticCoreEqualFullPortfolioQuoteRequirements:
+    """Return the exact formal-tick batch for the immediate executable phase.
+
+    This is the same pure delta/phase path used by the final planner.  It reads
+    no quote, performs no I/O or mutation, and never exposes deferred OPEN as a
+    current request.  Callers may materialize ``result.requests`` with the one
+    formal batch reader, key the returned bindings by ``exact_contract``, and
+    pass that exact mapping to the final planner.
+    """
+
+    result = _build_static_core_equal_full_portfolio(
+        static_core_equal_projection=static_core_equal_projection,
+        static_core_equal_freeze_contract=static_core_equal_freeze_contract,
+        static_core_equal_target_evidence=static_core_equal_target_evidence,
+        position_manager_snapshot=position_manager_snapshot,
+        position_manager_sha256=position_manager_sha256,
+        current_facts=current_facts,
+        reconciliation=reconciliation,
+        formal_quotes_by_exact_contract=None,
+        run_id=run_id,
+        event_generated_at=event_generated_at,
+        now=now,
+        target_plan_version=target_plan_version,
+        requirements_only=True,
+    )
+    if not isinstance(result, StaticCoreEqualFullPortfolioQuoteRequirements):
+        raise ExecutableTargetAdapterError(
+            "full-portfolio quote requirements were not produced"
+        )
+    return result
+
+
+def build_static_core_equal_full_portfolio_keyless_decision(
+    *,
+    static_core_equal_projection: Mapping[str, Any],
+    static_core_equal_freeze_contract: Mapping[str, Any],
+    static_core_equal_target_evidence: Mapping[str, Any],
+    position_manager_snapshot: Mapping[str, Any],
+    position_manager_sha256: str,
+    current_facts: GatewaySnapshot,
+    reconciliation: Mapping[str, Any],
+    quote_requirements: StaticCoreEqualFullPortfolioQuoteRequirements,
+    formal_quotes_by_exact_contract: Mapping[str, Any] | None,
+    run_id: str,
+    event_generated_at: str,
+    expires_at: str | None = None,
+    now: datetime | None = None,
+    target_plan_version: int = 2,
+) -> StaticCoreEqualFullPortfolioDecision:
+    """Build at most one immutable phase plan for the complete portfolio."""
+
+    result = _build_static_core_equal_full_portfolio(
+        static_core_equal_projection=static_core_equal_projection,
+        static_core_equal_freeze_contract=static_core_equal_freeze_contract,
+        static_core_equal_target_evidence=static_core_equal_target_evidence,
+        position_manager_snapshot=position_manager_snapshot,
+        position_manager_sha256=position_manager_sha256,
+        current_facts=current_facts,
+        reconciliation=reconciliation,
+        formal_quotes_by_exact_contract=formal_quotes_by_exact_contract,
+        run_id=run_id,
+        event_generated_at=event_generated_at,
+        expires_at=expires_at,
+        now=now,
+        target_plan_version=target_plan_version,
+        requirements_only=False,
+        quote_requirements=quote_requirements,
+    )
+    if not isinstance(result, StaticCoreEqualFullPortfolioDecision):
+        raise ExecutableTargetAdapterError(
+            "full-portfolio target-plan decision was not produced"
+        )
+    return result
 
 
 def build_static_core_equal_keyless_safety_flat_decision(
@@ -2947,9 +3438,13 @@ __all__ = [
     "StaticCoreEqualDeferredOpenIntent",
     "StaticCoreEqualFullPortfolioDecision",
     "StaticCoreEqualFullPortfolioPhaseHandoff",
+    "StaticCoreEqualFullPortfolioQuoteInputBinding",
+    "StaticCoreEqualFullPortfolioQuoteRequirement",
+    "StaticCoreEqualFullPortfolioQuoteRequirements",
     "StaticCoreEqualKeylessDecision",
     "StaticCoreEqualPhaseBoundary",
     "build_executable_target_plan",
+    "build_full_portfolio_quote_requests",
     "build_static_core_equal_full_portfolio_keyless_decision",
     "build_static_core_equal_keyless_safety_flat_decision",
     "build_static_core_equal_keyless_target_decision",
