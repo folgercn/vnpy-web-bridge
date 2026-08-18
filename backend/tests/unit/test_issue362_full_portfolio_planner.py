@@ -10,9 +10,12 @@ from app.execution.executable_target_adapter import (
     ExecutableTargetAdapterError,
     build_static_core_equal_full_portfolio_keyless_decision,
     full_portfolio_phase_plan_id_from_preimage,
+    full_portfolio_phase_plan_id_from_payload,
 )
 from shared.commodity_execution import (
+    FORMAL_QUOTE_PROOF_SCHEMA_VERSION,
     KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+    KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
     before_position_projection_hash,
     canonical_before_position_projection,
     canonical_target_position_projection,
@@ -187,6 +190,7 @@ def _decision(
     event_generated_at: str = EVENT_GENERATED_AT,
     expires_at: str | None = "2099-01-01T00:00:00Z",
     now: datetime = NOW,
+    target_plan_version: int = 2,
 ):
     projection, freeze, target = _static_outputs()
     manager = _position_manager_snapshot(target, selected=selected)
@@ -223,6 +227,7 @@ def _decision(
         event_generated_at=event_generated_at,
         expires_at=expires_at,
         now=now,
+        target_plan_version=target_plan_version,
     )
 
 
@@ -516,6 +521,54 @@ def test_roll_binds_exact_formal_quotes_and_derives_protected_sides() -> None:
         )
 
 
+def test_quote_aware_v3_is_explicit_and_close_still_defers_open() -> None:
+    _projection, _freeze, target = _static_outputs()
+    manager = _position_manager_snapshot(target, selected=_targets(cu=1))
+    cu = _row_by_product(manager)["cu"]
+    old_contract = cu["exact_contract"][:-2] + "09"
+    positions = dict([_position(old_contract, direction="LONG", volume=1, yd_volume=0)])
+
+    default = _decision(selected=_targets(cu=1), positions=positions)
+    explicit_v3 = _decision(
+        selected=_targets(cu=1),
+        positions=positions,
+        target_plan_version=3,
+    )
+
+    assert default.close_handoff is not None
+    assert default.close_handoff.target_plan["schema_version"] == (
+        KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION
+    )
+    assert default.close_handoff.identity_preimage is not None
+    assert "creation_quote_proof" not in default.close_handoff.target_plan
+    assert "execution_run_id" not in default.close_handoff.target_plan
+
+    assert explicit_v3.close_handoff is not None
+    assert explicit_v3.open_handoff is None
+    assert explicit_v3.deferred_open_intent is not None
+    handoff = explicit_v3.close_handoff
+    plan = handoff.target_plan
+    assert plan["schema_version"] == KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION
+    assert plan["execution_run_id"] == "issue362-full-portfolio-0001"
+    assert plan["creation_quote_proof"] == {
+        "schema_version": FORMAL_QUOTE_PROOF_SCHEMA_VERSION,
+        "validated_at_utc": EVENT_GENERATED_AT,
+        "max_age_seconds": 2,
+        "future_skew_seconds": 2,
+        "journal_authenticated": False,
+        "start_authorized": False,
+        "bindings": explicit_v3.close_formal_quote_bindings,
+    }
+    assert handoff.identity_preimage is None
+    assert full_portfolio_phase_plan_id_from_payload(plan) == plan["plan_id"]
+    assert handoff.recompute_plan_id() == plan["plan_id"]
+    assert handoff.trusted_keyless_custody_artifact()["schema_ref"] == (
+        KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION
+    )
+    assert "creation_quote_proof" not in explicit_v3.deferred_open_intent.template
+    assert explicit_v3.deferred_open_intent.custody_allowed is False
+
+
 def test_roll_quote_binding_requires_exact_frozen_tick_identity_and_freshness() -> None:
     _projection, _freeze, target = _static_outputs()
     manager = _position_manager_snapshot(target, selected=_targets(cu=1))
@@ -642,6 +695,12 @@ def test_same_event_is_byte_identical_and_all_plan_material_changes_identity() -
     assert first.open_handoff is not None and replay.open_handoff is not None
     assert first.open_handoff.target_plan == replay.open_handoff.target_plan
     assert first.open_handoff.identity_preimage == replay.open_handoff.identity_preimage
+    assert sha256_json(first.open_handoff.target_plan) == (
+        "eefbdf7d244ae3a88c34414a3f4f4dcbe028039276b3b6b1fd115b9887844b69"
+    )
+    assert sha256_json(first.open_handoff.identity_preimage) == (
+        "cf3704b69da27f312b95b5ca6292c729aeb89fd09b7fdaaaeeb22f86b8253e77"
+    )
     assert (
         first.open_handoff.recompute_plan_id()
         == (first.open_handoff.target_plan["plan_id"])
@@ -688,6 +747,7 @@ def test_phase_identity_preimage_is_detached_and_cannot_hide_quote_tamper() -> N
     decision = _decision(selected=_targets(ag=1), formal_quotes=quotes)
     assert decision.open_handoff is not None
     handoff = decision.open_handoff
+    assert handoff.identity_preimage is not None
     saved = deepcopy(handoff.identity_preimage)
 
     quote = next(iter(quotes.values()))
@@ -707,6 +767,7 @@ def test_phase_identity_preimage_is_detached_and_cannot_hide_quote_tamper() -> N
         != (handoff.target_plan["plan_id"])
     )
     tampered_handoff = deepcopy(handoff)
+    assert tampered_handoff.identity_preimage is not None
     tampered_handoff.identity_preimage["formal_quote_bindings"] = tampered[
         "formal_quote_bindings"
     ]

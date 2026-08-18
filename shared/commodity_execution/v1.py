@@ -15,15 +15,19 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 TARGET_PLAN_SCHEMA_VERSION = "web-bridge-simnow-target-plan-v1"
 KEYLESS_TARGET_PLAN_SCHEMA_VERSION = "web-bridge-simnow-keyless-target-plan-v1"
 KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION = "web-bridge-simnow-keyless-target-plan-v2"
+KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION = "web-bridge-simnow-keyless-target-plan-v3"
+FORMAL_QUOTE_PROOF_SCHEMA_VERSION = "web-bridge-formal-quote-proof-v1"
 _KEYLESS_TARGET_PLAN_SCHEMA_VERSIONS = frozenset(
     {
         KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
         KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+        KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
     }
 )
 TRUSTED_KEYLESS_SIMNOW_SCOPE = {
@@ -39,11 +43,15 @@ _KEY_VERSION_RE = re.compile(r"^v[0-9]+$")
 # symbols using their native lower-case spelling (for example, ``ru2609``),
 # while snapshots remain normalized independently for position projections.
 _SYMBOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,31}$")
+_EXACT_COMMODITY_SYMBOL_RE = re.compile(r"^[A-Za-z]+[0-9]{4}$")
 _REFERENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
+_EXECUTION_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$")
 _GATEWAY_NAME_RE = re.compile(r"^(?:CTP|[A-Za-z0-9][A-Za-z0-9._:-]{7,127})$")
 _EXCHANGES = frozenset({"CFFEX", "CZCE", "DCE", "GFEX", "INE", "SHFE"})
 _CLOSE_ORDER_OFFSETS = frozenset({"CLOSE", "CLOSETODAY", "CLOSEYESTERDAY"})
 _YD_AWARE_EXCHANGES = frozenset({"INE", "SHFE"})
+_FORMAL_QUOTE_MAX_AGE_SECONDS = 2
+_FORMAL_QUOTE_FUTURE_SKEW_SECONDS = 2
 
 
 class CommodityExecutionContractError(ValueError):
@@ -655,6 +663,204 @@ _KEYLESS_PLAN_FIELDS = frozenset(
     }
 )
 
+_KEYLESS_PLAN_V3_FIELDS = frozenset(
+    {
+        *_KEYLESS_PLAN_FIELDS,
+        "execution_run_id",
+        "creation_quote_proof",
+    }
+)
+_KEYLESS_PLAN_V3_IDENTITY_FIELDS = _KEYLESS_PLAN_V3_FIELDS - {
+    "plan_id",
+    "plan_hash",
+}
+_FORMAL_QUOTE_PROOF_FIELDS = frozenset(
+    {
+        "schema_version",
+        "validated_at_utc",
+        "max_age_seconds",
+        "future_skew_seconds",
+        "journal_authenticated",
+        "start_authorized",
+        "bindings",
+    }
+)
+_FORMAL_QUOTE_BINDING_FIELDS = frozenset(
+    {
+        "source",
+        "vt_symbol",
+        "price_side",
+        "stream_generation",
+        "ingest_id",
+        "ingest_seq",
+        "event_hash",
+        "received_at_utc",
+        "reference_price",
+        "price_tick",
+    }
+)
+
+
+def _decimal(value: Any, field: str) -> Decimal:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise CommodityExecutionContractError(f"{field} is invalid")
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise CommodityExecutionContractError(f"{field} is invalid") from exc
+    if not result.is_finite():
+        raise CommodityExecutionContractError(f"{field} is invalid")
+    return result
+
+
+def _creation_quote_proof(
+    value: Any, *, orders: tuple[TargetPlanOrder, ...]
+) -> dict[str, Any]:
+    proof = _detached_mapping(value, "target plan creation_quote_proof")
+    if set(proof) != _FORMAL_QUOTE_PROOF_FIELDS:
+        raise CommodityExecutionContractError(
+            "target plan creation quote proof fields are not exact"
+        )
+    if (
+        proof["schema_version"] != FORMAL_QUOTE_PROOF_SCHEMA_VERSION
+        or type(proof["max_age_seconds"]) is not int
+        or proof["max_age_seconds"] != _FORMAL_QUOTE_MAX_AGE_SECONDS
+        or type(proof["future_skew_seconds"]) is not int
+        or proof["future_skew_seconds"] != _FORMAL_QUOTE_FUTURE_SKEW_SECONDS
+        or proof["journal_authenticated"] is not False
+        or proof["start_authorized"] is not False
+    ):
+        raise CommodityExecutionContractError(
+            "target plan creation quote proof policy is invalid"
+        )
+    validated_at_raw = _utc(
+        proof["validated_at_utc"],
+        "target plan creation quote proof validated_at_utc",
+    )
+    validated_at = datetime.fromisoformat(validated_at_raw[:-1] + "+00:00")
+    bindings = _detached_mapping(
+        proof["bindings"], "target plan creation quote proof bindings"
+    )
+    required: dict[str, tuple[str, Decimal]] = {}
+    for order in orders:
+        if _EXACT_COMMODITY_SYMBOL_RE.fullmatch(order.symbol) is None:
+            raise CommodityExecutionContractError(
+                "target plan creation quote order contract is not exact"
+            )
+        exact_contract = f"{order.exchange}.{order.symbol}"
+        side = "ask" if order.direction == "LONG" else "bid"
+        price = Decimal(str(order.price))
+        prior = required.setdefault(exact_contract, (side, price))
+        if prior != (side, price):
+            raise CommodityExecutionContractError(
+                "target plan creation quote proof order set is ambiguous"
+            )
+    if set(bindings) != set(required):
+        raise CommodityExecutionContractError(
+            "target plan creation quote proof contract set is not exact"
+        )
+    for exact_contract, (expected_side, order_price) in required.items():
+        raw = bindings[exact_contract]
+        if not isinstance(raw, Mapping) or set(raw) != _FORMAL_QUOTE_BINDING_FIELDS:
+            raise CommodityExecutionContractError(
+                f"target plan creation quote binding is invalid: {exact_contract}"
+            )
+        try:
+            exchange, symbol = exact_contract.split(".", 1)
+        except ValueError as exc:  # pragma: no cover - derived from a validated order
+            raise CommodityExecutionContractError(
+                "target plan creation quote contract is invalid"
+            ) from exc
+        if (
+            raw["source"] != "windows-tick-wire-v1"
+            or raw["vt_symbol"] != f"{symbol}.{exchange}"
+            or raw["price_side"] != expected_side
+        ):
+            raise CommodityExecutionContractError(
+                f"target plan creation quote identity is invalid: {exact_contract}"
+            )
+        for identity_field in ("stream_generation", "ingest_id"):
+            identity_value = raw[identity_field]
+            if not isinstance(identity_value, str) or not identity_value:
+                raise CommodityExecutionContractError(
+                    "target plan creation quote "
+                    f"{identity_field} is invalid: {exact_contract}"
+                )
+        ingest_seq = raw["ingest_seq"]
+        if (
+            isinstance(ingest_seq, bool)
+            or not isinstance(ingest_seq, int)
+            or ingest_seq < 1
+        ):
+            raise CommodityExecutionContractError(
+                f"target plan creation quote sequence is invalid: {exact_contract}"
+            )
+        _sha(
+            raw["event_hash"],
+            f"target plan creation quote event_hash: {exact_contract}",
+        )
+        received_at_raw = _utc(
+            raw["received_at_utc"],
+            f"target plan creation quote received_at_utc: {exact_contract}",
+        )
+        received_at = datetime.fromisoformat(received_at_raw[:-1] + "+00:00")
+        age = (validated_at - received_at).total_seconds()
+        if (
+            age > _FORMAL_QUOTE_MAX_AGE_SECONDS
+            or age < -_FORMAL_QUOTE_FUTURE_SKEW_SECONDS
+        ):
+            raise CommodityExecutionContractError(
+                f"target plan creation quote is stale or from the future: {exact_contract}"
+            )
+        reference_price = _decimal(
+            raw["reference_price"],
+            f"target plan creation quote reference_price: {exact_contract}",
+        )
+        price_tick = _decimal(
+            raw["price_tick"],
+            f"target plan creation quote price_tick: {exact_contract}",
+        )
+        if reference_price <= 0 or price_tick <= 0 or reference_price % price_tick != 0:
+            raise CommodityExecutionContractError(
+                f"target plan creation quote price is invalid: {exact_contract}"
+            )
+        protected_price = (
+            reference_price + price_tick
+            if expected_side == "ask"
+            else reference_price - price_tick
+        )
+        if protected_price <= 0 or protected_price != order_price:
+            raise CommodityExecutionContractError(
+                f"target plan creation quote does not bind order price: {exact_contract}"
+            )
+    proof["bindings"] = bindings
+    return proof
+
+
+def trusted_keyless_target_plan_v3_plan_id(value: Any) -> str:
+    """Derive the v3 full-portfolio ID solely from persisted plan material."""
+
+    raw = _detached_mapping(value, "keyless target plan v3 identity")
+    if set(raw) == _KEYLESS_PLAN_V3_FIELDS:
+        raw = {key: raw[key] for key in raw if key not in {"plan_id", "plan_hash"}}
+    if set(raw) != _KEYLESS_PLAN_V3_IDENTITY_FIELDS:
+        raise CommodityExecutionContractError(
+            "keyless target plan v3 identity fields are not exact"
+        )
+    phase = raw.get("phase")
+    if raw.get(
+        "schema_version"
+    ) != KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION or phase not in {"CLOSE", "OPEN"}:
+        raise CommodityExecutionContractError(
+            "keyless target plan v3 identity is invalid"
+        )
+    _short_string(
+        raw.get("execution_run_id"),
+        "keyless target plan v3 execution_run_id",
+        pattern=_EXECUTION_RUN_ID_RE,
+    )
+    return f"static-core-full-{str(phase).lower()}-v3-{sha256_json(raw)}"
+
 
 @dataclass(frozen=True, slots=True)
 class TargetPlan:
@@ -667,29 +873,61 @@ class TargetPlan:
     def from_mapping(cls, value: Any, *, max_order_volume: int = 1) -> TargetPlan:
         raw = _detached_mapping(value, "target plan")
         is_keyless = raw.get("schema_version") in _KEYLESS_TARGET_PLAN_SCHEMA_VERSIONS
-        if set(raw) != (_KEYLESS_PLAN_FIELDS if is_keyless else _PLAN_FIELDS):
+        is_keyless_v3 = (
+            raw.get("schema_version") == KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION
+        )
+        expected_fields = (
+            _KEYLESS_PLAN_V3_FIELDS
+            if is_keyless_v3
+            else (_KEYLESS_PLAN_FIELDS if is_keyless else _PLAN_FIELDS)
+        )
+        if set(raw) != expected_fields:
             raise CommodityExecutionContractError("target plan fields are not exact")
         if raw["schema_version"] not in {
             TARGET_PLAN_SCHEMA_VERSION,
             KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
             KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+            KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
         }:
             raise CommodityExecutionContractError(
                 "target plan schema_version is invalid"
             )
-        for field in (("plan_id", "account_scope") if is_keyless else (
-            "plan_id", "account_scope", "authority_artifact_id", "authority_receipt_id"
-        )):
+        for field in (
+            ("plan_id", "account_scope")
+            if is_keyless
+            else (
+                "plan_id",
+                "account_scope",
+                "authority_artifact_id",
+                "authority_receipt_id",
+            )
+        ):
             _id(raw[field], f"target plan {field}")
         if not is_keyless:
             _short_string(raw["signer_key_id"], "target plan signer_key_id")
-            _short_string(raw["signer_key_version"], "target plan signer_key_version", pattern=_KEY_VERSION_RE)
-        for field in ((
-            "plan_hash", "expected_before_position_hash", "expected_after_position_hash", "order_set_sha256"
-        ) if is_keyless else (
-            "plan_hash", "authority_artifact_sha256", "authority_receipt_sha256", "keyring_raw_sha256",
-            "expected_before_position_hash", "expected_after_position_hash", "order_set_sha256"
-        )):
+            _short_string(
+                raw["signer_key_version"],
+                "target plan signer_key_version",
+                pattern=_KEY_VERSION_RE,
+            )
+        for field in (
+            (
+                "plan_hash",
+                "expected_before_position_hash",
+                "expected_after_position_hash",
+                "order_set_sha256",
+            )
+            if is_keyless
+            else (
+                "plan_hash",
+                "authority_artifact_sha256",
+                "authority_receipt_sha256",
+                "keyring_raw_sha256",
+                "expected_before_position_hash",
+                "expected_after_position_hash",
+                "order_set_sha256",
+            )
+        ):
             _sha(raw[field], f"target plan {field}")
         if raw["environment"] != "SIMNOW":
             raise CommodityExecutionContractError(
@@ -705,7 +943,9 @@ class TargetPlan:
                 or raw["account_scope"] != "account:windows"
                 or scope != TRUSTED_KEYLESS_SIMNOW_SCOPE
             ):
-                raise CommodityExecutionContractError("keyless target plan scope is invalid")
+                raise CommodityExecutionContractError(
+                    "keyless target plan scope is invalid"
+                )
             lineage = _detached_mapping(raw["lineage"], "keyless target plan lineage")
             if raw["schema_version"] == KEYLESS_TARGET_PLAN_SCHEMA_VERSION:
                 if set(lineage) != {"map_sha256", "c_fast_sha256"}:
@@ -726,6 +966,12 @@ class TargetPlan:
                     )
                 for field in sorted(lineage_fields):
                     _sha(lineage[field], f"keyless target plan {field} lineage")
+            if is_keyless_v3:
+                _short_string(
+                    raw["execution_run_id"],
+                    "keyless target plan v3 execution_run_id",
+                    pattern=_EXECUTION_RUN_ID_RE,
+                )
         if any(
             raw[field] is not False
             for field in (
@@ -750,7 +996,9 @@ class TargetPlan:
             TargetPlanOrder.from_mapping(item, max_order_volume=max_order_volume)
             for item in orders_raw
         )
-        if is_keyless and any(order.gateway_name != raw["gateway_name"] for order in orders):
+        if is_keyless and any(
+            order.gateway_name != raw["gateway_name"] for order in orders
+        ):
             raise CommodityExecutionContractError(
                 "keyless target plan order gateway is not scope-bound"
             )
@@ -778,6 +1026,25 @@ class TargetPlan:
             raise CommodityExecutionContractError(
                 "keyless target plan order has no position transition"
             )
+        if is_keyless_v3:
+            raw["creation_quote_proof"] = _creation_quote_proof(
+                raw["creation_quote_proof"], orders=orders
+            )
+            quote_validated_at = datetime.fromisoformat(
+                raw["creation_quote_proof"]["validated_at_utc"][:-1] + "+00:00"
+            )
+            plan_expires_at = datetime.fromisoformat(
+                str(raw["expires_at"])[:-1] + "+00:00"
+            )
+            if quote_validated_at >= plan_expires_at:
+                raise CommodityExecutionContractError(
+                    "keyless target plan v3 quote proof is not before expiry"
+                )
+            expected_plan_id = trusted_keyless_target_plan_v3_plan_id(raw)
+            if raw["plan_id"] != expected_plan_id:
+                raise CommodityExecutionContractError(
+                    "keyless target plan v3 plan_id mismatch"
+                )
         canonical = {key: raw[key] for key in raw if key != "plan_hash"}
         if sha256_json(canonical) != raw["plan_hash"]:
             raise CommodityExecutionContractError("target plan hash mismatch")
@@ -800,11 +1067,19 @@ class TargetPlan:
 
     @property
     def authority_id(self) -> str:
-        return self.plan_id if self.is_trusted_keyless_simnow else str(self.raw["authority_artifact_id"])
+        return (
+            self.plan_id
+            if self.is_trusted_keyless_simnow
+            else str(self.raw["authority_artifact_id"])
+        )
 
     @property
     def authority_hash(self) -> str:
-        return self.plan_hash if self.is_trusted_keyless_simnow else str(self.raw["authority_artifact_sha256"])
+        return (
+            self.plan_hash
+            if self.is_trusted_keyless_simnow
+            else str(self.raw["authority_artifact_sha256"])
+        )
 
     def order(self, order_ref: str) -> TargetPlanOrder:
         wanted = _id(order_ref, "order_ref")
@@ -872,6 +1147,38 @@ def build_trusted_keyless_target_plan_v2(**fields: Any) -> dict[str, Any]:
         raw.setdefault(flag, False)
     raw.setdefault("order_set_sha256", sha256_json(raw.get("orders", [])))
     raw.pop("plan_hash", None)
+    raw["plan_hash"] = sha256_json(raw)
+    return TargetPlan.from_mapping(raw).as_dict()
+
+
+def build_trusted_keyless_target_plan_v3(**fields: Any) -> dict[str, Any]:
+    """Build the quote-aware full-portfolio SIMNOW TargetPlan v3.
+
+    The derived plan ID is a hash of every persisted field except ``plan_id``
+    and ``plan_hash``.  No planner-local identity preimage is required to
+    recover or audit it after custody.
+    """
+
+    raw = dict(fields)
+    if raw.get("schema_version", KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION) != (
+        KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION
+    ):
+        raise CommodityExecutionContractError(
+            "keyless target plan v3 builder requires the v3 schema"
+        )
+    raw.setdefault("schema_version", KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION)
+    raw.setdefault("custody_mode", "trusted-keyless-simnow")
+    raw.setdefault("scope", dict(TRUSTED_KEYLESS_SIMNOW_SCOPE))
+    for flag in ("production_allowed", "live_trading_authorized", "countable_forward"):
+        raw.setdefault(flag, False)
+    raw.setdefault("order_set_sha256", sha256_json(raw.get("orders", [])))
+    raw.pop("plan_hash", None)
+    supplied_plan_id = raw.pop("plan_id", None)
+    raw["plan_id"] = trusted_keyless_target_plan_v3_plan_id(raw)
+    if supplied_plan_id is not None and supplied_plan_id != raw["plan_id"]:
+        raise CommodityExecutionContractError(
+            "keyless target plan v3 supplied plan_id mismatch"
+        )
     raw["plan_hash"] = sha256_json(raw)
     return TargetPlan.from_mapping(raw).as_dict()
 

@@ -40,6 +40,7 @@ from shared.artifact_custody.v1 import ArtifactCustody, CustodyError
 from shared.commodity_execution import (
     KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
     KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+    KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
     TARGET_PLAN_SCHEMA_VERSION,
     TRUSTED_KEYLESS_SIMNOW_SCOPE,
     CommodityExecutionContractError,
@@ -223,6 +224,7 @@ class ArtifactCustodyService:
                 TARGET_PLAN_SCHEMA_VERSION: _target_plan_schema,
                 KEYLESS_TARGET_PLAN_SCHEMA_VERSION: _target_plan_schema,
                 KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION: _target_plan_schema,
+                KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION: _target_plan_schema,
             },
             read_only=read_only,
         )
@@ -273,6 +275,7 @@ class ArtifactCustodyService:
             not in {
                 KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
                 KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+                KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
             }
             or artifact["schema_ref"] != plan.raw["schema_version"]
             or artifact["scope"] != TRUSTED_KEYLESS_SIMNOW_SCOPE
@@ -295,8 +298,7 @@ class ArtifactCustodyService:
             or receipt.get("artifact_id") != artifact["artifact_id"]
             or receipt.get("artifact_type") != artifact["artifact_type"]
             or receipt.get("trust_domain") != artifact["trust_domain"]
-            or receipt.get("artifact_canonical_sha256")
-            != artifact["canonical_sha256"]
+            or receipt.get("artifact_canonical_sha256") != artifact["canonical_sha256"]
             or receipt.get("artifact_raw_sha256") != artifact["raw_sha256"]
             or receipt.get("schema_ref") != artifact["schema_ref"]
             or receipt.get("predecessor_refs") != artifact["predecessor_refs"]
@@ -569,20 +571,14 @@ class ArtifactCustodyService:
                     "plan_phase": plan.raw["phase"],
                     "publish_receipt_id": published["receipt_id"],
                     "publish_receipt_sha256": self._receipt_sha256(published),
-                    "publish_expected_custody_version": published[
-                        "expected_version"
-                    ],
-                    "publish_resulting_custody_version": published[
-                        "resulting_version"
-                    ],
+                    "publish_expected_custody_version": published["expected_version"],
+                    "publish_resulting_custody_version": published["resulting_version"],
                 }
                 if installed is not None:
                     common.update(
                         install_receipt_id=installed["receipt_id"],
                         install_receipt_sha256=self._receipt_sha256(installed),
-                        install_expected_custody_version=installed[
-                            "expected_version"
-                        ],
+                        install_expected_custody_version=installed["expected_version"],
                         install_resulting_custody_version=installed[
                             "resulting_version"
                         ],
@@ -628,8 +624,7 @@ class ArtifactCustodyService:
             or projection.publish_resulting_custody_version
             != payload.publish_resulting_custody_version
             or projection.artifact_id != artifact["artifact_id"]
-            or projection.artifact_canonical_sha256
-            != artifact["canonical_sha256"]
+            or projection.artifact_canonical_sha256 != artifact["canonical_sha256"]
             or projection.artifact_raw_sha256 != artifact["raw_sha256"]
             or projection.artifact_schema_ref != artifact["schema_ref"]
         ):
@@ -638,9 +633,7 @@ class ArtifactCustodyService:
             )
         try:
             with self._custody() as custody:
-                published = custody.read_receipt_by_idempotency(
-                    payload.idempotency_key
-                )
+                published = custody.read_receipt_by_idempotency(payload.idempotency_key)
                 stored_artifact = custody.read_artifact(artifact["artifact_id"])
                 if canonical_json_line(stored_artifact) != canonical_json_line(
                     artifact
@@ -656,8 +649,7 @@ class ArtifactCustodyService:
                 )
                 if (
                     published["receipt_id"] != payload.publish_receipt_id
-                    or self._receipt_sha256(published)
-                    != payload.publish_receipt_sha256
+                    or self._receipt_sha256(published) != payload.publish_receipt_sha256
                     or published["actor_id"] != principal
                     or published["correlation_id"] != payload.correlation_id
                     or published["expected_version"]
@@ -692,6 +684,7 @@ class ArtifactCustodyService:
                 if raw["receipt_type"] == "install" and artifact.get("schema_ref") in {
                     KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
                     KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+                    KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
                 }:
                     return self._keyless_receipt(raw, artifact)
                 signed = custody.read_signed_artifact(raw["artifact_id"])
@@ -728,6 +721,7 @@ class ArtifactCustodyService:
                 if raw["receipt_type"] == "install" and artifact.get("schema_ref") in {
                     KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
                     KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+                    KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
                 }:
                     return self._keyless_receipt(raw, artifact)
                 signed = custody.read_signed_artifact(raw["artifact_id"])
@@ -779,6 +773,7 @@ class ArtifactCustodyService:
             elif artifact.get("schema_ref") not in {
                 KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
                 KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+                KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
             }:
                 raise CustodyEvidenceReadError(
                     "custody artifact is not an execution target plan"
@@ -915,9 +910,7 @@ def create_app(service: ArtifactCustodyService | None = None) -> FastAPI:
         except WorkflowAdapterError as exc:
             raise HTTPException(exc.status_code, detail={"code": exc.code}) from exc
 
-    @app.get(
-        "/internal/v1/target-plan-publications/by-idempotency/{idempotency_key}"
-    )
+    @app.get("/internal/v1/target-plan-publications/by-idempotency/{idempotency_key}")
     def target_plan_publication(
         idempotency_key: str, request: Request
     ) -> dict[str, Any]:
