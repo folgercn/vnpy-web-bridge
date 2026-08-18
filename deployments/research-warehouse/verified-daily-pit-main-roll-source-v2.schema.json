@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/folgercn/vnpy-web-bridge/deployments/research-warehouse/verified-daily-pit-main-roll-source-v2.schema.json",
   "title": "Verified no-authority daily PIT-main roll source v2",
-  "description": "Delayed-Genesis-only verified-at-construction Warehouse source evidence: artifact official_day equals the signed monthly STATIC_CORE_EQUAL baseline execution day, after month-end research and execution-day official-open evidence are sealed. Linked continuity is unavailable until Warehouse owns an immutable predecessor receipt/catalog. Roll changes are detection facts only; this artifact is never installable, event-ready, dispatch-authorized, order-authorized, production/live authority, or official/countable forward evidence.",
+  "description": "Verified-at-construction Warehouse source evidence. Genesis uses a signed delayed monthly STATIC_CORE_EQUAL baseline; linked continuity uses only the fixed root-managed immutable predecessor catalog. Roll changes are detection facts only; this artifact is never installable, event-ready, dispatch-authorized, order-authorized, production/live authority, or official/countable forward evidence.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -188,7 +188,12 @@
             "expected_raw_sha256": {"$ref": "#/$defs/sha256"}
           }
         },
-        "continuity": {"$ref": "#/$defs/genesisContinuity"},
+        "continuity": {
+          "oneOf": [
+            {"$ref": "#/$defs/genesisContinuity"},
+            {"$ref": "#/$defs/linkedContinuity"}
+          ]
+        },
         "producer": {
           "type": "object", "additionalProperties": false,
           "required": ["producer_kernel_id", "frozen_rule_id", "frozen_rule_sha256"],
@@ -216,6 +221,22 @@
         "baseline_execution_day": {"$ref": "#/$defs/day"},
         "baseline_signer_key_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,128}$"},
         "baseline_public_key_sha256": {"$ref": "#/$defs/sha256"},
+        "predecessor_exact_contract_map_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "linkedContinuity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mode", "catalog_receipt_id", "catalog_receipt_raw_sha256", "catalog_sequence", "predecessor_artifact_id", "predecessor_artifact_raw_sha256", "predecessor_artifact_raw_bytes", "predecessor_official_day", "predecessor_execution_day", "predecessor_exact_contract_map_sha256"],
+      "properties": {
+        "mode": {"const": "LINKED_ROOT_CATALOG"},
+        "catalog_receipt_id": {"type": "string", "pattern": "^daily-roll-catalog-receipt-[0-9a-f]{64}$"},
+        "catalog_receipt_raw_sha256": {"$ref": "#/$defs/sha256"},
+        "catalog_sequence": {"type": "integer", "minimum": 1},
+        "predecessor_artifact_id": {"type": "string", "pattern": "^verified-daily-roll-[0-9a-f]{64}$"},
+        "predecessor_artifact_raw_sha256": {"$ref": "#/$defs/sha256"},
+        "predecessor_artifact_raw_bytes": {"type": "integer", "minimum": 1, "maximum": 4194304},
+        "predecessor_official_day": {"$ref": "#/$defs/day"},
+        "predecessor_execution_day": {"$ref": "#/$defs/day"},
         "predecessor_exact_contract_map_sha256": {"$ref": "#/$defs/sha256"}
       }
     },
