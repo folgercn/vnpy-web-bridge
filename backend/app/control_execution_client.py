@@ -25,7 +25,7 @@ from app.control_execution_projection import (
 from app.execution.errors import CommandValidationError
 from app.execution.models import CommandEnvelope, validate_identifier
 from app.schemas.control_execution import (
-    ExecutionAccountFactsProjection,
+    ExecutionAccountFactsProjectionV2,
     ExecutionCompletionProjection,
     ExecutionLeaderStatusProjection,
     ExecutionLeaderTokenProjection,
@@ -402,12 +402,12 @@ class ExecutionClient:
         projection = await self.status()
         return projection.model_dump(mode="json")
 
-    async def account_facts(self) -> ExecutionAccountFactsProjection:
+    async def account_facts(self) -> ExecutionAccountFactsProjectionV2:
         """Read one bounded, fresh, full-account projection from Execution."""
 
         body = await self._request("GET", self.account_facts_path)
         try:
-            return ExecutionAccountFactsProjection.model_validate(body)
+            return ExecutionAccountFactsProjectionV2.model_validate(body)
         except (ValueError, TypeError) as exc:
             raise ExecutionProtocolError(
                 "Execution account facts projection 不符合冻结合同",

@@ -466,6 +466,40 @@ _ACCOUNT_FACTS_FIELDS = frozenset(
         "account_facts_sha256",
     }
 )
+_ACCOUNT_FACTS_V2_FIELDS = _ACCOUNT_FACTS_FIELDS | {"execution_binding"}
+_EXECUTION_BINDING_FIELDS = frozenset(
+    {
+        "state_version",
+        "plan_state",
+        "send_intents",
+        "send_intents_sha256",
+        "nonterminal_send_intent_count",
+    }
+)
+_TERMINAL_SEND_INTENT_STATES = frozenset({"RECONCILED", "CANCELLED", "TERMINAL"})
+_SEND_INTENT_REQUIRED_FIELDS = frozenset(
+    {
+        "intent_id",
+        "idempotency_key",
+        "state",
+        "plan_id",
+        "plan_hash",
+        "leader_epoch",
+        "fencing_token",
+        "created_at",
+    }
+)
+_SEND_INTENT_OPTIONAL_FIELDS = frozenset(
+    {
+        "action",
+        "request_hash",
+        "target_intent_id",
+        "receipt_id",
+        "receipt_hash",
+        "broker_order_id",
+        "unknown_reason",
+    }
+)
 _STATUS_BINDING_FIELDS = frozenset(
     {
         "status_schema_version",
@@ -671,6 +705,105 @@ class ExecutionAccountFactsProjection:
         return self.model_dump()
 
 
+@dataclass(frozen=True, slots=True)
+class ExecutionAccountFactsProjectionV2:
+    """Strict #362 readiness view bound to one complete Execution state."""
+
+    value: dict[str, Any]
+
+    @classmethod
+    def from_mapping(cls, value: Any) -> ExecutionAccountFactsProjectionV2:
+        candidate = _detached_object(value, name="execution account facts v2")
+        if set(candidate) != _ACCOUNT_FACTS_V2_FIELDS:
+            raise ValueError("execution account facts v2 fields are not exact")
+        if candidate["schema_version"] != "web_bridge_execution_account_facts_v2":
+            raise ValueError("execution account facts v2 identity is invalid")
+
+        # Reuse the complete v1 row/status closure instead of maintaining a
+        # second interpretation of positions, orders or durable reconciliation.
+        v1 = {
+            key: candidate[key]
+            for key in _ACCOUNT_FACTS_FIELDS
+            if key != "account_facts_sha256"
+        }
+        v1["schema_version"] = "web_bridge_execution_account_facts_v1"
+        v1["account_facts_sha256"] = sha256_json(v1)
+        ExecutionAccountFactsProjection.from_mapping(v1)
+
+        binding = candidate["execution_binding"]
+        if not isinstance(binding, Mapping) or set(binding) != (
+            _EXECUTION_BINDING_FIELDS
+        ):
+            raise ValueError("execution account facts v2 binding is not exact")
+        _strict_nonnegative_int(binding["state_version"], field="state_version")
+        _strict_nonnegative_int(
+            binding["nonterminal_send_intent_count"],
+            field="nonterminal_send_intent_count",
+        )
+        _strict_sha(binding["send_intents_sha256"], field="send_intents_sha256")
+        intents = binding["send_intents"]
+        if not isinstance(intents, Mapping) or any(
+            not isinstance(intent_id, str)
+            or not isinstance(row, Mapping)
+            or not _SEND_INTENT_REQUIRED_FIELDS.issubset(row)
+            or not set(row).issubset(
+                _SEND_INTENT_REQUIRED_FIELDS | _SEND_INTENT_OPTIONAL_FIELDS
+            )
+            or row.get("intent_id") != intent_id
+            or not isinstance(row.get("state"), str)
+            or not isinstance(row.get("idempotency_key"), str)
+            or not row.get("idempotency_key")
+            or not isinstance(row.get("plan_id"), str)
+            or IDENTIFIER_RE.fullmatch(row["plan_id"]) is None
+            or not isinstance(row.get("plan_hash"), str)
+            or SHA256_RE.fullmatch(row["plan_hash"]) is None
+            or any(
+                isinstance(row.get(field), bool)
+                or not isinstance(row.get(field), int)
+                or row[field] < 1
+                for field in ("leader_epoch", "fencing_token")
+            )
+            or not isinstance(row.get("created_at"), str)
+            or UTC_RE.fullmatch(row["created_at"]) is None
+            for intent_id, row in intents.items()
+        ):
+            raise ValueError("execution account facts v2 send intents are invalid")
+        nonterminal_count = sum(
+            row["state"] not in _TERMINAL_SEND_INTENT_STATES for row in intents.values()
+        )
+        status = candidate["status_binding"]
+        if (
+            binding["state_version"] != status["state_version"]
+            or binding["plan_state"] not in {"IDLE", "TERMINAL"}
+            or binding["send_intents_sha256"] != sha256_json(dict(intents))
+            or binding["nonterminal_send_intent_count"] != nonterminal_count
+            or nonterminal_count != 0
+            or status["lifecycle"] != "READY"
+            or candidate["active_order_count"] != 0
+            or candidate["active_orders"] != {}
+        ):
+            raise ValueError("execution account facts v2 are not planner-ready")
+        preimage = {
+            key: candidate[key] for key in candidate if key != "account_facts_sha256"
+        }
+        if candidate["account_facts_sha256"] != sha256_json(preimage):
+            raise ValueError(
+                "execution account facts v2 projection hash does not close"
+            )
+        return cls(candidate)
+
+    @classmethod
+    def model_validate(cls, value: Any) -> ExecutionAccountFactsProjectionV2:
+        return cls.from_mapping(value)
+
+    def model_dump(self, *, mode: str = "python") -> dict[str, Any]:
+        del mode
+        return json.loads(json.dumps(self.value, ensure_ascii=False))
+
+    def as_dict(self) -> dict[str, Any]:
+        return self.model_dump()
+
+
 _RECOVERY_BEFORE_CUSTODY_FIELDS = frozenset(
     {
         "schema_version",
@@ -854,7 +987,9 @@ ExecutionStatusDTO = ExecutionStatusProjection
 ExecutionStatusProjectionDTO = ExecutionStatusProjection
 ExecutionCompletionDTO = ExecutionCompletionProjection
 ExecutionCompletionProjectionDTO = ExecutionCompletionProjection
-ExecutionAccountFactsDTO = ExecutionAccountFactsProjection
+ExecutionAccountFactsDTO = ExecutionAccountFactsProjectionV2
+ExecutionAccountFactsV1DTO = ExecutionAccountFactsProjection
+ExecutionAccountFactsV2DTO = ExecutionAccountFactsProjectionV2
 ExecutionTargetPlanRecoveryDTO = ExecutionTargetPlanRecoveryProjection
 ExecutionLeaderStatusDTO = ExecutionLeaderStatusProjection
 ExecutionLeaderTokenDTO = ExecutionLeaderTokenProjection
@@ -869,6 +1004,9 @@ __all__ = [
     "ExecutionCompletionProjectionDTO",
     "ExecutionAccountFactsDTO",
     "ExecutionAccountFactsProjection",
+    "ExecutionAccountFactsProjectionV2",
+    "ExecutionAccountFactsV1DTO",
+    "ExecutionAccountFactsV2DTO",
     "ExecutionLeaderStatusDTO",
     "ExecutionLeaderStatusProjection",
     "ExecutionLeaderTokenDTO",
