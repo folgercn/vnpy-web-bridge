@@ -35,6 +35,7 @@ from shared.commodity_execution.v1 import (
     before_position_projection_hash,
     canonical_json,
     sha256_json,
+    target_position_projection_hash,
     utc_now,
 )
 from shared.trust_contracts.v1 import canonical_json_line, sha256_bytes
@@ -463,6 +464,84 @@ class FinalExecutionRuntime:
             self.custody.probe()
         except Exception as exc:
             raise AuthorityRejected("custody read-only readiness failed") from exc
+
+    def completion_projection(
+        self, *, plan_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """Project one completed immutable TargetPlan v2, if any.
+
+        Completion identity is derived exclusively from the append-only
+        ``final_plan_completed`` archive record and the already-installed
+        create-only TargetPlan.  Historical broker rows and authority/custody
+        material intentionally remain inside Execution.  Supplying ``plan_id``
+        searches the complete archive so crash recovery never mistakes a newer
+        unrelated completion for an unexecuted historical event.
+        """
+
+        state = self.orchestrator.repository.snapshot()
+        completed = next(
+            (
+                entry
+                for entry in reversed(state["terminal_archive"])
+                if entry.get("kind") == "final_plan_completed"
+                and (plan_id is None or entry.get("plan_id") == plan_id)
+            ),
+            None,
+        )
+        if completed is None:
+            return None
+        if "target_position_hash" not in completed:
+            raise PlanRejected("latest completion predates the target-position binding")
+        plan = self.plans.get(str(completed["plan_id"]))
+        if plan is None:
+            raise PlanRejected("latest completed target plan is not installed")
+        try:
+            plan = TargetPlan.from_mapping(
+                plan.as_dict(), max_order_volume=self.max_order_volume
+            )
+        except CommodityExecutionContractError as exc:
+            raise PlanRejected("latest completed target plan is invalid") from exc
+        if plan.plan_hash != completed["plan_hash"]:
+            raise PlanRejected("latest completion target plan hash mismatches")
+        if plan.raw["schema_version"] != KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION:
+            raise PlanRejected("latest completion target plan is not v2")
+        if (
+            completed["target_position_hash"]
+            != plan.raw["expected_after_position_hash"]
+        ):
+            raise PlanRejected("latest completion target position hash mismatches")
+        positions = completed.get("positions")
+        if not isinstance(positions, Mapping):
+            raise PlanRejected("latest completion target positions are unavailable")
+        try:
+            projected_target_hash = target_position_projection_hash(
+                positions,
+                account_scope=plan.raw["account_scope"],
+                environment=plan.raw["environment"],
+            )
+        except CommodityExecutionContractError as exc:
+            raise PlanRejected(
+                "latest completion target positions are invalid"
+            ) from exc
+        if projected_target_hash != completed["target_position_hash"]:
+            raise PlanRejected(
+                "latest completion archived positions do not match target semantics"
+            )
+        return {
+            "plan_id": plan.plan_id,
+            "plan_hash": plan.plan_hash,
+            "schema_version": plan.raw["schema_version"],
+            "phase": plan.raw["phase"],
+            "lineage": dict(plan.raw["lineage"]),
+            "expected_after_position_hash": plan.raw["expected_after_position_hash"],
+            "target_position_hash": completed["target_position_hash"],
+            "archived_at": completed["archived_at"],
+        }
+
+    def latest_completion_projection(self) -> dict[str, Any] | None:
+        """Project the latest completed immutable TargetPlan v2, if any."""
+
+        return self.completion_projection()
 
     def _plan(self, plan_id: str, *, plan_hash: str | None = None) -> TargetPlan:
         plan = self.plans.get(plan_id)

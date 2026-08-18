@@ -42,12 +42,13 @@ COPY backend/app/services/watchlist_service.py /app/backend/app/services/watchli
 COPY backend/app/data /app/backend/app/data
 COPY shared/trading_session_profiles.json /app/shared/trading_session_profiles.json
 COPY shared/artifact_contracts /app/shared/artifact_contracts
+COPY shared/commodity_execution /app/shared/commodity_execution
 COPY shared/trust_contracts /app/shared/trust_contracts
 COPY shared/phase_c_workflow /app/shared/phase_c_workflow
 COPY docs/schemas/web-bridge-control-execution-command-v1.schema.json /app/docs/schemas/web-bridge-control-execution-command-v1.schema.json
 COPY docs/schemas/web-bridge-execution-status-v1.schema.json /app/docs/schemas/web-bridge-execution-status-v1.schema.json
 
-RUN python -m compileall -q /app/backend/app
+RUN python -m compileall -q /app/backend/app /app/shared/commodity_execution
 
 # A fresh named volume inherits this fixed runtime identity and remains
 # writable after Compose makes the image filesystem read-only.

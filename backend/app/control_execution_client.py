@@ -23,8 +23,11 @@ from app.control_execution_projection import (
     validate_execution_receipt,
 )
 from app.execution.errors import CommandValidationError
-from app.execution.models import CommandEnvelope
-from app.schemas.control_execution import ExecutionStatusProjection
+from app.execution.models import CommandEnvelope, validate_identifier
+from app.schemas.control_execution import (
+    ExecutionCompletionProjection,
+    ExecutionStatusProjection,
+)
 
 
 class ExecutionClientError(RuntimeError):
@@ -110,6 +113,7 @@ class ExecutionClient:
 
     command_path = "/internal/v1/commands"
     status_path = "/internal/v1/status"
+    completion_path = "/internal/v1/completions/latest"
     receipt_path = "/internal/v1/receipts"
     live_path = "/health/live"
     ready_path = "/health/ready"
@@ -171,7 +175,11 @@ class ExecutionClient:
             ) from exc
         body = _unwrap(body)
         if response.status_code >= 400:
-            detail = body.get("error", body) if isinstance(body, Mapping) else body
+            detail = (
+                body.get("error", body.get("detail", body))
+                if isinstance(body, Mapping)
+                else body
+            )
             message = (
                 "Execution 命令被拒绝"
                 if response.status_code < 500
@@ -285,6 +293,43 @@ class ExecutionClient:
 
         projection = await self.status()
         return projection.model_dump(mode="json")
+
+    async def latest_completion(self) -> ExecutionCompletionProjection | None:
+        """Read the latest immutable completion identity without mutation."""
+
+        body = await self._request("GET", self.completion_path)
+        if body is None:
+            return None
+        try:
+            return ExecutionCompletionProjection.model_validate(body)
+        except (ValueError, TypeError) as exc:
+            raise ExecutionProtocolError(
+                "Execution completion projection 不符合冻结 schema",
+                detail={"error": str(exc)},
+            ) from exc
+
+    async def completion(self, plan_id: str) -> ExecutionCompletionProjection | None:
+        """Read one exact historical completion identity without mutation."""
+
+        try:
+            validate_identifier(plan_id, "plan_id")
+        except CommandValidationError as exc:
+            raise ExecutionProtocolError(
+                "Execution completion plan_id 不合法",
+                detail={"error": str(exc)},
+            ) from exc
+        body = await self._request(
+            "GET", f"{self.completion_path.rsplit('/', 1)[0]}/{plan_id}"
+        )
+        if body is None:
+            return None
+        try:
+            return ExecutionCompletionProjection.model_validate(body)
+        except (ValueError, TypeError) as exc:
+            raise ExecutionProtocolError(
+                "Execution completion projection 不符合冻结 schema",
+                detail={"error": str(exc)},
+            ) from exc
 
     async def ready(self) -> dict[str, Any]:
         """Run Execution's authenticated Gateway/durable-state readiness probe."""
