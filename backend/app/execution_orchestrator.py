@@ -16,6 +16,7 @@ from urllib.request import Request as UrlRequest
 from shared.commodity_execution import TRUSTED_KEYLESS_SIMNOW_SCOPE
 
 from .execution import (
+    AuthorityRejected,
     CommandEnvelope,
     CommandValidationError,
     DurableExecutionRepository,
@@ -154,6 +155,14 @@ class _HttpCustodyReadClient(CustodyReadClient):
     broker capability is available on this client.
     """
 
+    _EVIDENCE_ERROR_CODES = frozenset(
+        {
+            "PHASE_C_CUSTODY_RECEIPT_EVIDENCE_INVALID",
+            "PHASE_C_CUSTODY_IDEMPOTENCY_EVIDENCE_INVALID",
+            "PHASE_C_CUSTODY_ARTIFACT_EVIDENCE_INVALID",
+        }
+    )
+
     def __init__(self, *, base_url: str, secret: str) -> None:
         parsed = urlsplit(base_url)
         if (
@@ -172,6 +181,30 @@ class _HttpCustodyReadClient(CustodyReadClient):
         self.base_url = base_url.rstrip("/")
         self.secret = secret
         self._opener = build_opener(_NoRedirect())
+
+    @classmethod
+    def _evidence_error_code(cls, error: HTTPError) -> str | None:
+        try:
+            raw = error.read(64 * 1024 + 1)
+            if len(raw) > 64 * 1024:
+                return None
+            value = json.loads(raw)
+        except (OSError, UnicodeDecodeError, ValueError):
+            return None
+        if not isinstance(value, Mapping):
+            return None
+        detail = value.get("detail")
+        if not isinstance(detail, Mapping):
+            return None
+        code = detail.get("code")
+        if (
+            error.code == 503
+            and detail.get("retryable") is False
+            and isinstance(code, str)
+            and code in cls._EVIDENCE_ERROR_CODES
+        ):
+            return code
+        return None
 
     def _request(
         self, path: str, *, missing_is_none: bool = False
@@ -192,6 +225,11 @@ class _HttpCustodyReadClient(CustodyReadClient):
         except HTTPError as exc:
             if missing_is_none and exc.code == 404:
                 return None
+            evidence_code = self._evidence_error_code(exc)
+            if evidence_code is not None:
+                raise AuthorityRejected(
+                    f"custody evidence read was rejected: {evidence_code}"
+                ) from exc
             raise GatewayUnavailable("custody read was rejected") from exc
         except (URLError, OSError, TimeoutError) as exc:
             raise GatewayUnavailable("custody read outcome is unknown") from exc
@@ -208,6 +246,13 @@ class _HttpCustodyReadClient(CustodyReadClient):
     def receipt(self, receipt_id: str) -> dict[str, Any] | None:
         return self._request(
             f"/internal/v1/receipts/{validate_identifier(receipt_id, 'receipt_id')}",
+            missing_is_none=True,
+        )
+
+    def receipt_by_idempotency(self, idempotency_key: str) -> dict[str, Any] | None:
+        return self._request(
+            "/internal/v1/receipts-by-idempotency/"
+            + validate_identifier(idempotency_key, "custody_idempotency_key"),
             missing_is_none=True,
         )
 
@@ -441,6 +486,34 @@ def create_app(
         except RepositoryUnavailableError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+    @app.get("/internal/v1/account-facts")
+    def account_facts(request: Request) -> dict[str, Any]:
+        """Project fresh full-account facts without exposing the Gateway RPC."""
+
+        authenticate(request)
+        if request.headers.get("X-Control-Service", "") != "control-api":
+            raise HTTPException(
+                status_code=403, detail="canonical control service header required"
+            )
+        try:
+            if readiness_probe is None:
+                raise GatewayUnavailable("gateway readiness probe is unavailable")
+            return require_core().account_facts_projection(readiness_probe.probe())
+        except (
+            GatewayTimeout,
+            GatewayUnavailable,
+            SnapshotRejected,
+            RepositoryUnavailableError,
+        ) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "EXECUTION_ACCOUNT_FACTS_UNAVAILABLE",
+                    "message": str(exc),
+                    "retryable": True,
+                },
+            ) from exc
+
     @app.get("/internal/v1/completions/latest")
     def latest_completion(request: Request) -> dict[str, Any] | None:
         authenticate(request)
@@ -512,6 +585,66 @@ def create_app(
                 status_code=503,
                 detail={
                     "code": "EXECUTION_COMPLETION_REPOSITORY_UNAVAILABLE",
+                    "message": str(exc),
+                    "retryable": True,
+                },
+            ) from exc
+
+    @app.get(
+        "/internal/v1/recovery/target-plans/by-custody-idempotency/{idempotency_key}"
+    )
+    def target_plan_recovery(idempotency_key: str, request: Request) -> dict[str, Any]:
+        authenticate(request)
+        if request.headers.get("X-Control-Service", "") != "control-api":
+            raise HTTPException(
+                status_code=403, detail="canonical control service header required"
+            )
+        try:
+            validate_identifier(idempotency_key, "custody_idempotency_key")
+        except CommandValidationError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "EXECUTION_RECOVERY_IDEMPOTENCY_KEY_INVALID",
+                    "message": str(exc),
+                    "retryable": False,
+                },
+            ) from exc
+        target = require_instance()
+        if not isinstance(target, FinalExecutionRuntime):
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "EXECUTION_RECOVERY_RUNTIME_UNAVAILABLE",
+                    "message": "recovery projection requires final Execution runtime",
+                    "retryable": False,
+                },
+            )
+        try:
+            return target.recovery_projection(custody_idempotency_key=idempotency_key)
+        except GatewayUnavailable as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "EXECUTION_RECOVERY_DEPENDENCY_UNAVAILABLE",
+                    "message": str(exc),
+                    "retryable": True,
+                },
+            ) from exc
+        except (AuthorityRejected, PlanRejected) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "EXECUTION_RECOVERY_EVIDENCE_UNAVAILABLE",
+                    "message": str(exc),
+                    "retryable": False,
+                },
+            ) from exc
+        except RepositoryUnavailableError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "EXECUTION_RECOVERY_REPOSITORY_UNAVAILABLE",
                     "message": str(exc),
                     "retryable": True,
                 },

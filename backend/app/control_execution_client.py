@@ -25,10 +25,12 @@ from app.control_execution_projection import (
 from app.execution.errors import CommandValidationError
 from app.execution.models import CommandEnvelope, validate_identifier
 from app.schemas.control_execution import (
+    ExecutionAccountFactsProjection,
     ExecutionCompletionProjection,
     ExecutionLeaderStatusProjection,
     ExecutionLeaderTokenProjection,
     ExecutionStatusProjection,
+    ExecutionTargetPlanRecoveryProjection,
 )
 
 
@@ -115,7 +117,9 @@ class ExecutionClient:
 
     command_path = "/internal/v1/commands"
     status_path = "/internal/v1/status"
+    account_facts_path = "/internal/v1/account-facts"
     completion_path = "/internal/v1/completions/latest"
+    recovery_path = "/internal/v1/recovery/target-plans/by-custody-idempotency"
     receipt_path = "/internal/v1/receipts"
     leader_path = "/internal/v1/leader"
     live_path = "/health/live"
@@ -398,6 +402,18 @@ class ExecutionClient:
         projection = await self.status()
         return projection.model_dump(mode="json")
 
+    async def account_facts(self) -> ExecutionAccountFactsProjection:
+        """Read one bounded, fresh, full-account projection from Execution."""
+
+        body = await self._request("GET", self.account_facts_path)
+        try:
+            return ExecutionAccountFactsProjection.model_validate(body)
+        except (ValueError, TypeError) as exc:
+            raise ExecutionProtocolError(
+                "Execution account facts projection 不符合冻结合同",
+                detail={"error": str(exc)},
+            ) from exc
+
     async def latest_completion(self) -> ExecutionCompletionProjection | None:
         """Read the latest immutable completion identity without mutation."""
 
@@ -432,6 +448,29 @@ class ExecutionClient:
         except (ValueError, TypeError) as exc:
             raise ExecutionProtocolError(
                 "Execution completion projection 不符合冻结 schema",
+                detail={"error": str(exc)},
+            ) from exc
+
+    async def target_plan_recovery(
+        self, custody_idempotency_key: str
+    ) -> ExecutionTargetPlanRecoveryProjection:
+        """Classify one custody key without publishing or installing a plan."""
+
+        try:
+            validate_identifier(custody_idempotency_key, "custody_idempotency_key")
+        except CommandValidationError as exc:
+            raise ExecutionProtocolError(
+                "Execution recovery custody_idempotency_key 不合法",
+                detail={"error": str(exc)},
+            ) from exc
+        body = await self._request(
+            "GET", f"{self.recovery_path}/{custody_idempotency_key}"
+        )
+        try:
+            return ExecutionTargetPlanRecoveryProjection.model_validate(body)
+        except (ValueError, TypeError) as exc:
+            raise ExecutionProtocolError(
+                "Execution target plan recovery projection 不符合冻结合同",
                 detail={"error": str(exc)},
             ) from exc
 

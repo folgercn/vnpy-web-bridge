@@ -9,9 +9,11 @@ It never imports legacy ``TradeService`` or ``commodity_simnow`` code.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import os
+import stat
 import tempfile
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -40,7 +42,13 @@ from shared.commodity_execution.v1 import (
 )
 from shared.trust_contracts.v1 import canonical_json_line, sha256_bytes
 
-from .errors import AuthorityRejected, MutationRejected, PlanRejected
+from .errors import (
+    AuthorityRejected,
+    GatewayUnavailable,
+    MutationRejected,
+    PlanRejected,
+    RepositoryUnavailableError,
+)
 from .models import CommandEnvelope, LeaderToken, validate_identifier
 from .orchestrator import CommandResponse, ExecutionOrchestrator
 
@@ -63,6 +71,10 @@ class CustodyReadClient(Protocol):
     """Read-only custody protocol; it has no publish, sign, or revoke method."""
 
     def receipt(self, receipt_id: str) -> Mapping[str, Any] | None: ...
+
+    def receipt_by_idempotency(
+        self, idempotency_key: str
+    ) -> Mapping[str, Any] | None: ...
 
     def artifact(self, artifact_id: str) -> Mapping[str, Any] | None: ...
 
@@ -132,32 +144,95 @@ class DurableTargetPlanRepository:
                 self.fd = -1
 
             def __enter__(self):
-                self.fd = os.open(
-                    self.path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600
-                )
-                fcntl.flock(self.fd, fcntl.LOCK_EX)
+                try:
+                    self.fd = os.open(
+                        self.path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600
+                    )
+                    fcntl.flock(self.fd, fcntl.LOCK_EX)
+                except OSError as exc:
+                    if self.fd >= 0:
+                        try:
+                            os.close(self.fd)
+                        except OSError:
+                            pass
+                        finally:
+                            self.fd = -1
+                    raise RepositoryUnavailableError(
+                        "durable target plan lock is unavailable"
+                    ) from exc
                 return self
 
             def __exit__(self, *_: object) -> None:
-                fcntl.flock(self.fd, fcntl.LOCK_UN)
-                os.close(self.fd)
+                failure: OSError | None = None
+                try:
+                    fcntl.flock(self.fd, fcntl.LOCK_UN)
+                except OSError as exc:
+                    failure = exc
+                try:
+                    os.close(self.fd)
+                except OSError as exc:
+                    failure = failure or exc
+                finally:
+                    self.fd = -1
+                if failure is not None:
+                    raise RepositoryUnavailableError(
+                        "durable target plan lock release failed"
+                    ) from failure
 
         return _Guard(self._lock_path)
 
     @staticmethod
     def _read(path: Path) -> TargetPlan | None:
-        if not path.exists():
-            return None
         try:
-            if path.is_symlink() or not path.is_file():
-                raise ValueError("target plan file is unsafe")
-            raw = path.read_bytes()
+            metadata = path.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise RepositoryUnavailableError(
+                "durable target plan metadata is unavailable"
+            ) from exc
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise PlanRejected("durable target plan file is unsafe")
+
+        fd = -1
+        try:
+            flags = os.O_RDONLY | os.O_CLOEXEC
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            fd = os.open(path, flags)
+            opened = os.fstat(fd)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_dev != metadata.st_dev
+                or opened.st_ino != metadata.st_ino
+            ):
+                raise PlanRejected("durable target plan file changed during read")
+            with os.fdopen(fd, "rb", closefd=True) as stream:
+                fd = -1
+                raw = stream.read()
+        except PlanRejected:
+            raise
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise PlanRejected("durable target plan file is unsafe") from exc
+            raise RepositoryUnavailableError(
+                "durable target plan read is unavailable"
+            ) from exc
+        finally:
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError as exc:
+                    raise RepositoryUnavailableError(
+                        "durable target plan read close failed"
+                    ) from exc
+
+        try:
             plan = TargetPlan.from_mapping(json.loads(raw))
             if canonical_json(plan.as_dict()) != raw:
                 raise ValueError("target plan is not canonical")
             return plan
         except (
-            OSError,
             UnicodeDecodeError,
             ValueError,
             CommodityExecutionContractError,
@@ -238,6 +313,10 @@ class _CallableCustodyClient:
 
     def receipt(self, receipt_id: str) -> Mapping[str, Any] | None:
         return self._receipt(receipt_id)
+
+    def receipt_by_idempotency(self, idempotency_key: str) -> Mapping[str, Any] | None:
+        del idempotency_key
+        return None
 
     def artifact(self, artifact_id: str) -> Mapping[str, Any] | None:
         return None
@@ -352,23 +431,18 @@ class FinalExecutionRuntime:
             )
         return receipt
 
-    def _preview_from_custody(
-        self, receipt_id: str, *, require_current_expiry: bool = True
-    ) -> tuple[TargetPlan, VerifiedCustodyReceipt | TrustedKeylessCustodyReceipt]:
-        """Fetch, cross-check and install a plan before a SIMNOW preview exists.
+    def _target_plan_from_custody_receipt(
+        self,
+        raw_receipt: Mapping[str, Any],
+        *,
+        require_current_expiry: bool,
+    ) -> tuple[
+        TargetPlan,
+        VerifiedCustodyReceipt | TrustedKeylessCustodyReceipt,
+        str,
+    ]:
+        """Verify one receipt/artifact/plan chain without installing the plan."""
 
-        The Control command supplies only a receipt id.  Order requests never
-        traverse Control: they are read from the exact custody artifact here.
-        """
-
-        try:
-            raw_receipt = self.custody.receipt(receipt_id)
-        except Exception as exc:
-            raise AuthorityRejected(
-                "custody receipt lookup outcome is unknown"
-            ) from exc
-        if raw_receipt is None:
-            raise AuthorityRejected("custody receipt is unavailable")
         try:
             receipt = (
                 TrustedKeylessCustodyReceipt.from_mapping(raw_receipt)
@@ -398,8 +472,10 @@ class FinalExecutionRuntime:
             raise PlanRejected("SIMNOW preview receipt does not identify a target plan")
         try:
             response = self.custody.artifact(receipt.artifact_id)
+        except (AuthorityRejected, PlanRejected):
+            raise
         except Exception as exc:
-            raise AuthorityRejected(
+            raise GatewayUnavailable(
                 "custody artifact lookup outcome is unknown"
             ) from exc
         if response is None:
@@ -448,6 +524,30 @@ class FinalExecutionRuntime:
         ):
             raise PlanRejected("custody target plan receipt scope/expiry mismatch")
         self._plan_from_value(plan)
+        return plan, receipt, envelope_raw_sha256
+
+    def _preview_from_custody(
+        self, receipt_id: str, *, require_current_expiry: bool = True
+    ) -> tuple[TargetPlan, VerifiedCustodyReceipt | TrustedKeylessCustodyReceipt]:
+        """Fetch, cross-check and install a plan before a SIMNOW preview exists.
+
+        The Control command supplies only a receipt id.  Order requests never
+        traverse Control: they are read from the exact custody artifact here.
+        """
+
+        try:
+            raw_receipt = self.custody.receipt(receipt_id)
+        except Exception as exc:
+            raise AuthorityRejected(
+                "custody receipt lookup outcome is unknown"
+            ) from exc
+        if raw_receipt is None:
+            raise AuthorityRejected("custody receipt is unavailable")
+        plan, receipt, _artifact_envelope_sha256 = (
+            self._target_plan_from_custody_receipt(
+                raw_receipt, require_current_expiry=require_current_expiry
+            )
+        )
         self.plans.put(plan)
         return plan, receipt
 
@@ -542,6 +642,94 @@ class FinalExecutionRuntime:
         """Project the latest completed immutable TargetPlan v2, if any."""
 
         return self.completion_projection()
+
+    def recovery_projection(self, *, custody_idempotency_key: str) -> dict[str, Any]:
+        """Classify one custody key without changing custody or plan storage.
+
+        A missing receipt is ``BEFORE_CUSTODY``.  A verified receipt/artifact
+        chain is returned with the exact immutable v2 plan identity and an
+        explicit local installation state, so a response lost before preview
+        can reuse the original receipt rather than publish a second identity.
+        """
+
+        validate_identifier(custody_idempotency_key, "custody_idempotency_key")
+        try:
+            raw_receipt = self.custody.receipt_by_idempotency(custody_idempotency_key)
+        except (AuthorityRejected, PlanRejected):
+            raise
+        except Exception as exc:
+            raise GatewayUnavailable(
+                "custody idempotency lookup outcome is unknown"
+            ) from exc
+        if raw_receipt is None:
+            preimage = {
+                "schema_version": "web_bridge_execution_target_plan_recovery_v1",
+                "state": "BEFORE_CUSTODY",
+                "custody_idempotency_key": custody_idempotency_key,
+                "production_allowed": False,
+                "live_trading_authorized": False,
+                "countable_forward": False,
+            }
+            return {**preimage, "recovery_sha256": sha256_json(preimage)}
+        plan, receipt, artifact_envelope_sha256 = (
+            self._target_plan_from_custody_receipt(
+                raw_receipt, require_current_expiry=False
+            )
+        )
+        if not isinstance(receipt, TrustedKeylessCustodyReceipt):
+            raise PlanRejected("recovery receipt is not trusted keyless custody")
+        if plan.raw["schema_version"] != KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION:
+            raise PlanRejected("recovery target plan is not v2")
+        if receipt.raw["idempotency_key"] != f"install-{custody_idempotency_key}":
+            raise PlanRejected("recovery custody idempotency binding mismatches")
+        installed = self.plans.get(plan.plan_id)
+        if installed is not None:
+            try:
+                installed = TargetPlan.from_mapping(
+                    installed.as_dict(), max_order_volume=self.max_order_volume
+                )
+            except CommodityExecutionContractError as exc:
+                raise PlanRejected("installed recovery target plan is invalid") from exc
+            if (
+                installed.plan_hash != plan.plan_hash
+                or installed.as_dict() != plan.as_dict()
+            ):
+                raise PlanRejected("installed recovery target plan binding mismatches")
+
+        preimage = {
+            "schema_version": "web_bridge_execution_target_plan_recovery_v1",
+            "state": (
+                "INSTALLED"
+                if installed is not None
+                else "CUSTODY_PUBLISHED_NOT_PREVIEWED"
+            ),
+            "custody_idempotency_key": custody_idempotency_key,
+            "custody_install_idempotency_key": receipt.raw["idempotency_key"],
+            "custody_version": receipt.raw["custody_version"],
+            "receipt_id": receipt.receipt_id,
+            "receipt_sha256": receipt.receipt_sha256,
+            "artifact_id": receipt.artifact_id,
+            "artifact_sha256": receipt.artifact_sha256,
+            "artifact_envelope_sha256": artifact_envelope_sha256,
+            "installed": installed is not None,
+            "target_plan_schema_version": plan.raw["schema_version"],
+            "plan_id": plan.plan_id,
+            "plan_hash": plan.plan_hash,
+            "phase": plan.raw["phase"],
+            "lineage": dict(plan.raw["lineage"]),
+            "account_scope": plan.raw["account_scope"],
+            "environment": plan.raw["environment"],
+            "gateway_name": plan.raw["gateway_name"],
+            "generated_at": plan.raw["generated_at"],
+            "expires_at": plan.raw["expires_at"],
+            "expected_before_position_hash": plan.raw["expected_before_position_hash"],
+            "expected_after_position_hash": plan.raw["expected_after_position_hash"],
+            "order_set_sha256": plan.raw["order_set_sha256"],
+            "production_allowed": False,
+            "live_trading_authorized": False,
+            "countable_forward": False,
+        }
+        return {**preimage, "recovery_sha256": sha256_json(preimage)}
 
     def _plan(self, plan_id: str, *, plan_hash: str | None = None) -> TargetPlan:
         plan = self.plans.get(plan_id)
