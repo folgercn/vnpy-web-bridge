@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 import httpx
+
+from shared.artifact_contracts.v1 import (
+    ContractError as ArtifactContractError,
+)
+from shared.artifact_contracts.v1 import validate_artifact_envelope
 
 from .adapters import (
     OfflineFakeWorkflowAdapter,
@@ -21,8 +27,10 @@ from .models import (
     CustodyReceiptDTO,
     ExecutionProjectionDTO,
     SignedArtifactUploadDTO,
+    TargetPlanPublicationProjectionDTO,
     TRUSTED_KEYLESS_TARGET_PLAN_SCHEMA_REFS,
     TrustedKeylessCustodyReceiptDTO,
+    TrustedKeylessTargetPlanInstallContinuationDTO,
     TrustedKeylessTargetPlanUploadDTO,
 )
 
@@ -34,6 +42,12 @@ class PhaseCWorkflowClient(Protocol):
     def install(self, request: SignedArtifactUploadDTO) -> CustodyReceiptDTO: ...
     def install_trusted_keyless_target_plan(
         self, request: TrustedKeylessTargetPlanUploadDTO
+    ) -> TrustedKeylessCustodyReceiptDTO: ...
+    def target_plan_publication(
+        self, idempotency_key: str
+    ) -> TargetPlanPublicationProjectionDTO: ...
+    def install_published_trusted_keyless_target_plan(
+        self, request: TrustedKeylessTargetPlanInstallContinuationDTO
     ) -> TrustedKeylessCustodyReceiptDTO: ...
     def custody_receipt(self, receipt_id: str) -> CustodyInstallReceipt | None: ...
     def custody_receipt_by_idempotency(
@@ -67,6 +81,24 @@ class OfflineFakeWorkflowClient:
         del request
         raise WorkflowAdapterError(
             "trusted keyless custody is unavailable in offline fake"
+        )
+
+    def target_plan_publication(
+        self, idempotency_key: str
+    ) -> TargetPlanPublicationProjectionDTO:
+        return TargetPlanPublicationProjectionDTO(
+            state="NOT_PUBLISHED",
+            idempotency_key=idempotency_key,
+            install_idempotency_key=f"install-{idempotency_key}",
+            observed_custody_version=self.adapter.custody.version,
+        )
+
+    def install_published_trusted_keyless_target_plan(
+        self, request: TrustedKeylessTargetPlanInstallContinuationDTO
+    ) -> TrustedKeylessCustodyReceiptDTO:
+        del request
+        raise WorkflowAdapterError(
+            "trusted keyless custody continuation is unavailable in offline fake"
         )
 
     def custody_receipt(self, receipt_id: str) -> CustodyInstallReceipt | None:
@@ -143,6 +175,7 @@ class RemotePhaseCWorkflowClient:
         payload: dict[str, Any] | None = None,
         *,
         mutation: bool = False,
+        unknown_query_path: str | None = None,
     ) -> dict[str, Any] | None:
         try:
             with httpx.Client(
@@ -162,24 +195,126 @@ class RemotePhaseCWorkflowClient:
         ) as exc:
             if mutation:
                 raise UnknownOutcomeError(
-                    "private mutation outcome unknown; query same idempotency key"
+                    "private mutation outcome unknown; query same idempotency key",
+                    detail={
+                        "query_path": unknown_query_path,
+                        "query_same_intent_only": True,
+                    },
+                    retryable=False,
                 ) from exc
             raise WorkflowAdapterError(
                 "private Phase C dependency is unavailable"
             ) from exc
         except httpx.HTTPError as exc:
+            if mutation:
+                raise UnknownOutcomeError(
+                    "private mutation outcome unknown; query same idempotency key",
+                    detail={
+                        "query_path": unknown_query_path,
+                        "query_same_intent_only": True,
+                    },
+                    retryable=False,
+                ) from exc
             raise WorkflowAdapterError(
                 "private Phase C dependency is unavailable"
             ) from exc
         if response.status_code == 404:
             return None
         if response.status_code >= 400:
-            raise WorkflowAdapterError("private Phase C request was rejected")
+            try:
+                error = response.json()
+            except ValueError:
+                error = None
+            detail = error.get("detail") if isinstance(error, dict) else None
+            if isinstance(detail, dict):
+                code = detail.get("code")
+                message = detail.get("message")
+                retryable = detail.get("retryable")
+                raise WorkflowAdapterError(
+                    message
+                    if isinstance(message, str) and message
+                    else "private Phase C request was rejected",
+                    code=code if isinstance(code, str) and code else None,
+                    detail=detail,
+                    status_code=response.status_code,
+                    retryable=retryable if isinstance(retryable, bool) else None,
+                )
+            raise WorkflowAdapterError(
+                "private Phase C request was rejected",
+                detail=detail,
+                status_code=response.status_code,
+            )
         try:
             body = response.json()
         except ValueError as exc:
+            if mutation:
+                raise UnknownOutcomeError(
+                    "private mutation returned an unclassifiable response; query exact intent",
+                    detail={
+                        "query_path": unknown_query_path,
+                        "query_same_intent_only": True,
+                    },
+                    retryable=False,
+                ) from exc
             raise WorkflowAdapterError("private Phase C response is invalid") from exc
-        return body if isinstance(body, dict) else None
+        if not isinstance(body, dict):
+            if mutation:
+                raise UnknownOutcomeError(
+                    "private mutation returned an unclassifiable response; query exact intent",
+                    detail={
+                        "query_path": unknown_query_path,
+                        "query_same_intent_only": True,
+                    },
+                    retryable=False,
+                )
+            return None
+        return body
+
+    @staticmethod
+    def _unknown_mutation_response(*, query_path: str) -> UnknownOutcomeError:
+        return UnknownOutcomeError(
+            "private mutation response does not bind the exact request; query exact intent",
+            detail={
+                "query_path": query_path,
+                "query_same_intent_only": True,
+            },
+            retryable=False,
+        )
+
+    @classmethod
+    def _keyless_receipt_for_request(
+        cls,
+        raw: dict[str, Any] | None,
+        *,
+        request: TrustedKeylessTargetPlanUploadDTO
+        | TrustedKeylessTargetPlanInstallContinuationDTO,
+        query_path: str,
+        custody_version: int,
+    ) -> TrustedKeylessCustodyReceiptDTO:
+        try:
+            receipt = TrustedKeylessCustodyReceiptDTO.model_validate(raw)
+            artifact = validate_artifact_envelope(request.artifact)
+            payload = artifact["payload"]
+            if (
+                not isinstance(payload, Mapping)
+                or artifact["schema_ref"] != payload.get("schema_version")
+                or receipt.idempotency_key != f"install-{request.idempotency_key}"
+                or receipt.artifact_id != artifact["artifact_id"]
+                or receipt.artifact_sha256 != artifact["raw_sha256"]
+                or receipt.schema_ref != artifact["schema_ref"]
+                or receipt.scope != artifact["scope"]
+                or receipt.scope != payload.get("scope")
+                or receipt.expires_at != payload.get("expires_at")
+                or receipt.custody_version != custody_version
+            ):
+                raise ValueError("trusted keyless receipt identity mismatches")
+            return receipt
+        except (
+            ArtifactContractError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise cls._unknown_mutation_response(query_path=query_path) from exc
 
     def custody_current_version(self) -> CustodyCurrentVersionDTO:
         try:
@@ -245,6 +380,10 @@ class RemotePhaseCWorkflowClient:
     def install_trusted_keyless_target_plan(
         self, request: TrustedKeylessTargetPlanUploadDTO
     ) -> TrustedKeylessCustodyReceiptDTO:
+        query_path = (
+            "/internal/v1/target-plan-publications/by-idempotency/"
+            f"{request.idempotency_key}"
+        )
         raw = self._request(
             self.settings.custody_url,
             self.settings.custody_secret,
@@ -252,8 +391,64 @@ class RemotePhaseCWorkflowClient:
             "/internal/v1/publish-keyless-simnow-target-plan",
             request.model_dump(mode="json"),
             mutation=True,
+            unknown_query_path=query_path,
         )
-        return TrustedKeylessCustodyReceiptDTO.model_validate(raw)
+        return self._keyless_receipt_for_request(
+            raw,
+            request=request,
+            query_path=query_path,
+            custody_version=request.expected_custody_version + 2,
+        )
+
+    def target_plan_publication(
+        self, idempotency_key: str
+    ) -> TargetPlanPublicationProjectionDTO:
+        raw = self._request(
+            self.settings.custody_url,
+            self.settings.custody_secret,
+            "GET",
+            f"/internal/v1/target-plan-publications/by-idempotency/{idempotency_key}",
+        )
+        try:
+            projection = TargetPlanPublicationProjectionDTO.model_validate(raw)
+        except (TypeError, ValueError) as exc:
+            raise WorkflowAdapterError(
+                "private Phase C publication response is invalid",
+                code="PHASE_C_RESPONSE_BINDING_INVALID",
+                status_code=502,
+                retryable=False,
+            ) from exc
+        if projection.idempotency_key != idempotency_key:
+            raise WorkflowAdapterError(
+                "private Phase C publication response key mismatches",
+                code="PHASE_C_RESPONSE_BINDING_INVALID",
+                status_code=502,
+                retryable=False,
+            )
+        return projection
+
+    def install_published_trusted_keyless_target_plan(
+        self, request: TrustedKeylessTargetPlanInstallContinuationDTO
+    ) -> TrustedKeylessCustodyReceiptDTO:
+        query_path = (
+            "/internal/v1/target-plan-publications/by-idempotency/"
+            f"{request.idempotency_key}"
+        )
+        raw = self._request(
+            self.settings.custody_url,
+            self.settings.custody_secret,
+            "POST",
+            "/internal/v1/install-published-keyless-simnow-target-plan",
+            request.model_dump(mode="json"),
+            mutation=True,
+            unknown_query_path=query_path,
+        )
+        return self._keyless_receipt_for_request(
+            raw,
+            request=request,
+            query_path=query_path,
+            custody_version=request.publish_resulting_custody_version + 1,
+        )
 
     @staticmethod
     def _custody_receipt(raw: dict[str, Any] | None) -> CustodyInstallReceipt | None:
@@ -344,6 +539,18 @@ class UnconfiguredPhaseCWorkflowClient:
 
     def install_trusted_keyless_target_plan(
         self, request: TrustedKeylessTargetPlanUploadDTO
+    ) -> TrustedKeylessCustodyReceiptDTO:
+        del request
+        self._unavailable()
+
+    def target_plan_publication(
+        self, idempotency_key: str
+    ) -> TargetPlanPublicationProjectionDTO:
+        del idempotency_key
+        self._unavailable()
+
+    def install_published_trusted_keyless_target_plan(
+        self, request: TrustedKeylessTargetPlanInstallContinuationDTO
     ) -> TrustedKeylessCustodyReceiptDTO:
         del request
         self._unavailable()

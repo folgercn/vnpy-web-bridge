@@ -162,6 +162,8 @@ class _HttpCustodyReadClient(CustodyReadClient):
             "PHASE_C_CUSTODY_RECEIPT_EVIDENCE_INVALID",
             "PHASE_C_CUSTODY_IDEMPOTENCY_EVIDENCE_INVALID",
             "PHASE_C_CUSTODY_ARTIFACT_EVIDENCE_INVALID",
+            "PHASE_C_TARGET_PLAN_PUBLICATION_EVIDENCE_INVALID",
+            "PHASE_C_TARGET_PLAN_RECEIPT_EVIDENCE_INVALID",
         }
     )
 
@@ -227,6 +229,10 @@ class _HttpCustodyReadClient(CustodyReadClient):
         except HTTPError as exc:
             if missing_is_none and exc.code == 404:
                 return None
+            if exc.code in {401, 403}:
+                raise GatewayConfigurationError(
+                    "custody read authentication was rejected"
+                ) from exc
             evidence_code = self._evidence_error_code(exc)
             if evidence_code is not None:
                 raise AuthorityRejected(
@@ -255,6 +261,22 @@ class _HttpCustodyReadClient(CustodyReadClient):
         return self._request(
             "/internal/v1/receipts-by-idempotency/"
             + validate_identifier(idempotency_key, "custody_idempotency_key"),
+            missing_is_none=True,
+        )
+
+    def target_plan_publication(self, idempotency_key: str) -> dict[str, Any]:
+        value = self._request(
+            "/internal/v1/target-plan-publications/by-idempotency/"
+            + validate_identifier(idempotency_key, "custody_idempotency_key")
+        )
+        if value is None:  # the endpoint returns an explicit NOT_PUBLISHED state
+            raise GatewayUnavailable("custody publication response is missing")
+        return value
+
+    def target_plan_receipt(self, receipt_id: str) -> dict[str, Any] | None:
+        return self._request(
+            "/internal/v1/target-plan-receipts/"
+            + validate_identifier(receipt_id, "receipt_id"),
             missing_is_none=True,
         )
 
@@ -730,6 +752,15 @@ def create_app(
             )
         try:
             return target.recovery_projection(custody_idempotency_key=idempotency_key)
+        except GatewayConfigurationError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "EXECUTION_RECOVERY_AUTHENTICATION_REJECTED",
+                    "message": str(exc),
+                    "retryable": False,
+                },
+            ) from exc
         except GatewayUnavailable as exc:
             raise HTTPException(
                 status_code=503,

@@ -20,6 +20,7 @@ from app.phase_c.models import (
     AuthorizationCommandDTO,
     SignedArtifactUploadDTO,
     SigningRequestCreateDTO,
+    TrustedKeylessTargetPlanInstallContinuationDTO,
     TrustedKeylessTargetPlanUploadDTO,
     WorkflowStatusDTO,
 )
@@ -35,7 +36,11 @@ def _adapter_error(exc: WorkflowAdapterError) -> AppError:
         str(exc),
         code=exc.code,
         status_code=exc.status_code,
-        detail={"fail_closed": True},
+        detail={
+            "fail_closed": True,
+            "retryable": exc.retryable,
+            "upstream": exc.detail,
+        },
     )
 
 
@@ -98,6 +103,32 @@ def upload_keyless_simnow_target_plan(
         )
     except WorkflowAdapterError as exc:
         raise _adapter_error(exc) from exc
+
+
+@router.get("/custody/target-plan-publications/{idempotency_key}")
+def target_plan_publication(idempotency_key: str, _: Reader) -> dict[str, Any]:
+    """Return pins-only publication state; order payloads never enter Control."""
+
+    try:
+        result = phase_c_workflow_client.target_plan_publication(idempotency_key)
+    except WorkflowAdapterError as exc:
+        raise _adapter_error(exc) from exc
+    return ok(result.model_dump(mode="json"))
+
+
+@router.post("/custody/install-published-keyless-simnow-target-plan")
+def install_published_keyless_simnow_target_plan(
+    payload: TrustedKeylessTargetPlanInstallContinuationDTO, _: Admin
+) -> dict[str, Any]:
+    """Continue the exact prior publish; this route can never republish."""
+
+    try:
+        result = phase_c_workflow_client.install_published_trusted_keyless_target_plan(
+            payload
+        )
+    except WorkflowAdapterError as exc:
+        raise _adapter_error(exc) from exc
+    return ok(result.model_dump(mode="json"))
 
 
 @router.get("/custody/receipts/{receipt_id}")
