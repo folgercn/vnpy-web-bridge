@@ -26,6 +26,8 @@ from app.execution.errors import CommandValidationError
 from app.execution.models import CommandEnvelope, validate_identifier
 from app.schemas.control_execution import (
     ExecutionCompletionProjection,
+    ExecutionLeaderStatusProjection,
+    ExecutionLeaderTokenProjection,
     ExecutionStatusProjection,
 )
 
@@ -115,6 +117,7 @@ class ExecutionClient:
     status_path = "/internal/v1/status"
     completion_path = "/internal/v1/completions/latest"
     receipt_path = "/internal/v1/receipts"
+    leader_path = "/internal/v1/leader"
     live_path = "/health/live"
     ready_path = "/health/ready"
     version_path = "/version"
@@ -277,6 +280,107 @@ class ExecutionClient:
                 "Execution receipt 不符合冻结合同",
                 detail={"error": str(exc)},
             ) from exc
+
+    @staticmethod
+    def _leader_token(body: Any) -> ExecutionLeaderTokenProjection:
+        try:
+            return ExecutionLeaderTokenProjection.model_validate(body)
+        except (ValueError, TypeError) as exc:
+            raise ExecutionProtocolError(
+                "Execution leader token 不符合冻结合同",
+                detail={"error": str(exc)},
+            ) from exc
+
+    @staticmethod
+    def _leader_status(body: Any) -> ExecutionLeaderStatusProjection:
+        try:
+            return ExecutionLeaderStatusProjection.model_validate(body)
+        except (ValueError, TypeError) as exc:
+            raise ExecutionProtocolError(
+                "Execution leader status 不符合冻结合同",
+                detail={"error": str(exc)},
+            ) from exc
+
+    async def acquire_leader(self, owner_id: str) -> ExecutionLeaderTokenProjection:
+        """Acquire one new durable lease instance; mutating calls are never retried."""
+
+        try:
+            validate_identifier(owner_id, "owner_id")
+        except CommandValidationError as exc:
+            raise ExecutionProtocolError(
+                "Execution leader owner_id 不合法",
+                detail={"error": str(exc)},
+            ) from exc
+        body = await self._request(
+            "POST", self.leader_path + "/acquire", json_body={"owner_id": owner_id}
+        )
+        acquired = self._leader_token(body)
+        if acquired.owner_id != owner_id:
+            raise ExecutionProtocolError(
+                "Execution leader acquire 返回了错误 owner identity"
+            )
+        return acquired
+
+    async def renew_leader(
+        self, token: ExecutionLeaderTokenProjection | Mapping[str, Any]
+    ) -> ExecutionLeaderTokenProjection:
+        """Renew only the exact held lease token; no implicit cached token exists."""
+
+        projection = (
+            token
+            if isinstance(token, ExecutionLeaderTokenProjection)
+            else self._leader_token(token)
+        )
+        body = await self._request(
+            "POST",
+            self.leader_path + "/renew",
+            json_body={"token": projection.token_dict()},
+        )
+        renewed = self._leader_token(body)
+        if (
+            renewed.scope != projection.scope
+            or renewed.owner_id != projection.owner_id
+            or renewed.epoch != projection.epoch
+            or renewed.fencing_token != projection.fencing_token
+            or renewed.instance_id != projection.instance_id
+        ):
+            raise ExecutionProtocolError(
+                "Execution leader renew 返回了错误 lease identity"
+            )
+        return renewed
+
+    async def release_leader(
+        self, token: ExecutionLeaderTokenProjection | Mapping[str, Any]
+    ) -> ExecutionLeaderStatusProjection:
+        """Release the exact lease once; an ambiguous result must be status-queried."""
+
+        projection = (
+            token
+            if isinstance(token, ExecutionLeaderTokenProjection)
+            else self._leader_token(token)
+        )
+        body = await self._request(
+            "POST",
+            self.leader_path + "/release",
+            json_body={"token": projection.token_dict()},
+        )
+        released = self._leader_status(body)
+        if (
+            released.state != "RELEASED"
+            or released.held
+            or released.scope != projection.scope
+            or released.epoch != projection.epoch
+            or released.fencing_token != projection.fencing_token
+        ):
+            raise ExecutionProtocolError(
+                "Execution leader release 未返回 exact released 状态"
+            )
+        return released
+
+    async def leader_status(self) -> ExecutionLeaderStatusProjection:
+        """Read the current durable leader projection without mutation."""
+
+        return self._leader_status(await self._request("GET", self.leader_path))
 
     async def status(self) -> ExecutionStatusProjection:
         body = await self._request("GET", self.status_path)

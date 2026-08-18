@@ -15,12 +15,8 @@ from shared.phase_c_workflow.v1 import (
     FALSE_AUTHORITY_FLAGS,
 )
 
-TRUSTED_KEYLESS_TARGET_PLAN_V1_SCHEMA_REF = (
-    "web-bridge-simnow-keyless-target-plan-v1"
-)
-TRUSTED_KEYLESS_TARGET_PLAN_V2_SCHEMA_REF = (
-    "web-bridge-simnow-keyless-target-plan-v2"
-)
+TRUSTED_KEYLESS_TARGET_PLAN_V1_SCHEMA_REF = "web-bridge-simnow-keyless-target-plan-v1"
+TRUSTED_KEYLESS_TARGET_PLAN_V2_SCHEMA_REF = "web-bridge-simnow-keyless-target-plan-v2"
 TRUSTED_KEYLESS_TARGET_PLAN_SCHEMA_REFS = frozenset(
     {
         TRUSTED_KEYLESS_TARGET_PLAN_V1_SCHEMA_REF,
@@ -89,6 +85,16 @@ class TrustedKeylessTargetPlanUploadDTO(StrictDTO):
         min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
     )
     artifact: dict[str, Any]
+
+
+class CustodyCurrentVersionDTO(AuthorityNegativeDTO):
+    """Read-only CAS input projected from the sole custody ledger owner."""
+
+    schema_version: Literal["phase-c-custody-current-version-v1"] = (
+        "phase-c-custody-current-version-v1"
+    )
+    version: int = Field(ge=0)
+    custody_state_owner: Literal["artifact-custody"] = "artifact-custody"
 
 
 class CustodyReceiptDTO(AuthorityNegativeDTO):

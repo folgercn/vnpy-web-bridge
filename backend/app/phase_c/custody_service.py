@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from app.phase_c.adapters import (
     WorkflowAdapterError,
 )
 from app.phase_c.models import (
+    CustodyCurrentVersionDTO,
     CustodyReceiptDTO,
     SignedArtifactUploadDTO,
     TrustedKeylessTargetPlanUploadDTO,
@@ -90,7 +92,9 @@ class CustodySettings:
         projection_raw = os.getenv("PHASE_C_CUSTODY_PROJECTION_DIR", "").strip()
         projection_dir = Path(projection_raw) if projection_raw else None
         policies_json = os.getenv("PHASE_C_CUSTODY_POLICIES_JSON", "").strip()
-        keyless_only = os.getenv("SIMNOW_TRUSTED_KEYLESS_CUSTODY_ENABLED", "").lower() in {
+        keyless_only = os.getenv(
+            "SIMNOW_TRUSTED_KEYLESS_CUSTODY_ENABLED", ""
+        ).lower() in {
             "1",
             "true",
             "yes",
@@ -110,11 +114,15 @@ class CustodySettings:
             if raw
             else {}
         )
-        if (not raw and not keyless_only) or (raw and set(raw) != set(ARTIFACT_POLICY)) or any(
-            not item.keyring_path.startswith("/")
-            or len(item.keyring_raw_sha256) != 64
-            or not item.key_purpose
-            for item in policies.values()
+        if (
+            (not raw and not keyless_only)
+            or (raw and set(raw) != set(ARTIFACT_POLICY))
+            or any(
+                not item.keyring_path.startswith("/")
+                or len(item.keyring_raw_sha256) != 64
+                or not item.key_purpose
+                for item in policies.values()
+            )
         ):
             raise RuntimeError("Phase C custody trust policy is invalid")
         return cls(
@@ -138,7 +146,7 @@ class ArtifactCustodyService:
     def __init__(self, settings: CustodySettings) -> None:
         self.settings = settings
 
-    def _custody(self) -> ArtifactCustody:
+    def _custody(self, *, read_only: bool = False) -> ArtifactCustody:
         return ArtifactCustody(
             self.settings.root,
             writer_id=self.settings.writer_id,
@@ -152,7 +160,47 @@ class ArtifactCustodyService:
                 KEYLESS_TARGET_PLAN_SCHEMA_VERSION: _target_plan_schema,
                 KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION: _target_plan_schema,
             },
+            read_only=read_only,
         )
+
+    def current_version(self) -> CustodyCurrentVersionDTO:
+        """Read the sole ledger CAS version without creating custody state."""
+
+        root = self.settings.root
+        try:
+            if not root.exists():
+                version = 0
+            else:
+                root_stat = root.lstat()
+                if (
+                    not root.is_absolute()
+                    or root.resolve() != root
+                    or not stat.S_ISDIR(root_stat.st_mode)
+                    or stat.S_IMODE(root_stat.st_mode) != 0o700
+                ):
+                    raise WorkflowAdapterError("custody durable root is invalid")
+                entries = {entry.name for entry in root.iterdir()}
+                if not entries:
+                    version = 0
+                else:
+                    required = {
+                        ".writer.lock",
+                        ".tmp",
+                        "artifacts",
+                        "epochs",
+                        "receipts",
+                    }
+                    if entries != required or not any((root / "epochs").iterdir()):
+                        raise WorkflowAdapterError(
+                            "custody durable state is incomplete"
+                        )
+                    with self._custody(read_only=True) as custody:
+                        version = int(custody.audit()["version"])
+            return CustodyCurrentVersionDTO(version=version)
+        except WorkflowAdapterError:
+            raise
+        except (CustodyError, OSError, TypeError, ValueError) as exc:
+            raise WorkflowAdapterError("custody durable state is unavailable") from exc
 
     @staticmethod
     def _receipt(
@@ -230,7 +278,9 @@ class ArtifactCustodyService:
             ) from exc
 
     @staticmethod
-    def _keyless_receipt(raw: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
+    def _keyless_receipt(
+        raw: dict[str, Any], artifact: dict[str, Any]
+    ) -> dict[str, Any]:
         payload = artifact["payload"]
         return {
             "receipt_id": raw["receipt_id"],
@@ -300,7 +350,9 @@ class ArtifactCustodyService:
                 raise IdempotencyConflictError(exc.code) from exc
             raise WorkflowAdapterError(exc.code) from exc
         except (ArtifactContractError, CommodityExecutionContractError) as exc:
-            raise WorkflowAdapterError("keyless target plan artifact is invalid") from exc
+            raise WorkflowAdapterError(
+                "keyless target plan artifact is invalid"
+            ) from exc
 
     def receipt(self, receipt_id: str) -> CustodyReceiptDTO | dict[str, Any] | None:
         try:
@@ -367,7 +419,9 @@ class ArtifactCustodyService:
                 or artifact.get("artifact_type") != "simnow-target-plan"
                 or artifact.get("trust_domain") != "runtime_authorization"
             ):
-                raise WorkflowAdapterError("custody artifact is not an execution target plan")
+                raise WorkflowAdapterError(
+                    "custody artifact is not an execution target plan"
+                )
             if artifact.get("schema_ref") == TARGET_PLAN_SCHEMA_VERSION:
                 with self._custody() as custody:
                     signed = custody.read_signed_artifact(artifact_id)
@@ -376,9 +430,13 @@ class ArtifactCustodyService:
                 KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
                 KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
             }:
-                raise WorkflowAdapterError("custody artifact is not an execution target plan")
+                raise WorkflowAdapterError(
+                    "custody artifact is not an execution target plan"
+                )
             if not isinstance(artifact, dict):
-                raise WorkflowAdapterError("custody artifact is not an execution target plan")
+                raise WorkflowAdapterError(
+                    "custody artifact is not an execution target plan"
+                )
             raw = canonical_json_line(artifact)
             return {
                 "artifact_id": artifact_id,
@@ -467,11 +525,26 @@ def create_app(service: ArtifactCustodyService | None = None) -> FastAPI:
         payload: SignedArtifactUploadDTO, request: Request
     ) -> dict[str, Any]:
         try:
-            return target.publish_install(payload, principal=control_auth(request)).model_dump(
-                mode="json"
-            )
+            return target.publish_install(
+                payload, principal=control_auth(request)
+            ).model_dump(mode="json")
         except WorkflowAdapterError as exc:
             raise HTTPException(exc.status_code, detail={"code": exc.code}) from exc
+
+    @app.get("/internal/v1/current-version")
+    def current_version(request: Request) -> dict[str, Any]:
+        control_auth(request)
+        try:
+            return target.current_version().model_dump(mode="json")
+        except WorkflowAdapterError as exc:
+            raise HTTPException(
+                503,
+                detail={
+                    "code": "PHASE_C_CUSTODY_VERSION_UNAVAILABLE",
+                    "message": str(exc),
+                    "retryable": True,
+                },
+            ) from exc
 
     @app.post("/internal/v1/publish-keyless-simnow-target-plan")
     def publish_keyless_simnow_target_plan(
@@ -521,7 +594,12 @@ def create_app(service: ArtifactCustodyService | None = None) -> FastAPI:
 
     @app.get("/health/live")
     def live() -> dict[str, Any]:
-        return {"status": "live", "production": False, "live_trading_authorized": False, "countable_forward": False}
+        return {
+            "status": "live",
+            "production": False,
+            "live_trading_authorized": False,
+            "countable_forward": False,
+        }
 
     @app.get("/health/ready")
     def ready() -> dict[str, Any]:
@@ -529,10 +607,21 @@ def create_app(service: ArtifactCustodyService | None = None) -> FastAPI:
             target.publish_projection()
         except (CustodyError, OSError) as exc:
             raise HTTPException(503, "custody durable state is unavailable") from exc
-        return {"status": "ready", "production": False, "live_trading_authorized": False, "countable_forward": False}
+        return {
+            "status": "ready",
+            "production": False,
+            "live_trading_authorized": False,
+            "countable_forward": False,
+        }
 
     @app.get("/version")
     def version() -> dict[str, Any]:
-        return {"service": "artifact-custody", "version": "issue-291-final", "production": False, "live_trading_authorized": False, "countable_forward": False}
+        return {
+            "service": "artifact-custody",
+            "version": "issue-291-final",
+            "production": False,
+            "live_trading_authorized": False,
+            "countable_forward": False,
+        }
 
     return app

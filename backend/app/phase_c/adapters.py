@@ -32,6 +32,18 @@ class WorkflowAdapterError(RuntimeError):
     code = "PHASE_C_ADAPTER_REJECTED"
     status_code = 409
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        detail: Any = None,
+        status_code: int | None = None,
+    ) -> None:
+        self.detail = detail
+        if status_code is not None:
+            self.status_code = status_code
+        super().__init__(message)
+
 
 class ExpectedVersionError(WorkflowAdapterError):
     code = "PHASE_C_EXPECTED_VERSION_CONFLICT"

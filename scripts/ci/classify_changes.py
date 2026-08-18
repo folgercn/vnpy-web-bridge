@@ -285,6 +285,11 @@ PHASE_B_RULES = (
         exact=("scripts/phase_b_artifact_custody.py",),
     ),
     _phase_b_rule(
+        "phase-b-execution-control-custody-tests",
+        units=("artifact-custody",),
+        exact=("backend/tests/unit/test_issue362_execution_control_plumbing.py",),
+    ),
+    _phase_b_rule(
         "phase-b-signing-runtime",
         units=("signing-authority",),
         exact=("scripts/phase_b_offline_signer.py",),
@@ -356,6 +361,7 @@ PHASE_B_SCOPE_PREFIXES = (
 PHASE_B_SCOPE_EXACT = {
     ".github/workflows/ci.yml",
     "backend/requirements.phase-b-verifier.txt",
+    "backend/tests/unit/test_issue362_execution_control_plumbing.py",
     "deployments/docker-compose.phase-b.yml",
     "scripts/ci/classify_changes.py",
     "scripts/ci/phase_b_projection_compose_smoke.sh",
@@ -627,6 +633,7 @@ PHASE_A_RULES = (
             "docs/schemas/web-bridge-control-execution-command-v1.schema.json",
             "docs/schemas/web-bridge-execution-status-v1.schema.json",
         ),
+        prefix=("backend/tests/unit/test_issue362_execution_control_",),
         shared=True,
         safety=True,
     ),

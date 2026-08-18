@@ -591,17 +591,84 @@ def create_app(
     def leader_acquire(payload: dict[str, Any], request: Request) -> dict[str, Any]:
         authenticate(request)
         try:
-            return require_core().leader_acquire(str(payload.get("owner_id", "")))
+            if set(payload) != {"owner_id"} or not isinstance(
+                payload.get("owner_id"), str
+            ):
+                raise FencingError("leader acquire payload fields are not exact")
+            return require_core().leader_acquire(payload["owner_id"])
+        except RepositoryUnavailableError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "EXECUTION_LEADER_REPOSITORY_UNAVAILABLE",
+                    "message": str(exc),
+                    "retryable": True,
+                },
+            ) from exc
         except ExecutionError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "EXECUTION_LEADER_ACQUIRE_REJECTED",
+                    "message": str(exc),
+                    "retryable": False,
+                },
+            ) from exc
 
     @app.post("/internal/v1/leader/renew")
     def leader_renew(payload: dict[str, Any], request: Request) -> dict[str, Any]:
         authenticate(request)
         try:
-            return require_core().leader_renew(payload.get("token"))
+            if set(payload) != {"token"}:
+                raise FencingError("leader renew payload fields are not exact")
+            return require_core().leader_renew(payload["token"])
+        except RepositoryUnavailableError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "EXECUTION_LEADER_REPOSITORY_UNAVAILABLE",
+                    "message": str(exc),
+                    "retryable": True,
+                },
+            ) from exc
         except ExecutionError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "EXECUTION_LEADER_RENEW_REJECTED",
+                    "message": str(exc),
+                    "retryable": False,
+                },
+            ) from exc
+
+    @app.post("/internal/v1/leader/release")
+    def leader_release(payload: dict[str, Any], request: Request) -> dict[str, Any]:
+        authenticate(request)
+        try:
+            if set(payload) != {"token"}:
+                raise FencingError("leader release payload fields are not exact")
+            return require_core().leader_release(payload.get("token"))
+        except RepositoryUnavailableError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "EXECUTION_LEADER_REPOSITORY_UNAVAILABLE",
+                    "message": str(exc),
+                    "retryable": True,
+                },
+            ) from exc
+        except ExecutionError as exc:
+            # Release is deliberately fail-closed rather than replay-idempotent:
+            # after the exact lease is gone, the same token is stale and cannot
+            # affect a later leader that may already hold a higher fence.
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "EXECUTION_LEADER_RELEASE_REJECTED",
+                    "message": str(exc),
+                    "retryable": False,
+                },
+            ) from exc
 
     @app.get("/internal/v1/leader")
     def leader_status(request: Request) -> dict[str, Any]:
@@ -609,7 +676,14 @@ def create_app(
         try:
             return require_core().leader_status()
         except RepositoryUnavailableError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "EXECUTION_LEADER_REPOSITORY_UNAVAILABLE",
+                    "message": str(exc),
+                    "retryable": True,
+                },
+            ) from exc
 
     # Phase C remains inside this canonical execution-orchestrator process.
     # It has a separate offline-only projection state file and never reaches
