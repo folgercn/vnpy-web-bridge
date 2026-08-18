@@ -283,6 +283,44 @@ except Exception as exc:  # noqa: BLE001 - print the exact smoke contract error
     ) from exc
 PY
 
+# The worker healthcheck proves only that its durable stream exists.  The
+# ingress cursor advances while frames are decoded, before their verified row
+# is committed, so require both the replay cursor and the exact database row.
+market_ingress_ready() {
+  docker exec -i "$market_container" python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+import psycopg
+
+fence = json.loads(Path("/var/lib/phase-b/market-data/tick_wire_v1_cursor.json").read_text())
+assert int(fence["last_source_seq"]) >= 2, fence
+with psycopg.connect(os.environ["PHASE_B_QUESTDB_PG_DSN"], connect_timeout=1) as db:
+    with db.cursor() as cur:
+        cur.execute("SELECT count(*), min(vt_symbol), min(last_price) FROM market_ticks")
+        count, symbol, price = cur.fetchone()
+        assert (count, symbol, float(price)) == (1, "RB2601.SHFE", 3500.0), (
+            count,
+            symbol,
+            price,
+        )
+PY
+}
+for _attempt in $(seq 1 30); do
+  if [ "$_attempt" = "30" ]; then
+    if market_ingress_ready; then
+      break
+    fi
+    echo "market-data worker did not commit the smoke ingress row" >&2
+    exit 1
+  fi
+  if market_ingress_ready >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+
 docker exec -i "$market_container" python - <<'PY'
 import json
 import os

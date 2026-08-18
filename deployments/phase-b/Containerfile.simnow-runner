@@ -22,6 +22,7 @@ COPY backend/app/schemas/control_execution.py /app/backend/app/schemas/control_e
 COPY backend/app/execution/__init__.py /app/backend/app/execution/__init__.py
 COPY backend/app/execution/errors.py /app/backend/app/execution/errors.py
 COPY backend/app/execution/executable_target_adapter.py /app/backend/app/execution/executable_target_adapter.py
+COPY backend/app/execution/formal_tick_reader.py /app/backend/app/execution/formal_tick_reader.py
 COPY backend/app/execution/gateway_contracts.py /app/backend/app/execution/gateway_contracts.py
 COPY backend/app/execution/models.py /app/backend/app/execution/models.py
 COPY backend/app/phase_c/__init__.py /app/backend/app/phase_c/__init__.py
@@ -45,7 +46,7 @@ COPY shared/commodity_execution /app/shared/commodity_execution
 COPY shared/phase_c_workflow /app/shared/phase_c_workflow
 COPY shared/trust_contracts /app/shared/trust_contracts
 
-RUN python -m py_compile /app/scripts/simnow_run_once.py /app/scripts/simnow_keyless_pilot.py /app/scripts/commodity_static_core_equal_formula_v1.py /app/scripts/commodity_static_core_equal_pure_producer.py /app/scripts/commodity_relative_vol_snapshot_producer.py /app/phase_b_workers/contracts.py /app/phase_b_workers/durable.py /app/phase_b_workers/projections.py
+RUN python -m py_compile /app/scripts/simnow_run_once.py /app/scripts/simnow_keyless_pilot.py /app/scripts/commodity_static_core_equal_formula_v1.py /app/scripts/commodity_static_core_equal_pure_producer.py /app/scripts/commodity_relative_vol_snapshot_producer.py /app/backend/app/execution/formal_tick_reader.py /app/phase_b_workers/contracts.py /app/phase_b_workers/durable.py /app/phase_b_workers/projections.py
 
 USER 65532:65532
 ENTRYPOINT ["python", "/app/scripts/simnow_run_once.py"]

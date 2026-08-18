@@ -227,10 +227,14 @@ def _append_formal_tick(root: Path, *, vt_symbol: str, source_event_id: str) -> 
 
     generation = "tick-generation-0001"
     stream = DurableVerifiedTickStream(root / "stream", generation=generation)
-    sequence = int(
-        AtomicCheckpoint(root / "stream" / "producer_watermark.json", read_only=True)
-        .read()["last_ingest_seq"]
-    ) + 1
+    sequence = (
+        int(
+            AtomicCheckpoint(
+                root / "stream" / "producer_watermark.json", read_only=True
+            ).read()["last_ingest_seq"]
+        )
+        + 1
+    )
     tick = VerifiedTick.from_raw(
         {
             "event_time_utc": "2030-01-01T00:00:00Z",
@@ -285,7 +289,9 @@ def test_pilot_requires_fresh_canonical_fixed_ctp_tick_for_reference_price(
     _write_formal_tick_state(module, tmp_path)
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(module, "_FORMAL_MARKET_STATE_DIR", tmp_path)
-    monkeypatch.setattr(module, "_FORMAL_MARKET_PROJECTION_DIR", tmp_path / "projection")
+    monkeypatch.setattr(
+        module, "_FORMAL_MARKET_PROJECTION_DIR", tmp_path / "projection"
+    )
     try:
         assert module._formal_tick_binding(clock=lambda: now)[-1] == 3700.0
         _write_formal_tick_state(
@@ -357,7 +363,9 @@ def test_pilot_accepts_projection_lagging_verified_watermark(tmp_path: Path) -> 
 
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(module, "_FORMAL_MARKET_STATE_DIR", tmp_path)
-    monkeypatch.setattr(module, "_FORMAL_MARKET_PROJECTION_DIR", tmp_path / "projection")
+    monkeypatch.setattr(
+        module, "_FORMAL_MARKET_PROJECTION_DIR", tmp_path / "projection"
+    )
     try:
         assert module._formal_tick_binding(clock=lambda: now)[-1] == 3700.0
     finally:
@@ -370,7 +378,9 @@ def test_pilot_waits_for_projection_watermark_to_converge(tmp_path: Path) -> Non
     _write_formal_tick_state(module, tmp_path)
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(module, "_FORMAL_MARKET_STATE_DIR", tmp_path)
-    monkeypatch.setattr(module, "_FORMAL_MARKET_PROJECTION_DIR", tmp_path / "projection")
+    monkeypatch.setattr(
+        module, "_FORMAL_MARKET_PROJECTION_DIR", tmp_path / "projection"
+    )
     original = module._formal_market_checkpoint
     calls = 0
 
@@ -389,12 +399,16 @@ def test_pilot_waits_for_projection_watermark_to_converge(tmp_path: Path) -> Non
         monkeypatch.undo()
 
 
-def test_pilot_rejects_projection_watermark_that_never_converges(tmp_path: Path) -> None:
+def test_pilot_rejects_projection_watermark_that_never_converges(
+    tmp_path: Path,
+) -> None:
     module = _module("simnow_keyless_pilot_projection_wait_timeout")
     _write_formal_tick_state(module, tmp_path)
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(module, "_FORMAL_MARKET_STATE_DIR", tmp_path)
-    monkeypatch.setattr(module, "_FORMAL_MARKET_PROJECTION_DIR", tmp_path / "projection")
+    monkeypatch.setattr(
+        module, "_FORMAL_MARKET_PROJECTION_DIR", tmp_path / "projection"
+    )
     calls = 0
 
     def mismatched_checkpoint():
@@ -411,6 +425,26 @@ def test_pilot_rejects_projection_watermark_that_never_converges(tmp_path: Path)
                 clock=lambda: datetime(2030, 1, 1, tzinfo=timezone.utc)
             )
         assert calls > 1
+    finally:
+        monkeypatch.undo()
+
+
+def test_pilot_preserves_legacy_missing_formal_tick_error(tmp_path: Path) -> None:
+    module = _module("simnow_keyless_pilot_missing_formal_tick")
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(module, "_FORMAL_MARKET_STATE_DIR", tmp_path / "missing")
+    monkeypatch.setattr(
+        module,
+        "_FORMAL_MARKET_PROJECTION_DIR",
+        tmp_path / "missing-projection",
+    )
+    try:
+        with pytest.raises(ValueError) as invalid:
+            module._formal_tick_binding(
+                clock=lambda: datetime(2030, 1, 1, tzinfo=timezone.utc)
+            )
+        assert type(invalid.value) is ValueError
+        assert str(invalid.value) == "formal CTP durable tick state is invalid"
     finally:
         monkeypatch.undo()
 
@@ -441,7 +475,9 @@ def test_pilot_rejects_tampered_formal_tick_state(
     _write_formal_tick_state(module, tmp_path)
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(module, "_FORMAL_MARKET_STATE_DIR", tmp_path)
-    monkeypatch.setattr(module, "_FORMAL_MARKET_PROJECTION_DIR", tmp_path / "projection")
+    monkeypatch.setattr(
+        module, "_FORMAL_MARKET_PROJECTION_DIR", tmp_path / "projection"
+    )
     try:
         if artifact == "projection":
             path = tmp_path / "projection" / "market-data-worker.json"
@@ -494,16 +530,24 @@ def test_pilot_rejects_tampered_formal_tick_state(
             ]
             path.write_text("\n".join(retained) + "\n", encoding="utf-8")
         else:
-            name = "tick_writer_acks.jsonl" if artifact == "ack" else "verified_ticks.jsonl"
+            name = (
+                "tick_writer_acks.jsonl"
+                if artifact == "ack"
+                else "verified_ticks.jsonl"
+            )
             path = tmp_path / "stream" / name
             path.write_bytes(path.read_bytes() + b"{}\n")
-        with pytest.raises(ValueError, match="durable tick state"):
+        with pytest.raises(ValueError) as invalid:
             module._formal_tick_binding(clock=lambda: now)
+        assert type(invalid.value) is ValueError
+        assert str(invalid.value) == "formal CTP durable tick state is invalid"
     finally:
         monkeypatch.undo()
 
 
-def test_pilot_reads_a_fresh_tail_without_replaying_310k_history(tmp_path: Path) -> None:
+def test_pilot_reads_a_fresh_tail_without_replaying_310k_history(
+    tmp_path: Path,
+) -> None:
     from phase_b_workers.contracts import VerifiedTick, canonical_json
     from phase_b_workers.durable import AtomicCheckpoint, DurableVerifiedTickStream
     from phase_b_workers.projections import build_projection, publish_projection
@@ -530,7 +574,12 @@ def test_pilot_reads_a_fresh_tail_without_replaying_310k_history(tmp_path: Path)
                 received_at=datetime(2029, 12, 31, 23, tzinfo=timezone.utc),
             )
             journal_file.write(
-                (canonical_json({"record_type": "verified_tick", "tick": tick.as_dict()}) + "\n").encode()
+                (
+                    canonical_json(
+                        {"record_type": "verified_tick", "tick": tick.as_dict()}
+                    )
+                    + "\n"
+                ).encode()
             )
             ack_file.write(
                 (
@@ -558,7 +607,12 @@ def test_pilot_reads_a_fresh_tail_without_replaying_310k_history(tmp_path: Path)
             received_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
         )
         journal_file.write(
-            (canonical_json({"record_type": "verified_tick", "tick": current.as_dict()}) + "\n").encode()
+            (
+                canonical_json(
+                    {"record_type": "verified_tick", "tick": current.as_dict()}
+                )
+                + "\n"
+            ).encode()
         )
         ack_file.write(
             (
@@ -619,7 +673,9 @@ def test_pilot_reads_a_fresh_tail_without_replaying_310k_history(tmp_path: Path)
     )
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(module, "_FORMAL_MARKET_STATE_DIR", tmp_path)
-    monkeypatch.setattr(module, "_FORMAL_MARKET_PROJECTION_DIR", tmp_path / "projection")
+    monkeypatch.setattr(
+        module, "_FORMAL_MARKET_PROJECTION_DIR", tmp_path / "projection"
+    )
     try:
         started = time.monotonic()
         binding = module._formal_tick_binding(
@@ -637,7 +693,9 @@ def test_pilot_anchors_append_growth_to_the_initial_frontier(tmp_path: Path) -> 
     _write_formal_tick_state(module, tmp_path)
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(module, "_FORMAL_MARKET_STATE_DIR", tmp_path)
-    monkeypatch.setattr(module, "_FORMAL_MARKET_PROJECTION_DIR", tmp_path / "projection")
+    monkeypatch.setattr(
+        module, "_FORMAL_MARKET_PROJECTION_DIR", tmp_path / "projection"
+    )
     original_tail = module._bounded_verified_tick_tail
     appended = False
 
@@ -671,7 +729,9 @@ def test_pilot_retries_a_partial_tail_record_within_snapshot_window(
     journal.write_bytes(journal.read_bytes() + b"{")
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(module, "_FORMAL_MARKET_STATE_DIR", tmp_path)
-    monkeypatch.setattr(module, "_FORMAL_MARKET_PROJECTION_DIR", tmp_path / "projection")
+    monkeypatch.setattr(
+        module, "_FORMAL_MARKET_PROJECTION_DIR", tmp_path / "projection"
+    )
     waits = 0
 
     def finish_partial_record(_deadline: float) -> bool:
@@ -715,9 +775,7 @@ def test_pilot_tail_accepts_append_after_captured_size(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("mutation", ["overwrite", "truncate", "replace", "mode"])
-def test_pilot_tail_rejects_non_append_mutation(
-    tmp_path: Path, mutation: str
-) -> None:
+def test_pilot_tail_rejects_non_append_mutation(tmp_path: Path, mutation: str) -> None:
     module = _module(f"simnow_keyless_pilot_tail_{mutation}")
     _write_formal_tick_state(module, tmp_path)
     acknowledgements = tmp_path / "stream" / "tick_writer_acks.jsonl"
@@ -1108,7 +1166,14 @@ def _stub_pilot_build(
     monkeypatch.setattr(
         module,
         "_formal_tick_binding",
-        lambda **_kwargs: ("tick-generation", "tick", 1, "a" * 64, "2030-01-01T00:00:00Z", 3700.0),
+        lambda **_kwargs: (
+            "tick-generation",
+            "tick",
+            1,
+            "a" * 64,
+            "2030-01-01T00:00:00Z",
+            3700.0,
+        ),
     )
     monkeypatch.setattr(
         module,
@@ -1398,7 +1463,14 @@ def test_pilot_noop_does_not_create_custody_or_execution_intent(
     monkeypatch.setattr(
         module,
         "_formal_tick_binding",
-        lambda **_kwargs: ("tick-generation", "tick", 1, "a" * 64, "2030-01-01T00:00:00Z", 3700.0),
+        lambda **_kwargs: (
+            "tick-generation",
+            "tick",
+            1,
+            "a" * 64,
+            "2030-01-01T00:00:00Z",
+            3700.0,
+        ),
     )
     monkeypatch.setattr(module, "_now", lambda: "2030-01-01T00:00:00Z")
     monkeypatch.setattr(
@@ -1471,7 +1543,14 @@ def test_pilot_noop_rejects_dirty_execution_status_before_custody(
     monkeypatch.setattr(
         module,
         "_formal_tick_binding",
-        lambda **_kwargs: ("tick-generation", "tick", 1, "a" * 64, "2030-01-01T00:00:00Z", 3700.0),
+        lambda **_kwargs: (
+            "tick-generation",
+            "tick",
+            1,
+            "a" * 64,
+            "2030-01-01T00:00:00Z",
+            3700.0,
+        ),
     )
     monkeypatch.setattr(module, "_now", lambda: "2030-01-01T00:00:00Z")
     monkeypatch.setattr(
@@ -1549,7 +1628,14 @@ def test_pilot_start_uncertainty_never_retries_start(
     monkeypatch.setattr(
         module,
         "_formal_tick_binding",
-        lambda **_kwargs: ("tick-generation", "tick", 1, "a" * 64, "2030-01-01T00:00:00Z", 3700.0),
+        lambda **_kwargs: (
+            "tick-generation",
+            "tick",
+            1,
+            "a" * 64,
+            "2030-01-01T00:00:00Z",
+            3700.0,
+        ),
     )
     monkeypatch.setattr(
         module,
