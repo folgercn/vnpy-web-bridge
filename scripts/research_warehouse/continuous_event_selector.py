@@ -9,10 +9,11 @@ dataclass and self-consistent hashes are not custody or current-root proof.
 
 ``MONTHLY_REBALANCE`` and ``ROLL_ONLY`` are deliberately exclusive.  A new
 monthly target always wins on the same execution day and absorbs any daily
-contract transition.  A standalone roll requires root-catalog linked daily
-continuity plus a pinned terminal predecessor and preserves the complete
-ten-product signed integer quantity vector byte-for-byte at the semantic
-projection level.
+contract transition: quantities and economic lineage remain monthly, while
+the routable exact-contract projection comes from the verified daily current
+map.  A standalone roll requires root-catalog linked daily continuity plus a
+pinned terminal predecessor and preserves the complete ten-product signed
+integer quantity vector byte-for-byte at the semantic projection level.
 """
 
 from __future__ import annotations
@@ -354,6 +355,13 @@ def _candidate(
     predecessor: TerminalPredecessorPinCandidate | None,
 ) -> dict[str, Any]:
     roll_only = trigger_kind == ROLL_ONLY
+    monthly_target_contracts = {
+        product: _exact_contract(
+            target_rows[product]["exact_contract"],
+            product=product,
+        )
+        for product in frozen.PRODUCTS
+    }
     targets = []
     for product in frozen.PRODUCTS:
         quantity = int(target_rows[product]["target_quantity"])
@@ -362,6 +370,7 @@ def _candidate(
         targets.append(
             {
                 "product": product,
+                "monthly_target_exact_contract": monthly_target_contracts[product],
                 "previous_exact_contract": previous_contract,
                 "exact_contract": current_contract,
                 "previous_target_quantity": quantity if roll_only else None,
@@ -386,6 +395,9 @@ def _candidate(
         "monthly_final_target_sha256": final_target_sha256,
         "baseline_batch_raw_sha256": target_input.baseline_batch_raw_sha256,
         "quantity_vector_sha256": quantity_vector_sha256,
+        "monthly_target_exact_contract_map_sha256": _contract_map_sha(
+            monthly_target_contracts
+        ),
         "previous_exact_contract_map_sha256": _contract_map_sha(previous_contracts),
         "exact_contract_map_sha256": _contract_map_sha(current_contracts),
         "roll_preserves_integer_lots": roll_only,
@@ -412,6 +424,29 @@ def _false_boundary() -> dict[str, Any]:
         "position_mutation_authorized": False,
         "authority": false_authority(),
     }
+
+
+def _event_candidate(
+    *,
+    selection_id: str,
+    selection_sha256: str,
+    candidate_set_sha256: str,
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": EVENT_SCHEMA_VERSION,
+        "event_id": "",
+        "selection_id": selection_id,
+        "selection_sha256": selection_sha256,
+        "candidate_set_sha256": candidate_set_sha256,
+        "candidate": candidate,
+        "verification_status": VERIFICATION_STATUS,
+        "event_ready": False,
+        "installable": False,
+        **_false_boundary(),
+    }
+    payload["event_id"] = _event_id(payload)
+    return payload
 
 
 def build_continuous_event_candidate_selection(
@@ -489,16 +524,6 @@ def build_continuous_event_candidate_selection(
         ):
             raise ContinuousEventSelectorError(
                 "monthly target does not belong to the daily official day"
-            )
-        target_contracts = {
-            product: _exact_contract(
-                monthly_rows[product]["exact_contract"], product=product
-            )
-            for product in frozen.PRODUCTS
-        }
-        if target_contracts != current_contracts:
-            raise ContinuousEventSelectorError(
-                "monthly target exact contracts do not match verified daily PIT main"
             )
         if continuity.get("mode") == "GENESIS_STATIC_CORE_EQUAL" and (
             monthly_candidate.baseline_batch_raw_sha256
@@ -606,19 +631,12 @@ def build_continuous_event_candidate_selection(
     event_candidate_id: str | None = None
     event_candidate_raw_sha: str | None = None
     if selected is not None:
-        event = {
-            "schema_version": EVENT_SCHEMA_VERSION,
-            "event_id": "",
-            "selection_id": selection_id,
-            "selection_sha256": selection_sha,
-            "candidate_set_sha256": candidate_set_sha,
-            "candidate": selected,
-            "verification_status": VERIFICATION_STATUS,
-            "event_ready": False,
-            "installable": False,
-            **_false_boundary(),
-        }
-        event["event_id"] = _event_id(event)
+        event = _event_candidate(
+            selection_id=selection_id,
+            selection_sha256=selection_sha,
+            candidate_set_sha256=candidate_set_sha,
+            candidate=selected,
+        )
         event_candidate_raw = canonical_json_line(event)
         event_candidate_id = event["event_id"]
         event_candidate_raw_sha = sha256(event_candidate_raw)
@@ -680,6 +698,7 @@ def _validate_candidate(candidate: object) -> dict[str, Any]:
         "monthly_final_target_sha256",
         "baseline_batch_raw_sha256",
         "quantity_vector_sha256",
+        "monthly_target_exact_contract_map_sha256",
         "previous_exact_contract_map_sha256",
         "exact_contract_map_sha256",
         "roll_preserves_integer_lots",
@@ -717,6 +736,7 @@ def _validate_candidate(candidate: object) -> dict[str, Any]:
         "monthly_final_target_sha256",
         "baseline_batch_raw_sha256",
         "quantity_vector_sha256",
+        "monthly_target_exact_contract_map_sha256",
         "previous_exact_contract_map_sha256",
         "exact_contract_map_sha256",
     ):
@@ -725,6 +745,7 @@ def _validate_candidate(candidate: object) -> dict[str, Any]:
     if not isinstance(targets, list) or len(targets) != len(frozen.PRODUCTS):
         raise ContinuousEventSelectorError("candidate target set is incomplete")
     quantities: dict[str, int] = {}
+    monthly_target_map: dict[str, str] = {}
     previous_map: dict[str, str] = {}
     current_map: dict[str, str] = {}
     changed = 0
@@ -736,6 +757,7 @@ def _validate_candidate(candidate: object) -> dict[str, Any]:
             or set(row)
             != {
                 "product",
+                "monthly_target_exact_contract",
                 "previous_exact_contract",
                 "exact_contract",
                 "previous_target_quantity",
@@ -745,12 +767,19 @@ def _validate_candidate(candidate: object) -> dict[str, Any]:
             or row.get("product") != product
         ):
             raise ContinuousEventSelectorError("candidate target rows are invalid")
+        monthly_target_map[product] = _exact_contract(
+            row["monthly_target_exact_contract"], product=product
+        )
         previous_map[product] = _exact_contract(
             row["previous_exact_contract"], product=product
         )
         current_map[product] = _exact_contract(row["exact_contract"], product=product)
         quantity = row["target_quantity"]
-        if isinstance(quantity, bool) or not isinstance(quantity, int):
+        if (
+            isinstance(quantity, bool)
+            or not isinstance(quantity, int)
+            or abs(quantity) > MAX_ABS_TARGET_QUANTITY
+        ):
             raise ContinuousEventSelectorError("candidate quantity is invalid")
         quantities[product] = quantity
         is_changed = previous_map[product] != current_map[product]
@@ -767,6 +796,8 @@ def _validate_candidate(candidate: object) -> dict[str, Any]:
             )
     if (
         candidate["quantity_vector_sha256"] != _quantity_vector_sha(quantities)
+        or candidate["monthly_target_exact_contract_map_sha256"]
+        != _contract_map_sha(monthly_target_map)
         or candidate["previous_exact_contract_map_sha256"]
         != _contract_map_sha(previous_map)
         or candidate["exact_contract_map_sha256"] != _contract_map_sha(current_map)
@@ -775,6 +806,7 @@ def _validate_candidate(candidate: object) -> dict[str, Any]:
     if roll_only:
         if (
             changed == 0
+            or candidate["verified_daily_continuity_mode"] != "LINKED_ROOT_CATALOG"
             or candidate["roll_preserves_integer_lots"] is not True
             or not isinstance(candidate["predecessor_terminal_target_id"], str)
             or not isinstance(candidate["predecessor_terminal_target_raw_sha256"], str)
@@ -841,6 +873,10 @@ def validate_continuous_event_selection(raw: bytes) -> dict[str, Any]:
         raise ContinuousEventSelectorError("continuous selection contract mismatch")
     _require_false_boundary(payload, "continuous selection")
     _require_day(payload["execution_day"], "selection execution day")
+    _require_stable_id(
+        payload["verified_daily_artifact_id"],
+        "selection daily artifact ID",
+    )
     _require_sha(
         payload["verified_daily_artifact_raw_sha256"],
         "selection daily artifact hash",
@@ -893,22 +929,29 @@ def validate_continuous_event_selection(raw: bytes) -> dict[str, Any]:
         or payload["installable"] is not False
     ):
         raise ContinuousEventSelectorError("continuous selection identity mismatch")
-    observed = payload["observed_trigger_kinds"]
-    suppressed = payload["suppressed_trigger_kinds"]
-    if not isinstance(observed, list) or not isinstance(suppressed, list):
-        raise ContinuousEventSelectorError("selection trigger audit is invalid")
-    if payload["monthly_precedence_applied"]:
-        if (
-            selected is None
-            or selected["trigger_kind"] != MONTHLY_REBALANCE
-            or observed != [MONTHLY_REBALANCE, ROLL_ONLY]
-            or suppressed != [ROLL_ONLY]
-        ):
-            raise ContinuousEventSelectorError("monthly precedence audit mismatch")
-    elif suppressed:
-        raise ContinuousEventSelectorError("unexpected suppressed trigger")
-    elif observed != ([selected["trigger_kind"]] if selected else []):
-        raise ContinuousEventSelectorError("selection observed trigger audit mismatch")
+    if selected is None:
+        expected_observed: list[str] = []
+        expected_suppressed: list[str] = []
+        expected_monthly_precedence = False
+    elif selected["trigger_kind"] == MONTHLY_REBALANCE:
+        same_day_roll = any(
+            row["exact_contract_changed"] for row in selected["targets"]
+        )
+        expected_observed = (
+            [MONTHLY_REBALANCE, ROLL_ONLY] if same_day_roll else [MONTHLY_REBALANCE]
+        )
+        expected_suppressed = [ROLL_ONLY] if same_day_roll else []
+        expected_monthly_precedence = same_day_roll
+    else:
+        expected_observed = [ROLL_ONLY]
+        expected_suppressed = []
+        expected_monthly_precedence = False
+    if (
+        payload["observed_trigger_kinds"] != expected_observed
+        or payload["suppressed_trigger_kinds"] != expected_suppressed
+        or payload["monthly_precedence_applied"] is not expected_monthly_precedence
+    ):
+        raise ContinuousEventSelectorError("selection trigger audit mismatch")
     if selected is None:
         if any(
             payload[field] is not None
@@ -923,6 +966,19 @@ def validate_continuous_event_selection(raw: bytes) -> dict[str, Any]:
             payload["event_candidate_raw_sha256"],
             "selected event candidate raw hash",
         )
+        expected_event = _event_candidate(
+            selection_id=payload["selection_id"],
+            selection_sha256=payload["selection_sha256"],
+            candidate_set_sha256=candidate_set_sha,
+            candidate=selected,
+        )
+        expected_event_raw = canonical_json_line(expected_event)
+        if payload["event_candidate_id"] != expected_event["event_id"] or payload[
+            "event_candidate_raw_sha256"
+        ] != sha256(expected_event_raw):
+            raise ContinuousEventSelectorError(
+                "selection event candidate binding mismatch"
+            )
     return payload
 
 

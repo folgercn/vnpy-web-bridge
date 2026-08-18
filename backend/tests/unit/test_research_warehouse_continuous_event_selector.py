@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 import sys
@@ -15,13 +16,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import commodity_c_fast_pure_producer_kernel as frozen
 from research_warehouse import continuous_event_selector as selector
+import research_warehouse.daily_roll_predecessor_catalog as catalog
 from research_warehouse.canonical import canonical_json, canonical_json_line, sha256
 from research_warehouse.m2_isolation_contracts import false_authority
+from research_warehouse.m2_receipts import run_receipt_id
 from research_warehouse.verified_daily_pit_main_roll_source import (
     BuiltVerifiedDailyPitMainRollSource,
 )
 import research_warehouse.verified_daily_pit_main_roll_source as verified_roll
-from test_research_warehouse_verified_daily_pit_main_roll_source import _kwargs
+from test_research_warehouse_daily_roll_predecessor_catalog import _linked_setup
+from test_research_warehouse_verified_daily_pit_main_roll_source import (
+    _kwargs,
+    _state,
+    _verified_input,
+)
 
 
 def _contracts(suffix: str) -> dict[str, str]:
@@ -127,6 +135,7 @@ def _terminal(
     target: selector.MonthlyFinalTargetCandidate,
     *,
     exact_contracts: dict[str, str],
+    execution_day: str = "2026-08-03",
 ) -> selector.TerminalPredecessorPinCandidate:
     payload = json.loads(target.final_target_raw)
     quantities = {row["product"]: row["target_quantity"] for row in payload["targets"]}
@@ -136,7 +145,53 @@ def _terminal(
         monthly_final_target_sha256=sha256(canonical_json(payload)),
         quantity_vector_sha256=selector._quantity_vector_sha(quantities),
         exact_contract_map_sha256=selector._contract_map_sha(exact_contracts),
-        execution_day="2026-08-03",
+        execution_day=execution_day,
+    )
+
+
+def _with_daily_roll(
+    value: verified_roll._VerifiedDailyInput,
+    *,
+    product: str,
+) -> verified_roll._VerifiedDailyInput:
+    """Create a coherent verified-input fixture with one later OI winner."""
+
+    exchange = frozen.PRODUCT_SPECS[product]["exchange"]
+    daily_source_raw = dict(value.daily_source_raw)
+    daily = json.loads(daily_source_raw[exchange])
+    matched = False
+    for row in daily["o_curinstrument"]:
+        if row["PRODUCTID"] == f"{product}_f" and row["DELIVERYMONTH"] == "2611":
+            row["OPENINTEREST"] = "6000"
+            matched = True
+    assert matched
+    daily_source_raw[exchange] = canonical_json(daily)
+
+    receipt = dict(value.receipt)
+    receipt["sources"] = [dict(row) for row in value.receipt["sources"]]
+    for source in receipt["sources"]:
+        raw = daily_source_raw[source["exchange"]]
+        source["raw_sha256"] = sha256(raw)
+        source["raw_bytes"] = len(raw)
+    receipt["receipt_id"] = ""
+    receipt["receipt_id"] = run_receipt_id(receipt)
+
+    source_by_revision = {row["revision_id"]: row for row in receipt["sources"]}
+    manifest = dict(value.manifest)
+    manifest["revisions"] = [
+        {
+            **row,
+            "raw_sha256": source_by_revision[row["revision_id"]]["raw_sha256"],
+            "raw_bytes": source_by_revision[row["revision_id"]]["raw_bytes"],
+        }
+        for row in value.manifest["revisions"]
+    ]
+    return replace(
+        value,
+        receipt_raw=canonical_json_line(receipt),
+        receipt=receipt,
+        daily_source_raw=daily_source_raw,
+        manifest=manifest,
     )
 
 
@@ -192,9 +247,10 @@ def test_monthly_precedence_is_exclusive_stable_and_no_authority(
 ) -> None:
     daily = _daily(changed_products=("ag", "sc"))
     raw = _patch_daily(monkeypatch, daily)
-    monthly = _target(
-        contracts={row["product"]: row["exact_contract"] for row in daily["mains"]}
-    )
+    monthly_contracts = {
+        row["product"]: row["previous_exact_contract"] for row in daily["mains"]
+    }
+    monthly = _target(contracts=monthly_contracts)
 
     first = selector.build_continuous_event_candidate_selection(
         verified_daily_artifact=raw,
@@ -217,6 +273,23 @@ def test_monthly_precedence_is_exclusive_stable_and_no_authority(
     assert selection["monthly_precedence_applied"] is True
     assert selection["candidate_set_sha256"] == first.candidate_set_sha256
     assert selection["selection_sha256"] == first.selection_sha256
+    candidate = selection["candidates"][0]
+    assert candidate["monthly_target_exact_contract_map_sha256"] == (
+        selector._contract_map_sha(monthly_contracts)
+    )
+    assert candidate["monthly_final_target_sha256"] == sha256(
+        canonical_json(json.loads(monthly.final_target_raw))
+    )
+    monthly_quantities = {
+        row["product"]: row["target_quantity"]
+        for row in json.loads(monthly.final_target_raw)["targets"]
+    }
+    for row, daily_row in zip(candidate["targets"], daily["mains"], strict=True):
+        # Monthly economics and signed integer quantities retain their own
+        # lineage, while routing always consumes the verified daily current map.
+        assert row["monthly_target_exact_contract"] == monthly_contracts[row["product"]]
+        assert row["target_quantity"] == monthly_quantities[row["product"]]
+        assert row["exact_contract"] == daily_row["exact_contract"]
     event = selector.validate_continuous_event_candidate(
         first.event_candidate_raw,
         expected_selection_raw=first.selection_raw,
@@ -313,6 +386,108 @@ def test_real_verified_genesis_output_is_accepted_as_typed_input(
         )["event_id"]
         == result.event_candidate_id
     )
+
+
+def test_real_linked_catalog_roll_artifact_selects_structural_roll_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # The uid/root filesystem seam is harnessed, but all three artifacts run
+    # through the real v2 builder and root-catalog publisher.  In particular,
+    # the selector's public structural validator is not monkeypatched here.
+    kwargs, inputs, holder, _genesis_entry, linked_entry = _linked_setup(
+        monkeypatch,
+        tmp_path,
+    )
+    head = "b" * 64
+    commit = "c" * 64
+    state = _state("2026-07-03", head, commit, sequence=3)
+    state = replace(state, path=kwargs["operator_state"].path)
+    holder["state"] = state
+    current = _verified_input(
+        "2026-07-03",
+        head_seal=head,
+        head_commit=commit,
+        parent_seal=linked_entry.artifact["verified_lineage"]["manifest"][
+            "batch_seal_sha256"
+        ],
+        parent_commit=linked_entry.artifact["verified_lineage"]["manifest"][
+            "commit_seal_sha256"
+        ],
+        expected_genesis_baseline=None,
+    )
+    current = replace(
+        _with_daily_roll(current, product="ag"),
+        predecessor_entry=linked_entry,
+    )
+    inputs["2026-07-03"] = current
+    kwargs.update(
+        operator_state=state,
+        official_day="2026-07-03",
+        genesis=None,
+        predecessor=verified_roll.PredecessorContinuity(),
+    )
+    roll_entry = catalog.publish_predecessor_artifact(**kwargs)
+    daily = verified_roll.validate_structural_daily_pit_main_roll_source(
+        roll_entry.artifact_raw
+    )
+
+    assert roll_entry.receipt["sequence"] == 3
+    assert roll_entry.receipt["artifact_raw_sha256"] == sha256(roll_entry.artifact_raw)
+    assert daily["verified_lineage"]["continuity"]["mode"] == "LINKED_ROOT_CATALOG"
+    assert daily["roll_change_detected"] is True
+    assert daily["changed_products"] == ["ag"]
+    previous_contracts = {
+        row["product"]: row["previous_exact_contract"] for row in daily["mains"]
+    }
+    predecessor = _target(
+        execution_day="2026-07-01",
+        contracts=previous_contracts,
+    )
+    built = BuiltVerifiedDailyPitMainRollSource(
+        artifact_raw=roll_entry.artifact_raw,
+        artifact_id=roll_entry.artifact["artifact_id"],
+        artifact_raw_sha256=sha256(roll_entry.artifact_raw),
+    )
+
+    result = selector.build_continuous_event_candidate_selection(
+        verified_daily_artifact=built,
+        predecessor_monthly_target=predecessor,
+        predecessor_terminal=_terminal(
+            predecessor,
+            exact_contracts=previous_contracts,
+            execution_day=linked_entry.artifact["execution_day"],
+        ),
+    )
+    selection = selector.validate_continuous_event_selection(result.selection_raw)
+    candidate = selection["candidates"][0]
+
+    assert result.selected_trigger_kind == selector.ROLL_ONLY
+    assert selection["verified_daily_artifact_id"] == roll_entry.artifact["artifact_id"]
+    assert selection["observed_trigger_kinds"] == [selector.ROLL_ONLY]
+    assert selection["suppressed_trigger_kinds"] == []
+    assert [
+        row["product"] for row in candidate["targets"] if row["exact_contract_changed"]
+    ] == ["ag"]
+    assert all(
+        row["previous_target_quantity"] == row["target_quantity"]
+        for row in candidate["targets"]
+    )
+    event = selector.validate_continuous_event_candidate(
+        result.event_candidate_raw,
+        expected_selection_raw=result.selection_raw,
+    )
+    for payload in (selection, event):
+        assert payload["event_ready"] is False
+        assert payload["installable"] is False
+        assert payload["production_allowed"] is False
+        assert payload["live_trading_authorized"] is False
+        assert payload["countable_forward"] is False
+        assert payload["official_forward_claimed"] is False
+        assert payload["dispatch_authorized"] is False
+        assert payload["order_authorized"] is False
+        assert payload["position_mutation_authorized"] is False
+        assert payload["authority"] == false_authority()
 
 
 def test_pure_builder_roll_only_preserves_quantities_and_daily_contract_projection(
@@ -478,21 +653,38 @@ def test_unverified_v1_daily_detector_is_never_consumed() -> None:
         )
 
 
-def test_monthly_contract_map_must_equal_verified_daily_current_map(
+def test_monthly_economic_contract_map_never_overrides_daily_routing_map(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     daily = _daily(changed_products=())
     raw = _patch_daily(monkeypatch, daily)
-    wrong = _contracts("2611")
+    monthly_contracts = _contracts("2611")
 
-    with pytest.raises(
-        selector.ContinuousEventSelectorError,
-        match="do not match verified daily PIT main",
-    ):
-        selector.build_continuous_event_candidate_selection(
-            verified_daily_artifact=raw,
-            monthly_candidate=_target(contracts=wrong),
+    result = selector.build_continuous_event_candidate_selection(
+        verified_daily_artifact=raw,
+        monthly_candidate=_target(contracts=monthly_contracts),
+    )
+    selection = selector.validate_continuous_event_selection(result.selection_raw)
+    candidate = selection["candidates"][0]
+
+    assert selection["observed_trigger_kinds"] == [selector.MONTHLY_REBALANCE]
+    assert selection["suppressed_trigger_kinds"] == []
+    assert candidate["monthly_target_exact_contract_map_sha256"] == (
+        selector._contract_map_sha(monthly_contracts)
+    )
+    assert candidate["exact_contract_map_sha256"] == selector._contract_map_sha(
+        {row["product"]: row["exact_contract"] for row in daily["mains"]}
+    )
+    assert all(
+        row["monthly_target_exact_contract"] == monthly_contracts[row["product"]]
+        and row["exact_contract"]
+        == next(
+            daily_row["exact_contract"]
+            for daily_row in daily["mains"]
+            if daily_row["product"] == row["product"]
         )
+        for row in candidate["targets"]
+    )
 
 
 def test_selection_and_event_tampering_fail_closed(
@@ -520,6 +712,165 @@ def test_selection_and_event_tampering_fail_closed(
             canonical_json_line(event),
             expected_selection_raw=result.selection_raw,
         )
+
+
+def test_selection_rejects_out_of_contract_quantity_after_complete_rehash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    daily = _daily(changed_products=())
+    result = selector.build_continuous_event_candidate_selection(
+        verified_daily_artifact=_patch_daily(monkeypatch, daily),
+        monthly_candidate=_target(),
+    )
+    selection = json.loads(result.selection_raw)
+    candidate = selection["candidates"][0]
+    candidate["targets"][0]["target_quantity"] = selector.MAX_ABS_TARGET_QUANTITY + 1
+    quantities = {
+        row["product"]: row["target_quantity"] for row in candidate["targets"]
+    }
+    candidate["quantity_vector_sha256"] = selector._quantity_vector_sha(quantities)
+    candidate["candidate_id"] = selector._candidate_id(candidate)
+
+    with pytest.raises(
+        selector.ContinuousEventSelectorError,
+        match="candidate quantity is invalid",
+    ):
+        selector.validate_continuous_event_selection(_fully_rehash_selection(selection))
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("event_candidate_id", "continuous-event-" + "9" * 64),
+        ("event_candidate_raw_sha256", "8" * 64),
+    ],
+)
+def test_selection_rejects_event_identity_field_tamper_after_complete_rehash(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    replacement: str,
+) -> None:
+    daily = _daily(changed_products=())
+    result = selector.build_continuous_event_candidate_selection(
+        verified_daily_artifact=_patch_daily(monkeypatch, daily),
+        monthly_candidate=_target(),
+    )
+    selection = json.loads(result.selection_raw)
+    selection[field] = replacement
+
+    with pytest.raises(
+        selector.ContinuousEventSelectorError,
+        match="selection event candidate binding mismatch",
+    ):
+        selector.validate_continuous_event_selection(_fully_rehash_selection(selection))
+
+
+def test_selection_rejects_joint_event_identity_cross_splice_after_complete_rehash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    daily = _daily(changed_products=())
+    built_daily = _patch_daily(monkeypatch, daily)
+    first = selector.build_continuous_event_candidate_selection(
+        verified_daily_artifact=built_daily,
+        monthly_candidate=_target(),
+    )
+    second = selector.build_continuous_event_candidate_selection(
+        verified_daily_artifact=built_daily,
+        monthly_candidate=_target(
+            quantities={
+                product: index + 1 for index, product in enumerate(frozen.PRODUCTS)
+            }
+        ),
+    )
+    selection = json.loads(first.selection_raw)
+    selection["event_candidate_id"] = second.event_candidate_id
+    selection["event_candidate_raw_sha256"] = sha256(second.event_candidate_raw)
+
+    with pytest.raises(
+        selector.ContinuousEventSelectorError,
+        match="selection event candidate binding mismatch",
+    ):
+        selector.validate_continuous_event_selection(_fully_rehash_selection(selection))
+
+
+def test_no_event_selection_rejects_invalid_daily_artifact_id_after_complete_rehash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = selector.build_continuous_event_candidate_selection(
+        verified_daily_artifact=_patch_daily(
+            monkeypatch,
+            _daily(changed_products=()),
+        ),
+    )
+    selection = json.loads(result.selection_raw)
+    assert selection["candidates"] == []
+    selection["verified_daily_artifact_id"] = None
+
+    with pytest.raises(
+        selector.ContinuousEventSelectorError,
+        match="selection daily artifact ID is invalid",
+    ):
+        selector.validate_continuous_event_selection(_fully_rehash_selection(selection))
+
+
+def test_roll_only_rejects_genesis_continuity_after_complete_rehash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    daily = _daily(changed_products=("ag",))
+    predecessor = _target(execution_day="2026-07-01")
+    previous_contracts = {
+        row["product"]: row["previous_exact_contract"] for row in daily["mains"]
+    }
+    result = selector.build_continuous_event_candidate_selection(
+        verified_daily_artifact=_patch_daily(monkeypatch, daily),
+        predecessor_monthly_target=predecessor,
+        predecessor_terminal=_terminal(
+            predecessor,
+            exact_contracts=previous_contracts,
+        ),
+    )
+    selection = json.loads(result.selection_raw)
+    candidate = selection["candidates"][0]
+    candidate["verified_daily_continuity_mode"] = "GENESIS_STATIC_CORE_EQUAL"
+    candidate["candidate_id"] = selector._candidate_id(candidate)
+
+    with pytest.raises(
+        selector.ContinuousEventSelectorError,
+        match="ROLL_ONLY contract mismatch",
+    ):
+        selector.validate_continuous_event_selection(_fully_rehash_selection(selection))
+
+
+@pytest.mark.parametrize(
+    "audit_patch",
+    [
+        {"suppressed_trigger_kinds": []},
+        {"monthly_precedence_applied": False},
+        {"monthly_precedence_applied": 1},
+        {
+            "observed_trigger_kinds": [selector.MONTHLY_REBALANCE],
+            "suppressed_trigger_kinds": [],
+            "monthly_precedence_applied": False,
+        },
+    ],
+)
+def test_monthly_roll_suppression_audit_is_derived_after_complete_rehash(
+    monkeypatch: pytest.MonkeyPatch,
+    audit_patch: dict,
+) -> None:
+    daily = _daily(changed_products=("ag",))
+    result = selector.build_continuous_event_candidate_selection(
+        verified_daily_artifact=_patch_daily(monkeypatch, daily),
+        monthly_candidate=_target(),
+    )
+    selection = json.loads(result.selection_raw)
+    selection.update(audit_patch)
+
+    with pytest.raises(
+        selector.ContinuousEventSelectorError,
+        match="selection trigger audit mismatch",
+    ):
+        selector.validate_continuous_event_selection(_fully_rehash_selection(selection))
 
 
 @pytest.mark.parametrize(
