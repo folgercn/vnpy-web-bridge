@@ -42,6 +42,15 @@ from shared.commodity_execution.v1 import (
 )
 from shared.trust_contracts.v1 import canonical_json_line, sha256_bytes
 
+from .active_plan_resume import (
+    TERMINAL_INTENT_STATES,
+    classify_active_plan_intents,
+    expected_send_intent_bindings,
+    require_active_resume_boundary,
+    require_first_send_snapshot_closure,
+    require_snapshot_order_ownership,
+    require_snapshot_state_compatibility,
+)
 from .errors import (
     AuthorityRejected,
     GatewayUnavailable,
@@ -361,6 +370,7 @@ class FinalExecutionRuntime:
         self.allowed_scope = dict(allowed_scope) if allowed_scope is not None else None
         self.allow_simnow_execution = bool(allow_simnow_execution)
         self.allow_trusted_keyless_simnow = bool(allow_trusted_keyless_simnow)
+        self._active_plan_resume_lock = RLock()
         if (
             not isinstance(max_order_volume, int)
             or isinstance(max_order_volume, bool)
@@ -789,7 +799,7 @@ class FinalExecutionRuntime:
             return
         self.orchestrator.fail_closed_halt(reason)
 
-    def _finalization_evidence(self) -> dict[str, str] | None:
+    def _finalization_evidence(self) -> dict[str, Any] | None:
         """Re-verify runtime-only proof before a reconcile can complete a plan."""
 
         state = self.orchestrator.repository.snapshot()
@@ -825,6 +835,14 @@ class FinalExecutionRuntime:
             or preview_receipt.artifact_sha256 != proof["preview_artifact_sha256"]
         ):
             raise PlanRejected("SIMNOW preview custody evidence changed after restart")
+        expected_bindings = expected_send_intent_bindings(
+            plan,
+            account_scope=self.orchestrator.scope,
+            environment=self.orchestrator.environment,
+        )
+        # Existing intent rows are checked before reconciliation reads the
+        # gateway, while a legitimately missing child remains PENDING.
+        classify_active_plan_intents(state, plan=plan, bindings=expected_bindings)
         return {
             "plan_id": plan.plan_id,
             "plan_hash": plan.plan_hash,
@@ -843,7 +861,201 @@ class FinalExecutionRuntime:
             "preview_receipt_sha256": str(proof["preview_receipt_sha256"]),
             "preview_artifact_id": str(proof["preview_artifact_id"]),
             "preview_artifact_sha256": str(proof["preview_artifact_sha256"]),
+            "expected_send_intent_bindings": [
+                {
+                    **{
+                        field: binding[field]
+                        for field in (
+                            "intent_id",
+                            "idempotency_key",
+                            "request_hash",
+                            "receipt_id",
+                            "receipt_hash",
+                        )
+                    },
+                    "action": "send",
+                    "target_intent_id": None,
+                    "plan_id": plan.plan_id,
+                    "plan_hash": plan.plan_hash,
+                }
+                for binding in expected_bindings
+            ],
         }
+
+    def resume_active_plan(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        """Resume only the immutable deterministic children of one ACTIVE plan.
+
+        Existing children are never handed back to ``send_plan_order``: a
+        terminal child is reused, and every nonterminal child is query-only.
+        Only an absent deterministic child can take the canonical first-send
+        path.  Current v2 plans do not carry the required formal quote proof,
+        so that missing-child branch remains fail-closed for v2.
+        """
+
+        # Local imports avoid making the core execution package depend on the
+        # HTTP application at import time while still enforcing the same strict
+        # Control/Execution DTO for direct runtime callers.
+        from app.schemas.control_execution import (
+            ExecutionActivePlanResumeProjection,
+            ExecutionActivePlanResumeRequest,
+            ExecutionLeaderTokenProjection,
+        )
+
+        parsed = ExecutionActivePlanResumeRequest.from_mapping(request).as_dict()
+        leader = ExecutionLeaderTokenProjection.from_mapping(parsed["leader_token"])
+        token = leader.token_dict()
+        terminal_states = TERMINAL_INTENT_STATES
+        with self._active_plan_resume_lock:
+            plan = self._plan(parsed["plan_id"], plan_hash=parsed["plan_hash"])
+            if leader.scope != self.orchestrator.scope:
+                raise PlanRejected("resume leader token scope mismatches Execution")
+            self.orchestrator.fencer.admission(
+                leader_epoch=leader.epoch,
+                fencing_token=leader.fencing_token,
+                token=token,
+            )
+            snapshot = parsed["reconciliation_snapshot"]
+            state = self.orchestrator.repository.snapshot()
+            require_active_resume_boundary(
+                state,
+                plan=plan,
+                snapshot=snapshot,
+                account_scope=self.orchestrator.scope,
+                environment=self.orchestrator.environment,
+            )
+            bindings = expected_send_intent_bindings(
+                plan,
+                account_scope=self.orchestrator.scope,
+                environment=self.orchestrator.environment,
+            )
+            finalization_proof = self._finalization_evidence()
+            if (
+                finalization_proof is None
+                or finalization_proof["plan_id"] != plan.plan_id
+                or finalization_proof["plan_hash"] != plan.plan_hash
+                or [
+                    row["intent_id"]
+                    for row in finalization_proof["expected_send_intent_bindings"]
+                ]
+                != [binding["intent_id"] for binding in bindings]
+            ):
+                raise PlanRejected(
+                    "ACTIVE target plan lacks exact immutable custody binding"
+                )
+            existing = classify_active_plan_intents(state, plan=plan, bindings=bindings)
+            require_snapshot_order_ownership(snapshot, existing=existing)
+            missing = [
+                binding
+                for binding in bindings
+                if existing[binding["intent_id"]] is None
+            ]
+            require_snapshot_state_compatibility(
+                state,
+                snapshot,
+                expected_intent_ids={binding["intent_id"] for binding in bindings},
+                has_missing_intent=bool(missing),
+            )
+            if missing and plan.raw["schema_version"] == (
+                KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION
+            ):
+                raise PlanRejected(
+                    "TargetPlan v2 missing intent has no formal quote proof; first send is blocked"
+                )
+            if missing:
+                require_first_send_snapshot_closure(state, snapshot)
+
+            actions: dict[str, str] = {}
+            effective_states: dict[str, str] = {}
+            for binding in bindings:
+                intent_id = binding["intent_id"]
+                raw = existing[intent_id]
+                current = self.orchestrator.repository.snapshot()
+                active = current.get("plan", {})
+                if (
+                    active.get("state") != "ACTIVE"
+                    or active.get("plan_id") != plan.plan_id
+                    or active.get("plan_hash") != plan.plan_hash
+                ):
+                    raise PlanRejected("ACTIVE target plan changed during resume")
+                self.orchestrator.fencer.admission(
+                    leader_epoch=leader.epoch,
+                    fencing_token=leader.fencing_token,
+                    token=token,
+                )
+                if raw is None:
+                    result = self.send_plan_order(
+                        plan.plan_id, binding["order_ref"], token=token
+                    )
+                    actions[intent_id] = "FIRST_SEND"
+                    effective_states[intent_id] = str(result.get("state", ""))
+                elif raw.get("state") in terminal_states:
+                    actions[intent_id] = "TERMINAL_REUSED"
+                    effective_states[intent_id] = str(raw["state"])
+                elif raw.get("state") in {
+                    "PERSISTED",
+                    "SUBMITTED",
+                    "UNKNOWN_OUTCOME",
+                }:
+                    result = self.orchestrator.query_intent(intent_id)
+                    actions[intent_id] = "QUERY_ONLY"
+                    queried_state = str(result.get("state", "UNKNOWN_OUTCOME")).upper()
+                    effective_states[intent_id] = (
+                        "UNKNOWN_OUTCOME"
+                        if queried_state in {"UNKNOWN", "UNKNOWN_OUTCOME", ""}
+                        else queried_state
+                    )
+                else:
+                    actions[intent_id] = "REUSED"
+                    effective_states[intent_id] = str(raw["state"])
+
+            final_state = self.orchestrator.repository.snapshot()
+            final_existing = classify_active_plan_intents(
+                final_state, plan=plan, bindings=bindings
+            )
+            rows: list[dict[str, str]] = []
+            for binding in bindings:
+                intent_id = binding["intent_id"]
+                raw = final_existing[intent_id]
+                if raw is None:
+                    raise PlanRejected(
+                        "deterministic send intent disappeared during resume"
+                    )
+                durable_state = str(raw["state"])
+                row_state = effective_states.get(intent_id, durable_state)
+                if durable_state in terminal_states:
+                    row_state = durable_state
+                rows.append(
+                    {
+                        "intent_id": intent_id,
+                        "state": row_state,
+                        "resume_action": actions[intent_id],
+                    }
+                )
+            terminal_count = sum(row["state"] in terminal_states for row in rows)
+            preimage = {
+                "schema_version": "web_bridge_execution_active_plan_resume_v1",
+                "plan_id": plan.plan_id,
+                "plan_hash": plan.plan_hash,
+                "state": ("TERMINAL" if terminal_count == len(bindings) else "ACTIVE"),
+                "expected_intent_count": len(bindings),
+                "terminal_intent_count": terminal_count,
+                "queried_intent_count": sum(
+                    action == "QUERY_ONLY" for action in actions.values()
+                ),
+                "new_intent_count": sum(
+                    action == "FIRST_SEND" for action in actions.values()
+                ),
+                "reused_intent_count": sum(
+                    action != "FIRST_SEND" for action in actions.values()
+                ),
+                "intents": rows,
+                "production_allowed": False,
+                "live_trading_authorized": False,
+                "countable_forward": False,
+            }
+            return ExecutionActivePlanResumeProjection.from_mapping(
+                {**preimage, "resume_sha256": sha256_json(preimage)}
+            ).as_dict()
 
     def process_command(
         self, command: CommandEnvelope | Mapping[str, Any]
@@ -999,15 +1211,17 @@ class FinalExecutionRuntime:
             raise AuthorityRejected("SIMNOW execution is locally disabled")
         plan = self._plan(plan_id)
         order = plan.order(order_ref)
-        intent_seed = sha256_json(
-            {
-                "plan_id": plan.plan_id,
-                "plan_hash": plan.plan_hash,
-                "order_ref": order.reference,
-            }
+        binding = next(
+            item
+            for item in expected_send_intent_bindings(
+                plan,
+                account_scope=self.orchestrator.scope,
+                environment=self.orchestrator.environment,
+            )
+            if item["order_ref"] == order.reference
         )
-        idempotency_key = f"send-{intent_seed[:32]}"
-        intent_id = f"intent-{intent_seed[:24]}"
+        idempotency_key = binding["idempotency_key"]
+        intent_id = binding["intent_id"]
         status = self.orchestrator.status()
         # A halted lifecycle must never admit a *new* send.  The exact same
         # deterministic intent is still handed to the core, which returns its

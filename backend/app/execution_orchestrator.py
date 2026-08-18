@@ -31,6 +31,7 @@ from .execution import (
     GatewayUnavailable,
     IdempotencyConflictError,
     InMemoryExecutionRepository,
+    MutationRejected,
     NullGateway,
     PlanRejected,
     RepositoryUnavailableError,
@@ -40,6 +41,7 @@ from .execution.errors import SnapshotRejected
 from .execution.final_runtime import CustodyReadClient
 from .execution.models import validate_identifier
 from .execution.readiness import GatewayReadinessProbe
+from .schemas.control_execution import ExecutionActivePlanResumeRequest
 
 
 def _test_mode_from_env() -> bool:
@@ -539,6 +541,82 @@ def create_app(
                 status_code=503,
                 detail={
                     "code": "EXECUTION_RECONCILIATION_SNAPSHOT_UNAVAILABLE",
+                    "message": str(exc),
+                    "retryable": True,
+                },
+            ) from exc
+
+    @app.post("/internal/v1/active-plans/resume")
+    def active_plan_resume(payload: dict[str, Any], request: Request) -> dict[str, Any]:
+        """Resume an exact installed ACTIVE plan without accepting order input."""
+
+        authenticate(request)
+        if request.headers.get("X-Control-Service", "") != "control-api":
+            raise HTTPException(
+                status_code=403, detail="canonical control service header required"
+            )
+        target = require_instance()
+        if not isinstance(target, FinalExecutionRuntime):
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "EXECUTION_ACTIVE_PLAN_RESUME_RUNTIME_UNAVAILABLE",
+                    "message": "ACTIVE plan resume requires final Execution runtime",
+                    "retryable": False,
+                },
+            )
+        try:
+            parsed = ExecutionActivePlanResumeRequest.from_mapping(payload)
+        except (TypeError, ValueError, CommandValidationError) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "EXECUTION_ACTIVE_PLAN_RESUME_REQUEST_INVALID",
+                    "message": str(exc),
+                    "retryable": False,
+                },
+            ) from exc
+        try:
+            return target.resume_active_plan(parsed.as_dict())
+        except (
+            FencingError,
+            PlanRejected,
+            AuthorityRejected,
+            MutationRejected,
+            ExpectedVersionConflict,
+            IdempotencyConflictError,
+        ) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "EXECUTION_ACTIVE_PLAN_RESUME_REJECTED",
+                    "message": str(exc),
+                    "retryable": False,
+                },
+            ) from exc
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "EXECUTION_ACTIVE_PLAN_RESUME_RESPONSE_INVALID",
+                    "message": str(exc),
+                    "retryable": False,
+                },
+            ) from exc
+        except (GatewayTimeout, GatewayUnavailable) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "EXECUTION_ACTIVE_PLAN_RESUME_OUTCOME_UNKNOWN",
+                    "message": str(exc),
+                    "retryable": True,
+                },
+            ) from exc
+        except RepositoryUnavailableError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "EXECUTION_ACTIVE_PLAN_RESUME_REPOSITORY_UNAVAILABLE",
                     "message": str(exc),
                     "retryable": True,
                 },
