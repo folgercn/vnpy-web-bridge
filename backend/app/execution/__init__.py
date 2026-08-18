@@ -7,6 +7,7 @@ Execution Orchestrator state owner.
 """
 
 from .errors import (
+    ActiveResumeFreshSnapshotRequired,
     AuthorityRejected,
     ClockRollbackError,
     CommandValidationError,
@@ -24,6 +25,9 @@ from .errors import (
     RepositoryUnavailableError,
     RestartReconciliationRequired,
     SnapshotRejected,
+    StartQuoteEvidenceInvalid,
+    StartQuoteReplanRequired,
+    StartQuoteSourceUnavailable,
     UnknownCommandError,
     UnknownOutcomeError,
 )
@@ -79,6 +83,7 @@ def __getattr__(name: str):
 
 __all__ = [
     "Actor",
+    "ActiveResumeFreshSnapshotRequired",
     "AuthorityRejected",
     "AuthorityState",
     "BrokerState",
@@ -123,6 +128,9 @@ __all__ = [
     "SendIntent",
     "SingleLeaderFencer",
     "SnapshotRejected",
+    "StartQuoteEvidenceInvalid",
+    "StartQuoteReplanRequired",
+    "StartQuoteSourceUnavailable",
     "TargetPlanRepository",
     "UnknownCommandError",
     "UnknownOutcomeError",

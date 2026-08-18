@@ -5,9 +5,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from shared.commodity_execution import TargetPlan, sha256_json
+from shared.commodity_execution import (
+    KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
+    TargetPlan,
+    sha256_json,
+)
 
 from .errors import PlanRejected
+from .start_quote_proof import validate_execution_start_quote_proof
 
 TERMINAL_INTENT_STATES = frozenset({"TERMINAL", "RECONCILED", "CANCELLED"})
 RESUMABLE_INTENT_STATES = frozenset(
@@ -64,7 +69,7 @@ def expected_send_intent_bindings(
 
 
 def _require_active_start_receipt(
-    state: Mapping[str, Any], *, plan_id: str, plan_hash: str
+    state: Mapping[str, Any], *, plan: TargetPlan
 ) -> None:
     expected_plan = dict(state["plan"])
     matches = [
@@ -77,11 +82,20 @@ def _require_active_start_receipt(
         and receipt["result"].get("accepted") is True
         and receipt["result"].get("plan") == expected_plan
         and expected_plan.get("state") == "ACTIVE"
-        and expected_plan.get("plan_id") == plan_id
-        and expected_plan.get("plan_hash") == plan_hash
+        and expected_plan.get("plan_id") == plan.plan_id
+        and expected_plan.get("plan_hash") == plan.plan_hash
     ]
     if len(matches) != 1:
         raise PlanRejected("ACTIVE target plan lacks one exact accepted start receipt")
+    if plan.raw["schema_version"] == KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION:
+        try:
+            validate_execution_start_quote_proof(
+                matches[0]["result"].get("execution_start_quote_proof"), plan=plan
+            )
+        except ValueError as exc:
+            raise PlanRejected(
+                "ACTIVE target plan start quote proof is invalid"
+            ) from exc
 
 
 def require_active_resume_boundary(
@@ -99,7 +113,7 @@ def require_active_resume_boundary(
         or active.get("plan_hash") != plan.plan_hash
     ):
         raise PlanRejected("target plan is not the exact ACTIVE plan")
-    _require_active_start_receipt(state, plan_id=plan.plan_id, plan_hash=plan.plan_hash)
+    _require_active_start_receipt(state, plan=plan)
     binding = snapshot["state_binding"]
     if (
         snapshot["account_scope"] != account_scope
@@ -141,6 +155,21 @@ def _existing_intent(
         raise PlanRejected("deterministic send-intent binding mismatches")
     if raw.get("state") not in RESUMABLE_INTENT_STATES:
         raise PlanRejected("deterministic send-intent state is invalid")
+    if plan.raw["schema_version"] == KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION:
+        try:
+            quote_proof = validate_execution_start_quote_proof(
+                raw.get("execution_start_quote_proof"),
+                plan=plan,
+                expected_order_refs=(binding["order_ref"],),
+            )
+        except ValueError as exc:
+            raise PlanRejected(
+                "deterministic send-intent start quote proof is invalid"
+            ) from exc
+        if raw.get("execution_start_quote_proof_sha256") != quote_proof["proof_sha256"]:
+            raise PlanRejected(
+                "deterministic send-intent start quote proof hash mismatches"
+            )
     return raw
 
 

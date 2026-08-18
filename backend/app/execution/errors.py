@@ -63,6 +63,18 @@ class PlanRejected(MutationRejected):
     """The requested plan is not the durable active plan."""
 
 
+class StartQuoteReplanRequired(PlanRejected):
+    """Fresh protected price no longer matches the immutable plan."""
+
+
+class StartQuoteEvidenceInvalid(PlanRejected):
+    """Formal quote or persisted start-proof evidence is invalid."""
+
+
+class ActiveResumeFreshSnapshotRequired(MutationRejected):
+    """A query advanced durable state; resume needs newly bound account facts."""
+
+
 class UnknownOutcomeError(MutationRejected):
     """A previous timeout/connection failure is unresolved."""
 
@@ -77,6 +89,10 @@ class GatewayTimeout(ExecutionError):
 
 class GatewayUnavailable(ExecutionError):
     """The gateway could not be reached and no mutation was admitted."""
+
+
+class StartQuoteSourceUnavailable(GatewayUnavailable):
+    """Formal quote source is unavailable before any mutation admission."""
 
 
 class GatewayConfigurationError(GatewayUnavailable):

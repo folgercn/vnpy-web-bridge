@@ -16,6 +16,7 @@ from urllib.request import Request as UrlRequest
 from shared.commodity_execution import TRUSTED_KEYLESS_SIMNOW_SCOPE
 
 from .execution import (
+    ActiveResumeFreshSnapshotRequired,
     AuthorityRejected,
     CommandEnvelope,
     CommandValidationError,
@@ -35,6 +36,9 @@ from .execution import (
     NullGateway,
     PlanRejected,
     RepositoryUnavailableError,
+    StartQuoteEvidenceInvalid,
+    StartQuoteReplanRequired,
+    StartQuoteSourceUnavailable,
     VnpyWindowsGateway,
 )
 from .execution.errors import SnapshotRejected
@@ -490,6 +494,37 @@ def create_app(
             assert_http_fence(require_core(), envelope)
             response = require_instance().process_command(envelope)
             return dict(response)
+        except StartQuoteSourceUnavailable as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "EXECUTION_START_QUOTE_SOURCE_UNAVAILABLE",
+                    "message": str(exc),
+                    "retryable": True,
+                    "mutation_admitted": False,
+                },
+            ) from exc
+        except StartQuoteReplanRequired as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "REPLAN_REQUIRED",
+                    "message": str(exc),
+                    "retryable": False,
+                    "mutation_admitted": False,
+                },
+            ) from exc
+        except StartQuoteEvidenceInvalid as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "EXECUTION_START_QUOTE_EVIDENCE_INVALID",
+                    "message": str(exc),
+                    "retryable": False,
+                    "mutation_admitted": False,
+                    "action": "STOP",
+                },
+            ) from exc
         except (ExpectedVersionConflict, IdempotencyConflictError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except (
@@ -600,6 +635,49 @@ def create_app(
             ) from exc
         try:
             return target.resume_active_plan(parsed.as_dict())
+        except StartQuoteSourceUnavailable as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "EXECUTION_START_QUOTE_SOURCE_UNAVAILABLE",
+                    "message": str(exc),
+                    "retryable": True,
+                    "mutation_admitted": False,
+                },
+            ) from exc
+        except StartQuoteReplanRequired as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "REPLAN_REQUIRED",
+                    "message": str(exc),
+                    "retryable": False,
+                    "mutation_admitted": False,
+                },
+            ) from exc
+        except StartQuoteEvidenceInvalid as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "EXECUTION_START_QUOTE_EVIDENCE_INVALID",
+                    "message": str(exc),
+                    "retryable": False,
+                    "mutation_admitted": False,
+                    "action": "STOP",
+                },
+            ) from exc
+        except ActiveResumeFreshSnapshotRequired as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "EXECUTION_ACTIVE_PLAN_RESUME_FRESH_SNAPSHOT_REQUIRED",
+                    "message": str(exc),
+                    "retryable": True,
+                    "order_mutation_admitted": False,
+                    "repository_mutated": True,
+                    "retry_with_fresh_snapshot_only": True,
+                },
+            ) from exc
         except (
             FencingError,
             PlanRejected,

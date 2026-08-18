@@ -16,6 +16,7 @@ import os
 import stat
 import tempfile
 from collections.abc import Callable, Mapping
+from datetime import datetime
 from pathlib import Path
 from threading import RLock
 from typing import Any, Protocol
@@ -33,6 +34,7 @@ from shared.artifact_contracts.v1 import (
 from shared.commodity_execution.v1 import (
     KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
     KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+    KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
     TARGET_PLAN_SCHEMA_VERSION,
     CommodityExecutionContractError,
     TargetPlan,
@@ -56,15 +58,34 @@ from .active_plan_resume import (
     require_snapshot_state_compatibility,
 )
 from .errors import (
+    ActiveResumeFreshSnapshotRequired,
     AuthorityRejected,
     GatewayConfigurationError,
     GatewayUnavailable,
     MutationRejected,
     PlanRejected,
     RepositoryUnavailableError,
+    StartQuoteEvidenceInvalid,
+    StartQuoteReplanRequired,
+    StartQuoteSourceUnavailable,
+)
+from .formal_tick_reader import (
+    FormalTickBinding,
+    FormalTickEvidenceInvalid,
+    FormalTickReadError,
+    FormalTickRequest,
+    FormalTickSourceUnavailable,
+    read_formal_tick_bindings,
 )
 from .models import CommandEnvelope, LeaderToken, validate_identifier
 from .orchestrator import CommandResponse, ExecutionOrchestrator
+from .start_quote_proof import (
+    ExecutionStartQuotePriceIncompatible,
+    ExecutionStartQuoteProofError,
+    build_execution_start_quote_proof,
+    quote_proof_for_order,
+    validate_execution_start_quote_proof,
+)
 
 
 class TargetPlanRepository(Protocol):
@@ -374,6 +395,10 @@ class FinalExecutionRuntime:
         allow_simnow_execution: bool = False,
         allow_trusted_keyless_simnow: bool = False,
         max_order_volume: int = 1,
+        formal_tick_bindings_reader: Callable[
+            [tuple[FormalTickRequest, ...]], tuple[FormalTickBinding, ...]
+        ] = read_formal_tick_bindings,
+        quote_clock: Callable[[], datetime] = utc_now,
     ) -> None:
         if orchestrator.environment.upper() != "SIMNOW":
             raise ValueError("final execution runtime requires SIMNOW environment")
@@ -391,6 +416,10 @@ class FinalExecutionRuntime:
         self.allowed_scope = dict(allowed_scope) if allowed_scope is not None else None
         self.allow_simnow_execution = bool(allow_simnow_execution)
         self.allow_trusted_keyless_simnow = bool(allow_trusted_keyless_simnow)
+        if not callable(formal_tick_bindings_reader) or not callable(quote_clock):
+            raise ValueError("final execution formal tick reader/clock is invalid")
+        self.formal_tick_bindings_reader = formal_tick_bindings_reader
+        self.quote_clock = quote_clock
         self._active_plan_resume_lock = RLock()
         if (
             not isinstance(max_order_volume, int)
@@ -481,6 +510,7 @@ class FinalExecutionRuntime:
                 in {
                     KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
                     KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+                    KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
                 }
                 else VerifiedCustodyReceipt.from_mapping(raw_receipt)
             )
@@ -1219,9 +1249,48 @@ class FinalExecutionRuntime:
 
             actions: dict[str, str] = {}
             effective_states: dict[str, str] = {}
-            for binding in bindings:
-                intent_id = binding["intent_id"]
-                raw = existing[intent_id]
+
+            missing_quote_proof: dict[str, Any] | None = None
+            if (
+                missing
+                and plan.raw["schema_version"] == KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION
+            ):
+                # Missing-child quote admission must be fully read-only.  Do
+                # not query an existing intent (which can advance durable
+                # reconciliation state) until every fresh proof required by
+                # this resume is materialized and validated.
+                missing_quote_proof = self._fresh_start_quote_proof(
+                    plan,
+                    order_refs=tuple(row["order_ref"] for row in missing),
+                )
+                post_quote_state = self.orchestrator.repository.snapshot()
+                require_active_resume_boundary(
+                    post_quote_state,
+                    plan=plan,
+                    snapshot=snapshot,
+                    account_scope=self.orchestrator.scope,
+                    environment=self.orchestrator.environment,
+                )
+                post_quote_existing = classify_active_plan_intents(
+                    post_quote_state, plan=plan, bindings=bindings
+                )
+                if {
+                    binding["intent_id"]
+                    for binding in bindings
+                    if post_quote_existing[binding["intent_id"]] is None
+                } != {binding["intent_id"] for binding in missing}:
+                    raise PlanRejected(
+                        "deterministic intent set changed during fresh quote read"
+                    )
+                require_snapshot_state_compatibility(
+                    post_quote_state,
+                    snapshot,
+                    expected_intent_ids={binding["intent_id"] for binding in bindings},
+                    has_missing_intent=True,
+                )
+                require_first_send_snapshot_closure(post_quote_state, snapshot)
+
+            def require_current_active() -> None:
                 current = self.orchestrator.repository.snapshot()
                 active = current.get("plan", {})
                 if (
@@ -1235,13 +1304,14 @@ class FinalExecutionRuntime:
                     fencing_token=leader.fencing_token,
                     token=token,
                 )
+
+            for binding in bindings:
+                intent_id = binding["intent_id"]
+                raw = existing[intent_id]
                 if raw is None:
-                    result = self.send_plan_order(
-                        plan.plan_id, binding["order_ref"], token=token
-                    )
-                    actions[intent_id] = "FIRST_SEND"
-                    effective_states[intent_id] = str(result.get("state", ""))
-                elif raw.get("state") in terminal_states:
+                    continue
+                require_current_active()
+                if raw.get("state") in terminal_states:
                     actions[intent_id] = "TERMINAL_REUSED"
                     effective_states[intent_id] = str(raw["state"])
                 elif raw.get("state") in {
@@ -1260,6 +1330,51 @@ class FinalExecutionRuntime:
                 else:
                     actions[intent_id] = "REUSED"
                     effective_states[intent_id] = str(raw["state"])
+
+            if missing and any(action == "QUERY_ONLY" for action in actions.values()):
+                raise ActiveResumeFreshSnapshotRequired(
+                    "existing intent query advanced durable state; obtain a fresh reconciliation snapshot"
+                )
+
+            if missing:
+                current_before_missing = self.orchestrator.repository.snapshot()
+                require_active_resume_boundary(
+                    current_before_missing,
+                    plan=plan,
+                    snapshot=snapshot,
+                    account_scope=self.orchestrator.scope,
+                    environment=self.orchestrator.environment,
+                )
+                current_existing = classify_active_plan_intents(
+                    current_before_missing, plan=plan, bindings=bindings
+                )
+                if {
+                    binding["intent_id"]
+                    for binding in bindings
+                    if current_existing[binding["intent_id"]] is None
+                } != {binding["intent_id"] for binding in missing}:
+                    raise PlanRejected(
+                        "deterministic intent set changed before first send"
+                    )
+                require_snapshot_state_compatibility(
+                    current_before_missing,
+                    snapshot,
+                    expected_intent_ids={binding["intent_id"] for binding in bindings},
+                    has_missing_intent=True,
+                )
+                require_first_send_snapshot_closure(current_before_missing, snapshot)
+                for binding in missing:
+                    require_current_active()
+                    result = self.send_plan_order(
+                        plan.plan_id,
+                        binding["order_ref"],
+                        token=token,
+                        execution_start_quote_proof=missing_quote_proof,
+                    )
+                    actions[binding["intent_id"]] = "FIRST_SEND"
+                    effective_states[binding["intent_id"]] = str(
+                        result.get("state", "")
+                    )
 
             final_state = self.orchestrator.repository.snapshot()
             final_existing = classify_active_plan_intents(
@@ -1310,6 +1425,55 @@ class FinalExecutionRuntime:
                 {**preimage, "resume_sha256": sha256_json(preimage)}
             ).as_dict()
 
+    def _fresh_start_quote_proof(
+        self, plan: TargetPlan, *, order_refs: tuple[str, ...] | None = None
+    ) -> dict[str, Any]:
+        try:
+            return build_execution_start_quote_proof(
+                plan,
+                order_refs=order_refs,
+                reader=self.formal_tick_bindings_reader,
+                clock=self.quote_clock,
+            )
+        except ExecutionStartQuotePriceIncompatible as exc:
+            raise StartQuoteReplanRequired(str(exc)) from exc
+        except FormalTickSourceUnavailable as exc:
+            raise StartQuoteSourceUnavailable(str(exc)) from exc
+        except (
+            FormalTickEvidenceInvalid,
+            FormalTickReadError,
+            ExecutionStartQuoteProofError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise StartQuoteEvidenceInvalid(str(exc)) from exc
+
+    def _persisted_start_quote_proof(
+        self, envelope: CommandEnvelope, plan: TargetPlan
+    ) -> dict[str, Any] | None:
+        key = f"{envelope.actor.service}:{envelope.idempotency_key}"
+        receipt = self.orchestrator.repository.snapshot().get("receipts", {}).get(key)
+        if receipt is None:
+            return None
+        if (
+            not isinstance(receipt, Mapping)
+            or receipt.get("command_hash") != envelope.command_hash()
+            or receipt.get("status") != "COMPLETED"
+            or not isinstance(receipt.get("result"), Mapping)
+            or receipt["result"].get("accepted") is not True
+        ):
+            raise StartQuoteEvidenceInvalid(
+                "persisted start receipt does not bind exact accepted command"
+            )
+        try:
+            return validate_execution_start_quote_proof(
+                receipt["result"].get("execution_start_quote_proof"), plan=plan
+            )
+        except ValueError as exc:
+            raise StartQuoteEvidenceInvalid(
+                "persisted execution start quote proof is invalid"
+            ) from exc
+
     def process_command(
         self, command: CommandEnvelope | Mapping[str, Any]
     ) -> CommandResponse:
@@ -1356,6 +1520,18 @@ class FinalExecutionRuntime:
             plan = self._plan(
                 envelope.payload["plan_id"], plan_hash=envelope.payload["plan_hash"]
             )
+            persisted_quote_proof = (
+                self._persisted_start_quote_proof(envelope, plan)
+                if plan.raw["schema_version"] == KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION
+                else None
+            )
+            if persisted_quote_proof is not None:
+                response = self.orchestrator.process_command(
+                    envelope, start_evidence=persisted_quote_proof
+                )
+                return self._dispatch_accepted_start(
+                    response, plan=plan, quote_proof=persisted_quote_proof
+                )
             prior = self.orchestrator.repository.snapshot()
             expected_preview_id = f"preview-{plan.plan_hash[:16]}"
             try:
@@ -1408,39 +1584,99 @@ class FinalExecutionRuntime:
                 fencing_token=envelope.expected.fencing_token,
                 token=self.orchestrator.fencer.token,
             )
-            response = self.orchestrator.process_command(envelope)
-            if response.result.get("accepted") is True:
-                token = self.orchestrator.fencer.token
-                if (
-                    token is None
-                ):  # admission above prevents this; preserve fail-closed behaviour
-                    raise MutationRejected("SIMNOW runner lost its leader token")
-                for order in plan.orders:
-                    try:
-                        result = self.send_plan_order(
-                            plan.plan_id, order.reference, token=token
-                        )
-                    except Exception as exc:
-                        self._halt_runner_after_failure(
-                            f"SIMNOW runner order {order.reference} failed: {exc}"
-                        )
-                        raise
-                    if result.get("accepted") is not True or str(
-                        result.get("state", "")
-                    ).upper() not in {"SUBMITTED", "ACKNOWLEDGED"}:
-                        self._halt_runner_after_failure(
-                            f"SIMNOW runner order {order.reference} was not accepted"
-                        )
-                        raise MutationRejected(
-                            "SIMNOW runner order was rejected or has unknown outcome"
-                        )
-            return response
+            quote_proof = (
+                self._fresh_start_quote_proof(plan)
+                if plan.raw["schema_version"] == KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION
+                else None
+            )
+            response = self.orchestrator.process_command(
+                envelope, start_evidence=quote_proof
+            )
+            return self._dispatch_accepted_start(
+                response, plan=plan, quote_proof=quote_proof
+            )
         finalization_evidence = (
             self._finalization_evidence() if envelope.command == "reconcile" else None
         )
         return self.orchestrator.process_command(
             envelope, finalization_evidence=finalization_evidence
         )
+
+    def _dispatch_accepted_start(
+        self,
+        response: CommandResponse,
+        *,
+        plan: TargetPlan,
+        quote_proof: Mapping[str, Any] | None,
+    ) -> CommandResponse:
+        if response.result.get("accepted") is not True:
+            return response
+        token = self.orchestrator.fencer.token
+        if token is None:
+            raise MutationRejected("SIMNOW runner lost its leader token")
+        proof_for_missing = quote_proof
+        if (
+            response.reused
+            and plan.raw["schema_version"] == KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION
+        ):
+            state = self.orchestrator.repository.snapshot()
+            bindings = expected_send_intent_bindings(
+                plan,
+                account_scope=self.orchestrator.scope,
+                environment=self.orchestrator.environment,
+            )
+            missing_refs = tuple(
+                binding["order_ref"]
+                for binding in bindings
+                if state["intent_keys"].get(binding["idempotency_key"])
+                != binding["intent_id"]
+            )
+            if missing_refs:
+                proof_for_missing = self._fresh_start_quote_proof(
+                    plan, order_refs=missing_refs
+                )
+        for order in plan.orders:
+            dispatch_proof = proof_for_missing
+            if plan.raw["schema_version"] == KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION:
+                state = self.orchestrator.repository.snapshot()
+                binding = next(
+                    item
+                    for item in expected_send_intent_bindings(
+                        plan,
+                        account_scope=self.orchestrator.scope,
+                        environment=self.orchestrator.environment,
+                    )
+                    if item["order_ref"] == order.reference
+                )
+                existing_id = state["intent_keys"].get(binding["idempotency_key"])
+                existing = state["send_intents"].get(existing_id, {})
+                if (
+                    isinstance(existing, Mapping)
+                    and existing.get("execution_start_quote_proof") is not None
+                ):
+                    dispatch_proof = existing["execution_start_quote_proof"]
+            try:
+                result = self.send_plan_order(
+                    plan.plan_id,
+                    order.reference,
+                    token=token,
+                    execution_start_quote_proof=dispatch_proof,
+                )
+            except Exception as exc:
+                self._halt_runner_after_failure(
+                    f"SIMNOW runner order {order.reference} failed: {exc}"
+                )
+                raise
+            if result.get("accepted") is not True or str(
+                result.get("state", "")
+            ).upper() not in {"SUBMITTED", "ACKNOWLEDGED"}:
+                self._halt_runner_after_failure(
+                    f"SIMNOW runner order {order.reference} was not accepted"
+                )
+                raise MutationRejected(
+                    "SIMNOW runner order was rejected or has unknown outcome"
+                )
+        return response
 
     def _token(
         self, token: LeaderToken | Mapping[str, Any] | None
@@ -1457,6 +1693,7 @@ class FinalExecutionRuntime:
         order_ref: str,
         *,
         token: LeaderToken | Mapping[str, Any] | None,
+        execution_start_quote_proof: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Submit one plan order through the canonical Execution adapter."""
 
@@ -1492,6 +1729,22 @@ class FinalExecutionRuntime:
                 "target plan is not the active reconciled execution plan"
             )
         leader = self._token(token)
+        order_quote_proof = None
+        if plan.raw["schema_version"] == KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION:
+            if execution_start_quote_proof is None:
+                raise StartQuoteEvidenceInvalid(
+                    "TargetPlan v3 first send lacks execution start quote proof"
+                )
+            try:
+                order_quote_proof = quote_proof_for_order(
+                    execution_start_quote_proof,
+                    plan=plan,
+                    order_ref=order.reference,
+                )
+            except ExecutionStartQuotePriceIncompatible as exc:
+                raise StartQuoteReplanRequired(str(exc)) from exc
+            except ValueError as exc:
+                raise StartQuoteEvidenceInvalid(str(exc)) from exc
         return self.orchestrator.submit_planned_order(
             order.as_dict(),
             idempotency_key=idempotency_key,
@@ -1507,6 +1760,7 @@ class FinalExecutionRuntime:
             ),
             token=leader,
             intent_id=intent_id,
+            execution_start_quote_proof=order_quote_proof,
         )
 
     def cancel_plan_intent(

@@ -42,6 +42,7 @@ from .models import (
     format_utc,
     sha256_json,
 )
+from .start_quote_proof import validate_execution_start_quote_proof
 
 
 def _state_digest(state: Mapping[str, Any]) -> str:
@@ -440,16 +441,16 @@ def _validate_state(
         raise RepositoryUnavailableError("durable plan version is invalid")
     if plan.get("preview_mode") not in {"", "offline_preview", "simnow_preview"}:
         raise RepositoryUnavailableError("durable preview mode is invalid")
-    if not isinstance(plan.get("preview_receipt_id"), str) or not IDENTIFIER_RE.fullmatch(
-        plan["preview_receipt_id"]
-    ):
+    if not isinstance(
+        plan.get("preview_receipt_id"), str
+    ) or not IDENTIFIER_RE.fullmatch(plan["preview_receipt_id"]):
         raise RepositoryUnavailableError("durable preview receipt id is invalid")
     for field in ("preview_receipt_sha256", "preview_artifact_sha256"):
         if not isinstance(plan.get(field), str) or not SHA256_RE.fullmatch(plan[field]):
             raise RepositoryUnavailableError(f"durable {field} is invalid")
-    if not isinstance(plan.get("preview_artifact_id"), str) or not IDENTIFIER_RE.fullmatch(
-        plan["preview_artifact_id"]
-    ):
+    if not isinstance(
+        plan.get("preview_artifact_id"), str
+    ) or not IDENTIFIER_RE.fullmatch(plan["preview_artifact_id"]):
         raise RepositoryUnavailableError("durable preview artifact id is invalid")
     preview_defaults = (
         plan["preview_receipt_id"] == UNKNOWN_ID
@@ -460,7 +461,9 @@ def _validate_state(
     if plan["preview_mode"] == "simnow_preview" and preview_defaults:
         raise RepositoryUnavailableError("SIMNOW preview is missing custody provenance")
     if plan["preview_mode"] != "simnow_preview" and not preview_defaults:
-        raise RepositoryUnavailableError("non-SIMNOW preview retains custody provenance")
+        raise RepositoryUnavailableError(
+            "non-SIMNOW preview retains custody provenance"
+        )
     lease = state["lease"]
     if set(lease) != {
         "scope",
@@ -593,6 +596,33 @@ def _validate_state(
             raise RepositoryUnavailableError(
                 "durable send intent receipt hash is invalid"
             )
+        quote_proof = raw_intent.get("execution_start_quote_proof")
+        quote_proof_sha256 = raw_intent.get("execution_start_quote_proof_sha256")
+        if (quote_proof is None) != (quote_proof_sha256 is None):
+            raise RepositoryUnavailableError(
+                "durable send intent start quote proof is incomplete"
+            )
+        if quote_proof is not None:
+            try:
+                validated_quote_proof = validate_execution_start_quote_proof(
+                    quote_proof
+                )
+            except ValueError as exc:
+                raise RepositoryUnavailableError(
+                    "durable send intent start quote proof is invalid"
+                ) from exc
+            if quote_proof_sha256 != validated_quote_proof["proof_sha256"]:
+                raise RepositoryUnavailableError(
+                    "durable send intent start quote proof hash mismatches"
+                )
+            if (
+                raw_intent.get("action", "send") != "send"
+                or validated_quote_proof["plan_id"] != raw_intent.get("plan_id")
+                or validated_quote_proof["plan_hash"] != raw_intent.get("plan_hash")
+            ):
+                raise RepositoryUnavailableError(
+                    "durable send intent start quote proof binding mismatches"
+                )
         target_intent_id = raw_intent.get("target_intent_id")
         if target_intent_id is not None and (
             not isinstance(target_intent_id, str)
@@ -826,11 +856,26 @@ class DurableExecutionRepository:
                 )
         old_intents = previous.get("send_intents", {})
         new_intents = candidate.get("send_intents", {})
+        mutable_intent_fields = {"state", "broker_order_id", "unknown_reason"}
         for intent_id, old_intent in old_intents.items():
             if intent_id not in new_intents:
                 raise RepositoryUnavailableError("durable send intent was deleted")
             if new_intents[intent_id].get("intent_id") != old_intent.get("intent_id"):
                 raise RepositoryUnavailableError("durable send intent identity changed")
+            old_creation = {
+                field: value
+                for field, value in old_intent.items()
+                if field not in mutable_intent_fields
+            }
+            new_creation = {
+                field: value
+                for field, value in new_intents[intent_id].items()
+                if field not in mutable_intent_fields
+            }
+            if new_creation != old_creation:
+                raise RepositoryUnavailableError(
+                    "durable send intent creation facts changed"
+                )
         for key, old_intent_id in previous.get("intent_keys", {}).items():
             if candidate.get("intent_keys", {}).get(key) != old_intent_id:
                 raise RepositoryUnavailableError(
