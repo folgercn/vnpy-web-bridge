@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,8 +24,10 @@ from shared.commodity_execution import (
 
 from app.execution.models import (
     EPOCH_TIMESTAMP,
+    FUTURE_SKEW_SECONDS,
     IDENTIFIER_RE,
     SHA256_RE,
+    SNAPSHOT_STALE_SECONDS,
     UTC_RE,
     CommandEnvelope,
     parse_utc,
@@ -804,6 +806,182 @@ class ExecutionAccountFactsProjectionV2:
         return self.model_dump()
 
 
+_RECONCILIATION_SNAPSHOT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "service",
+        "service_version",
+        "account_scope",
+        "environment",
+        "snapshot_id",
+        "generation",
+        "observed_at",
+        "connected",
+        "fresh",
+        "position_snapshot_hash",
+        "positions",
+        "active_order_count",
+        "active_orders_sha256",
+        "active_orders",
+        "state_binding",
+        "production_allowed",
+        "live_trading_authorized",
+        "countable_forward",
+        "official_forward_claimed",
+        "reconciliation_snapshot_sha256",
+    }
+)
+_RECONCILIATION_STATE_BINDING_FIELDS = frozenset(
+    {
+        "state_version",
+        "durable_broker_generation",
+        "lifecycle",
+        "reconciliation",
+    }
+)
+_LIFECYCLE_VALUES = frozenset(
+    {
+        "STARTING",
+        "READY",
+        "DEGRADED",
+        "DRAINING",
+        "HALTED_RECONCILE_REQUIRED",
+        "HALTED_UNKNOWN_OUTCOME",
+        "STOPPING",
+    }
+)
+_RECONCILIATION_STATE_VALUES = frozenset(
+    {"NOT_REQUIRED", "REQUIRED", "IN_PROGRESS", "RECONCILED", "UNKNOWN"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionReconciliationSnapshotProjection:
+    """Fresh broker facts beside one non-mutating durable state projection."""
+
+    value: dict[str, Any]
+
+    @classmethod
+    def from_mapping(
+        cls,
+        value: Any,
+        *,
+        now: datetime | None = None,
+    ) -> ExecutionReconciliationSnapshotProjection:
+        candidate = _detached_object(value, name="execution reconciliation snapshot")
+        if set(candidate) != _RECONCILIATION_SNAPSHOT_FIELDS:
+            raise ValueError("execution reconciliation snapshot fields are not exact")
+        if (
+            candidate["schema_version"]
+            != "web_bridge_execution_reconciliation_snapshot_v1"
+            or candidate["service"] != "execution-orchestrator"
+            or not isinstance(candidate["service_version"], str)
+            or not candidate["service_version"]
+            or not isinstance(candidate["account_scope"], str)
+            or IDENTIFIER_RE.fullmatch(candidate["account_scope"]) is None
+            or not isinstance(candidate["environment"], str)
+            or not candidate["environment"]
+            or not isinstance(candidate["snapshot_id"], str)
+            or IDENTIFIER_RE.fullmatch(candidate["snapshot_id"]) is None
+            or candidate["connected"] is not True
+            or candidate["fresh"] is not True
+            or any(
+                candidate[field] is not False
+                for field in (
+                    "production_allowed",
+                    "live_trading_authorized",
+                    "countable_forward",
+                    "official_forward_claimed",
+                )
+            )
+        ):
+            raise ValueError("execution reconciliation snapshot identity is invalid")
+        _strict_nonnegative_int(candidate["generation"], field="generation")
+        _strict_nonnegative_int(
+            candidate["active_order_count"], field="active_order_count"
+        )
+        observed_at = _strict_utc(candidate["observed_at"], field="observed_at")
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            raise ValueError("execution reconciliation validation clock is invalid")
+        current = current.astimezone(timezone.utc)
+        if (observed_at - current).total_seconds() > FUTURE_SKEW_SECONDS or (
+            current - observed_at
+        ).total_seconds() > SNAPSHOT_STALE_SECONDS:
+            raise ValueError("execution reconciliation snapshot timestamp is stale")
+        for field in (
+            "position_snapshot_hash",
+            "active_orders_sha256",
+            "reconciliation_snapshot_sha256",
+        ):
+            _strict_sha(candidate[field], field=field)
+        positions = candidate["positions"]
+        orders = candidate["active_orders"]
+        if not isinstance(positions, Mapping) or not isinstance(orders, Mapping):
+            raise ValueError("execution reconciliation snapshot rows are invalid")
+        if any(
+            not isinstance(key, str) or not isinstance(row, Mapping)
+            for facts in (positions, orders)
+            for key, row in facts.items()
+        ):
+            raise ValueError("execution reconciliation snapshot rows are invalid")
+        if (
+            candidate["active_order_count"] != len(orders)
+            or candidate["position_snapshot_hash"] != sha256_json(dict(positions))
+            or candidate["active_orders_sha256"] != sha256_json(dict(orders))
+        ):
+            raise ValueError("execution reconciliation snapshot facts do not close")
+        binding = candidate["state_binding"]
+        if (
+            not isinstance(binding, Mapping)
+            or set(binding) != _RECONCILIATION_STATE_BINDING_FIELDS
+            or not isinstance(binding["lifecycle"], str)
+            or binding["lifecycle"] not in _LIFECYCLE_VALUES
+            or not isinstance(binding["reconciliation"], Mapping)
+            or set(binding["reconciliation"]) != _RECONCILIATION_FIELDS
+        ):
+            raise ValueError("execution reconciliation state binding is not exact")
+        _strict_nonnegative_int(binding["state_version"], field="state_version")
+        _strict_nonnegative_int(
+            binding["durable_broker_generation"],
+            field="durable_broker_generation",
+        )
+        if candidate["generation"] < binding["durable_broker_generation"]:
+            raise ValueError("execution reconciliation snapshot generation regressed")
+        reconciliation = binding["reconciliation"]
+        if reconciliation["state"] not in _RECONCILIATION_STATE_VALUES:
+            raise ValueError("execution reconciliation state binding is invalid")
+        for field in ("run_id", "fresh_snapshot_id"):
+            if (
+                not isinstance(reconciliation[field], str)
+                or IDENTIFIER_RE.fullmatch(reconciliation[field]) is None
+            ):
+                raise ValueError("execution reconciliation state binding is invalid")
+        _strict_utc(reconciliation["last_completed_at"], field="last_completed_at")
+        _strict_nonnegative_int(
+            reconciliation["unknown_outcomes"], field="unknown_outcomes"
+        )
+        preimage = {
+            key: candidate[key]
+            for key in candidate
+            if key != "reconciliation_snapshot_sha256"
+        }
+        if candidate["reconciliation_snapshot_sha256"] != sha256_json(preimage):
+            raise ValueError("execution reconciliation snapshot hash does not close")
+        return cls(candidate)
+
+    @classmethod
+    def model_validate(cls, value: Any) -> ExecutionReconciliationSnapshotProjection:
+        return cls.from_mapping(value)
+
+    def model_dump(self, *, mode: str = "python") -> dict[str, Any]:
+        del mode
+        return json.loads(json.dumps(self.value, ensure_ascii=False))
+
+    def as_dict(self) -> dict[str, Any]:
+        return self.model_dump()
+
+
 _RECOVERY_BEFORE_CUSTODY_FIELDS = frozenset(
     {
         "schema_version",
@@ -990,6 +1168,7 @@ ExecutionCompletionProjectionDTO = ExecutionCompletionProjection
 ExecutionAccountFactsDTO = ExecutionAccountFactsProjectionV2
 ExecutionAccountFactsV1DTO = ExecutionAccountFactsProjection
 ExecutionAccountFactsV2DTO = ExecutionAccountFactsProjectionV2
+ExecutionReconciliationSnapshotDTO = ExecutionReconciliationSnapshotProjection
 ExecutionTargetPlanRecoveryDTO = ExecutionTargetPlanRecoveryProjection
 ExecutionLeaderStatusDTO = ExecutionLeaderStatusProjection
 ExecutionLeaderTokenDTO = ExecutionLeaderTokenProjection
@@ -1011,6 +1190,8 @@ __all__ = [
     "ExecutionLeaderStatusProjection",
     "ExecutionLeaderTokenDTO",
     "ExecutionLeaderTokenProjection",
+    "ExecutionReconciliationSnapshotDTO",
+    "ExecutionReconciliationSnapshotProjection",
     "ExecutionStatusDTO",
     "ExecutionStatusProjection",
     "ExecutionStatusProjectionDTO",

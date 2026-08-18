@@ -29,6 +29,7 @@ from app.schemas.control_execution import (
     ExecutionCompletionProjection,
     ExecutionLeaderStatusProjection,
     ExecutionLeaderTokenProjection,
+    ExecutionReconciliationSnapshotProjection,
     ExecutionStatusProjection,
     ExecutionTargetPlanRecoveryProjection,
 )
@@ -118,6 +119,7 @@ class ExecutionClient:
     command_path = "/internal/v1/commands"
     status_path = "/internal/v1/status"
     account_facts_path = "/internal/v1/account-facts"
+    reconciliation_snapshot_path = "/internal/v1/reconciliation-snapshot"
     completion_path = "/internal/v1/completions/latest"
     recovery_path = "/internal/v1/recovery/target-plans/by-custody-idempotency"
     receipt_path = "/internal/v1/receipts"
@@ -411,6 +413,20 @@ class ExecutionClient:
         except (ValueError, TypeError) as exc:
             raise ExecutionProtocolError(
                 "Execution account facts projection 不符合冻结合同",
+                detail={"error": str(exc)},
+            ) from exc
+
+    async def reconciliation_snapshot(
+        self,
+    ) -> ExecutionReconciliationSnapshotProjection:
+        """Read fresh full broker facts without changing reconciliation state."""
+
+        body = await self._request("GET", self.reconciliation_snapshot_path)
+        try:
+            return ExecutionReconciliationSnapshotProjection.model_validate(body)
+        except (ValueError, TypeError) as exc:
+            raise ExecutionProtocolError(
+                "Execution reconciliation snapshot 不符合冻结合同",
                 detail={"error": str(exc)},
             ) from exc
 

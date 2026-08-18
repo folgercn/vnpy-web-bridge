@@ -1,4 +1,5 @@
 """Shared bounded clock-skew limits for Execution snapshot validation."""
 
-FUTURE_SKEW_SECONDS = 2
-SNAPSHOT_STALE_SECONDS = 60
+from .models import FUTURE_SKEW_SECONDS, SNAPSHOT_STALE_SECONDS
+
+__all__ = ["FUTURE_SKEW_SECONDS", "SNAPSHOT_STALE_SECONDS"]

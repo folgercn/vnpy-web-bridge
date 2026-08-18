@@ -8,7 +8,7 @@ leader/fencing admission check.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -494,6 +494,148 @@ class ExecutionOrchestrator:
             snapshot,
             observed_at=observed_at,
             projection_version=1,
+        )
+
+    def reconciliation_snapshot_projection(
+        self,
+        snapshot: GatewaySnapshot | Mapping[str, Any],
+        *,
+        expected_state_version: int,
+        expected_durable_broker_generation: int,
+        observed_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Project fresh broker facts beside one read-only durable state version.
+
+        Unlike :meth:`account_facts_projection`, this diagnostic/recovery view
+        deliberately does not require the durable reconciliation to have
+        completed or the plan to be idle.  It lets a caller see the broker
+        facts needed to reconcile an interrupted ACTIVE plan while preserving
+        the lifecycle/reconciliation values from one immutable repository
+        snapshot.  It never calls the gateway and never writes durable state.
+        """
+
+        current = self._coerce_snapshot(snapshot)
+        observed = observed_at or utc_now()
+        try:
+            validate_identifier(current.snapshot_id, "snapshot_id")
+            snapshot_observed = _timestamp(current.observed_at)
+            positions = _detached_json(current.positions)
+            active_orders = _detached_json(current.orders)
+        except (CommandValidationError, MutationRejected, TypeError, ValueError) as exc:
+            raise SnapshotRejected("reconciliation snapshot facts are invalid") from exc
+        if any(
+            not isinstance(key, str) or not isinstance(row, Mapping)
+            for facts in (positions, active_orders)
+            for key, row in facts.items()
+        ):
+            raise SnapshotRejected("reconciliation snapshot rows are invalid")
+        if (
+            current.connected is not True
+            or current.fresh is not True
+            or current.account_scope != self.scope
+            or current.environment != self.environment
+        ):
+            raise SnapshotRejected(
+                "reconciliation snapshot failed connection/scope/freshness binding"
+            )
+        if (snapshot_observed - observed).total_seconds() > FUTURE_SKEW_SECONDS or (
+            observed - snapshot_observed
+        ).total_seconds() > SNAPSHOT_STALE_SECONDS:
+            raise SnapshotRejected("reconciliation snapshot timestamp is stale")
+        if (
+            isinstance(current.generation, bool)
+            or not isinstance(current.generation, int)
+            or current.generation < 0
+            or isinstance(current.active_order_count, bool)
+            or not isinstance(current.active_order_count, int)
+            or current.active_order_count < 0
+            or current.active_order_count != len(active_orders)
+        ):
+            raise SnapshotRejected(
+                "reconciliation snapshot generation/order closure failed"
+            )
+        position_snapshot_hash = sha256_json(positions)
+        active_orders_sha256 = sha256_json(active_orders)
+        if current.position_snapshot_hash != position_snapshot_hash:
+            raise SnapshotRejected(
+                "reconciliation snapshot position hash does not close"
+            )
+
+        if (
+            isinstance(expected_state_version, bool)
+            or not isinstance(expected_state_version, int)
+            or expected_state_version < 0
+            or isinstance(expected_durable_broker_generation, bool)
+            or not isinstance(expected_durable_broker_generation, int)
+            or expected_durable_broker_generation < 0
+        ):
+            raise SnapshotRejected("reconciliation snapshot durable binding is invalid")
+        state = self.repository.snapshot()
+        status = self._projection(state, observed)
+        durable_generation = status["broker"]["generation"]
+        if (
+            status["state_version"] != expected_state_version
+            or durable_generation != expected_durable_broker_generation
+        ):
+            raise SnapshotRejected(
+                "reconciliation snapshot durable state changed during read"
+            )
+        if current.generation < durable_generation:
+            raise SnapshotRejected("reconciliation snapshot generation regressed")
+        preimage = {
+            "schema_version": "web_bridge_execution_reconciliation_snapshot_v1",
+            "service": SERVICE,
+            "service_version": self.service_version,
+            "account_scope": self.scope,
+            "environment": self.environment,
+            "snapshot_id": current.snapshot_id,
+            "generation": current.generation,
+            "observed_at": current.observed_at,
+            "connected": True,
+            "fresh": True,
+            "position_snapshot_hash": position_snapshot_hash,
+            "positions": positions,
+            "active_order_count": current.active_order_count,
+            "active_orders_sha256": active_orders_sha256,
+            "active_orders": active_orders,
+            "state_binding": {
+                "state_version": status["state_version"],
+                "durable_broker_generation": durable_generation,
+                "lifecycle": status["lifecycle"],
+                "reconciliation": deepcopy(status["reconciliation"]),
+            },
+            "production_allowed": False,
+            "live_trading_authorized": False,
+            "countable_forward": False,
+            "official_forward_claimed": False,
+        }
+        return {
+            **preimage,
+            "reconciliation_snapshot_sha256": sha256_json(preimage),
+        }
+
+    def stable_reconciliation_snapshot_projection(
+        self,
+        probe: Callable[[], GatewaySnapshot],
+        *,
+        observed_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Run one bounded probe only while the durable version stays stable."""
+
+        if not callable(probe):
+            raise SnapshotRejected("reconciliation snapshot probe is invalid")
+        before = self.repository.snapshot()
+        snapshot = probe()
+        after = self.repository.snapshot()
+        if before["state_version"] != after["state_version"]:
+            raise SnapshotRejected(
+                "reconciliation snapshot durable state changed during probe"
+            )
+        return self.reconciliation_snapshot_projection(
+            snapshot,
+            expected_state_version=int(after["state_version"]),
+            expected_durable_broker_generation=int(after["broker"]["generation"]),
+            observed_at=observed_at,
         )
 
     overview = status
