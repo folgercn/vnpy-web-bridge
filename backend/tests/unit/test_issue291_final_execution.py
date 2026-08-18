@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import ast
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Event, Thread
 
 import pytest
 from app.execution import (
@@ -20,6 +21,7 @@ from app.execution import (
     MutationRejected,
     PlanRejected,
     RepositoryUnavailableError,
+    UnknownOutcomeError,
 )
 from app.execution.errors import GatewayConfigurationError, GatewayUnavailable
 from app.execution.final_runtime import FinalExecutionRuntime
@@ -961,6 +963,155 @@ def test_runner_second_failure_cancels_first_ack_and_halts() -> None:
     assert core.status()["lifecycle"] == "HALTED_RECONCILE_REQUIRED"
 
 
+def test_runner_multi_child_dispatch_survives_concurrent_same_leader_renew(
+    monkeypatch,
+) -> None:
+    import app.execution.fencing as fencing_module
+    import app.execution.final_runtime as final_runtime_module
+    import app.execution.orchestrator as orchestrator_module
+
+    current = [datetime.now(timezone.utc)]
+    for module in (fencing_module, final_runtime_module, orchestrator_module):
+        monkeypatch.setattr(module, "utc_now", lambda: current[0])
+
+    service, core, repo, gateway, _ = runtime(execute=True)
+    core.fencer.lease_seconds = 2
+    target = plan()
+    second = deepcopy(target["orders"][0])
+    second["reference"] = "order-ref-0002"
+    source = {
+        key: value
+        for key, value in target.items()
+        if key not in {"plan_hash", "order_set_sha256"}
+    }
+    source["orders"] = [target["orders"][0], second]
+    target = build_target_plan(**source)
+    original_send = gateway.send_order
+    renewed = []
+    renewal_errors = []
+    renew_first_child = Event()
+    renewal_finished = Event()
+
+    def background_renew() -> None:
+        renew_first_child.wait(timeout=2)
+        try:
+            snapshot = core.fencer.token
+            assert snapshot is not None
+            current[0] += timedelta(seconds=1)
+            renewed.append(core.renew_leader(snapshot))
+            # The first dispatch snapshot has expired, while the same durable
+            # owner/epoch/fence/instance remains live under its renewed expiry.
+            current[0] += timedelta(seconds=1, milliseconds=500)
+        except Exception as exc:  # pragma: no cover - asserted in caller thread
+            renewal_errors.append(exc)
+        finally:
+            renewal_finished.set()
+
+    renewal_thread = Thread(target=background_renew)
+    renewal_thread.start()
+
+    def renew_while_first_child_is_in_flight(request, context):
+        result = original_send(request, context)
+        if len(gateway.send_calls) == 1:
+            renew_first_child.set()
+            assert renewal_finished.wait(timeout=2)
+        return result
+
+    gateway.send_order = renew_while_first_child_is_in_flight
+    try:
+        dispatch_snapshot = reconcile_enable_start(service, core, repo, target)
+    finally:
+        renew_first_child.set()
+        renewal_thread.join(timeout=2)
+
+    assert renewal_errors == []
+    assert not renewal_thread.is_alive()
+    assert len(renewed) == 1
+    assert renewed[0].lease_expires_at > dispatch_snapshot.lease_expires_at
+    assert len(gateway.send_calls) == 2
+    assert all(
+        intent["state"] == "ACKNOWLEDGED"
+        for intent in repo.snapshot()["send_intents"].values()
+    )
+
+
+def test_planned_dispatch_retries_cas_window_same_leader_renew(monkeypatch) -> None:
+    import app.execution.fencing as fencing_module
+    import app.execution.final_runtime as final_runtime_module
+    import app.execution.orchestrator as orchestrator_module
+
+    current = [datetime.now(timezone.utc)]
+    for module in (fencing_module, final_runtime_module, orchestrator_module):
+        monkeypatch.setattr(module, "utc_now", lambda: current[0])
+
+    service, core, repo, gateway, _ = runtime(execute=True)
+    target = plan()
+    original_mutate = repo.mutate
+    renewals = []
+
+    def renew_before_first_intent_cas(mutator, *, expected_version=None):
+        if (
+            not renewals
+            and expected_version is not None
+            and getattr(mutator, "__name__", "") == "persist_with_cas"
+        ):
+            snapshot = core.fencer.token
+            assert snapshot is not None
+            current[0] += timedelta(seconds=1)
+            renewals.append(core.renew_leader(snapshot))
+        return original_mutate(mutator, expected_version=expected_version)
+
+    monkeypatch.setattr(repo, "mutate", renew_before_first_intent_cas)
+    reconcile_enable_start(service, core, repo, target)
+
+    assert len(renewals) == 1
+    assert len(gateway.send_calls) == 1
+    assert (
+        next(iter(repo.snapshot()["send_intents"].values()))["state"] == "ACKNOWLEDGED"
+    )
+
+
+def test_restart_still_blocks_old_snapshot_after_same_leader_renew(monkeypatch) -> None:
+    import app.execution.fencing as fencing_module
+    import app.execution.final_runtime as final_runtime_module
+    import app.execution.orchestrator as orchestrator_module
+
+    current = [datetime.now(timezone.utc)]
+    for module in (fencing_module, final_runtime_module, orchestrator_module):
+        monkeypatch.setattr(module, "utc_now", lambda: current[0])
+
+    service, core, repo, gateway, _ = runtime(execute=True)
+    target = plan()
+    old_snapshot = reconcile_enable_start(service, core, repo, target)
+    current[0] += timedelta(seconds=1)
+    core.renew_leader(old_snapshot)
+
+    restarted = ExecutionOrchestrator(
+        repo,
+        gateway,
+        scope=SCOPE,
+        environment="SIMNOW",
+        test_mode=True,
+        now=current[0],
+    )
+    second = deepcopy(target["orders"][0])
+    second["reference"] = "order-ref-restart-0002"
+    before_calls = len(gateway.send_calls)
+    with pytest.raises(UnknownOutcomeError, match="requires query/reconcile"):
+        restarted.submit_planned_order(
+            second,
+            idempotency_key="send-restart-negative-0002",
+            plan_id=target["plan_id"],
+            plan_hash=target["plan_hash"],
+            leader_epoch=old_snapshot.epoch,
+            fencing_token=old_snapshot.fencing_token,
+            token=old_snapshot,
+            intent_id="intent-restart-negative-0002",
+        )
+    assert len(gateway.send_calls) == before_calls
+    assert "intent-restart-negative-0002" not in repo.snapshot()["send_intents"]
+
+
 def test_runner_timeout_cancels_ack_sibling_without_replaying_unknown_intent() -> None:
     service, core, repo, gateway, _ = runtime(execute=True)
     target = plan()
@@ -1097,7 +1248,9 @@ def test_reconcile_final_target_projection_completes_or_halts(
         assert core.status()["lifecycle"] == "HALTED_RECONCILE_REQUIRED"
 
 
-def test_reconcile_query_only_terminal_submitted_intent_completes_finalization() -> None:
+def test_reconcile_query_only_terminal_submitted_intent_completes_finalization() -> (
+    None
+):
     service, _core, repo, gateway, _ = runtime(execute=True)
     target = plan()
     reconcile_enable_start(service, _core, repo, target)

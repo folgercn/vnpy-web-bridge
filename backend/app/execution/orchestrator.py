@@ -1294,7 +1294,8 @@ class ExecutionOrchestrator:
         UNKNOWN outcome handling, and the gateway send itself.
         """
 
-        return self.send_order(
+        return self._mutate_order(
+            "send",
             request,
             idempotency_key=idempotency_key,
             plan_id=plan_id,
@@ -1303,6 +1304,8 @@ class ExecutionOrchestrator:
             fencing_token=fencing_token,
             token=token,
             intent_id=intent_id,
+            now=None,
+            allow_renewed_lease_snapshot=True,
         )
 
     def cancel_order(
@@ -1386,6 +1389,8 @@ class ExecutionOrchestrator:
         target_intent_id: str | None = None,
         now: datetime | None,
         emergency_stop_only: bool = False,
+        allow_renewed_lease_snapshot: bool = False,
+        _version_conflict_retries: int = 0,
     ) -> dict[str, Any]:
         with self._mutation_lock:
             current = now or utc_now()
@@ -1434,6 +1439,7 @@ class ExecutionOrchestrator:
                 action=action,
                 target_intent_id=target_intent_id,
                 emergency_stop_only=emergency_stop_only,
+                allow_renewed_lease_snapshot=allow_renewed_lease_snapshot,
             )
             expected_state_version = int(state["state_version"])
             active_plan = state["plan"]
@@ -1457,12 +1463,19 @@ class ExecutionOrchestrator:
                     "action": action,
                 }
             )
-            admission = self.fencer.admission(
-                leader_epoch=leader_epoch,
-                fencing_token=fencing_token,
-                token=token,
-                now=current,
-            )
+            if allow_renewed_lease_snapshot:
+                admission = self.fencer.planned_dispatch_admission(
+                    leader_epoch=leader_epoch,
+                    fencing_token=fencing_token,
+                    token=token,
+                )
+            else:
+                admission = self.fencer.admission(
+                    leader_epoch=leader_epoch,
+                    fencing_token=fencing_token,
+                    token=token,
+                    now=current,
+                )
             context = MutationContext(
                 account_scope=self.scope,
                 leader_epoch=admission.epoch,
@@ -1522,12 +1535,39 @@ class ExecutionOrchestrator:
                     target_intent_id=target_intent_id,
                     transaction_candidate=True,
                     emergency_stop_only=emergency_stop_only,
+                    allow_renewed_lease_snapshot=allow_renewed_lease_snapshot,
                 )
                 persist_intent(candidate)
 
-            self.repository.mutate(
-                persist_with_cas, expected_version=expected_state_version
-            )
+            try:
+                self.repository.mutate(
+                    persist_with_cas, expected_version=expected_state_version
+                )
+            except ExpectedVersionConflict:
+                # A background renewal is an independent durable versioned
+                # write.  If it lands after the read preflight but before this
+                # intent CAS, restart the no-side-effect preflight against the
+                # new state.  The planned-dispatch fence then admits only the
+                # same active identity with a forward expiry; plan, authority,
+                # reconciliation, and idempotency are all checked again.
+                if not allow_renewed_lease_snapshot or _version_conflict_retries >= 2:
+                    raise
+                return self._mutate_order(
+                    action,
+                    request,
+                    idempotency_key=idempotency_key,
+                    plan_id=plan_id,
+                    plan_hash=plan_hash,
+                    leader_epoch=leader_epoch,
+                    fencing_token=fencing_token,
+                    token=token,
+                    intent_id=intent_id,
+                    target_intent_id=target_intent_id,
+                    now=now,
+                    emergency_stop_only=emergency_stop_only,
+                    allow_renewed_lease_snapshot=True,
+                    _version_conflict_retries=_version_conflict_retries + 1,
+                )
 
             # The durable intent write is not itself a broker admission.  A
             # second process may have renewed/replaced the lease or revoked
@@ -1546,6 +1586,7 @@ class ExecutionOrchestrator:
                 action=action,
                 target_intent_id=target_intent_id,
                 emergency_stop_only=emergency_stop_only,
+                allow_renewed_lease_snapshot=allow_renewed_lease_snapshot,
             )
 
             try:
@@ -1564,12 +1605,19 @@ class ExecutionOrchestrator:
                 # Linux lease must also still be current when its response is
                 # accepted.  A response racing a lease loss is unknown, never
                 # an acknowledgement under the old fence.
-                self.fencer.admission(
-                    leader_epoch=leader_epoch,
-                    fencing_token=fencing_token,
-                    token=token,
-                    now=utc_now(),
-                )
+                if allow_renewed_lease_snapshot:
+                    self.fencer.planned_dispatch_admission(
+                        leader_epoch=leader_epoch,
+                        fencing_token=fencing_token,
+                        token=token,
+                    )
+                else:
+                    self.fencer.admission(
+                        leader_epoch=leader_epoch,
+                        fencing_token=fencing_token,
+                        token=token,
+                        now=utc_now(),
+                    )
             except Exception as exc:
                 self._mark_unknown(
                     actual_intent_id,
@@ -1633,6 +1681,7 @@ class ExecutionOrchestrator:
         target_intent_id: str | None,
         transaction_candidate: bool = False,
         emergency_stop_only: bool = False,
+        allow_renewed_lease_snapshot: bool = False,
     ) -> None:
         if self._local_halted:
             raise RestartReconciliationRequired("orchestrator is halted fail closed")
@@ -1674,20 +1723,35 @@ class ExecutionOrchestrator:
                     "emergency cancellation is limited to acknowledged intents"
                 )
         if transaction_candidate:
-            self.fencer.validate_against_state(
-                state,
-                leader_epoch=leader_epoch,
-                fencing_token=fencing_token,
-                token=token,
-                now=now,
-            )
+            if allow_renewed_lease_snapshot:
+                self.fencer.validate_planned_dispatch_against_state(
+                    state,
+                    leader_epoch=leader_epoch,
+                    fencing_token=fencing_token,
+                    token=token,
+                )
+            else:
+                self.fencer.validate_against_state(
+                    state,
+                    leader_epoch=leader_epoch,
+                    fencing_token=fencing_token,
+                    token=token,
+                    now=now,
+                )
         else:
-            self.fencer.admission(
-                leader_epoch=leader_epoch,
-                fencing_token=fencing_token,
-                token=token,
-                now=now,
-            )
+            if allow_renewed_lease_snapshot:
+                self.fencer.planned_dispatch_admission(
+                    leader_epoch=leader_epoch,
+                    fencing_token=fencing_token,
+                    token=token,
+                )
+            else:
+                self.fencer.admission(
+                    leader_epoch=leader_epoch,
+                    fencing_token=fencing_token,
+                    token=token,
+                    now=now,
+                )
         self._require_authority(state, now=now)
         active_plan = state.get("plan", {})
         if active_plan.get("state") != "ACTIVE":
