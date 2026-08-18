@@ -760,7 +760,7 @@ class FinalExecutionRuntime:
     def completion_projection(
         self, *, plan_id: str | None = None
     ) -> dict[str, Any] | None:
-        """Project one completed immutable TargetPlan v2, if any.
+        """Project one completed immutable TargetPlan v2/v3, if any.
 
         Completion identity is derived exclusively from the append-only
         ``final_plan_completed`` archive record and the already-installed
@@ -795,8 +795,12 @@ class FinalExecutionRuntime:
             raise PlanRejected("latest completed target plan is invalid") from exc
         if plan.plan_hash != completed["plan_hash"]:
             raise PlanRejected("latest completion target plan hash mismatches")
-        if plan.raw["schema_version"] != KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION:
-            raise PlanRejected("latest completion target plan is not v2")
+        plan_schema_version = plan.raw["schema_version"]
+        if plan_schema_version not in {
+            KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+            KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
+        }:
+            raise PlanRejected("latest completion target plan is not v2/v3")
         if (
             completed["target_position_hash"]
             != plan.raw["expected_after_position_hash"]
@@ -819,19 +823,48 @@ class FinalExecutionRuntime:
             raise PlanRejected(
                 "latest completion archived positions do not match target semantics"
             )
-        return {
+        projection = {
             "plan_id": plan.plan_id,
             "plan_hash": plan.plan_hash,
-            "schema_version": plan.raw["schema_version"],
+            "schema_version": plan_schema_version,
             "phase": plan.raw["phase"],
             "lineage": dict(plan.raw["lineage"]),
             "expected_after_position_hash": plan.raw["expected_after_position_hash"],
             "target_position_hash": completed["target_position_hash"],
             "archived_at": completed["archived_at"],
         }
+        if plan_schema_version == KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION:
+            creation_quote_proof_sha256 = sha256_json(plan.raw["creation_quote_proof"])
+            start_quote_proof = self._persisted_start_quote_proof_for_plan(plan)
+            if start_quote_proof is None:
+                raise PlanRejected(
+                    "latest v3 completion start quote proof is unavailable"
+                )
+            proof_pins = {
+                "execution_run_id": plan.raw["execution_run_id"],
+                "creation_quote_proof_sha256": creation_quote_proof_sha256,
+                "start_quote_proof_sha256": start_quote_proof["proof_sha256"],
+            }
+            if any(
+                completed.get(field) != value for field, value in proof_pins.items()
+            ):
+                raise PlanRejected(
+                    "latest v3 completion quote proof binding mismatches"
+                )
+            projection.update(proof_pins)
+        elif any(
+            field in completed
+            for field in (
+                "execution_run_id",
+                "creation_quote_proof_sha256",
+                "start_quote_proof_sha256",
+            )
+        ):
+            raise PlanRejected("latest v2 completion contains v3 quote proof binding")
+        return projection
 
     def latest_completion_projection(self) -> dict[str, Any] | None:
-        """Project the latest completed immutable TargetPlan v2, if any."""
+        """Project the latest completed immutable TargetPlan v2/v3, if any."""
 
         return self.completion_projection()
 
@@ -881,8 +914,22 @@ class FinalExecutionRuntime:
             publication, publish_evidence, install=False
         )
         plan, artifact_envelope_sha256 = self._target_plan_from_publication(publication)
-        if plan.raw["schema_version"] != KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION:
-            raise PlanRejected("recovery target plan is not v2")
+        plan_schema_version = plan.raw["schema_version"]
+        if plan_schema_version not in {
+            KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+            KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
+        }:
+            raise PlanRejected("recovery target plan is not v2/v3")
+        v3_identity = (
+            {
+                "execution_run_id": plan.raw["execution_run_id"],
+                "creation_quote_proof_sha256": sha256_json(
+                    plan.raw["creation_quote_proof"]
+                ),
+            }
+            if plan_schema_version == KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION
+            else {}
+        )
         if publication.state == "PUBLISHED_NOT_INSTALLED":
             if self.plans.get(plan.plan_id) is not None:
                 raise PlanRejected(
@@ -893,7 +940,11 @@ class FinalExecutionRuntime:
                 == publication.publish_resulting_custody_version
             )
             preimage = {
-                "schema_version": "web_bridge_execution_target_plan_recovery_v2",
+                "schema_version": (
+                    "web_bridge_execution_target_plan_recovery_v3"
+                    if v3_identity
+                    else "web_bridge_execution_target_plan_recovery_v2"
+                ),
                 "state": "CUSTODY_PUBLISHED_NOT_INSTALLED",
                 "custody_idempotency_key": custody_idempotency_key,
                 "custody_install_idempotency_key": publication.install_idempotency_key,
@@ -935,6 +986,7 @@ class FinalExecutionRuntime:
                     "expected_after_position_hash"
                 ],
                 "order_set_sha256": plan.raw["order_set_sha256"],
+                **v3_identity,
                 "production_allowed": False,
                 "live_trading_authorized": False,
                 "countable_forward": False,
@@ -989,8 +1041,26 @@ class FinalExecutionRuntime:
             ):
                 raise PlanRejected("installed recovery target plan binding mismatches")
 
+        v3_start = (
+            self._v3_start_recovery_fields(plan, receipt)
+            if plan_schema_version == KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION
+            and installed is not None
+            else (
+                {
+                    "start_quote_proof_state": "NOT_INSTALLED",
+                    "start_quote_proof_sha256": None,
+                    "can_start_same_plan": False,
+                }
+                if plan_schema_version == KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION
+                else {}
+            )
+        )
         preimage = {
-            "schema_version": "web_bridge_execution_target_plan_recovery_v1",
+            "schema_version": (
+                "web_bridge_execution_target_plan_recovery_v3"
+                if v3_identity
+                else "web_bridge_execution_target_plan_recovery_v1"
+            ),
             "state": (
                 "INSTALLED"
                 if installed is not None
@@ -1018,11 +1088,164 @@ class FinalExecutionRuntime:
             "expected_before_position_hash": plan.raw["expected_before_position_hash"],
             "expected_after_position_hash": plan.raw["expected_after_position_hash"],
             "order_set_sha256": plan.raw["order_set_sha256"],
+            **v3_identity,
+            **v3_start,
             "production_allowed": False,
             "live_trading_authorized": False,
             "countable_forward": False,
         }
         return {**preimage, "recovery_sha256": sha256_json(preimage)}
+
+    def _persisted_start_quote_proof_for_plan(
+        self, plan: TargetPlan
+    ) -> dict[str, Any] | None:
+        """Return the one durable start proof bound to ``plan``, if present."""
+
+        matched: dict[str, dict[str, Any]] = {}
+        receipts = self.orchestrator.repository.snapshot().get("receipts", {})
+        if not isinstance(receipts, Mapping):
+            raise PlanRejected("Execution command receipts are invalid")
+        for receipt in receipts.values():
+            if not isinstance(receipt, Mapping):
+                raise PlanRejected("Execution command receipt is invalid")
+            result = receipt.get("result")
+            if not isinstance(result, Mapping) or (
+                "execution_start_quote_proof" not in result
+            ):
+                continue
+            evidence = result["execution_start_quote_proof"]
+            if not isinstance(evidence, Mapping):
+                raise PlanRejected("persisted execution start quote proof is invalid")
+            references_plan = (
+                evidence.get("plan_id") == plan.plan_id
+                or evidence.get("plan_hash") == plan.plan_hash
+            )
+            if not references_plan:
+                continue
+            try:
+                proof = validate_execution_start_quote_proof(evidence, plan=plan)
+            except ValueError as exc:
+                raise PlanRejected(
+                    "persisted execution start quote proof mismatches target plan"
+                ) from exc
+            matched[proof["proof_sha256"]] = proof
+        if len(matched) > 1:
+            raise PlanRejected("multiple execution start quote proofs bind target plan")
+        return next(iter(matched.values()), None)
+
+    def _v3_start_recovery_fields(
+        self,
+        plan: TargetPlan,
+        receipt: TrustedKeylessCustodyReceipt,
+    ) -> dict[str, Any]:
+        """Classify v3 start evidence without persisting or exposing tick rows."""
+
+        persisted = self._persisted_start_quote_proof_for_plan(plan)
+        if persisted is not None:
+            return {
+                "start_quote_proof_state": "STARTED_MATCHED",
+                "start_quote_proof_sha256": persisted["proof_sha256"],
+                "can_start_same_plan": False,
+            }
+        state = self.orchestrator.repository.snapshot()
+        active = state.get("plan", {})
+        completion_exists = any(
+            isinstance(row, Mapping)
+            and row.get("kind") == "final_plan_completed"
+            and row.get("plan_id") == plan.plan_id
+            and row.get("plan_hash") == plan.plan_hash
+            for row in state.get("terminal_archive", ())
+        )
+        if (
+            isinstance(active, Mapping)
+            and active.get("state") == "ACTIVE"
+            and active.get("plan_id") == plan.plan_id
+            and active.get("plan_hash") == plan.plan_hash
+        ) or completion_exists:
+            raise PlanRejected("v3 started target plan lacks durable start quote proof")
+        if not self._v3_same_plan_start_boundary(state, plan=plan, receipt=receipt):
+            return {
+                "start_quote_proof_state": "NOT_STARTED",
+                "start_quote_proof_sha256": None,
+                "can_start_same_plan": False,
+            }
+        try:
+            proof = self._fresh_start_quote_proof(plan)
+        except StartQuoteReplanRequired:
+            state_name = "REPLAN_REQUIRED"
+        except StartQuoteSourceUnavailable:
+            state_name = "SOURCE_UNAVAILABLE"
+        except StartQuoteEvidenceInvalid:
+            state_name = "EVIDENCE_INVALID"
+        else:
+            post_quote_state = self.orchestrator.repository.snapshot()
+            if (
+                post_quote_state.get("state_version") != state.get("state_version")
+                or post_quote_state.get("state_hash") != state.get("state_hash")
+                or not self._v3_same_plan_start_boundary(
+                    post_quote_state, plan=plan, receipt=receipt
+                )
+            ):
+                return {
+                    "start_quote_proof_state": "EVIDENCE_INVALID",
+                    "start_quote_proof_sha256": None,
+                    "can_start_same_plan": False,
+                }
+            return {
+                "start_quote_proof_state": "READY",
+                "start_quote_proof_sha256": proof["proof_sha256"],
+                "can_start_same_plan": True,
+            }
+        return {
+            "start_quote_proof_state": state_name,
+            "start_quote_proof_sha256": None,
+            "can_start_same_plan": False,
+        }
+
+    def _v3_same_plan_start_boundary(
+        self,
+        state: Mapping[str, Any],
+        *,
+        plan: TargetPlan,
+        receipt: TrustedKeylessCustodyReceipt,
+    ) -> bool:
+        active = state.get("plan")
+        authority = state.get("authority")
+        reconciliation = state.get("reconciliation")
+        broker = state.get("broker")
+        if not all(
+            isinstance(value, Mapping)
+            for value in (active, authority, reconciliation, broker)
+        ):
+            return False
+        expected_preview_id = f"preview-{plan.plan_hash[:16]}"
+        try:
+            current_position_hash = before_position_projection_hash(
+                broker.get("positions"),
+                account_scope=self.orchestrator.scope,
+                environment=self.orchestrator.environment,
+            )
+        except CommodityExecutionContractError:
+            return False
+        return bool(
+            state.get("lifecycle") == "READY"
+            and active.get("state") == "PREVIEWED"
+            and active.get("plan_id") == expected_preview_id
+            and active.get("plan_hash") == plan.plan_hash
+            and active.get("preview_mode") == "simnow_preview"
+            and active.get("preview_receipt_id") == receipt.receipt_id
+            and active.get("preview_receipt_sha256") == receipt.receipt_sha256
+            and active.get("preview_artifact_id") == receipt.artifact_id
+            and active.get("preview_artifact_sha256") == receipt.artifact_sha256
+            and authority.get("state") == "ENABLED"
+            and authority.get("artifact_id") == plan.authority_id
+            and authority.get("artifact_hash") == plan.authority_hash
+            and authority.get("expires_at") == plan.raw["expires_at"]
+            and reconciliation.get("state") == "RECONCILED"
+            and reconciliation.get("unknown_outcomes") == 0
+            and current_position_hash == plan.raw["expected_before_position_hash"]
+            and receipt.expires_at() > utc_now()
+        )
 
     def _plan(self, plan_id: str, *, plan_hash: str | None = None) -> TargetPlan:
         plan = self.plans.get(plan_id)
@@ -1126,7 +1349,7 @@ class FinalExecutionRuntime:
         # Existing intent rows are checked before reconciliation reads the
         # gateway, while a legitimately missing child remains PENDING.
         classify_active_plan_intents(state, plan=plan, bindings=expected_bindings)
-        return {
+        evidence = {
             "plan_id": plan.plan_id,
             "plan_hash": plan.plan_hash,
             "expected_after_position_hash": str(
@@ -1164,6 +1387,45 @@ class FinalExecutionRuntime:
                 for binding in expected_bindings
             ],
         }
+        if plan.raw["schema_version"] == KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION:
+            start_quote_proof = self._persisted_start_quote_proof_for_plan(plan)
+            if start_quote_proof is None:
+                raise PlanRejected(
+                    "SIMNOW v3 active plan lacks durable start quote proof"
+                )
+            for binding in expected_bindings:
+                intent = state["send_intents"].get(binding["intent_id"])
+                if intent is None:
+                    continue
+                if not isinstance(intent, Mapping):
+                    raise PlanRejected("SIMNOW v3 send intent is invalid")
+                try:
+                    persisted_order_proof = validate_execution_start_quote_proof(
+                        intent.get("execution_start_quote_proof"),
+                        plan=plan,
+                        expected_order_refs=(binding["order_ref"],),
+                    )
+                except ValueError as exc:
+                    raise PlanRejected(
+                        "SIMNOW v3 send intent start quote proof does not bind order"
+                    ) from exc
+                if (
+                    intent.get("execution_start_quote_proof_sha256")
+                    != persisted_order_proof["proof_sha256"]
+                ):
+                    raise PlanRejected(
+                        "SIMNOW v3 send intent start quote proof mismatches"
+                    )
+            evidence.update(
+                {
+                    "execution_run_id": plan.raw["execution_run_id"],
+                    "creation_quote_proof_sha256": sha256_json(
+                        plan.raw["creation_quote_proof"]
+                    ),
+                    "start_quote_proof_sha256": start_quote_proof["proof_sha256"],
+                }
+            )
+        return evidence
 
     def resume_active_plan(self, request: Mapping[str, Any]) -> dict[str, Any]:
         """Resume only the immutable deterministic children of one ACTIVE plan.
