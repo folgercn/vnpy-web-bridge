@@ -67,6 +67,10 @@ from .models import (
     validate_sha256,
 )
 from .repository import DurableExecutionRepository, InMemoryExecutionRepository
+from .start_quote_proof import (
+    require_quote_proof_order_request,
+    validate_execution_start_quote_proof,
+)
 
 MUTATING_COMMANDS = {
     "preview",
@@ -760,6 +764,7 @@ class ExecutionOrchestrator:
         command: CommandEnvelope | Mapping[str, Any],
         *,
         preview_evidence: Mapping[str, Any] | None = None,
+        start_evidence: Mapping[str, Any] | None = None,
         finalization_evidence: Mapping[str, Any] | None = None,
     ) -> CommandResponse:
         """Apply a typed Control command.
@@ -775,11 +780,12 @@ class ExecutionOrchestrator:
             else CommandEnvelope.from_mapping(command)
         )
         preview = self._validated_preview_evidence(envelope, preview_evidence)
+        start = self._validated_start_evidence(envelope, start_evidence)
         finalization = self._validated_finalization_evidence(
             envelope, finalization_evidence
         )
         with self._command_lock:
-            return self._process_envelope(envelope, preview, finalization)
+            return self._process_envelope(envelope, preview, start, finalization)
 
     handle_command = process_command
     execute_command = process_command
@@ -933,10 +939,32 @@ class ExecutionOrchestrator:
             )
         return raw
 
+    @staticmethod
+    def _validated_start_evidence(
+        envelope: CommandEnvelope, evidence: Mapping[str, Any] | None
+    ) -> dict[str, Any] | None:
+        if evidence is None:
+            return None
+        if envelope.command != "start":
+            raise MutationRejected("internal start quote evidence is limited to start")
+        try:
+            raw = validate_execution_start_quote_proof(evidence)
+        except ValueError as exc:
+            raise MutationRejected("internal start quote evidence is invalid") from exc
+        if (
+            raw["plan_id"] != envelope.payload["plan_id"]
+            or raw["plan_hash"] != envelope.payload["plan_hash"]
+        ):
+            raise MutationRejected(
+                "internal start quote evidence does not bind command"
+            )
+        return raw
+
     def _process_envelope(
         self,
         envelope: CommandEnvelope,
         preview_evidence: Mapping[str, str] | None,
+        start_evidence: Mapping[str, Any] | None,
         finalization_evidence: Mapping[str, Any] | None,
     ) -> CommandResponse:
         command_key = f"{envelope.actor.service}:{envelope.idempotency_key}"
@@ -983,7 +1011,9 @@ class ExecutionOrchestrator:
         def writer(candidate: dict[str, Any]) -> dict[str, Any]:
             status = "COMPLETED"
             try:
-                result = self._apply_command(candidate, envelope, preview_evidence)
+                result = self._apply_command(
+                    candidate, envelope, preview_evidence, start_evidence
+                )
             except MutationRejected as exc:
                 # Rejected state transitions are durable audit facts, but they
                 # do not call the gateway.  Keep expected-version semantics
@@ -1042,6 +1072,7 @@ class ExecutionOrchestrator:
         state: dict[str, Any],
         envelope: CommandEnvelope,
         preview_evidence: Mapping[str, str] | None = None,
+        start_evidence: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         command = envelope.command
         payload = envelope.payload
@@ -1123,7 +1154,10 @@ class ExecutionOrchestrator:
                 str(state["plan"].get("preview_artifact_sha256", ZERO_HASH)),
             ).as_dict()
             state["lifecycle"] = "READY"
-            return {"accepted": True, "plan": deepcopy(state["plan"])}
+            result = {"accepted": True, "plan": deepcopy(state["plan"])}
+            if start_evidence is not None:
+                result["execution_start_quote_proof"] = deepcopy(dict(start_evidence))
+            return result
         if command == "stop":
             plan = state["plan"]
             prior_plan_state = str(plan.get("state", "IDLE"))
@@ -1686,6 +1720,7 @@ class ExecutionOrchestrator:
         fencing_token: int,
         token: LeaderToken | Mapping[str, Any],
         intent_id: str,
+        execution_start_quote_proof: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Canonical adapter entry for an immutable target-plan child order.
 
@@ -1706,6 +1741,7 @@ class ExecutionOrchestrator:
             intent_id=intent_id,
             now=None,
             allow_renewed_lease_snapshot=True,
+            execution_start_quote_proof=execution_start_quote_proof,
         )
 
     def cancel_order(
@@ -1790,6 +1826,7 @@ class ExecutionOrchestrator:
         now: datetime | None,
         emergency_stop_only: bool = False,
         allow_renewed_lease_snapshot: bool = False,
+        execution_start_quote_proof: Mapping[str, Any] | None = None,
         _version_conflict_retries: int = 0,
     ) -> dict[str, Any]:
         with self._mutation_lock:
@@ -1799,6 +1836,26 @@ class ExecutionOrchestrator:
                 raise MutationRejected("order request must be an object")
             detached_request = _detached_json(request)
             request_hash = sha256_json(detached_request)
+            quote_proof = (
+                validate_execution_start_quote_proof(execution_start_quote_proof)
+                if execution_start_quote_proof is not None
+                else None
+            )
+            if quote_proof is not None and (
+                action != "send"
+                or quote_proof["plan_id"] != plan_id
+                or quote_proof["plan_hash"] != plan_hash
+            ):
+                raise MutationRejected(
+                    "execution start quote proof does not bind planned order"
+                )
+            if quote_proof is not None:
+                try:
+                    require_quote_proof_order_request(quote_proof, detached_request)
+                except ValueError as exc:
+                    raise MutationRejected(
+                        "execution start quote proof does not bind order request"
+                    ) from exc
             state = self.repository.snapshot()
             existing_ref = state.get("intent_keys", {}).get(key)
             existing = (
@@ -1814,6 +1871,10 @@ class ExecutionOrchestrator:
                 if (
                     existing.get("request_hash") != request_hash
                     or existing.get("action") != action
+                    or (
+                        quote_proof is not None
+                        and existing.get("execution_start_quote_proof") != quote_proof
+                    )
                 ):
                     raise IdempotencyConflictError(
                         "order idempotency key was reused with different payload"
@@ -1915,6 +1976,13 @@ class ExecutionOrchestrator:
                     "receipt_id": receipt_id,
                     "receipt_hash": receipt_hash,
                 }
+                if quote_proof is not None:
+                    candidate["send_intents"][actual_intent_id][
+                        "execution_start_quote_proof"
+                    ] = deepcopy(quote_proof)
+                    candidate["send_intents"][actual_intent_id][
+                        "execution_start_quote_proof_sha256"
+                    ] = quote_proof["proof_sha256"]
                 candidate["intent_keys"][key] = actual_intent_id
 
             # No gateway call is made if the intent cannot be proven durable.
@@ -1966,6 +2034,7 @@ class ExecutionOrchestrator:
                     now=now,
                     emergency_stop_only=emergency_stop_only,
                     allow_renewed_lease_snapshot=True,
+                    execution_start_quote_proof=quote_proof,
                     _version_conflict_retries=_version_conflict_retries + 1,
                 )
 

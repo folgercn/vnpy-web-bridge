@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from app.execution import (
-    AuthorityRejected,
     ExecutionOrchestrator,
     InMemoryExecutionRepository,
     InMemoryGateway,
@@ -294,10 +293,10 @@ def test_phase_c_v3_roundtrip_and_schema_splice(tmp_path: Path) -> None:
         allowed_scope=TRUSTED_KEYLESS_SIMNOW_SCOPE,
         allow_trusted_keyless_simnow=True,
     )
-    with pytest.raises(AuthorityRejected, match="not strict verified evidence"):
-        runtime.preview_from_custody(receipt["receipt_id"])
+    installed = runtime.preview_from_custody(receipt["receipt_id"])
+    assert installed.as_dict() == plan
     assert gateway.send_calls == []
-    assert runtime.plans.get(plan["plan_id"]) is None
+    assert runtime.plans.get(plan["plan_id"]) == installed
 
     spliced = new_artifact_envelope(
         artifact_type="simnow-target-plan",
