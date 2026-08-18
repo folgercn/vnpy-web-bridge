@@ -17,10 +17,12 @@ from shared.phase_c_workflow.v1 import (
 
 TRUSTED_KEYLESS_TARGET_PLAN_V1_SCHEMA_REF = "web-bridge-simnow-keyless-target-plan-v1"
 TRUSTED_KEYLESS_TARGET_PLAN_V2_SCHEMA_REF = "web-bridge-simnow-keyless-target-plan-v2"
+TRUSTED_KEYLESS_TARGET_PLAN_V3_SCHEMA_REF = "web-bridge-simnow-keyless-target-plan-v3"
 TRUSTED_KEYLESS_TARGET_PLAN_SCHEMA_REFS = frozenset(
     {
         TRUSTED_KEYLESS_TARGET_PLAN_V1_SCHEMA_REF,
         TRUSTED_KEYLESS_TARGET_PLAN_V2_SCHEMA_REF,
+        TRUSTED_KEYLESS_TARGET_PLAN_V3_SCHEMA_REF,
     }
 )
 
@@ -133,9 +135,7 @@ class TargetPlanPublicationProjectionDTO(AuthorityNegativeDTO):
     artifact_canonical_sha256: Optional[str] = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
-    artifact_raw_sha256: Optional[str] = Field(
-        default=None, pattern=r"^[0-9a-f]{64}$"
-    )
+    artifact_raw_sha256: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     artifact_schema_ref: Optional[str] = None
     plan_schema_version: Optional[str] = None
     plan_id: Optional[str] = None
@@ -262,6 +262,7 @@ class TrustedKeylessCustodyReceiptDTO(AuthorityNegativeDTO):
     schema_ref: Literal[
         TRUSTED_KEYLESS_TARGET_PLAN_V1_SCHEMA_REF,
         TRUSTED_KEYLESS_TARGET_PLAN_V2_SCHEMA_REF,
+        TRUSTED_KEYLESS_TARGET_PLAN_V3_SCHEMA_REF,
     ]
     artifact_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     scope: dict[str, Any]

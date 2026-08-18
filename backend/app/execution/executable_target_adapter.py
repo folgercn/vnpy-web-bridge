@@ -27,20 +27,25 @@ from shared.artifact_contracts.v1 import (
     validate_artifact_envelope,
 )
 from shared.commodity_execution import (
+    FORMAL_QUOTE_PROOF_SCHEMA_VERSION,
     KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
     KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+    KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
     TARGET_PLAN_SCHEMA_VERSION,
     TRUSTED_KEYLESS_SIMNOW_SCOPE,
     CommodityExecutionContractError,
+    TargetPlan,
     VerifiedCustodyReceipt,
     before_position_projection_hash,
     build_target_plan,
     build_trusted_keyless_target_plan,
     build_trusted_keyless_target_plan_v2,
+    build_trusted_keyless_target_plan_v3,
     canonical_before_position_projection,
     canonical_target_position_projection,
     sha256_json,
     target_position_projection_hash,
+    trusted_keyless_target_plan_v3_plan_id,
 )
 from shared.commodity_execution.v1 import canonical_json, utc_now
 
@@ -95,8 +100,8 @@ _STATIC_CORE_EQUAL_EXCHANGE_BY_PRODUCT = {
     product: "INE" if product == "sc" else "SHFE"
     for product in _STATIC_CORE_EQUAL_PRODUCTS
 }
-_FULL_PORTFOLIO_QUOTE_MAX_AGE_SECONDS = 2.0
-_FULL_PORTFOLIO_QUOTE_FUTURE_SKEW_SECONDS = 2.0
+_FULL_PORTFOLIO_QUOTE_MAX_AGE_SECONDS = 2
+_FULL_PORTFOLIO_QUOTE_FUTURE_SKEW_SECONDS = 2
 _FULL_PORTFOLIO_IDENTITY_SCHEMA_VERSION = (
     "commodity_static_core_equal_phase_identity_preimage_v1"
 )
@@ -322,52 +327,102 @@ class StaticCoreEqualPhaseBoundary:
 
 @dataclass(frozen=True, slots=True)
 class StaticCoreEqualFullPortfolioPhaseHandoff:
-    """Custody-capable phase handoff with its complete identity proof.
-
-    The historical generic handoff intentionally remains unchanged.  Full-
-    portfolio plans retain the detached canonical preimage from which their
-    plan ID is derived, so a runner or auditor can reproduce that ID without
-    recovering planner-local state.
-    """
+    """Custody-capable phase handoff with version-specific identity proof."""
 
     target_plan: dict[str, Any]
     lineage: tuple[str, ...]
     scope: dict[str, Any]
     expires_at: str
-    identity_preimage: dict[str, Any]
+    identity_preimage: dict[str, Any] | None = None
 
     def recompute_plan_id(self) -> str:
-        """Recompute the exact TargetPlan ID from the retained preimage."""
+        """Recompute the exact ID using the schema's frozen identity contract."""
 
+        schema_version = self.target_plan.get("schema_version")
+        if schema_version == KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION:
+            if self.identity_preimage is not None:
+                raise ExecutableTargetAdapterError(
+                    "full-portfolio v3 must not retain a hidden identity preimage"
+                )
+            return full_portfolio_phase_plan_id_from_payload(self.target_plan)
+        if schema_version != KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION:
+            raise ExecutableTargetAdapterError(
+                "full-portfolio phase target plan schema is invalid"
+            )
+        if not isinstance(self.identity_preimage, Mapping):
+            raise ExecutableTargetAdapterError(
+                "full-portfolio v2 identity preimage is missing"
+            )
         return full_portfolio_phase_plan_id_from_preimage(self.identity_preimage)
 
     def validate_identity_proof(self) -> str:
-        """Fail closed unless the proof and every duplicated plan field agree."""
+        """Fail closed unless the schema-specific proof is self-consistent."""
 
+        schema_version = self.target_plan.get("schema_version")
+        if schema_version == KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION:
+            preimage = self.identity_preimage
+            if not isinstance(preimage, Mapping):
+                raise ExecutableTargetAdapterError(
+                    "full-portfolio v2 identity preimage is missing"
+                )
+            plan_id = self.recompute_plan_id()
+            lineage = preimage.get("lineage")
+            if not isinstance(lineage, Mapping):
+                raise ExecutableTargetAdapterError(
+                    "full-portfolio phase identity lineage is invalid"
+                )
+            target_bindings = {
+                field: self.target_plan.get(field)
+                for field in (
+                    "account_scope",
+                    "environment",
+                    "gateway_name",
+                    "scope",
+                    "lineage",
+                    "expected_before_position_hash",
+                    "expected_after_position_hash",
+                    "orders",
+                    "generated_at",
+                    "expires_at",
+                    "phase",
+                )
+            }
+            proof_bindings = {field: preimage.get(field) for field in target_bindings}
+            expected_lineage = tuple(
+                str(lineage[field])
+                for field in (
+                    "static_core_equal_sha256",
+                    "position_manager_sha256",
+                    "final_target_sha256",
+                )
+            )
+            if (
+                plan_id != self.target_plan.get("plan_id")
+                or target_bindings != proof_bindings
+                or self.scope != preimage.get("scope")
+                or self.expires_at != preimage.get("expires_at")
+                or self.lineage != expected_lineage
+            ):
+                raise ExecutableTargetAdapterError(
+                    "full-portfolio phase identity proof does not match target plan"
+                )
+            return plan_id
+        if schema_version != KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION:
+            raise ExecutableTargetAdapterError(
+                "full-portfolio phase target plan schema is invalid"
+            )
+        try:
+            plan = TargetPlan.from_mapping(self.target_plan)
+        except CommodityExecutionContractError as exc:
+            raise ExecutableTargetAdapterError(
+                "full-portfolio phase identity proof is invalid"
+            ) from exc
         plan_id = self.recompute_plan_id()
-        preimage = self.identity_preimage
-        lineage = preimage.get("lineage")
-        if not isinstance(lineage, Mapping):  # pragma: no cover - constructor proof
+        lineage = plan.raw.get("lineage")
+        if not isinstance(lineage, Mapping):  # pragma: no cover - strict v3 parser
             raise ExecutableTargetAdapterError(
                 "full-portfolio phase identity lineage is invalid"
             )
-        target_bindings = {
-            field: self.target_plan.get(field)
-            for field in (
-                "account_scope",
-                "environment",
-                "gateway_name",
-                "scope",
-                "lineage",
-                "expected_before_position_hash",
-                "expected_after_position_hash",
-                "orders",
-                "generated_at",
-                "expires_at",
-                "phase",
-            )
-        }
-        proof_bindings = {field: preimage.get(field) for field in target_bindings}
         expected_lineage = tuple(
             str(lineage[field])
             for field in (
@@ -377,10 +432,9 @@ class StaticCoreEqualFullPortfolioPhaseHandoff:
             )
         )
         if (
-            plan_id != self.target_plan.get("plan_id")
-            or target_bindings != proof_bindings
-            or self.scope != preimage.get("scope")
-            or self.expires_at != preimage.get("expires_at")
+            plan_id != plan.plan_id
+            or self.scope != plan.raw.get("scope")
+            or self.expires_at != plan.raw.get("expires_at")
             or self.lineage != expected_lineage
         ):
             raise ExecutableTargetAdapterError(
@@ -389,22 +443,27 @@ class StaticCoreEqualFullPortfolioPhaseHandoff:
         return plan_id
 
     def trusted_keyless_custody_artifact(self) -> dict[str, Any]:
-        """Return the existing v2 create-only custody envelope."""
+        """Return the schema-matched create-only custody envelope."""
 
-        if (
-            self.target_plan.get("schema_version")
-            != KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION
-        ):
+        schema_version = self.target_plan.get("schema_version")
+        if schema_version not in {
+            KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+            KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
+        }:
             raise ExecutableTargetAdapterError(
-                "full-portfolio phase target plan is not trusted keyless v2"
+                "full-portfolio phase target plan schema is invalid"
             )
         self.validate_identity_proof()
         return new_artifact_envelope(
             artifact_type="simnow-target-plan",
             trust_domain="runtime_authorization",
             producer_id="static-core-equal-final-target-adapter",
-            producer_version="v2",
-            schema_ref=KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+            producer_version=(
+                "v3"
+                if schema_version == KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION
+                else "v2"
+            ),
+            schema_ref=str(schema_version),
             payload=self.target_plan,
             generated_at=str(self.target_plan["generated_at"]),
             scope=self.scope,
@@ -443,7 +502,7 @@ class StaticCoreEqualFullPortfolioDecision:
     pure adapter.  Its ``current_facts`` input must already be the complete,
     fail-closed strategy-owned account portfolio.  The adapter proves frozen
     replay, freshness/reconciliation, scope, ten-product deltas and immutable
-    TargetPlan v2 material; it has no ledger or mutation dependency.
+    quote-aware TargetPlan v3 material; it has no ledger or mutation dependency.
     """
 
     close_handoff: StaticCoreEqualFullPortfolioPhaseHandoff | None
@@ -2002,7 +2061,7 @@ def _full_portfolio_formal_quote(
 def full_portfolio_phase_plan_id_from_preimage(
     value: Mapping[str, Any],
 ) -> str:
-    """Reproduce one full-portfolio phase plan ID from exact canonical input."""
+    """Reproduce one historical v2 plan ID from its canonical preimage."""
 
     preimage = _mapping(value, "full-portfolio phase identity preimage")
     phase = preimage.get("phase")
@@ -2023,6 +2082,19 @@ def full_portfolio_phase_plan_id_from_preimage(
     return f"static-core-full-{str(phase).lower()}-v2-{sha256_json(preimage)}"
 
 
+def full_portfolio_phase_plan_id_from_payload(
+    value: Mapping[str, Any],
+) -> str:
+    """Reproduce one v3 full-portfolio ID from its persisted payload."""
+
+    try:
+        return trusted_keyless_target_plan_v3_plan_id(value)
+    except CommodityExecutionContractError as exc:
+        raise ExecutableTargetAdapterError(
+            "full-portfolio phase target-plan identity is invalid"
+        ) from exc
+
+
 def _full_portfolio_plan_handoff(
     *,
     phase: str,
@@ -2034,56 +2106,103 @@ def _full_portfolio_plan_handoff(
     position_manager_sha256: str,
     final_target_sha256: str,
     formal_quote_bindings: Mapping[str, Any],
+    quote_validated_at: str,
+    target_plan_version: int,
     generated_at: str,
     expires_at: str,
 ) -> StaticCoreEqualFullPortfolioPhaseHandoff:
-    identity_preimage = _mapping(
-        {
-            "identity_schema_version": _FULL_PORTFOLIO_IDENTITY_SCHEMA_VERSION,
-            "strategy_id": "STATIC_CORE_EQUAL",
-            "run_id": run_id,
-            "phase": phase,
-            "account_scope": "account:windows",
-            "environment": "SIMNOW",
-            "gateway_name": "CTP",
-            "scope": dict(TRUSTED_KEYLESS_SIMNOW_SCOPE),
-            "lineage": {
-                "static_core_equal_sha256": static_core_equal_sha256,
-                "position_manager_sha256": position_manager_sha256,
-                "final_target_sha256": final_target_sha256,
+    if type(target_plan_version) is not int or target_plan_version not in {2, 3}:
+        raise ExecutableTargetAdapterError(
+            "full-portfolio target plan version is invalid"
+        )
+    lineage = {
+        "static_core_equal_sha256": static_core_equal_sha256,
+        "position_manager_sha256": position_manager_sha256,
+        "final_target_sha256": final_target_sha256,
+    }
+    if target_plan_version == 2:
+        identity_preimage = _mapping(
+            {
+                "identity_schema_version": _FULL_PORTFOLIO_IDENTITY_SCHEMA_VERSION,
+                "strategy_id": "STATIC_CORE_EQUAL",
+                "run_id": run_id,
+                "phase": phase,
+                "account_scope": "account:windows",
+                "environment": "SIMNOW",
+                "gateway_name": "CTP",
+                "scope": dict(TRUSTED_KEYLESS_SIMNOW_SCOPE),
+                "lineage": lineage,
+                "expected_before_position_hash": expected_before_position_hash,
+                "expected_after_position_hash": expected_after_position_hash,
+                "orders": orders,
+                "formal_quote_bindings": dict(formal_quote_bindings),
+                "generated_at": generated_at,
+                "expires_at": expires_at,
             },
-            "expected_before_position_hash": expected_before_position_hash,
-            "expected_after_position_hash": expected_after_position_hash,
-            "orders": orders,
-            "formal_quote_bindings": dict(formal_quote_bindings),
-            "generated_at": generated_at,
-            "expires_at": expires_at,
-        },
-        "full-portfolio phase identity preimage",
-    )
-    plan_id = full_portfolio_phase_plan_id_from_preimage(identity_preimage)
+            "full-portfolio phase identity preimage",
+        )
+        plan_id = full_portfolio_phase_plan_id_from_preimage(identity_preimage)
+        try:
+            plan = build_trusted_keyless_target_plan_v2(
+                plan_id=plan_id,
+                account_scope="account:windows",
+                environment="SIMNOW",
+                gateway_name="CTP",
+                lineage=_mapping(lineage, "phase lineage"),
+                scope=dict(TRUSTED_KEYLESS_SIMNOW_SCOPE),
+                generated_at=generated_at,
+                expires_at=expires_at,
+                phase=phase,
+                expected_before_position_hash=expected_before_position_hash,
+                expected_after_position_hash=expected_after_position_hash,
+                orders=orders,
+            )
+        except CommodityExecutionContractError as exc:
+            raise ExecutableTargetAdapterError(
+                f"STATIC_CORE_EQUAL full-portfolio {phase} TargetPlan v2 is invalid: {exc}"
+            ) from exc
+        return StaticCoreEqualFullPortfolioPhaseHandoff(
+            target_plan=plan,
+            lineage=(
+                static_core_equal_sha256,
+                position_manager_sha256,
+                final_target_sha256,
+            ),
+            scope=dict(TRUSTED_KEYLESS_SIMNOW_SCOPE),
+            expires_at=str(plan["expires_at"]),
+            identity_preimage=identity_preimage,
+        )
+    creation_quote_proof = {
+        "schema_version": FORMAL_QUOTE_PROOF_SCHEMA_VERSION,
+        "validated_at_utc": quote_validated_at,
+        "max_age_seconds": _FULL_PORTFOLIO_QUOTE_MAX_AGE_SECONDS,
+        "future_skew_seconds": _FULL_PORTFOLIO_QUOTE_FUTURE_SKEW_SECONDS,
+        # This foundation retains deterministic creation evidence only.  A
+        # later Execution admission must authenticate it against the journal
+        # and obtain an independent fresh start proof.
+        "journal_authenticated": False,
+        "start_authorized": False,
+        "bindings": dict(formal_quote_bindings),
+    }
     try:
-        plan = build_trusted_keyless_target_plan_v2(
-            plan_id=plan_id,
-            account_scope=str(identity_preimage["account_scope"]),
-            environment=str(identity_preimage["environment"]),
-            gateway_name=str(identity_preimage["gateway_name"]),
-            lineage=_mapping(identity_preimage["lineage"], "phase lineage"),
-            scope=_mapping(identity_preimage["scope"], "phase scope"),
-            generated_at=str(identity_preimage["generated_at"]),
-            expires_at=str(identity_preimage["expires_at"]),
-            phase=str(identity_preimage["phase"]),
-            expected_before_position_hash=str(
-                identity_preimage["expected_before_position_hash"]
-            ),
-            expected_after_position_hash=str(
-                identity_preimage["expected_after_position_hash"]
-            ),
-            orders=list(identity_preimage["orders"]),
+        plan = build_trusted_keyless_target_plan_v3(
+            execution_run_id=run_id,
+            account_scope="account:windows",
+            environment="SIMNOW",
+            gateway_name="CTP",
+            lineage=_mapping(lineage, "phase lineage"),
+            scope=dict(TRUSTED_KEYLESS_SIMNOW_SCOPE),
+            creation_quote_proof=creation_quote_proof,
+            generated_at=generated_at,
+            expires_at=expires_at,
+            phase=phase,
+            expected_before_position_hash=expected_before_position_hash,
+            expected_after_position_hash=expected_after_position_hash,
+            orders=orders,
         )
     except CommodityExecutionContractError as exc:
         raise ExecutableTargetAdapterError(
-            f"STATIC_CORE_EQUAL full-portfolio {phase} TargetPlan v2 is invalid: {exc}"
+            f"STATIC_CORE_EQUAL full-portfolio {phase} TargetPlan v3 is invalid: {exc}"
         ) from exc
     return StaticCoreEqualFullPortfolioPhaseHandoff(
         target_plan=plan,
@@ -2094,7 +2213,6 @@ def _full_portfolio_plan_handoff(
         ),
         scope=dict(TRUSTED_KEYLESS_SIMNOW_SCOPE),
         expires_at=str(plan["expires_at"]),
-        identity_preimage=identity_preimage,
     )
 
 
@@ -2151,6 +2269,7 @@ def build_static_core_equal_full_portfolio_keyless_decision(
     event_generated_at: str,
     expires_at: str | None = None,
     now: datetime | None = None,
+    target_plan_version: int = 2,
 ) -> StaticCoreEqualFullPortfolioDecision:
     """Build at most one immutable phase plan for the complete portfolio.
 
@@ -2162,6 +2281,9 @@ def build_static_core_equal_full_portfolio_keyless_decision(
     OPEN is emitted only as a non-custody template; a second invocation with
     fresh post-close facts and quotes is required to create the OPEN plan.  A
     true NOOP does not consume quote, expiry or any other mutation-only material.
+    The production caller remains on historical v2 by default.  Quote-aware
+    v3 is an explicit foundation-only opt-in until Execution gains independent
+    journal authentication and fresh start admission.
     """
 
     normalized_run_id = _require_text(run_id, "run id")
@@ -2173,6 +2295,7 @@ def build_static_core_equal_full_portfolio_keyless_decision(
         or current_time.utcoffset() != timezone.utc.utcoffset(current_time)
     ):
         raise ExecutableTargetAdapterError("adapter clock must be explicit UTC")
+    quote_validated_at = current_time.isoformat().replace("+00:00", "Z")
     if not isinstance(event_generated_at, str) or not event_generated_at.endswith("Z"):
         raise ExecutableTargetAdapterError("event generated_at is invalid")
     try:
@@ -2554,6 +2677,8 @@ def build_static_core_equal_full_portfolio_keyless_decision(
             position_manager_sha256=normalized_position_manager_sha256,
             final_target_sha256=final_target_sha256,
             formal_quote_bindings=close_formal_quote_bindings,
+            quote_validated_at=quote_validated_at,
+            target_plan_version=target_plan_version,
             generated_at=event_generated_at,
             expires_at=expires_at,
         )
@@ -2571,6 +2696,8 @@ def build_static_core_equal_full_portfolio_keyless_decision(
             position_manager_sha256=normalized_position_manager_sha256,
             final_target_sha256=final_target_sha256,
             formal_quote_bindings=open_formal_quote_bindings,
+            quote_validated_at=quote_validated_at,
+            target_plan_version=target_plan_version,
             generated_at=event_generated_at,
             expires_at=expires_at,
         )
@@ -2828,5 +2955,6 @@ __all__ = [
     "build_static_core_equal_keyless_target_decision",
     "build_trusted_keyless_executable_target_plan",
     "full_portfolio_phase_plan_id_from_preimage",
+    "full_portfolio_phase_plan_id_from_payload",
     "peek_current_facts_to_snapshot",
 ]
