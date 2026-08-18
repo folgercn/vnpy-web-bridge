@@ -50,6 +50,35 @@ from shared.phase_c_workflow.v1 import (
 from shared.trust_contracts.v1 import canonical_json_line
 
 
+class CustodyEvidenceReadError(WorkflowAdapterError):
+    """Permanent custody evidence/contract damage on a read-only path."""
+
+    status_code = 503
+
+
+_RETRYABLE_CUSTODY_READ_CODES = frozenset(
+    {
+        "CUSTODY_DIRECTORY_INVALID",
+        "CUSTODY_DIRECTORY_PERMISSIONS_INVALID",
+        "CUSTODY_FILE_CHANGED_DURING_READ",
+        "CUSTODY_FILE_READ_FAILED",
+        "CUSTODY_ROOT_NOT_PINNED",
+        "CUSTODY_ROOT_PERMISSIONS_INVALID",
+        "CUSTODY_WRITER_ALREADY_ACTIVE",
+    }
+)
+
+
+def _raise_custody_read_failure(exc: CustodyError, *, subject: str) -> None:
+    if exc.code in _RETRYABLE_CUSTODY_READ_CODES:
+        raise WorkflowAdapterError(
+            f"custody {subject} read is unavailable", status_code=503
+        ) from exc
+    raise CustodyEvidenceReadError(
+        f"custody {subject} evidence is invalid: {exc.code}"
+    ) from exc
+
+
 def _schema(payload: Any) -> None:
     if not isinstance(payload, dict):
         raise TypeError("payload must be an object")
@@ -162,6 +191,19 @@ class ArtifactCustodyService:
             },
             read_only=read_only,
         )
+
+    def _read_root_absent(self) -> bool:
+        """Classify a never-initialized root without creating any state."""
+
+        try:
+            self.settings.root.lstat()
+        except FileNotFoundError:
+            return True
+        except OSError as exc:
+            raise WorkflowAdapterError(
+                "custody durable root is unavailable", status_code=503
+            ) from exc
+        return False
 
     def current_version(self) -> CustodyCurrentVersionDTO:
         """Read the sole ledger CAS version without creating custody state."""
@@ -355,8 +397,10 @@ class ArtifactCustodyService:
             ) from exc
 
     def receipt(self, receipt_id: str) -> CustodyReceiptDTO | dict[str, Any] | None:
+        if self._read_root_absent():
+            return None
         try:
-            with self._custody() as custody:
+            with self._custody(read_only=True) as custody:
                 raw = custody.read_receipt(receipt_id)
                 artifact = custody.read_artifact(raw["artifact_id"])
                 if raw["receipt_type"] == "install" and artifact.get("schema_ref") in {
@@ -374,15 +418,25 @@ class ArtifactCustodyService:
                 else None
             )
         except CustodyError as exc:
-            if exc.code == "CUSTODY_RECEIPT_NOT_FOUND":
+            if exc.code in {"CUSTODY_RECEIPT_NOT_FOUND", "CUSTODY_ROOT_NOT_FOUND"}:
                 return None
-            raise WorkflowAdapterError(exc.code) from exc
+            _raise_custody_read_failure(exc, subject="receipt")
+        except OSError as exc:
+            raise WorkflowAdapterError(
+                "custody receipt read is unavailable", status_code=503
+            ) from exc
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CustodyEvidenceReadError(
+                "custody receipt evidence is invalid"
+            ) from exc
 
     def receipt_by_idempotency(
         self, idempotency_key: str
     ) -> CustodyReceiptDTO | dict[str, Any] | None:
+        if self._read_root_absent():
+            return None
         try:
-            with self._custody() as custody:
+            with self._custody(read_only=True) as custody:
                 raw = custody.read_receipt_by_idempotency(f"install-{idempotency_key}")
                 artifact = custody.read_artifact(raw["artifact_id"])
                 if raw["receipt_type"] == "install" and artifact.get("schema_ref") in {
@@ -400,9 +454,17 @@ class ArtifactCustodyService:
                 else None
             )
         except CustodyError as exc:
-            if exc.code == "CUSTODY_RECEIPT_NOT_FOUND":
+            if exc.code in {"CUSTODY_RECEIPT_NOT_FOUND", "CUSTODY_ROOT_NOT_FOUND"}:
                 return None
-            raise WorkflowAdapterError(exc.code) from exc
+            _raise_custody_read_failure(exc, subject="idempotency")
+        except OSError as exc:
+            raise WorkflowAdapterError(
+                "custody idempotency read is unavailable", status_code=503
+            ) from exc
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CustodyEvidenceReadError(
+                "custody idempotency evidence is invalid"
+            ) from exc
 
     def artifact_for_execution(self, artifact_id: str) -> dict[str, Any] | None:
         """Return one verified target-plan envelope to Execution only.
@@ -411,30 +473,32 @@ class ArtifactCustodyService:
         exposes records nor allows Control to inspect order-bearing payloads.
         """
 
+        if self._read_root_absent():
+            return None
         try:
-            with self._custody() as custody:
+            with self._custody(read_only=True) as custody:
                 artifact = custody.read_artifact(artifact_id)
             if (
                 not isinstance(artifact, dict)
                 or artifact.get("artifact_type") != "simnow-target-plan"
                 or artifact.get("trust_domain") != "runtime_authorization"
             ):
-                raise WorkflowAdapterError(
+                raise CustodyEvidenceReadError(
                     "custody artifact is not an execution target plan"
                 )
             if artifact.get("schema_ref") == TARGET_PLAN_SCHEMA_VERSION:
-                with self._custody() as custody:
+                with self._custody(read_only=True) as custody:
                     signed = custody.read_signed_artifact(artifact_id)
                 artifact = signed.get("artifact")
             elif artifact.get("schema_ref") not in {
                 KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
                 KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
             }:
-                raise WorkflowAdapterError(
+                raise CustodyEvidenceReadError(
                     "custody artifact is not an execution target plan"
                 )
             if not isinstance(artifact, dict):
-                raise WorkflowAdapterError(
+                raise CustodyEvidenceReadError(
                     "custody artifact is not an execution target plan"
                 )
             raw = canonical_json_line(artifact)
@@ -446,11 +510,19 @@ class ArtifactCustodyService:
         except CustodyError as exc:
             if exc.code in {
                 "CUSTODY_ARTIFACT_NOT_FOUND",
-                "CUSTODY_SIGNED_ARTIFACT_NOT_FOUND",
                 "CUSTODY_ARTIFACT_ID_INVALID",
+                "CUSTODY_ROOT_NOT_FOUND",
             }:
                 return None
-            raise WorkflowAdapterError(exc.code) from exc
+            _raise_custody_read_failure(exc, subject="artifact")
+        except OSError as exc:
+            raise WorkflowAdapterError(
+                "custody artifact read is unavailable", status_code=503
+            ) from exc
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CustodyEvidenceReadError(
+                "custody artifact evidence is invalid"
+            ) from exc
 
     def publish_projection(self) -> None:
         """Emit the monitor-only custody health projection when configured."""
@@ -566,7 +638,26 @@ def create_app(service: ArtifactCustodyService | None = None) -> FastAPI:
             execution_read_auth(request)
         else:
             shared_receipt_auth(request)
-        result = target.receipt(receipt_id)
+        try:
+            result = target.receipt(receipt_id)
+        except CustodyEvidenceReadError as exc:
+            raise HTTPException(
+                503,
+                detail={
+                    "code": "PHASE_C_CUSTODY_RECEIPT_EVIDENCE_INVALID",
+                    "message": str(exc),
+                    "retryable": False,
+                },
+            ) from exc
+        except WorkflowAdapterError as exc:
+            raise HTTPException(
+                503,
+                detail={
+                    "code": "PHASE_C_CUSTODY_RECEIPT_READ_UNAVAILABLE",
+                    "message": str(exc),
+                    "retryable": True,
+                },
+            ) from exc
         if result is None:
             raise HTTPException(404, "receipt not found")
         return result if isinstance(result, dict) else result.model_dump(mode="json")
@@ -575,11 +666,35 @@ def create_app(service: ArtifactCustodyService | None = None) -> FastAPI:
     def receipt_by_idempotency(
         idempotency_key: str, request: Request
     ) -> dict[str, Any]:
-        result = (
-            target.receipt_by_idempotency(idempotency_key)
-            if control_auth(request)
-            else None
-        )
+        # The dedicated Execution credential may resolve the same install
+        # receipt for crash recovery.  This route returns receipt evidence
+        # only; order-bearing artifacts remain behind the separate exact-id
+        # execution read route.
+        principal = request.headers.get("X-Phase-C-Principal", "")
+        if principal == "execution-orchestrator":
+            execution_read_auth(request)
+        else:
+            control_auth(request)
+        try:
+            result = target.receipt_by_idempotency(idempotency_key)
+        except CustodyEvidenceReadError as exc:
+            raise HTTPException(
+                503,
+                detail={
+                    "code": "PHASE_C_CUSTODY_IDEMPOTENCY_EVIDENCE_INVALID",
+                    "message": str(exc),
+                    "retryable": False,
+                },
+            ) from exc
+        except WorkflowAdapterError as exc:
+            raise HTTPException(
+                503,
+                detail={
+                    "code": "PHASE_C_CUSTODY_IDEMPOTENCY_READ_UNAVAILABLE",
+                    "message": str(exc),
+                    "retryable": True,
+                },
+            ) from exc
         if result is None:
             raise HTTPException(404, "receipt not found")
         return result if isinstance(result, dict) else result.model_dump(mode="json")
@@ -587,7 +702,26 @@ def create_app(service: ArtifactCustodyService | None = None) -> FastAPI:
     @app.get("/internal/v1/artifacts/{artifact_id}")
     def artifact(artifact_id: str, request: Request) -> dict[str, Any]:
         execution_read_auth(request)
-        result = target.artifact_for_execution(artifact_id)
+        try:
+            result = target.artifact_for_execution(artifact_id)
+        except CustodyEvidenceReadError as exc:
+            raise HTTPException(
+                503,
+                detail={
+                    "code": "PHASE_C_CUSTODY_ARTIFACT_EVIDENCE_INVALID",
+                    "message": str(exc),
+                    "retryable": False,
+                },
+            ) from exc
+        except WorkflowAdapterError as exc:
+            raise HTTPException(
+                503,
+                detail={
+                    "code": "PHASE_C_CUSTODY_ARTIFACT_READ_UNAVAILABLE",
+                    "message": str(exc),
+                    "retryable": True,
+                },
+            ) from exc
         if result is None:
             raise HTTPException(404, "artifact not found")
         return result

@@ -310,6 +310,150 @@ class ExecutionOrchestrator:
         self._last_observed_at = observed
         return self._projection(state, observed)
 
+    def account_facts_projection(
+        self,
+        snapshot: GatewaySnapshot | Mapping[str, Any],
+        *,
+        observed_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Return one fresh, full-account, read-only broker fact projection.
+
+        The HTTP adapter obtains ``snapshot`` through the bounded
+        :class:`GatewayReadinessProbe`; this method independently closes the
+        full position/order rows and binds them to one durable Execution state
+        snapshot.  A final-validation ``snapshot-peek-<sha256>`` id is stable
+        and therefore binds exactly.  Other transports may mint a new id/time
+        per read, so generation and both canonical fact-set hashes define
+        equivalent facts while durable time may not move into the future.  It
+        never persists the broker facts or calls a gateway.
+        """
+
+        current = self._coerce_snapshot(snapshot)
+        observed = observed_at or utc_now()
+        try:
+            validate_identifier(current.snapshot_id, "snapshot_id")
+            snapshot_observed = _timestamp(current.observed_at)
+            positions = _detached_json(current.positions)
+            active_orders = _detached_json(current.orders)
+            if current.snapshot_id.startswith("snapshot-peek-"):
+                validate_sha256(
+                    current.snapshot_id.removeprefix("snapshot-peek-"),
+                    "snapshot peek facts hash",
+                )
+        except (CommandValidationError, MutationRejected, TypeError, ValueError) as exc:
+            raise SnapshotRejected("full-account facts are invalid") from exc
+        if any(
+            not isinstance(key, str) or not isinstance(row, Mapping)
+            for facts in (positions, active_orders)
+            for key, row in facts.items()
+        ):
+            raise SnapshotRejected("full-account fact rows are invalid")
+        if (
+            current.connected is not True
+            or current.fresh is not True
+            or current.account_scope != self.scope
+            or current.environment != self.environment
+        ):
+            raise SnapshotRejected(
+                "full-account facts failed connection/scope/freshness binding"
+            )
+        if (snapshot_observed - observed).total_seconds() > FUTURE_SKEW_SECONDS or (
+            observed - snapshot_observed
+        ).total_seconds() > SNAPSHOT_STALE_SECONDS:
+            raise SnapshotRejected("full-account facts timestamp is stale")
+        if (
+            isinstance(current.generation, bool)
+            or not isinstance(current.generation, int)
+            or current.generation < 0
+            or isinstance(current.active_order_count, bool)
+            or not isinstance(current.active_order_count, int)
+            or current.active_order_count < 0
+            or current.active_order_count != len(active_orders)
+        ):
+            raise SnapshotRejected("full-account facts generation/order closure failed")
+        expected_position_hash = sha256_json(positions)
+        active_orders_sha256 = sha256_json(active_orders)
+        if current.position_snapshot_hash != expected_position_hash:
+            raise SnapshotRejected("full-account position hash does not close")
+
+        state = self.repository.snapshot()
+        try:
+            durable_active_orders = _detached_json(state["broker"]["orders"])
+            durable_positions = _detached_json(state["broker"]["positions"])
+        except (KeyError, MutationRejected, TypeError, ValueError) as exc:
+            raise SnapshotRejected(
+                "durable full-account broker facts are invalid"
+            ) from exc
+        if any(
+            not isinstance(fact_id, str) or not isinstance(row, Mapping)
+            for facts in (durable_active_orders, durable_positions)
+            for fact_id, row in facts.items()
+        ):
+            raise SnapshotRejected("durable full-account broker rows are invalid")
+        durable_active_orders_sha256 = sha256_json(durable_active_orders)
+        durable_positions_sha256 = sha256_json(durable_positions)
+        status = self._projection(state, observed)
+        stable_snapshot_identity = current.snapshot_id.startswith("snapshot-peek-")
+        status_binding = {
+            "status_schema_version": status["schema_version"],
+            "state_version": status["state_version"],
+            "status_observed_at": status["observed_at"],
+            "lifecycle": status["lifecycle"],
+            "reconciliation": deepcopy(status["reconciliation"]),
+            "broker": deepcopy(status["broker"]),
+            "durable_active_orders_sha256": durable_active_orders_sha256,
+            "durable_positions_sha256": durable_positions_sha256,
+            "snapshot_identity_mode": (
+                "EXACT"
+                if stable_snapshot_identity
+                else "GENERATION_FACT_HASH_EQUIVALENT"
+            ),
+        }
+        durable_broker = status_binding["broker"]
+        reconciliation = status_binding["reconciliation"]
+        try:
+            durable_snapshot_observed = _timestamp(durable_broker["last_snapshot_at"])
+        except (CommandValidationError, TypeError, ValueError) as exc:
+            raise SnapshotRejected("durable broker snapshot time is invalid") from exc
+        if (
+            reconciliation["state"] != "RECONCILED"
+            or reconciliation["unknown_outcomes"] != 0
+            or durable_broker["connected"] is not True
+            or durable_broker["generation"] != current.generation
+            or durable_broker["position_snapshot_hash"] != expected_position_hash
+            or durable_positions_sha256 != expected_position_hash
+            or durable_broker["active_order_count"] != current.active_order_count
+            or durable_broker["active_order_count"] != len(durable_active_orders)
+            or durable_active_orders_sha256 != active_orders_sha256
+            or (
+                stable_snapshot_identity
+                and reconciliation["fresh_snapshot_id"] != current.snapshot_id
+            )
+            or durable_snapshot_observed > snapshot_observed
+        ):
+            raise SnapshotRejected(
+                "full-account facts are not bound to the reconciled Execution status"
+            )
+        preimage = {
+            "schema_version": "web_bridge_execution_account_facts_v1",
+            "service": SERVICE,
+            "service_version": self.service_version,
+            "account_scope": self.scope,
+            "environment": self.environment,
+            "snapshot_id": current.snapshot_id,
+            "generation": current.generation,
+            "observed_at": current.observed_at,
+            "connected": True,
+            "fresh": True,
+            "position_snapshot_hash": expected_position_hash,
+            "positions": positions,
+            "active_order_count": current.active_order_count,
+            "active_orders_sha256": active_orders_sha256,
+            "active_orders": active_orders,
+            "status_binding": status_binding,
+        }
+        return {**preimage, "account_facts_sha256": sha256_json(preimage)}
+
     overview = status
     status_projection = status
     get_status = status

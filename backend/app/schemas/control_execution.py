@@ -11,12 +11,16 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from jsonschema import Draft202012Validator
 
-from shared.commodity_execution import KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION
+from shared.commodity_execution import (
+    KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+    sha256_json,
+)
 
 from app.execution.models import (
     EPOCH_TIMESTAMP,
@@ -24,6 +28,7 @@ from app.execution.models import (
     SHA256_RE,
     UTC_RE,
     CommandEnvelope,
+    parse_utc,
 )
 
 _SCHEMA_PATH = (
@@ -440,6 +445,407 @@ class ExecutionCompletionProjection:
         return str(self.value["target_position_hash"])
 
 
+_ACCOUNT_FACTS_FIELDS = frozenset(
+    {
+        "schema_version",
+        "service",
+        "service_version",
+        "account_scope",
+        "environment",
+        "snapshot_id",
+        "generation",
+        "observed_at",
+        "connected",
+        "fresh",
+        "position_snapshot_hash",
+        "positions",
+        "active_order_count",
+        "active_orders_sha256",
+        "active_orders",
+        "status_binding",
+        "account_facts_sha256",
+    }
+)
+_STATUS_BINDING_FIELDS = frozenset(
+    {
+        "status_schema_version",
+        "state_version",
+        "status_observed_at",
+        "lifecycle",
+        "reconciliation",
+        "broker",
+        "durable_active_orders_sha256",
+        "durable_positions_sha256",
+        "snapshot_identity_mode",
+    }
+)
+_RECONCILIATION_FIELDS = frozenset(
+    {
+        "state",
+        "run_id",
+        "last_completed_at",
+        "unknown_outcomes",
+        "fresh_snapshot_id",
+    }
+)
+_BROKER_FIELDS = frozenset(
+    {
+        "connected",
+        "generation",
+        "active_order_count",
+        "position_snapshot_hash",
+        "last_snapshot_at",
+    }
+)
+
+
+def _strict_nonnegative_int(value: Any, *, field: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{field} is invalid")
+
+
+def _strict_sha(value: Any, *, field: str) -> None:
+    if not isinstance(value, str) or SHA256_RE.fullmatch(value) is None:
+        raise ValueError(f"{field} is invalid")
+
+
+def _strict_utc(value: Any, *, field: str) -> datetime:
+    if not isinstance(value, str) or UTC_RE.fullmatch(value) is None:
+        raise ValueError(f"{field} is invalid")
+    try:
+        parse_utc(value, field_name=field)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} is invalid") from exc
+    return datetime.fromisoformat(value.removesuffix("Z") + "+00:00")
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionAccountFactsProjection:
+    """Strict Control-side view of one full, fresh Execution-owned account read."""
+
+    value: dict[str, Any]
+
+    @classmethod
+    def from_mapping(cls, value: Any) -> ExecutionAccountFactsProjection:
+        candidate = _detached_object(value, name="execution account facts")
+        if set(candidate) != _ACCOUNT_FACTS_FIELDS:
+            raise ValueError("execution account facts fields are not exact")
+        if (
+            candidate["schema_version"] != "web_bridge_execution_account_facts_v1"
+            or candidate["service"] != "execution-orchestrator"
+            or not isinstance(candidate["service_version"], str)
+            or not candidate["service_version"]
+            or not isinstance(candidate["account_scope"], str)
+            or IDENTIFIER_RE.fullmatch(candidate["account_scope"]) is None
+            or not isinstance(candidate["environment"], str)
+            or not candidate["environment"]
+            or not isinstance(candidate["snapshot_id"], str)
+            or IDENTIFIER_RE.fullmatch(candidate["snapshot_id"]) is None
+            or candidate["connected"] is not True
+            or candidate["fresh"] is not True
+        ):
+            raise ValueError("execution account facts identity is invalid")
+        _strict_nonnegative_int(candidate["generation"], field="generation")
+        _strict_nonnegative_int(
+            candidate["active_order_count"], field="active_order_count"
+        )
+        observed_at = _strict_utc(candidate["observed_at"], field="observed_at")
+        for field in (
+            "position_snapshot_hash",
+            "active_orders_sha256",
+            "account_facts_sha256",
+        ):
+            _strict_sha(candidate[field], field=field)
+        positions = candidate["positions"]
+        orders = candidate["active_orders"]
+        if not isinstance(positions, Mapping) or not isinstance(orders, Mapping):
+            raise ValueError("execution account fact rows are invalid")
+        if any(
+            not isinstance(key, str) or not isinstance(row, Mapping)
+            for facts in (positions, orders)
+            for key, row in facts.items()
+        ):
+            raise ValueError("execution account fact rows are invalid")
+        if candidate["active_order_count"] != len(orders):
+            raise ValueError("execution active order count does not close")
+        if candidate["position_snapshot_hash"] != sha256_json(dict(positions)):
+            raise ValueError("execution position facts hash does not close")
+        if candidate["active_orders_sha256"] != sha256_json(dict(orders)):
+            raise ValueError("execution active order facts hash does not close")
+
+        binding = candidate["status_binding"]
+        if not isinstance(binding, Mapping) or set(binding) != _STATUS_BINDING_FIELDS:
+            raise ValueError("execution account facts status binding is not exact")
+        if (
+            binding["status_schema_version"] != "web_bridge_execution_status_v1"
+            or not isinstance(binding["lifecycle"], str)
+            or not binding["lifecycle"]
+            or binding["snapshot_identity_mode"]
+            not in {"EXACT", "GENERATION_FACT_HASH_EQUIVALENT"}
+        ):
+            raise ValueError("execution account facts status identity is invalid")
+        _strict_nonnegative_int(binding["state_version"], field="state_version")
+        _strict_utc(binding["status_observed_at"], field="status_observed_at")
+        _strict_sha(
+            binding["durable_active_orders_sha256"],
+            field="durable_active_orders_sha256",
+        )
+        _strict_sha(
+            binding["durable_positions_sha256"],
+            field="durable_positions_sha256",
+        )
+        reconciliation = binding["reconciliation"]
+        broker = binding["broker"]
+        if (
+            not isinstance(reconciliation, Mapping)
+            or set(reconciliation) != _RECONCILIATION_FIELDS
+            or not isinstance(broker, Mapping)
+            or set(broker) != _BROKER_FIELDS
+        ):
+            raise ValueError("execution account facts durable binding is not exact")
+        for field in ("state", "run_id", "fresh_snapshot_id"):
+            if not isinstance(reconciliation[field], str):
+                raise ValueError("execution reconciliation binding is invalid")
+        _strict_utc(reconciliation["last_completed_at"], field="last_completed_at")
+        _strict_nonnegative_int(
+            reconciliation["unknown_outcomes"], field="unknown_outcomes"
+        )
+        if not isinstance(broker["connected"], bool):
+            raise ValueError("execution durable broker connected flag is invalid")
+        for field in ("generation", "active_order_count"):
+            _strict_nonnegative_int(broker[field], field=f"broker.{field}")
+        _strict_sha(
+            broker["position_snapshot_hash"], field="broker.position_snapshot_hash"
+        )
+        durable_observed_at = _strict_utc(
+            broker["last_snapshot_at"], field="broker.last_snapshot_at"
+        )
+        stable_snapshot_identity = candidate["snapshot_id"].startswith("snapshot-peek-")
+        if stable_snapshot_identity:
+            _strict_sha(
+                candidate["snapshot_id"].removeprefix("snapshot-peek-"),
+                field="snapshot peek facts hash",
+            )
+        if (
+            reconciliation["state"] != "RECONCILED"
+            or reconciliation["unknown_outcomes"] != 0
+            or broker["connected"] is not True
+            or broker["generation"] != candidate["generation"]
+            or broker["position_snapshot_hash"] != candidate["position_snapshot_hash"]
+            or binding["durable_positions_sha256"]
+            != candidate["position_snapshot_hash"]
+            or broker["active_order_count"] != candidate["active_order_count"]
+            or binding["durable_active_orders_sha256"]
+            != candidate["active_orders_sha256"]
+            or binding["snapshot_identity_mode"]
+            != (
+                "EXACT"
+                if stable_snapshot_identity
+                else "GENERATION_FACT_HASH_EQUIVALENT"
+            )
+            or (
+                stable_snapshot_identity
+                and reconciliation["fresh_snapshot_id"] != candidate["snapshot_id"]
+            )
+            or durable_observed_at > observed_at
+        ):
+            raise ValueError(
+                "execution account facts are not bound to reconciled status"
+            )
+        preimage = {
+            key: candidate[key] for key in candidate if key != "account_facts_sha256"
+        }
+        if candidate["account_facts_sha256"] != sha256_json(preimage):
+            raise ValueError("execution account facts projection hash does not close")
+        return cls(candidate)
+
+    @classmethod
+    def model_validate(cls, value: Any) -> ExecutionAccountFactsProjection:
+        return cls.from_mapping(value)
+
+    def model_dump(self, *, mode: str = "python") -> dict[str, Any]:
+        del mode
+        return json.loads(json.dumps(self.value, ensure_ascii=False))
+
+    def as_dict(self) -> dict[str, Any]:
+        return self.model_dump()
+
+
+_RECOVERY_BEFORE_CUSTODY_FIELDS = frozenset(
+    {
+        "schema_version",
+        "state",
+        "custody_idempotency_key",
+        "production_allowed",
+        "live_trading_authorized",
+        "countable_forward",
+        "recovery_sha256",
+    }
+)
+_RECOVERY_BOUND_FIELDS = frozenset(
+    {
+        "schema_version",
+        "state",
+        "custody_idempotency_key",
+        "custody_install_idempotency_key",
+        "custody_version",
+        "receipt_id",
+        "receipt_sha256",
+        "artifact_id",
+        "artifact_sha256",
+        "artifact_envelope_sha256",
+        "installed",
+        "target_plan_schema_version",
+        "plan_id",
+        "plan_hash",
+        "phase",
+        "lineage",
+        "account_scope",
+        "environment",
+        "gateway_name",
+        "generated_at",
+        "expires_at",
+        "expected_before_position_hash",
+        "expected_after_position_hash",
+        "order_set_sha256",
+        "production_allowed",
+        "live_trading_authorized",
+        "countable_forward",
+        "recovery_sha256",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionTargetPlanRecoveryProjection:
+    """Strict custody/installation state for immutable v2 plan recovery."""
+
+    value: dict[str, Any]
+
+    @classmethod
+    def from_mapping(cls, value: Any) -> ExecutionTargetPlanRecoveryProjection:
+        candidate = _detached_object(value, name="execution target plan recovery")
+        fields = set(candidate)
+        if fields == _RECOVERY_BEFORE_CUSTODY_FIELDS:
+            if (
+                candidate["schema_version"]
+                != "web_bridge_execution_target_plan_recovery_v1"
+                or candidate["state"] != "BEFORE_CUSTODY"
+                or any(
+                    candidate[field] is not False
+                    for field in (
+                        "production_allowed",
+                        "live_trading_authorized",
+                        "countable_forward",
+                    )
+                )
+                or not isinstance(candidate["custody_idempotency_key"], str)
+                or IDENTIFIER_RE.fullmatch(candidate["custody_idempotency_key"]) is None
+            ):
+                raise ValueError(
+                    "execution before-custody recovery identity is invalid"
+                )
+            _strict_sha(candidate["recovery_sha256"], field="recovery_sha256")
+            preimage = {
+                key: candidate[key] for key in candidate if key != "recovery_sha256"
+            }
+            if candidate["recovery_sha256"] != sha256_json(preimage):
+                raise ValueError("execution target plan recovery hash does not close")
+            return cls(candidate)
+        if fields != _RECOVERY_BOUND_FIELDS:
+            raise ValueError("execution target plan recovery fields are not exact")
+        if (
+            candidate["schema_version"]
+            != "web_bridge_execution_target_plan_recovery_v1"
+            or candidate["target_plan_schema_version"]
+            != KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION
+            or candidate["state"]
+            not in {"CUSTODY_PUBLISHED_NOT_PREVIEWED", "INSTALLED"}
+            or not isinstance(candidate["installed"], bool)
+            or candidate["installed"] is not (candidate["state"] == "INSTALLED")
+            or candidate["phase"] not in {"CLOSE", "OPEN"}
+            or candidate["environment"] != "SIMNOW"
+            or candidate["gateway_name"] != "CTP"
+            or any(
+                candidate[field] is not False
+                for field in (
+                    "production_allowed",
+                    "live_trading_authorized",
+                    "countable_forward",
+                )
+            )
+        ):
+            raise ValueError("execution target plan recovery identity is invalid")
+        for field in (
+            "custody_idempotency_key",
+            "custody_install_idempotency_key",
+            "receipt_id",
+            "artifact_id",
+            "plan_id",
+            "account_scope",
+        ):
+            if (
+                not isinstance(candidate[field], str)
+                or IDENTIFIER_RE.fullmatch(candidate[field]) is None
+            ):
+                raise ValueError(f"execution target plan recovery {field} is invalid")
+        if candidate["custody_install_idempotency_key"] != (
+            f"install-{candidate['custody_idempotency_key']}"
+        ):
+            raise ValueError("execution target plan recovery custody key mismatches")
+        _strict_nonnegative_int(candidate["custody_version"], field="custody_version")
+        if candidate["custody_version"] < 1:
+            raise ValueError(
+                "execution target plan recovery custody version is invalid"
+            )
+        for field in (
+            "receipt_sha256",
+            "artifact_sha256",
+            "artifact_envelope_sha256",
+            "plan_hash",
+            "expected_before_position_hash",
+            "expected_after_position_hash",
+            "order_set_sha256",
+            "recovery_sha256",
+        ):
+            _strict_sha(candidate[field], field=field)
+        for field in ("generated_at", "expires_at"):
+            _strict_utc(candidate[field], field=field)
+        lineage = candidate["lineage"]
+        if (
+            not isinstance(lineage, Mapping)
+            or set(lineage) != _COMPLETION_LINEAGE_FIELDS
+        ):
+            raise ValueError("execution target plan recovery lineage is not exact")
+        for field in _COMPLETION_LINEAGE_FIELDS:
+            _strict_sha(lineage[field], field=f"lineage.{field}")
+        preimage = {
+            key: candidate[key] for key in candidate if key != "recovery_sha256"
+        }
+        if candidate["recovery_sha256"] != sha256_json(preimage):
+            raise ValueError("execution target plan recovery hash does not close")
+        return cls(candidate)
+
+    @classmethod
+    def model_validate(cls, value: Any) -> ExecutionTargetPlanRecoveryProjection:
+        return cls.from_mapping(value)
+
+    def model_dump(self, *, mode: str = "python") -> dict[str, Any]:
+        del mode
+        return json.loads(json.dumps(self.value, ensure_ascii=False))
+
+    def as_dict(self) -> dict[str, Any]:
+        return self.model_dump()
+
+    @property
+    def plan_id(self) -> str:
+        return str(self.value.get("plan_id", ""))
+
+    @property
+    def state(self) -> str:
+        return str(self.value["state"])
+
+
 # Explicit aliases make the boundary discoverable to callers that use the
 # conventional DTO naming while retaining the shared execution model.
 ControlExecutionCommandDTO = CommandEnvelope
@@ -448,6 +854,8 @@ ExecutionStatusDTO = ExecutionStatusProjection
 ExecutionStatusProjectionDTO = ExecutionStatusProjection
 ExecutionCompletionDTO = ExecutionCompletionProjection
 ExecutionCompletionProjectionDTO = ExecutionCompletionProjection
+ExecutionAccountFactsDTO = ExecutionAccountFactsProjection
+ExecutionTargetPlanRecoveryDTO = ExecutionTargetPlanRecoveryProjection
 ExecutionLeaderStatusDTO = ExecutionLeaderStatusProjection
 ExecutionLeaderTokenDTO = ExecutionLeaderTokenProjection
 
@@ -459,6 +867,8 @@ __all__ = [
     "ExecutionCompletionDTO",
     "ExecutionCompletionProjection",
     "ExecutionCompletionProjectionDTO",
+    "ExecutionAccountFactsDTO",
+    "ExecutionAccountFactsProjection",
     "ExecutionLeaderStatusDTO",
     "ExecutionLeaderStatusProjection",
     "ExecutionLeaderTokenDTO",
@@ -466,4 +876,6 @@ __all__ = [
     "ExecutionStatusDTO",
     "ExecutionStatusProjection",
     "ExecutionStatusProjectionDTO",
+    "ExecutionTargetPlanRecoveryDTO",
+    "ExecutionTargetPlanRecoveryProjection",
 ]
