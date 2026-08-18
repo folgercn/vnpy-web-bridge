@@ -8,10 +8,15 @@ from decimal import Decimal
 import pytest
 from app.execution.executable_target_adapter import (
     ExecutableTargetAdapterError,
+    StaticCoreEqualFullPortfolioQuoteInputBinding,
+    StaticCoreEqualFullPortfolioQuoteRequirement,
+    StaticCoreEqualFullPortfolioQuoteRequirements,
+    build_full_portfolio_quote_requests,
     build_static_core_equal_full_portfolio_keyless_decision,
     full_portfolio_phase_plan_id_from_preimage,
     full_portfolio_phase_plan_id_from_payload,
 )
+from app.execution.formal_tick_reader import FormalTickRequest
 from shared.commodity_execution import (
     FORMAL_QUOTE_PROOF_SCHEMA_VERSION,
     KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
@@ -32,6 +37,7 @@ PRODUCTS = ("ag", "al", "au", "bu", "cu", "rb", "ru", "sc", "sp", "zn")
 NOW = datetime(2030, 1, 1, tzinfo=timezone.utc)
 EVENT_GENERATED_AT = "2030-01-01T00:00:00Z"
 _AUTO_QUOTES = object()
+_AUTO_REQUIREMENTS = object()
 
 
 def _targets(**overrides: int) -> dict[str, int]:
@@ -182,6 +188,7 @@ def _decision(
     *,
     selected: dict[str, int],
     positions: dict[str, dict] | None = None,
+    quote_requirements: object = _AUTO_REQUIREMENTS,
     formal_quotes: object = _AUTO_QUOTES,
     quote_overrides: dict[str, dict[str, object]] | None = None,
     drop_quotes: set[str] | None = None,
@@ -195,6 +202,28 @@ def _decision(
     projection, freeze, target = _static_outputs()
     manager = _position_manager_snapshot(target, selected=selected)
     current_positions = {} if positions is None else positions
+    normalized_reconciliation = (
+        {"state": "RECONCILED", "unknown_outcomes": 0}
+        if reconciliation is None
+        else reconciliation
+    )
+    requirements = (
+        build_full_portfolio_quote_requests(
+            static_core_equal_projection=projection,
+            static_core_equal_freeze_contract=freeze,
+            static_core_equal_target_evidence=target,
+            position_manager_snapshot=manager,
+            position_manager_sha256=sha256_json(manager),
+            current_facts=_snapshot(current_positions),
+            reconciliation=normalized_reconciliation,
+            run_id=run_id,
+            event_generated_at=event_generated_at,
+            now=now,
+            target_plan_version=target_plan_version,
+        )
+        if quote_requirements is _AUTO_REQUIREMENTS
+        else quote_requirements
+    )
     quotes = (
         _required_formal_quotes(
             manager,
@@ -217,11 +246,8 @@ def _decision(
         position_manager_snapshot=manager,
         position_manager_sha256=sha256_json(manager),
         current_facts=_snapshot(current_positions),
-        reconciliation=(
-            {"state": "RECONCILED", "unknown_outcomes": 0}
-            if reconciliation is None
-            else reconciliation
-        ),
+        reconciliation=normalized_reconciliation,
+        quote_requirements=requirements,
         formal_quotes_by_exact_contract=quotes,
         run_id=run_id,
         event_generated_at=event_generated_at,
@@ -229,6 +255,45 @@ def _decision(
         now=now,
         target_plan_version=target_plan_version,
     )
+
+
+def _requirements(
+    *,
+    selected: dict[str, int],
+    positions: dict[str, dict] | None = None,
+    run_id: str = "issue362-full-portfolio-0001",
+    event_generated_at: str = EVENT_GENERATED_AT,
+    now: datetime = NOW,
+    target_plan_version: int = 2,
+):
+    projection, freeze, target = _static_outputs()
+    manager = _position_manager_snapshot(target, selected=selected)
+    result = build_full_portfolio_quote_requests(
+        static_core_equal_projection=projection,
+        static_core_equal_freeze_contract=freeze,
+        static_core_equal_target_evidence=target,
+        position_manager_snapshot=manager,
+        position_manager_sha256=sha256_json(manager),
+        current_facts=_snapshot({} if positions is None else positions),
+        reconciliation={"state": "RECONCILED", "unknown_outcomes": 0},
+        run_id=run_id,
+        event_generated_at=event_generated_at,
+        now=now,
+        target_plan_version=target_plan_version,
+    )
+    return result, manager
+
+
+def _quotes_for_requirements(requirements) -> dict[str, dict[str, object]]:
+    return {
+        row.exact_contract: _formal_quote(
+            row.exact_contract,
+            price_side=row.request.price_side,
+            price_tick=row.request.price_tick,
+            ingest_seq=index,
+        )
+        for index, row in enumerate(requirements.requirements, start=1)
+    }
 
 
 def test_full_portfolio_mixed_delta_defers_open_until_fresh_second_cycle() -> None:
@@ -418,7 +483,7 @@ def test_full_portfolio_true_noop_has_no_handoff(
     decision = _decision(
         selected=selected,
         positions=positions,
-        formal_quotes=None,
+        formal_quotes={},
         expires_at=None,
     )
 
@@ -455,6 +520,427 @@ def test_full_portfolio_open_only_and_close_only_are_independent_plans() -> None
             {}, account_scope="account:windows", environment="SIMNOW"
         )
     )
+
+
+@pytest.mark.parametrize(
+    (
+        "product",
+        "current_quantity",
+        "target_quantity",
+        "roll",
+        "expected_phase",
+        "expected_side",
+        "expected_order_count",
+        "expected_deferred_open_count",
+    ),
+    [
+        ("ag", 0, 0, False, None, None, 0, 0),
+        ("ag", 0, 2, False, "OPEN", "ask", 2, 0),
+        ("ag", 1, 3, False, "OPEN", "ask", 2, 0),
+        ("ag", 3, 1, False, "CLOSE", "bid", 2, 0),
+        ("au", -2, 2, False, "CLOSE", "ask", 2, 2),
+        ("cu", 2, 2, True, "CLOSE", "bid", 2, 2),
+        ("sc", -3, 0, False, "CLOSE", "ask", 3, 0),
+    ],
+)
+def test_quote_requirements_use_the_exact_planner_delta_and_immediate_phase(
+    product: str,
+    current_quantity: int,
+    target_quantity: int,
+    roll: bool,
+    expected_phase: str | None,
+    expected_side: str | None,
+    expected_order_count: int,
+    expected_deferred_open_count: int,
+) -> None:
+    _projection, _freeze, target = _static_outputs()
+    manager = _position_manager_snapshot(
+        target, selected=_targets(**{product: target_quantity})
+    )
+    target_row = _row_by_product(manager)[product]
+    current_contract = (
+        target_row["exact_contract"][:-2] + "09"
+        if roll
+        else target_row["exact_contract"]
+    )
+    positions = {}
+    if current_quantity:
+        positions = dict(
+            [
+                _position(
+                    current_contract,
+                    direction="LONG" if current_quantity > 0 else "SHORT",
+                    volume=abs(current_quantity),
+                    yd_volume=min(1, abs(current_quantity)),
+                )
+            ]
+        )
+
+    requirements, _manager = _requirements(
+        selected=_targets(**{product: target_quantity}), positions=positions
+    )
+
+    assert requirements.phase == expected_phase
+    assert requirements.noop is (expected_phase is None)
+    assert requirements.deferred_open_order_count == expected_deferred_open_count
+    if expected_phase is None:
+        assert requirements.requirements == ()
+        assert requirements.requests == ()
+        decision = _decision(
+            selected=_targets(**{product: target_quantity}),
+            positions=positions,
+            formal_quotes={},
+            expires_at=None,
+        )
+        assert decision.noop is True
+        return
+
+    assert len(requirements.requirements) == 1
+    requirement = requirements.requirements[0]
+    expected_contract = (
+        current_contract if expected_phase == "CLOSE" else target_row["exact_contract"]
+    )
+    exchange, symbol = expected_contract.split(".", 1)
+    assert requirement.phase == expected_phase
+    assert requirement.product == product
+    assert requirement.exact_contract == expected_contract
+    assert requirement.request.vt_symbol == f"{symbol}.{exchange}"
+    assert requirement.request.price_side == expected_side
+    assert requirement.request.price_tick == float(target_row["price_tick"])
+    assert len(requirement.order_references) == expected_order_count
+    assert requirements.requests == (requirement.request,)
+
+    decision = _decision(
+        selected=_targets(**{product: target_quantity}),
+        positions=positions,
+        formal_quotes=_quotes_for_requirements(requirements),
+    )
+    handoff = (
+        decision.close_handoff if expected_phase == "CLOSE" else decision.open_handoff
+    )
+    assert handoff is not None
+    actual_references = tuple(
+        order["reference"]
+        for order in handoff.target_plan["orders"]
+        if f"{order['exchange']}.{order['symbol']}" == expected_contract
+    )
+    assert actual_references == requirement.order_references
+
+
+def test_close_requirements_defer_roll_open_until_fresh_post_close_facts() -> None:
+    _projection, _freeze, target = _static_outputs()
+    manager = _position_manager_snapshot(target, selected=_targets(cu=2))
+    cu = _row_by_product(manager)["cu"]
+    old_contract = cu["exact_contract"][:-2] + "09"
+    positions = dict([_position(old_contract, direction="LONG", volume=2, yd_volume=1)])
+    close_requirements, _manager = _requirements(
+        selected=_targets(cu=2), positions=positions
+    )
+    assert close_requirements.phase == "CLOSE"
+    assert [row.exact_contract for row in close_requirements.requirements] == [
+        old_contract
+    ]
+    assert close_requirements.deferred_open_order_count == 2
+
+    close_decision = _decision(
+        selected=_targets(cu=2),
+        positions=positions,
+        formal_quotes=_quotes_for_requirements(close_requirements),
+    )
+    open_requirements, _manager = _requirements(
+        selected=_targets(cu=2),
+        positions=deepcopy(close_decision.phase_boundary.positions),
+        event_generated_at="2030-01-01T00:00:01Z",
+        now=NOW + timedelta(seconds=1),
+    )
+    assert open_requirements.phase == "OPEN"
+    assert [row.exact_contract for row in open_requirements.requirements] == [
+        cu["exact_contract"]
+    ]
+    assert open_requirements.requirements[0].request.price_side == "ask"
+    assert len(open_requirements.requirements[0].order_references) == 2
+    assert open_requirements.deferred_open_order_count == 0
+
+
+def test_quote_requirements_are_sorted_deduplicated_and_match_all_final_orders() -> (
+    None
+):
+    selected = _targets(ag=2, cu=-3, sc=1)
+    requirements, _manager = _requirements(selected=selected)
+    assert requirements.phase == "OPEN"
+    contracts = [row.exact_contract for row in requirements.requirements]
+    assert contracts == sorted(contracts)
+    assert len(contracts) == len(set(contracts)) == 3
+    assert sum(len(row.order_references) for row in requirements.requirements) == 6
+
+    decision = _decision(
+        selected=selected,
+        formal_quotes=_quotes_for_requirements(requirements),
+    )
+    assert decision.open_handoff is not None
+    required_references = {
+        reference
+        for row in requirements.requirements
+        for reference in row.order_references
+    }
+    actual_references = {
+        order["reference"] for order in decision.open_handoff.target_plan["orders"]
+    }
+    assert actual_references == required_references
+
+
+def test_planner_rejects_any_deviation_from_the_quote_requirement_batch() -> None:
+    requirements, manager = _requirements(selected=_targets(ag=2))
+    quotes = _quotes_for_requirements(requirements)
+    requirement = requirements.requirements[0]
+    contract = requirement.exact_contract
+
+    with pytest.raises(ExecutableTargetAdapterError, match="formal quote is missing"):
+        _decision(selected=_targets(ag=2), formal_quotes={})
+
+    extra = deepcopy(quotes)
+    cu = _row_by_product(manager)["cu"]
+    extra[cu["exact_contract"]] = _formal_quote(
+        cu["exact_contract"],
+        price_side="ask",
+        price_tick=cu["price_tick"],
+        ingest_seq=99,
+    )
+    with pytest.raises(ExecutableTargetAdapterError, match="contract set is not exact"):
+        _decision(selected=_targets(ag=2), formal_quotes=extra)
+
+    wrong_side = deepcopy(quotes)
+    wrong_side[contract]["price_side"] = "bid"
+    with pytest.raises(ExecutableTargetAdapterError, match="identity is invalid"):
+        _decision(selected=_targets(ag=2), formal_quotes=wrong_side)
+
+    wrong_tick = deepcopy(quotes)
+    wrong_tick[contract]["price_tick"] = requirement.request.price_tick * 2
+    with pytest.raises(
+        ExecutableTargetAdapterError, match="frozen product price tick mismatch"
+    ):
+        _decision(selected=_targets(ag=2), formal_quotes=wrong_tick)
+
+
+def test_planner_rejects_requirements_from_different_target_run_or_phase() -> None:
+    one_lot, _manager = _requirements(selected=_targets(ag=1))
+    one_lot_quotes = _quotes_for_requirements(one_lot)
+    with pytest.raises(ExecutableTargetAdapterError, match="requirements do not match"):
+        _decision(
+            selected=_targets(ag=2),
+            quote_requirements=one_lot,
+            formal_quotes=one_lot_quotes,
+        )
+    with pytest.raises(ExecutableTargetAdapterError, match="requirements do not match"):
+        _decision(
+            selected=_targets(ag=1),
+            run_id="issue362-full-run-different-0001",
+            quote_requirements=one_lot,
+            formal_quotes=one_lot_quotes,
+        )
+
+    _projection, _freeze, target = _static_outputs()
+    manager = _position_manager_snapshot(target, selected=_targets(ag=1))
+    ag = _row_by_product(manager)["ag"]
+    positions = dict([_position(ag["exact_contract"], direction="LONG", volume=2)])
+    close_requirements, _manager = _requirements(
+        selected=_targets(ag=1), positions=positions
+    )
+    assert close_requirements.phase == "CLOSE"
+    with pytest.raises(ExecutableTargetAdapterError, match="requirements do not match"):
+        _decision(
+            selected=_targets(ag=1),
+            positions=positions,
+            quote_requirements=one_lot,
+            formal_quotes=_quotes_for_requirements(close_requirements),
+        )
+    with pytest.raises(ValueError, match="intent binding is inconsistent"):
+        StaticCoreEqualFullPortfolioQuoteRequirements(
+            phase="CLOSE",
+            requirements=close_requirements.requirements,
+            deferred_open_order_count=1,
+            input_binding=close_requirements.input_binding,
+        )
+
+
+def test_quote_requirements_bind_same_shape_open_to_exact_inputs() -> None:
+    flat_two, _manager = _requirements(selected=_targets(ag=2))
+    _projection, _freeze, target = _static_outputs()
+    manager = _position_manager_snapshot(target, selected=_targets(ag=3))
+    ag = _row_by_product(manager)["ag"]
+    one_long = dict(
+        [_position(ag["exact_contract"], direction="LONG", volume=1, yd_volume=0)]
+    )
+    one_to_three, _manager = _requirements(selected=_targets(ag=3), positions=one_long)
+
+    assert flat_two.phase == one_to_three.phase == "OPEN"
+    assert flat_two.requirements == one_to_three.requirements
+    assert flat_two.input_binding.current_before_position_hash != (
+        one_to_three.input_binding.current_before_position_hash
+    )
+    assert flat_two.input_binding.desired_target_sha256 != (
+        one_to_three.input_binding.desired_target_sha256
+    )
+    assert flat_two.quote_requirements_sha256 != (
+        one_to_three.quote_requirements_sha256
+    )
+    with pytest.raises(ExecutableTargetAdapterError, match="requirements do not match"):
+        _decision(
+            selected=_targets(ag=3),
+            positions=one_long,
+            quote_requirements=flat_two,
+            formal_quotes=_quotes_for_requirements(flat_two),
+        )
+
+
+def test_close_requirements_bind_exact_deferred_open_intent() -> None:
+    _projection, _freeze, target = _static_outputs()
+    ag_manager = _position_manager_snapshot(target, selected=_targets(ag=-1))
+    ag = _row_by_product(ag_manager)["ag"]
+    one_long = dict(
+        [_position(ag["exact_contract"], direction="LONG", volume=1, yd_volume=0)]
+    )
+    deferred_ag, _manager = _requirements(selected=_targets(ag=-1), positions=one_long)
+    deferred_au, _manager = _requirements(selected=_targets(au=-1), positions=one_long)
+
+    assert deferred_ag.phase == deferred_au.phase == "CLOSE"
+    assert deferred_ag.requirements == deferred_au.requirements
+    assert deferred_ag.deferred_open_order_count == 1
+    assert deferred_au.deferred_open_order_count == 1
+    assert deferred_ag.input_binding.phase_boundary_sha256 == (
+        deferred_au.input_binding.phase_boundary_sha256
+    )
+    assert deferred_ag.input_binding.deferred_open_intent_sha256 != (
+        deferred_au.input_binding.deferred_open_intent_sha256
+    )
+    assert deferred_ag.quote_requirements_sha256 != (
+        deferred_au.quote_requirements_sha256
+    )
+    with pytest.raises(ExecutableTargetAdapterError, match="requirements do not match"):
+        _decision(
+            selected=_targets(au=-1),
+            positions=one_long,
+            quote_requirements=deferred_ag,
+            formal_quotes=_quotes_for_requirements(deferred_ag),
+        )
+
+
+def test_planner_requires_exact_noop_requirements_and_empty_quote_batch() -> None:
+    noop, _manager = _requirements(selected=_targets())
+    assert noop.noop is True
+    assert _decision(
+        selected=_targets(), quote_requirements=noop, formal_quotes={}
+    ).noop
+    with pytest.raises(ExecutableTargetAdapterError, match="contract set is not exact"):
+        _decision(
+            selected=_targets(),
+            quote_requirements=noop,
+            formal_quotes={"SHFE.ag2609": {}},
+        )
+    with pytest.raises(ExecutableTargetAdapterError, match="contract set is not exact"):
+        _decision(selected=_targets(), quote_requirements=noop, formal_quotes=None)
+
+
+def test_quote_requirement_dtos_reject_mutable_containers_and_subclasses() -> None:
+    requirements, _manager = _requirements(selected=_targets(ag=1))
+    row = requirements.requirements[0]
+    with pytest.raises(ValueError, match="orders are invalid"):
+        StaticCoreEqualFullPortfolioQuoteRequirement(
+            phase=row.phase,
+            product=row.product,
+            exact_contract=row.exact_contract,
+            request=row.request,
+            order_references=list(row.order_references),  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="requirements are invalid"):
+        StaticCoreEqualFullPortfolioQuoteRequirements(
+            phase="OPEN",
+            requirements=[row],  # type: ignore[arg-type]
+            deferred_open_order_count=0,
+            input_binding=requirements.input_binding,
+        )
+
+    class ForeignFormalTickRequest(FormalTickRequest):
+        pass
+
+    with pytest.raises(ValueError, match="request is invalid"):
+        StaticCoreEqualFullPortfolioQuoteRequirement(
+            phase=row.phase,
+            product=row.product,
+            exact_contract=row.exact_contract,
+            request=ForeignFormalTickRequest(
+                vt_symbol=row.request.vt_symbol,
+                price_side=row.request.price_side,
+                price_tick=row.request.price_tick,
+            ),
+            order_references=row.order_references,
+        )
+
+    class ForeignRequirement(StaticCoreEqualFullPortfolioQuoteRequirement):
+        pass
+
+    foreign_row = ForeignRequirement(
+        phase=row.phase,
+        product=row.product,
+        exact_contract=row.exact_contract,
+        request=row.request,
+        order_references=row.order_references,
+    )
+    with pytest.raises(ValueError, match="requirements are invalid"):
+        StaticCoreEqualFullPortfolioQuoteRequirements(
+            phase="OPEN",
+            requirements=(foreign_row,),
+            deferred_open_order_count=0,
+            input_binding=requirements.input_binding,
+        )
+
+    class ForeignRequirements(StaticCoreEqualFullPortfolioQuoteRequirements):
+        pass
+
+    foreign_requirements = ForeignRequirements(
+        phase=requirements.phase,
+        requirements=requirements.requirements,
+        deferred_open_order_count=requirements.deferred_open_order_count,
+        input_binding=requirements.input_binding,
+    )
+    with pytest.raises(ExecutableTargetAdapterError, match="requirements are required"):
+        _decision(
+            selected=_targets(ag=1),
+            quote_requirements=foreign_requirements,
+            formal_quotes=_quotes_for_requirements(requirements),
+        )
+
+    class ForeignInputBinding(StaticCoreEqualFullPortfolioQuoteInputBinding):
+        pass
+
+    binding = requirements.input_binding
+    foreign_binding = ForeignInputBinding(
+        static_core_equal_projection_sha256=(
+            binding.static_core_equal_projection_sha256
+        ),
+        static_core_equal_freeze_contract_sha256=(
+            binding.static_core_equal_freeze_contract_sha256
+        ),
+        static_core_equal_target_evidence_sha256=(
+            binding.static_core_equal_target_evidence_sha256
+        ),
+        position_manager_sha256=binding.position_manager_sha256,
+        current_before_position_hash=binding.current_before_position_hash,
+        desired_target_sha256=binding.desired_target_sha256,
+        reconciliation_sha256=binding.reconciliation_sha256,
+        phase_boundary_sha256=binding.phase_boundary_sha256,
+        deferred_open_intent_sha256=binding.deferred_open_intent_sha256,
+        run_id=binding.run_id,
+        event_generated_at=binding.event_generated_at,
+        target_plan_version=binding.target_plan_version,
+    )
+    with pytest.raises(ValueError, match="input binding is invalid"):
+        StaticCoreEqualFullPortfolioQuoteRequirements(
+            phase=requirements.phase,
+            requirements=requirements.requirements,
+            deferred_open_order_count=requirements.deferred_open_order_count,
+            input_binding=foreign_binding,
+        )
 
 
 def test_roll_binds_exact_formal_quotes_and_derives_protected_sides() -> None:
@@ -643,6 +1129,7 @@ def test_ambiguous_or_out_of_universe_portfolio_fails_closed() -> None:
     else:  # pragma: no cover - fixture contract
         raise AssertionError("target evidence digest is missing")
     manager = _position_manager_snapshot(target, selected=_targets(ag=1))
+    noop_requirements, _noop_manager = _requirements(selected=_targets())
     with pytest.raises(ExecutableTargetAdapterError, match="does not match product"):
         build_static_core_equal_full_portfolio_keyless_decision(
             static_core_equal_projection=projection,
@@ -652,6 +1139,7 @@ def test_ambiguous_or_out_of_universe_portfolio_fails_closed() -> None:
             position_manager_sha256=sha256_json(manager),
             current_facts=_snapshot({}),
             reconciliation={"state": "RECONCILED", "unknown_outcomes": 0},
+            quote_requirements=noop_requirements,
             formal_quotes_by_exact_contract=None,
             run_id="target-exchange-mismatch-0001",
             event_generated_at=EVENT_GENERATED_AT,
