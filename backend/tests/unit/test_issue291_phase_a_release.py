@@ -260,10 +260,12 @@ def test_unknown_phase_a_deployment_asset_fails_closed() -> None:
     "path",
     [
         "deployments/research-warehouse/daily-pit-main-roll-source-v1.schema.json",
+        "deployments/research-warehouse/verified-daily-pit-main-roll-source-v2.schema.json",
         "scripts/research_warehouse/daily_pit_main_roll_source.py",
+        "scripts/research_warehouse/verified_daily_pit_main_roll_source.py",
     ],
 )
-def test_issue362_unverified_research_foundation_is_preserved_exactly(
+def test_issue362_research_foundations_are_preserved_exactly(
     path: str,
 ) -> None:
     result = classify_phase_a([path])

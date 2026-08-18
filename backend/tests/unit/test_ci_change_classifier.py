@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from scripts.ci.classify_changes import classify
+from scripts.ci.validate_json_schemas import SCHEMA_DIRECTORIES
 
 
 def test_workflow_change_conservatively_triggers_every_area() -> None:
@@ -69,6 +70,16 @@ def test_area_classification_examples() -> None:
     assert classify(["frontend/src/App.tsx"])["frontend_changed"]
     assert not any(classify(["docs/README.md"]).values())
     assert all(classify([], force_all=True).values())
+
+
+def test_global_schema_gate_includes_research_warehouse_contracts() -> None:
+    root = Path(__file__).resolve().parents[3]
+    research_schema_directory = root / "deployments/research-warehouse"
+
+    assert research_schema_directory in SCHEMA_DIRECTORIES
+    assert (
+        research_schema_directory / "verified-daily-pit-main-roll-source-v2.schema.json"
+    ).is_file()
 
 
 def test_windows_fence_exact_paths_use_the_dedicated_gate_without_generic_image() -> (

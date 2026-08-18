@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SCHEMA_DIRECTORIES = (
     ROOT / "docs/schemas",
     ROOT / "scripts/phase_b_workers/schemas",
+    ROOT / "deployments/research-warehouse",
 )
 
 
