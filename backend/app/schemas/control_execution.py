@@ -19,6 +19,7 @@ from jsonschema import Draft202012Validator
 
 from shared.commodity_execution import (
     KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+    KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
     sha256_json,
 )
 
@@ -355,6 +356,14 @@ _COMPLETION_FIELDS = frozenset(
         "archived_at",
     }
 )
+_COMPLETION_V3_FIELDS = frozenset(
+    {
+        *_COMPLETION_FIELDS,
+        "execution_run_id",
+        "creation_quote_proof_sha256",
+        "start_quote_proof_sha256",
+    }
+)
 _COMPLETION_LINEAGE_FIELDS = frozenset(
     {
         "static_core_equal_sha256",
@@ -366,7 +375,7 @@ _COMPLETION_LINEAGE_FIELDS = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class ExecutionCompletionProjection:
-    """Strict read-only projection of one completed TargetPlan v2.
+    """Strict read-only projection of one completed TargetPlan v2/v3.
 
     This DTO intentionally excludes archived broker rows, receipts, authority
     material and every other mutable Execution field.  It is sufficient to
@@ -383,7 +392,8 @@ class ExecutionCompletionProjection:
         candidate = json.loads(
             json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True)
         )
-        if set(candidate) != _COMPLETION_FIELDS:
+        fields = set(candidate)
+        if fields not in {_COMPLETION_FIELDS, _COMPLETION_V3_FIELDS}:
             raise ValueError("execution completion projection fields are not exact")
         if (
             not isinstance(candidate["plan_id"], str)
@@ -400,8 +410,25 @@ class ExecutionCompletionProjection:
                 or SHA256_RE.fullmatch(candidate[field]) is None
             ):
                 raise ValueError(f"execution completion {field} is invalid")
-        if candidate["schema_version"] != KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION:
-            raise ValueError("execution completion schema_version is not v2")
+        if (
+            fields == _COMPLETION_FIELDS
+            and candidate["schema_version"] != KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION
+        ) or (
+            fields == _COMPLETION_V3_FIELDS
+            and candidate["schema_version"] != KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION
+        ):
+            raise ValueError("execution completion schema/version variant mismatches")
+        if fields == _COMPLETION_V3_FIELDS:
+            if (
+                not isinstance(candidate["execution_run_id"], str)
+                or IDENTIFIER_RE.fullmatch(candidate["execution_run_id"]) is None
+            ):
+                raise ValueError("execution completion execution_run_id is invalid")
+            for field in (
+                "creation_quote_proof_sha256",
+                "start_quote_proof_sha256",
+            ):
+                _strict_sha(candidate[field], field=field)
         if candidate["phase"] not in {"CLOSE", "OPEN"}:
             raise ValueError("execution completion phase is invalid")
         lineage = candidate["lineage"]
@@ -1236,11 +1263,31 @@ _RECOVERY_PUBLISHED_NOT_INSTALLED_FIELDS = frozenset(
         "recovery_sha256",
     }
 )
+_RECOVERY_V3_IDENTITY_FIELDS = frozenset(
+    {"execution_run_id", "creation_quote_proof_sha256"}
+)
+_RECOVERY_V3_START_FIELDS = frozenset(
+    {
+        "start_quote_proof_state",
+        "start_quote_proof_sha256",
+        "can_start_same_plan",
+    }
+)
+_RECOVERY_PUBLISHED_NOT_INSTALLED_V3_FIELDS = frozenset(
+    {*_RECOVERY_PUBLISHED_NOT_INSTALLED_FIELDS, *_RECOVERY_V3_IDENTITY_FIELDS}
+)
+_RECOVERY_BOUND_V3_FIELDS = frozenset(
+    {
+        *_RECOVERY_BOUND_FIELDS,
+        *_RECOVERY_V3_IDENTITY_FIELDS,
+        *_RECOVERY_V3_START_FIELDS,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
 class ExecutionTargetPlanRecoveryProjection:
-    """Strict custody/installation state for immutable v2 plan recovery."""
+    """Strict custody/installation state for immutable v2/v3 plan recovery."""
 
     value: dict[str, Any]
 
@@ -1274,13 +1321,25 @@ class ExecutionTargetPlanRecoveryProjection:
             if candidate["recovery_sha256"] != sha256_json(preimage):
                 raise ValueError("execution target plan recovery hash does not close")
             return cls(candidate)
-        if fields == _RECOVERY_PUBLISHED_NOT_INSTALLED_FIELDS:
+        if fields in {
+            _RECOVERY_PUBLISHED_NOT_INSTALLED_FIELDS,
+            _RECOVERY_PUBLISHED_NOT_INSTALLED_V3_FIELDS,
+        }:
+            v3 = fields == _RECOVERY_PUBLISHED_NOT_INSTALLED_V3_FIELDS
             if (
                 candidate["schema_version"]
-                != "web_bridge_execution_target_plan_recovery_v2"
+                != (
+                    "web_bridge_execution_target_plan_recovery_v3"
+                    if v3
+                    else "web_bridge_execution_target_plan_recovery_v2"
+                )
                 or candidate["state"] != "CUSTODY_PUBLISHED_NOT_INSTALLED"
                 or candidate["target_plan_schema_version"]
-                != KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION
+                != (
+                    KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION
+                    if v3
+                    else KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION
+                )
                 or candidate["artifact_schema_ref"]
                 != candidate["target_plan_schema_version"]
                 or candidate["installed"] is not False
@@ -1361,6 +1420,18 @@ class ExecutionTargetPlanRecoveryProjection:
                 "recovery_sha256",
             ):
                 _strict_sha(candidate[field], field=field)
+            if v3:
+                if (
+                    not isinstance(candidate["execution_run_id"], str)
+                    or IDENTIFIER_RE.fullmatch(candidate["execution_run_id"]) is None
+                ):
+                    raise ValueError(
+                        "execution published-only recovery execution_run_id is invalid"
+                    )
+                _strict_sha(
+                    candidate["creation_quote_proof_sha256"],
+                    field="creation_quote_proof_sha256",
+                )
             for field in ("generated_at", "expires_at"):
                 _strict_utc(candidate[field], field=field)
             lineage = candidate["lineage"]
@@ -1379,13 +1450,22 @@ class ExecutionTargetPlanRecoveryProjection:
             if candidate["recovery_sha256"] != sha256_json(preimage):
                 raise ValueError("execution target plan recovery hash does not close")
             return cls(candidate)
-        if fields != _RECOVERY_BOUND_FIELDS:
+        if fields not in {_RECOVERY_BOUND_FIELDS, _RECOVERY_BOUND_V3_FIELDS}:
             raise ValueError("execution target plan recovery fields are not exact")
+        v3 = fields == _RECOVERY_BOUND_V3_FIELDS
         if (
             candidate["schema_version"]
-            != "web_bridge_execution_target_plan_recovery_v1"
+            != (
+                "web_bridge_execution_target_plan_recovery_v3"
+                if v3
+                else "web_bridge_execution_target_plan_recovery_v1"
+            )
             or candidate["target_plan_schema_version"]
-            != KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION
+            != (
+                KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION
+                if v3
+                else KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION
+            )
             or candidate["state"]
             not in {"CUSTODY_PUBLISHED_NOT_PREVIEWED", "INSTALLED"}
             or not isinstance(candidate["installed"], bool)
@@ -1436,6 +1516,49 @@ class ExecutionTargetPlanRecoveryProjection:
             "recovery_sha256",
         ):
             _strict_sha(candidate[field], field=field)
+        if v3:
+            if (
+                not isinstance(candidate["execution_run_id"], str)
+                or IDENTIFIER_RE.fullmatch(candidate["execution_run_id"]) is None
+            ):
+                raise ValueError(
+                    "execution target plan recovery execution_run_id is invalid"
+                )
+            _strict_sha(
+                candidate["creation_quote_proof_sha256"],
+                field="creation_quote_proof_sha256",
+            )
+            start_state = candidate["start_quote_proof_state"]
+            allowed_start_states = {
+                "NOT_INSTALLED",
+                "NOT_STARTED",
+                "READY",
+                "REPLAN_REQUIRED",
+                "SOURCE_UNAVAILABLE",
+                "EVIDENCE_INVALID",
+                "STARTED_MATCHED",
+            }
+            if start_state not in allowed_start_states:
+                raise ValueError(
+                    "execution target plan recovery start quote state is invalid"
+                )
+            proof_hash = candidate["start_quote_proof_sha256"]
+            if proof_hash is not None:
+                _strict_sha(proof_hash, field="start_quote_proof_sha256")
+            if not isinstance(candidate["can_start_same_plan"], bool):
+                raise ValueError(
+                    "execution target plan recovery can_start_same_plan is invalid"
+                )
+            has_proof = start_state in {"READY", "STARTED_MATCHED"}
+            if (
+                (proof_hash is not None) is not has_proof
+                or candidate["can_start_same_plan"] is not (start_state == "READY")
+                or (candidate["installed"] is False)
+                is not (start_state == "NOT_INSTALLED")
+            ):
+                raise ValueError(
+                    "execution target plan recovery start quote binding mismatches"
+                )
         for field in ("generated_at", "expires_at"):
             _strict_utc(candidate[field], field=field)
         lineage = candidate["lineage"]

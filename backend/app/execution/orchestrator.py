@@ -863,7 +863,13 @@ class ExecutionOrchestrator:
             "preview_artifact_sha256",
             "expected_send_intent_bindings",
         }
-        if set(raw) != fields:
+        v3_proof_fields = {
+            "execution_run_id",
+            "creation_quote_proof_sha256",
+            "start_quote_proof_sha256",
+        }
+        raw_fields = set(raw)
+        if raw_fields not in {frozenset(fields), frozenset(fields | v3_proof_fields)}:
             raise MutationRejected(
                 "internal finalization evidence fields are not exact"
             )
@@ -875,7 +881,11 @@ class ExecutionOrchestrator:
             "preview_artifact_id",
         ):
             validate_identifier(raw[field], f"finalization_evidence.{field}")
-        for field in fields.difference(
+        if "execution_run_id" in raw:
+            validate_identifier(
+                raw["execution_run_id"], "finalization_evidence.execution_run_id"
+            )
+        for field in raw_fields.difference(
             {
                 "plan_id",
                 "authority_artifact_id",
@@ -883,6 +893,7 @@ class ExecutionOrchestrator:
                 "preview_receipt_id",
                 "preview_artifact_id",
                 "expected_send_intent_bindings",
+                "execution_run_id",
             }
         ):
             validate_sha256(raw[field], f"finalization_evidence.{field}")
@@ -1621,19 +1632,29 @@ class ExecutionOrchestrator:
                 "final_position_hash": final_hash,
                 "target_position_hash": target_hash,
             }
-        state["terminal_archive"].append(
-            {
-                "kind": "final_plan_completed",
-                "plan_id": evidence["plan_id"],
-                "plan_hash": evidence["plan_hash"],
-                "plan_version": int(plan.get("version", 0)),
-                "receipt_id": evidence["authority_receipt_id"],
-                "final_position_hash": final_hash,
-                "target_position_hash": target_hash,
-                "positions": deepcopy(dict(positions)),
-                "archived_at": format_utc(utc_now()),
-            }
-        )
+        completion_archive = {
+            "kind": "final_plan_completed",
+            "plan_id": evidence["plan_id"],
+            "plan_hash": evidence["plan_hash"],
+            "plan_version": int(plan.get("version", 0)),
+            "receipt_id": evidence["authority_receipt_id"],
+            "final_position_hash": final_hash,
+            "target_position_hash": target_hash,
+            "positions": deepcopy(dict(positions)),
+            "archived_at": format_utc(utc_now()),
+        }
+        if "execution_run_id" in evidence:
+            completion_archive.update(
+                {
+                    field: evidence[field]
+                    for field in (
+                        "execution_run_id",
+                        "creation_quote_proof_sha256",
+                        "start_quote_proof_sha256",
+                    )
+                }
+            )
+        state["terminal_archive"].append(completion_archive)
         state["plan"] = PlanState(
             "TERMINAL",
             evidence["plan_id"],

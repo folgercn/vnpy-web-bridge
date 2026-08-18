@@ -566,12 +566,17 @@ class ExecutionClient:
         if body is None:
             return None
         try:
-            return ExecutionCompletionProjection.model_validate(body)
+            projection = ExecutionCompletionProjection.model_validate(body)
         except (ValueError, TypeError) as exc:
             raise ExecutionProtocolError(
                 "Execution completion projection 不符合冻结 schema",
                 detail={"error": str(exc)},
             ) from exc
+        if projection.plan_id != plan_id:
+            raise ExecutionProtocolError(
+                "Execution completion projection plan_id 不匹配"
+            )
+        return projection
 
     async def target_plan_recovery(
         self, custody_idempotency_key: str

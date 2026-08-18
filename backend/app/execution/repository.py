@@ -215,8 +215,13 @@ def _validate_archive_entry(value: Any) -> None:
             "archived_at",
         }
         new_fields = legacy_fields | {"target_position_hash", "positions"}
+        v3_fields = new_fields | {
+            "execution_run_id",
+            "creation_quote_proof_sha256",
+            "start_quote_proof_sha256",
+        }
         fields = set(value)
-        if fields != legacy_fields and fields != new_fields:
+        if fields != legacy_fields and fields != new_fields and fields != v3_fields:
             raise RepositoryUnavailableError(
                 "durable final plan archive fields are invalid"
             )
@@ -234,7 +239,7 @@ def _validate_archive_entry(value: Any) -> None:
                 raise RepositoryUnavailableError(
                     f"durable final plan archive {field} is invalid"
                 )
-        if fields == new_fields:
+        if fields == new_fields or fields == v3_fields:
             if not isinstance(
                 value["target_position_hash"], str
             ) or not SHA256_RE.fullmatch(value["target_position_hash"]):
@@ -257,6 +262,23 @@ def _validate_archive_entry(value: Any) -> None:
                 raise RepositoryUnavailableError(
                     "durable final plan archive positions are invalid"
                 ) from exc
+        if fields == v3_fields:
+            if not isinstance(
+                value["execution_run_id"], str
+            ) or not IDENTIFIER_RE.fullmatch(value["execution_run_id"]):
+                raise RepositoryUnavailableError(
+                    "durable final plan archive execution_run_id is invalid"
+                )
+            for field in (
+                "creation_quote_proof_sha256",
+                "start_quote_proof_sha256",
+            ):
+                if not isinstance(value[field], str) or not SHA256_RE.fullmatch(
+                    value[field]
+                ):
+                    raise RepositoryUnavailableError(
+                        f"durable final plan archive {field} is invalid"
+                    )
         if (
             isinstance(value["plan_version"], bool)
             or not isinstance(value["plan_version"], int)
