@@ -31,6 +31,7 @@ from .execution import (
     IdempotencyConflictError,
     InMemoryExecutionRepository,
     NullGateway,
+    PlanRejected,
     RepositoryUnavailableError,
     VnpyWindowsGateway,
 )
@@ -439,6 +440,82 @@ def create_app(
             return require_core().status()
         except RepositoryUnavailableError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @app.get("/internal/v1/completions/latest")
+    def latest_completion(request: Request) -> dict[str, Any] | None:
+        authenticate(request)
+        target = require_instance()
+        if not isinstance(target, FinalExecutionRuntime):
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "EXECUTION_COMPLETION_RUNTIME_UNAVAILABLE",
+                    "message": "completion projection requires final Execution runtime",
+                },
+            )
+        try:
+            return target.latest_completion_projection()
+        except PlanRejected as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "EXECUTION_COMPLETION_INVALID",
+                    "message": str(exc),
+                    "retryable": False,
+                },
+            ) from exc
+        except RepositoryUnavailableError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "EXECUTION_COMPLETION_REPOSITORY_UNAVAILABLE",
+                    "message": str(exc),
+                    "retryable": True,
+                },
+            ) from exc
+
+    @app.get("/internal/v1/completions/{plan_id}")
+    def completion(plan_id: str, request: Request) -> dict[str, Any] | None:
+        authenticate(request)
+        try:
+            validate_identifier(plan_id, "plan_id")
+        except CommandValidationError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "EXECUTION_COMPLETION_PLAN_ID_INVALID",
+                    "message": str(exc),
+                },
+            ) from exc
+        target = require_instance()
+        if not isinstance(target, FinalExecutionRuntime):
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "EXECUTION_COMPLETION_RUNTIME_UNAVAILABLE",
+                    "message": "completion projection requires final Execution runtime",
+                },
+            )
+        try:
+            return target.completion_projection(plan_id=plan_id)
+        except PlanRejected as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "EXECUTION_COMPLETION_INVALID",
+                    "message": str(exc),
+                    "retryable": False,
+                },
+            ) from exc
+        except RepositoryUnavailableError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "EXECUTION_COMPLETION_REPOSITORY_UNAVAILABLE",
+                    "message": str(exc),
+                    "retryable": True,
+                },
+            ) from exc
 
     @app.get("/health/live")
     def health_live() -> dict[str, str]:

@@ -16,7 +16,14 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
-from app.execution.models import CommandEnvelope
+from shared.commodity_execution import KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION
+
+from app.execution.models import (
+    IDENTIFIER_RE,
+    SHA256_RE,
+    UTC_RE,
+    CommandEnvelope,
+)
 
 _SCHEMA_PATH = (
     Path(__file__).resolve().parents[3]
@@ -130,18 +137,127 @@ class ExecutionStatusProjection:
         return bool(self.value["safe_to_restart"])
 
 
+_COMPLETION_FIELDS = frozenset(
+    {
+        "plan_id",
+        "plan_hash",
+        "schema_version",
+        "phase",
+        "lineage",
+        "expected_after_position_hash",
+        "target_position_hash",
+        "archived_at",
+    }
+)
+_COMPLETION_LINEAGE_FIELDS = frozenset(
+    {
+        "static_core_equal_sha256",
+        "position_manager_sha256",
+        "final_target_sha256",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionCompletionProjection:
+    """Strict read-only projection of one completed TargetPlan v2.
+
+    This DTO intentionally excludes archived broker rows, receipts, authority
+    material and every other mutable Execution field.  It is sufficient to
+    identify an already-completed immutable target without turning Control
+    into another Execution state store.
+    """
+
+    value: dict[str, Any]
+
+    @classmethod
+    def from_mapping(cls, value: Any) -> ExecutionCompletionProjection:
+        if not isinstance(value, Mapping):
+            raise TypeError("execution completion projection must be an object")
+        candidate = json.loads(
+            json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True)
+        )
+        if set(candidate) != _COMPLETION_FIELDS:
+            raise ValueError("execution completion projection fields are not exact")
+        if (
+            not isinstance(candidate["plan_id"], str)
+            or IDENTIFIER_RE.fullmatch(candidate["plan_id"]) is None
+        ):
+            raise ValueError("execution completion plan_id is invalid")
+        for field in (
+            "plan_hash",
+            "expected_after_position_hash",
+            "target_position_hash",
+        ):
+            if (
+                not isinstance(candidate[field], str)
+                or SHA256_RE.fullmatch(candidate[field]) is None
+            ):
+                raise ValueError(f"execution completion {field} is invalid")
+        if candidate["schema_version"] != KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION:
+            raise ValueError("execution completion schema_version is not v2")
+        if candidate["phase"] not in {"CLOSE", "OPEN"}:
+            raise ValueError("execution completion phase is invalid")
+        lineage = candidate["lineage"]
+        if not isinstance(lineage, Mapping) or set(lineage) != (
+            _COMPLETION_LINEAGE_FIELDS
+        ):
+            raise ValueError("execution completion lineage fields are not exact")
+        for field in _COMPLETION_LINEAGE_FIELDS:
+            if (
+                not isinstance(lineage[field], str)
+                or SHA256_RE.fullmatch(lineage[field]) is None
+            ):
+                raise ValueError(f"execution completion lineage {field} is invalid")
+        if (
+            candidate["target_position_hash"]
+            != candidate["expected_after_position_hash"]
+        ):
+            raise ValueError("execution completion target position binding mismatches")
+        if (
+            not isinstance(candidate["archived_at"], str)
+            or UTC_RE.fullmatch(candidate["archived_at"]) is None
+        ):
+            raise ValueError("execution completion archived_at is invalid")
+        return cls(candidate)
+
+    @classmethod
+    def model_validate(cls, value: Any) -> ExecutionCompletionProjection:
+        return cls.from_mapping(value)
+
+    def model_dump(self, *, mode: str = "python") -> dict[str, Any]:
+        del mode
+        return json.loads(json.dumps(self.value, ensure_ascii=False))
+
+    def as_dict(self) -> dict[str, Any]:
+        return self.model_dump()
+
+    @property
+    def plan_id(self) -> str:
+        return str(self.value["plan_id"])
+
+    @property
+    def target_position_hash(self) -> str:
+        return str(self.value["target_position_hash"])
+
+
 # Explicit aliases make the boundary discoverable to callers that use the
 # conventional DTO naming while retaining the shared execution model.
 ControlExecutionCommandDTO = CommandEnvelope
 CommandEnvelopeDTO = CommandEnvelope
 ExecutionStatusDTO = ExecutionStatusProjection
 ExecutionStatusProjectionDTO = ExecutionStatusProjection
+ExecutionCompletionDTO = ExecutionCompletionProjection
+ExecutionCompletionProjectionDTO = ExecutionCompletionProjection
 
 
 __all__ = [
     "CommandEnvelope",
     "CommandEnvelopeDTO",
     "ControlExecutionCommandDTO",
+    "ExecutionCompletionDTO",
+    "ExecutionCompletionProjection",
+    "ExecutionCompletionProjectionDTO",
     "ExecutionStatusDTO",
     "ExecutionStatusProjection",
     "ExecutionStatusProjectionDTO",

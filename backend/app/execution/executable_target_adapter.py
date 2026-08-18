@@ -15,7 +15,7 @@ import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -91,6 +91,34 @@ _FALSE_AUTHORITY_FIELDS = frozenset(
 _STATIC_CORE_EQUAL_STATUS = "PURE_RESEARCH_PRODUCER_ONLY_NOT_REAL_ARTIFACT"
 _STATIC_CORE_EQUAL_KERNEL_ID = "commodity_static_core_equal_pure_producer_v1"
 _STATIC_CORE_EQUAL_PRODUCTS = tuple(COMMODITY_FROZEN_SECTOR_MAP_V1)
+_STATIC_CORE_EQUAL_EXCHANGE_BY_PRODUCT = {
+    product: "INE" if product == "sc" else "SHFE"
+    for product in _STATIC_CORE_EQUAL_PRODUCTS
+}
+_FULL_PORTFOLIO_QUOTE_MAX_AGE_SECONDS = 2.0
+_FULL_PORTFOLIO_QUOTE_FUTURE_SKEW_SECONDS = 2.0
+_FULL_PORTFOLIO_IDENTITY_SCHEMA_VERSION = (
+    "commodity_static_core_equal_phase_identity_preimage_v1"
+)
+_FULL_PORTFOLIO_IDENTITY_FIELDS = frozenset(
+    {
+        "identity_schema_version",
+        "strategy_id",
+        "run_id",
+        "phase",
+        "account_scope",
+        "environment",
+        "gateway_name",
+        "scope",
+        "lineage",
+        "expected_before_position_hash",
+        "expected_after_position_hash",
+        "orders",
+        "formal_quote_bindings",
+        "generated_at",
+        "expires_at",
+    }
+)
 _STATIC_CORE_EQUAL_ARTIFACT_ROLES = (
     "freeze_contract",
     "research_manifest",
@@ -272,6 +300,184 @@ class StaticCoreEqualKeylessDecision:
     @property
     def stopped(self) -> bool:
         return self.stop_reason is not None
+
+
+@dataclass(frozen=True, slots=True)
+class StaticCoreEqualPhaseBoundary:
+    """One canonical post-close portfolio with both existing hash semantics.
+
+    TargetPlan final reconciliation intentionally hashes the target projection,
+    while a subsequent TargetPlan start hashes the before projection (including
+    SHFE/INE ``yd_volume``).  Both hashes are derived here from the same detached
+    position rows.  They are not claimed to be byte-equal; the runner must bind
+    a future OPEN plan to fresh authoritative post-close facts.
+    """
+
+    positions: dict[str, Any]
+    target_projection: dict[str, Any]
+    before_projection: dict[str, Any]
+    close_expected_after_position_hash: str
+    open_expected_before_position_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class StaticCoreEqualFullPortfolioPhaseHandoff:
+    """Custody-capable phase handoff with its complete identity proof.
+
+    The historical generic handoff intentionally remains unchanged.  Full-
+    portfolio plans retain the detached canonical preimage from which their
+    plan ID is derived, so a runner or auditor can reproduce that ID without
+    recovering planner-local state.
+    """
+
+    target_plan: dict[str, Any]
+    lineage: tuple[str, ...]
+    scope: dict[str, Any]
+    expires_at: str
+    identity_preimage: dict[str, Any]
+
+    def recompute_plan_id(self) -> str:
+        """Recompute the exact TargetPlan ID from the retained preimage."""
+
+        return full_portfolio_phase_plan_id_from_preimage(self.identity_preimage)
+
+    def validate_identity_proof(self) -> str:
+        """Fail closed unless the proof and every duplicated plan field agree."""
+
+        plan_id = self.recompute_plan_id()
+        preimage = self.identity_preimage
+        lineage = preimage.get("lineage")
+        if not isinstance(lineage, Mapping):  # pragma: no cover - constructor proof
+            raise ExecutableTargetAdapterError(
+                "full-portfolio phase identity lineage is invalid"
+            )
+        target_bindings = {
+            field: self.target_plan.get(field)
+            for field in (
+                "account_scope",
+                "environment",
+                "gateway_name",
+                "scope",
+                "lineage",
+                "expected_before_position_hash",
+                "expected_after_position_hash",
+                "orders",
+                "generated_at",
+                "expires_at",
+                "phase",
+            )
+        }
+        proof_bindings = {field: preimage.get(field) for field in target_bindings}
+        expected_lineage = tuple(
+            str(lineage[field])
+            for field in (
+                "static_core_equal_sha256",
+                "position_manager_sha256",
+                "final_target_sha256",
+            )
+        )
+        if (
+            plan_id != self.target_plan.get("plan_id")
+            or target_bindings != proof_bindings
+            or self.scope != preimage.get("scope")
+            or self.expires_at != preimage.get("expires_at")
+            or self.lineage != expected_lineage
+        ):
+            raise ExecutableTargetAdapterError(
+                "full-portfolio phase identity proof does not match target plan"
+            )
+        return plan_id
+
+    def trusted_keyless_custody_artifact(self) -> dict[str, Any]:
+        """Return the existing v2 create-only custody envelope."""
+
+        if (
+            self.target_plan.get("schema_version")
+            != KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION
+        ):
+            raise ExecutableTargetAdapterError(
+                "full-portfolio phase target plan is not trusted keyless v2"
+            )
+        self.validate_identity_proof()
+        return new_artifact_envelope(
+            artifact_type="simnow-target-plan",
+            trust_domain="runtime_authorization",
+            producer_id="static-core-equal-final-target-adapter",
+            producer_version="v2",
+            schema_ref=KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+            payload=self.target_plan,
+            generated_at=str(self.target_plan["generated_at"]),
+            scope=self.scope,
+            predecessor_refs=[],
+            lineage=[],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class StaticCoreEqualDeferredOpenIntent:
+    """Non-custody OPEN template that must be replanned from fresh facts."""
+
+    template: dict[str, Any]
+
+    @property
+    def custody_allowed(self) -> bool:
+        return False
+
+    @property
+    def order_count(self) -> int:
+        intents = self.template.get("intents", [])
+        if not isinstance(intents, list):  # pragma: no cover - built internally
+            return 0
+        return sum(
+            int(intent.get("volume", 0))
+            for intent in intents
+            if isinstance(intent, Mapping)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class StaticCoreEqualFullPortfolioDecision:
+    """Pure full-portfolio STATIC_CORE_EQUAL two-phase planning result.
+
+    Ownership and completed-target admission are deliberately outside this
+    pure adapter.  Its ``current_facts`` input must already be the complete,
+    fail-closed strategy-owned account portfolio.  The adapter proves frozen
+    replay, freshness/reconciliation, scope, ten-product deltas and immutable
+    TargetPlan v2 material; it has no ledger or mutation dependency.
+    """
+
+    close_handoff: StaticCoreEqualFullPortfolioPhaseHandoff | None
+    open_handoff: StaticCoreEqualFullPortfolioPhaseHandoff | None
+    deferred_open_intent: StaticCoreEqualDeferredOpenIntent | None
+    phase_boundary: StaticCoreEqualPhaseBoundary
+    static_core_equal_sha256: str
+    position_manager_sha256: str
+    final_target_sha256: str
+    final_target_projection: dict[str, Any]
+    current_before_position_hash: str
+    current_target_position_hash: str
+    final_position_hash: str
+    close_formal_quote_bindings: dict[str, Any]
+    open_formal_quote_bindings: dict[str, Any]
+    close_order_count: int
+    open_order_count: int
+    deferred_open_order_count: int
+
+    @property
+    def noop(self) -> bool:
+        return (
+            self.close_handoff is None
+            and self.open_handoff is None
+            and self.deferred_open_intent is None
+        )
+
+    @property
+    def handoffs(self) -> tuple[StaticCoreEqualFullPortfolioPhaseHandoff, ...]:
+        return tuple(
+            handoff
+            for handoff in (self.close_handoff, self.open_handoff)
+            if handoff is not None
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1155,18 +1361,26 @@ def build_executable_target_plan(
             raise ExecutableTargetAdapterError("trusted keyless tuple is invalid")
         scope = dict(TRUSTED_KEYLESS_SIMNOW_SCOPE)
         try:
-            expires_at = datetime.fromisoformat(trusted_keyless_expires_at.replace("Z", "+00:00"))
+            expires_at = datetime.fromisoformat(
+                trusted_keyless_expires_at.replace("Z", "+00:00")
+            )
         except ValueError as exc:
-            raise ExecutableTargetAdapterError("trusted keyless expiry is invalid") from exc
+            raise ExecutableTargetAdapterError(
+                "trusted keyless expiry is invalid"
+            ) from exc
         if expires_at.tzinfo is None or expires_at <= current_time:
             raise ExecutableTargetAdapterError("trusted keyless expiry is invalid")
     else:
         if trusted_keyless_expires_at is not None:
-            raise ExecutableTargetAdapterError("signed target plan cannot set keyless expiry")
+            raise ExecutableTargetAdapterError(
+                "signed target plan cannot set keyless expiry"
+            )
         try:
             receipt = VerifiedCustodyReceipt.from_mapping(authority_receipt)
         except CommodityExecutionContractError as exc:
-            raise ExecutableTargetAdapterError("authority custody receipt is invalid") from exc
+            raise ExecutableTargetAdapterError(
+                "authority custody receipt is invalid"
+            ) from exc
         if (
             receipt.raw["artifact_type"] != "runtime-authorization"
             or receipt.raw["trust_domain"] != "runtime_authorization"
@@ -1179,7 +1393,9 @@ def build_executable_target_plan(
             or scope.get("environment") != normalized_environment
             or scope.get("gateway_name") != normalized_gateway
         ):
-            raise ExecutableTargetAdapterError("authority scope/gateway does not match target")
+            raise ExecutableTargetAdapterError(
+                "authority scope/gateway does not match target"
+            )
         if receipt.expires_at() <= current_time:
             raise ExecutableTargetAdapterError("authority receipt is expired")
     positions = _validate_snapshot(
@@ -1266,7 +1482,9 @@ def build_executable_target_plan(
         "account_scope": normalized_scope,
         "environment": normalized_environment,
         "scope": scope,
-        "expires_at": trusted_keyless_expires_at if keyless else str(receipt.raw["expires_at"]),
+        "expires_at": trusted_keyless_expires_at
+        if keyless
+        else str(receipt.raw["expires_at"]),
         "phase": "CLOSE" if offset in _CLOSE_ORDER_OFFSETS else "OPEN",
         "expected_before_position_hash": expected_before,
         "expected_after_position_hash": expected_after,
@@ -1561,6 +1779,809 @@ def build_static_core_equal_keyless_target_decision(
     return StaticCoreEqualKeylessDecision(handoff=handoff, **decision_fields)
 
 
+def _canonical_strategy_portfolio_positions(
+    positions: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, tuple[str, dict[str, Any]]]]:
+    """Normalize the already owner-verified account to one row per product."""
+
+    original_symbol_by_product: dict[str, str] = {}
+    for raw in positions.values():
+        if not isinstance(raw, Mapping):
+            raise ExecutableTargetAdapterError("strategy portfolio position is invalid")
+        volume = raw.get("volume")
+        if isinstance(volume, bool) or not isinstance(volume, int) or volume < 0:
+            raise ExecutableTargetAdapterError(
+                "strategy portfolio position volume is invalid"
+            )
+        if volume == 0:
+            continue
+        symbol = _require_text(raw.get("symbol"), "strategy position symbol")
+        match = re.fullmatch(r"([A-Za-z]+)[0-9]{4}", symbol)
+        if match is None:
+            raise ExecutableTargetAdapterError(
+                "strategy portfolio position symbol is invalid"
+            )
+        product = match.group(1).lower()
+        if product not in _STATIC_CORE_EQUAL_PRODUCTS:
+            raise ExecutableTargetAdapterError(
+                "strategy portfolio contains a position outside the frozen universe"
+            )
+        if product in original_symbol_by_product:
+            raise ExecutableTargetAdapterError(
+                "strategy portfolio has split, hedged, or multi-contract product state"
+            )
+        original_symbol_by_product[product] = symbol
+
+    try:
+        projection = canonical_before_position_projection(
+            positions,
+            account_scope="account:windows",
+            environment="SIMNOW",
+        )
+    except CommodityExecutionContractError as exc:
+        raise ExecutableTargetAdapterError(
+            f"strategy portfolio semantics are invalid: {exc}"
+        ) from exc
+    normalized: dict[str, Any] = {}
+    by_product: dict[str, tuple[str, dict[str, Any]]] = {}
+    for index, raw in enumerate(projection["positions"]):
+        row = _mapping(raw, f"strategy portfolio position[{index}]")
+        if row.get("gateway_name") != "CTP":
+            raise ExecutableTargetAdapterError(
+                "strategy portfolio position gateway is outside CTP"
+            )
+        canonical_symbol = _require_text(row.get("symbol"), "strategy position symbol")
+        match = re.fullmatch(r"([A-Za-z]+)[0-9]{4}", canonical_symbol)
+        if match is None:
+            raise ExecutableTargetAdapterError(
+                "strategy portfolio position symbol is invalid"
+            )
+        product = match.group(1).lower()
+        if product not in _STATIC_CORE_EQUAL_PRODUCTS:
+            raise ExecutableTargetAdapterError(
+                "strategy portfolio contains a position outside the frozen universe"
+            )
+        symbol = original_symbol_by_product[product]
+        row["symbol"] = symbol
+        exchange = _require_text(
+            row.get("exchange"), "strategy position exchange"
+        ).upper()
+        _contract(f"{exchange}.{symbol}")
+        key = f"{symbol}.{exchange}.{row['direction']}.CTP.full-portfolio-v1"
+        normalized[key] = row
+        by_product[product] = (f"{exchange}.{symbol}", row)
+    return normalized, by_product
+
+
+def _full_portfolio_target_positions(
+    final_rows: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for product in _STATIC_CORE_EQUAL_PRODUCTS:
+        row = final_rows[product]
+        quantity = row["target_quantity"]
+        exchange, symbol = _contract(row["exact_contract"])
+        match = re.fullmatch(r"([A-Za-z]+)[0-9]{4}", symbol)
+        if (
+            match is None
+            or match.group(1).lower() != product
+            or exchange != _STATIC_CORE_EQUAL_EXCHANGE_BY_PRODUCT[product]
+        ):
+            raise ExecutableTargetAdapterError(
+                f"STATIC_CORE_EQUAL exact contract does not match product: {product}"
+            )
+        if quantity == 0:
+            continue
+        direction = "LONG" if quantity > 0 else "SHORT"
+        result[f"{symbol}.{exchange}.{direction}.CTP.full-target-v1"] = {
+            "gateway_name": "CTP",
+            "symbol": symbol,
+            "exchange": exchange,
+            "direction": direction,
+            "volume": abs(quantity),
+        }
+    return result
+
+
+def _full_portfolio_formal_quote(
+    values: Mapping[str, Any] | None,
+    *,
+    exact_contract: str,
+    product: str,
+    price_side: str,
+    expected_price_tick: Any,
+    now: datetime,
+) -> tuple[float, dict[str, Any]]:
+    if not isinstance(values, Mapping):
+        raise ExecutableTargetAdapterError(
+            "full-portfolio formal quote bindings must be an object"
+        )
+    if exact_contract not in values:
+        raise ExecutableTargetAdapterError(
+            f"full-portfolio formal quote is missing: {exact_contract}"
+        )
+    quote = values[exact_contract]
+    fields = {
+        "source",
+        "vt_symbol",
+        "price_side",
+        "stream_generation",
+        "ingest_id",
+        "ingest_seq",
+        "event_hash",
+        "received_at_utc",
+        "reference_price",
+        "price_tick",
+    }
+    if not isinstance(quote, Mapping) or set(quote) != fields:
+        raise ExecutableTargetAdapterError(
+            f"full-portfolio formal quote binding is invalid: {exact_contract}"
+        )
+    exchange, symbol = _contract(exact_contract)
+    if (
+        product not in _STATIC_CORE_EQUAL_PRODUCTS
+        or quote.get("source") != "windows-tick-wire-v1"
+        or quote.get("vt_symbol") != f"{symbol}.{exchange}"
+        or price_side not in {"bid", "ask"}
+        or quote.get("price_side") != price_side
+    ):
+        raise ExecutableTargetAdapterError(
+            f"full-portfolio formal quote identity is invalid: {exact_contract}"
+        )
+    for field in ("stream_generation", "ingest_id"):
+        _require_text(quote.get(field), f"formal quote {field}")
+    ingest_seq = quote.get("ingest_seq")
+    if (
+        isinstance(ingest_seq, bool)
+        or not isinstance(ingest_seq, int)
+        or ingest_seq < 1
+    ):
+        raise ExecutableTargetAdapterError(
+            f"full-portfolio formal quote sequence is invalid: {exact_contract}"
+        )
+    _sha(quote.get("event_hash"), "formal quote event hash")
+    received_at = quote.get("received_at_utc")
+    if not isinstance(received_at, str) or not received_at.endswith("Z"):
+        raise ExecutableTargetAdapterError(
+            f"full-portfolio formal quote timestamp is invalid: {exact_contract}"
+        )
+    try:
+        observed = datetime.fromisoformat(received_at[:-1] + "+00:00")
+    except ValueError as exc:
+        raise ExecutableTargetAdapterError(
+            f"full-portfolio formal quote timestamp is invalid: {exact_contract}"
+        ) from exc
+    if observed.utcoffset() != timezone.utc.utcoffset(observed):
+        raise ExecutableTargetAdapterError(
+            f"full-portfolio formal quote timestamp is invalid: {exact_contract}"
+        )
+    age = (now - observed).total_seconds()
+    if (
+        age > _FULL_PORTFOLIO_QUOTE_MAX_AGE_SECONDS
+        or age < -_FULL_PORTFOLIO_QUOTE_FUTURE_SKEW_SECONDS
+    ):
+        raise ExecutableTargetAdapterError(
+            f"full-portfolio formal quote is stale or from the future: {exact_contract}"
+        )
+    if isinstance(quote["price_tick"], bool) or isinstance(expected_price_tick, bool):
+        raise ExecutableTargetAdapterError(
+            f"full-portfolio frozen product price tick mismatch: {exact_contract}"
+        )
+    try:
+        quote_tick = Decimal(str(quote["price_tick"]))
+        frozen_tick = Decimal(str(expected_price_tick))
+        reference = Decimal(str(quote["reference_price"]))
+    except (InvalidOperation, ValueError) as exc:
+        raise ExecutableTargetAdapterError(
+            f"full-portfolio formal quote price is invalid: {exact_contract}"
+        ) from exc
+    if (
+        not quote_tick.is_finite()
+        or quote_tick <= 0
+        or not frozen_tick.is_finite()
+        or frozen_tick <= 0
+        or quote_tick != frozen_tick
+    ):
+        raise ExecutableTargetAdapterError(
+            f"full-portfolio frozen product price tick mismatch: {exact_contract}"
+        )
+    if not reference.is_finite() or reference <= 0 or reference % frozen_tick != 0:
+        raise ExecutableTargetAdapterError(
+            f"full-portfolio formal quote price is invalid: {exact_contract}"
+        )
+    protected = (
+        reference + frozen_tick if price_side == "ask" else reference - frozen_tick
+    )
+    if not protected.is_finite() or protected <= 0 or protected % frozen_tick != 0:
+        raise ExecutableTargetAdapterError(
+            f"full-portfolio protected limit price is invalid: {exact_contract}"
+        )
+    return float(protected), _mapping(quote, "full-portfolio formal quote binding")
+
+
+def full_portfolio_phase_plan_id_from_preimage(
+    value: Mapping[str, Any],
+) -> str:
+    """Reproduce one full-portfolio phase plan ID from exact canonical input."""
+
+    preimage = _mapping(value, "full-portfolio phase identity preimage")
+    phase = preimage.get("phase")
+    if (
+        set(preimage) != _FULL_PORTFOLIO_IDENTITY_FIELDS
+        or preimage.get("identity_schema_version")
+        != _FULL_PORTFOLIO_IDENTITY_SCHEMA_VERSION
+        or preimage.get("strategy_id") != "STATIC_CORE_EQUAL"
+        or phase not in {"CLOSE", "OPEN"}
+        or preimage.get("account_scope") != "account:windows"
+        or preimage.get("environment") != "SIMNOW"
+        or preimage.get("gateway_name") != "CTP"
+        or preimage.get("scope") != dict(TRUSTED_KEYLESS_SIMNOW_SCOPE)
+    ):
+        raise ExecutableTargetAdapterError(
+            "full-portfolio phase identity preimage is invalid"
+        )
+    return f"static-core-full-{str(phase).lower()}-v2-{sha256_json(preimage)}"
+
+
+def _full_portfolio_plan_handoff(
+    *,
+    phase: str,
+    run_id: str,
+    orders: list[dict[str, Any]],
+    expected_before_position_hash: str,
+    expected_after_position_hash: str,
+    static_core_equal_sha256: str,
+    position_manager_sha256: str,
+    final_target_sha256: str,
+    formal_quote_bindings: Mapping[str, Any],
+    generated_at: str,
+    expires_at: str,
+) -> StaticCoreEqualFullPortfolioPhaseHandoff:
+    identity_preimage = _mapping(
+        {
+            "identity_schema_version": _FULL_PORTFOLIO_IDENTITY_SCHEMA_VERSION,
+            "strategy_id": "STATIC_CORE_EQUAL",
+            "run_id": run_id,
+            "phase": phase,
+            "account_scope": "account:windows",
+            "environment": "SIMNOW",
+            "gateway_name": "CTP",
+            "scope": dict(TRUSTED_KEYLESS_SIMNOW_SCOPE),
+            "lineage": {
+                "static_core_equal_sha256": static_core_equal_sha256,
+                "position_manager_sha256": position_manager_sha256,
+                "final_target_sha256": final_target_sha256,
+            },
+            "expected_before_position_hash": expected_before_position_hash,
+            "expected_after_position_hash": expected_after_position_hash,
+            "orders": orders,
+            "formal_quote_bindings": dict(formal_quote_bindings),
+            "generated_at": generated_at,
+            "expires_at": expires_at,
+        },
+        "full-portfolio phase identity preimage",
+    )
+    plan_id = full_portfolio_phase_plan_id_from_preimage(identity_preimage)
+    try:
+        plan = build_trusted_keyless_target_plan_v2(
+            plan_id=plan_id,
+            account_scope=str(identity_preimage["account_scope"]),
+            environment=str(identity_preimage["environment"]),
+            gateway_name=str(identity_preimage["gateway_name"]),
+            lineage=_mapping(identity_preimage["lineage"], "phase lineage"),
+            scope=_mapping(identity_preimage["scope"], "phase scope"),
+            generated_at=str(identity_preimage["generated_at"]),
+            expires_at=str(identity_preimage["expires_at"]),
+            phase=str(identity_preimage["phase"]),
+            expected_before_position_hash=str(
+                identity_preimage["expected_before_position_hash"]
+            ),
+            expected_after_position_hash=str(
+                identity_preimage["expected_after_position_hash"]
+            ),
+            orders=list(identity_preimage["orders"]),
+        )
+    except CommodityExecutionContractError as exc:
+        raise ExecutableTargetAdapterError(
+            f"STATIC_CORE_EQUAL full-portfolio {phase} TargetPlan v2 is invalid: {exc}"
+        ) from exc
+    return StaticCoreEqualFullPortfolioPhaseHandoff(
+        target_plan=plan,
+        lineage=(
+            static_core_equal_sha256,
+            position_manager_sha256,
+            final_target_sha256,
+        ),
+        scope=dict(TRUSTED_KEYLESS_SIMNOW_SCOPE),
+        expires_at=str(plan["expires_at"]),
+        identity_preimage=identity_preimage,
+    )
+
+
+def _full_portfolio_deferred_open_intent(
+    *,
+    run_id: str,
+    static_core_equal_sha256: str,
+    position_manager_sha256: str,
+    final_target_sha256: str,
+    expected_post_close_before_position_hash: str,
+    expected_final_position_hash: str,
+    event_generated_at: str,
+    intents: list[dict[str, Any]],
+) -> StaticCoreEqualDeferredOpenIntent:
+    core = _mapping(
+        {
+            "schema_version": "commodity_static_core_equal_deferred_open_intent_v1",
+            "strategy_id": "STATIC_CORE_EQUAL",
+            "run_id": run_id,
+            "static_core_equal_sha256": static_core_equal_sha256,
+            "position_manager_sha256": position_manager_sha256,
+            "final_target_sha256": final_target_sha256,
+            "expected_post_close_before_position_hash": (
+                expected_post_close_before_position_hash
+            ),
+            "expected_final_position_hash": expected_final_position_hash,
+            "event_generated_at": event_generated_at,
+            "custody_allowed": False,
+            "executable": False,
+            "intents": intents,
+        },
+        "STATIC_CORE_EQUAL deferred OPEN intent",
+    )
+    template = {
+        **core,
+        "intent_id": f"static-core-deferred-open-v1-{sha256_json(core)}",
+    }
+    return StaticCoreEqualDeferredOpenIntent(
+        template=_mapping(template, "STATIC_CORE_EQUAL deferred OPEN intent")
+    )
+
+
+def build_static_core_equal_full_portfolio_keyless_decision(
+    *,
+    static_core_equal_projection: Mapping[str, Any],
+    static_core_equal_freeze_contract: Mapping[str, Any],
+    static_core_equal_target_evidence: Mapping[str, Any],
+    position_manager_snapshot: Mapping[str, Any],
+    position_manager_sha256: str,
+    current_facts: GatewaySnapshot,
+    reconciliation: Mapping[str, Any],
+    formal_quotes_by_exact_contract: Mapping[str, Any] | None,
+    run_id: str,
+    event_generated_at: str,
+    expires_at: str | None = None,
+    now: datetime | None = None,
+) -> StaticCoreEqualFullPortfolioDecision:
+    """Build at most one immutable phase plan for the complete portfolio.
+
+    The caller must prove that the complete account portfolio is owned by the
+    last completed strategy target before invoking this pure planner.  This
+    function does not accept a completion receipt and must not be used to infer
+    ownership or authorize recovery.  Every mutating plan is bound to exact
+    source-fenced formal bid/ask evidence.  If CLOSE is required, any following
+    OPEN is emitted only as a non-custody template; a second invocation with
+    fresh post-close facts and quotes is required to create the OPEN plan.  A
+    true NOOP does not consume quote, expiry or any other mutation-only material.
+    """
+
+    normalized_run_id = _require_text(run_id, "run id")
+    if _RUN_ID.fullmatch(normalized_run_id) is None:
+        raise ExecutableTargetAdapterError("run id is invalid")
+    current_time = utc_now() if now is None else now
+    if (
+        current_time.tzinfo is None
+        or current_time.utcoffset() != timezone.utc.utcoffset(current_time)
+    ):
+        raise ExecutableTargetAdapterError("adapter clock must be explicit UTC")
+    if not isinstance(event_generated_at, str) or not event_generated_at.endswith("Z"):
+        raise ExecutableTargetAdapterError("event generated_at is invalid")
+    try:
+        normalized_event_generated_at = datetime.fromisoformat(
+            event_generated_at[:-1] + "+00:00"
+        )
+    except ValueError as exc:
+        raise ExecutableTargetAdapterError("event generated_at is invalid") from exc
+    if (
+        normalized_event_generated_at.utcoffset()
+        != timezone.utc.utcoffset(normalized_event_generated_at)
+        or (normalized_event_generated_at - current_time).total_seconds()
+        > _FULL_PORTFOLIO_QUOTE_FUTURE_SKEW_SECONDS
+    ):
+        raise ExecutableTargetAdapterError("event generated_at is invalid")
+
+    static_sha256, static_rows, static_execution_day = _static_core_equal_outputs(
+        producer_projection=static_core_equal_projection,
+        freeze_contract=static_core_equal_freeze_contract,
+        target_evidence=static_core_equal_target_evidence,
+    )
+    final_projection, final_rows = _position_manager_final_projection(
+        snapshot=position_manager_snapshot,
+        expected_sha256=position_manager_sha256,
+        static_rows=static_rows,
+        static_execution_day=static_execution_day,
+    )
+    normalized_position_manager_sha256 = _sha(
+        position_manager_sha256, "position-manager snapshot hash"
+    )
+    final_target_sha256 = sha256_json(final_projection)
+    positions = _validate_snapshot(
+        current_facts,
+        account_scope="account:windows",
+        environment="SIMNOW",
+        reconciliation=reconciliation,
+    )
+    current_positions, current_by_product = _canonical_strategy_portfolio_positions(
+        positions
+    )
+    for product, (current_contract, _current_row) in current_by_product.items():
+        current_exchange, _current_symbol = _contract(current_contract)
+        target_exchange, _target_symbol = _contract(
+            final_rows[product]["exact_contract"]
+        )
+        expected_exchange = _STATIC_CORE_EQUAL_EXCHANGE_BY_PRODUCT[product]
+        if (
+            current_exchange != expected_exchange
+            or target_exchange != expected_exchange
+        ):
+            raise ExecutableTargetAdapterError(
+                "strategy portfolio product is on an unexpected exchange"
+            )
+    expected_target_positions = _full_portfolio_target_positions(final_rows)
+    current_before_position_hash = before_position_projection_hash(
+        current_positions,
+        account_scope="account:windows",
+        environment="SIMNOW",
+    )
+    current_target_position_hash = target_position_projection_hash(
+        current_positions,
+        account_scope="account:windows",
+        environment="SIMNOW",
+    )
+    final_position_hash = target_position_projection_hash(
+        expected_target_positions,
+        account_scope="account:windows",
+        environment="SIMNOW",
+    )
+
+    close_orders: list[dict[str, Any]] = []
+    close_formal_quote_bindings: dict[str, Any] = {}
+    after_close = current_positions
+    for product in _STATIC_CORE_EQUAL_PRODUCTS:
+        after_close, current_by_product = _canonical_strategy_portfolio_positions(
+            after_close
+        )
+        current = current_by_product.get(product)
+        if current is None:
+            continue
+        current_contract, current_row = current
+        current_quantity = (
+            current_row["volume"]
+            if current_row["direction"] == "LONG"
+            else -current_row["volume"]
+        )
+        target = final_rows[product]
+        target_quantity = target["target_quantity"]
+        same_contract = current_contract.upper() == target["exact_contract"].upper()
+        if (
+            not same_contract
+            or target_quantity == 0
+            or current_quantity * target_quantity < 0
+        ):
+            close_count = abs(current_quantity)
+        elif abs(current_quantity) > abs(target_quantity):
+            close_count = abs(current_quantity) - abs(target_quantity)
+        else:
+            close_count = 0
+        for child_index in range(1, close_count + 1):
+            exchange, symbol = _contract(current_contract)
+            _long, _short, matching = _current_contract_positions(
+                after_close,
+                exchange=exchange,
+                symbol=symbol,
+                gateway_name="CTP",
+            )
+            direction = "SHORT" if current_quantity > 0 else "LONG"
+            offset = _close_order_offset(
+                matching,
+                exchange=exchange,
+                direction=direction,
+            )
+            price_side = "ask" if direction == "LONG" else "bid"
+            price, formal_quote_binding = _full_portfolio_formal_quote(
+                formal_quotes_by_exact_contract,
+                exact_contract=current_contract,
+                product=product,
+                price_side=price_side,
+                expected_price_tick=target["price_tick"],
+                now=current_time,
+            )
+            close_formal_quote_bindings.setdefault(
+                current_contract, formal_quote_binding
+            )
+            reference = sha256_json(
+                {
+                    "strategy_id": "STATIC_CORE_EQUAL",
+                    "run_id": normalized_run_id,
+                    "phase": "CLOSE",
+                    "product": product,
+                    "exact_contract": current_contract,
+                    "child_index": child_index,
+                }
+            )
+            close_orders.append(
+                {
+                    "symbol": symbol,
+                    "exchange": exchange,
+                    "direction": direction,
+                    "type": "LIMIT",
+                    "volume": 1,
+                    "price": price,
+                    "offset": offset,
+                    "reference": reference,
+                    "gateway_name": "CTP",
+                }
+            )
+            after_close = _after_safety_flat_close(
+                after_close,
+                matching,
+                direction=direction,
+                offset=offset,
+            )
+
+    after_close, _boundary_by_product = _canonical_strategy_portfolio_positions(
+        after_close
+    )
+    boundary_target_projection = canonical_target_position_projection(
+        after_close,
+        account_scope="account:windows",
+        environment="SIMNOW",
+    )
+    boundary_before_projection = canonical_before_position_projection(
+        after_close,
+        account_scope="account:windows",
+        environment="SIMNOW",
+    )
+    close_expected_after = sha256_json(boundary_target_projection)
+    open_expected_before = sha256_json(boundary_before_projection)
+    boundary = StaticCoreEqualPhaseBoundary(
+        positions=_mapping(after_close, "STATIC_CORE_EQUAL phase boundary"),
+        target_projection=_mapping(
+            boundary_target_projection,
+            "STATIC_CORE_EQUAL phase boundary target projection",
+        ),
+        before_projection=_mapping(
+            boundary_before_projection,
+            "STATIC_CORE_EQUAL phase boundary before projection",
+        ),
+        close_expected_after_position_hash=close_expected_after,
+        open_expected_before_position_hash=open_expected_before,
+    )
+
+    open_intents: list[dict[str, Any]] = []
+    after_open = after_close
+    for product in _STATIC_CORE_EQUAL_PRODUCTS:
+        after_open, current_by_product = _canonical_strategy_portfolio_positions(
+            after_open
+        )
+        current = current_by_product.get(product)
+        current_quantity = 0
+        if current is not None:
+            current_contract, current_row = current
+            if (
+                current_contract.upper()
+                != final_rows[product]["exact_contract"].upper()
+            ):
+                raise ExecutableTargetAdapterError(
+                    "post-close portfolio retains a stale exact contract"
+                )
+            current_quantity = (
+                current_row["volume"]
+                if current_row["direction"] == "LONG"
+                else -current_row["volume"]
+            )
+        target = final_rows[product]
+        target_quantity = target["target_quantity"]
+        delta = target_quantity - current_quantity
+        if delta == 0:
+            continue
+        if current_quantity and current_quantity * target_quantity <= 0:
+            raise ExecutableTargetAdapterError(
+                "post-close portfolio has an unresolved direction reversal"
+            )
+        exchange, symbol = _contract(target["exact_contract"])
+        direction = "LONG" if delta > 0 else "SHORT"
+        price_side = "ask" if direction == "LONG" else "bid"
+        open_intents.append(
+            {
+                "product": product,
+                "exact_contract": target["exact_contract"],
+                "direction": direction,
+                "volume": abs(delta),
+                "price_side": price_side,
+                "frozen_product_price_tick": target["price_tick"],
+            }
+        )
+        _long, _short, matching = _current_contract_positions(
+            after_open,
+            exchange=exchange,
+            symbol=symbol,
+            gateway_name="CTP",
+        )
+        after_open = _after_positions(
+            after_open,
+            matching,
+            exchange=exchange,
+            symbol=symbol,
+            gateway_name="CTP",
+            direction=direction,
+            offset="OPEN",
+            quantity=abs(delta),
+        )
+        if exchange in _CLOSE_OFFSET_EXCHANGES:
+            detached_after_open = _mapping(
+                after_open, "STATIC_CORE_EQUAL post-open positions"
+            )
+            for key, raw in detached_after_open.items():
+                if (
+                    str(raw.get("symbol", "")).upper() == symbol.upper()
+                    and str(raw.get("exchange", "")).upper() == exchange
+                    and str(raw.get("direction", "")).upper() == direction
+                    and raw.get("volume", 0) > 0
+                ):
+                    raw.setdefault("yd_volume", 0)
+                    detached_after_open[key] = raw
+            after_open = detached_after_open
+
+    after_open, _final_by_product = _canonical_strategy_portfolio_positions(after_open)
+    actual_final_position_hash = target_position_projection_hash(
+        after_open,
+        account_scope="account:windows",
+        environment="SIMNOW",
+    )
+    if actual_final_position_hash != final_position_hash:
+        raise ExecutableTargetAdapterError(
+            "full-portfolio planner did not converge to the complete final target"
+        )
+
+    open_orders: list[dict[str, Any]] = []
+    open_formal_quote_bindings: dict[str, Any] = {}
+    deferred_open_intent = None
+    if close_orders and open_intents:
+        deferred_open_intent = _full_portfolio_deferred_open_intent(
+            run_id=normalized_run_id,
+            static_core_equal_sha256=static_sha256,
+            position_manager_sha256=normalized_position_manager_sha256,
+            final_target_sha256=final_target_sha256,
+            expected_post_close_before_position_hash=open_expected_before,
+            expected_final_position_hash=final_position_hash,
+            event_generated_at=event_generated_at,
+            intents=open_intents,
+        )
+    elif open_intents:
+        for intent in open_intents:
+            product = str(intent["product"])
+            exact_contract = str(intent["exact_contract"])
+            direction = str(intent["direction"])
+            price_side = str(intent["price_side"])
+            exchange, symbol = _contract(exact_contract)
+            price, formal_quote_binding = _full_portfolio_formal_quote(
+                formal_quotes_by_exact_contract,
+                exact_contract=exact_contract,
+                product=product,
+                price_side=price_side,
+                expected_price_tick=intent["frozen_product_price_tick"],
+                now=current_time,
+            )
+            open_formal_quote_bindings.setdefault(exact_contract, formal_quote_binding)
+            for child_index in range(1, int(intent["volume"]) + 1):
+                open_orders.append(
+                    {
+                        "symbol": symbol,
+                        "exchange": exchange,
+                        "direction": direction,
+                        "type": "LIMIT",
+                        "volume": 1,
+                        "price": price,
+                        "offset": "OPEN",
+                        "reference": sha256_json(
+                            {
+                                "strategy_id": "STATIC_CORE_EQUAL",
+                                "run_id": normalized_run_id,
+                                "phase": "OPEN",
+                                "product": product,
+                                "exact_contract": exact_contract,
+                                "child_index": child_index,
+                            }
+                        ),
+                        "gateway_name": "CTP",
+                    }
+                )
+
+    decision_fields = {
+        "close_handoff": None,
+        "open_handoff": None,
+        "deferred_open_intent": deferred_open_intent,
+        "phase_boundary": boundary,
+        "static_core_equal_sha256": static_sha256,
+        "position_manager_sha256": normalized_position_manager_sha256,
+        "final_target_sha256": final_target_sha256,
+        "final_target_projection": final_projection,
+        "current_before_position_hash": current_before_position_hash,
+        "current_target_position_hash": current_target_position_hash,
+        "final_position_hash": final_position_hash,
+        "close_formal_quote_bindings": close_formal_quote_bindings,
+        "open_formal_quote_bindings": open_formal_quote_bindings,
+        "close_order_count": len(close_orders),
+        "open_order_count": len(open_orders),
+        "deferred_open_order_count": (
+            deferred_open_intent.order_count if deferred_open_intent is not None else 0
+        ),
+    }
+    if not close_orders and not open_orders and deferred_open_intent is None:
+        return StaticCoreEqualFullPortfolioDecision(**decision_fields)
+
+    required_quote_contracts = set(close_formal_quote_bindings) | set(
+        open_formal_quote_bindings
+    )
+    if (
+        not isinstance(formal_quotes_by_exact_contract, Mapping)
+        or set(formal_quotes_by_exact_contract) != required_quote_contracts
+    ):
+        raise ExecutableTargetAdapterError(
+            "full-portfolio formal quote contract set is not exact"
+        )
+    if not isinstance(expires_at, str) or not expires_at.endswith("Z"):
+        raise ExecutableTargetAdapterError("trusted keyless expiry is invalid")
+    try:
+        normalized_expiry = datetime.fromisoformat(expires_at[:-1] + "+00:00")
+    except ValueError as exc:
+        raise ExecutableTargetAdapterError("trusted keyless expiry is invalid") from exc
+    if (
+        normalized_expiry.utcoffset() != timezone.utc.utcoffset(normalized_expiry)
+        or normalized_expiry <= current_time
+        or normalized_expiry <= normalized_event_generated_at
+    ):
+        raise ExecutableTargetAdapterError("trusted keyless expiry is invalid")
+
+    close_handoff = (
+        _full_portfolio_plan_handoff(
+            phase="CLOSE",
+            run_id=normalized_run_id,
+            orders=close_orders,
+            expected_before_position_hash=current_before_position_hash,
+            expected_after_position_hash=close_expected_after,
+            static_core_equal_sha256=static_sha256,
+            position_manager_sha256=normalized_position_manager_sha256,
+            final_target_sha256=final_target_sha256,
+            formal_quote_bindings=close_formal_quote_bindings,
+            generated_at=event_generated_at,
+            expires_at=expires_at,
+        )
+        if close_orders
+        else None
+    )
+    open_handoff = (
+        _full_portfolio_plan_handoff(
+            phase="OPEN",
+            run_id=normalized_run_id,
+            orders=open_orders,
+            expected_before_position_hash=open_expected_before,
+            expected_after_position_hash=final_position_hash,
+            static_core_equal_sha256=static_sha256,
+            position_manager_sha256=normalized_position_manager_sha256,
+            final_target_sha256=final_target_sha256,
+            formal_quote_bindings=open_formal_quote_bindings,
+            generated_at=event_generated_at,
+            expires_at=expires_at,
+        )
+        if open_orders
+        else None
+    )
+    decision_fields["close_handoff"] = close_handoff
+    decision_fields["open_handoff"] = open_handoff
+    return StaticCoreEqualFullPortfolioDecision(**decision_fields)
+
+
 def build_static_core_equal_keyless_safety_flat_decision(
     *,
     static_core_equal_projection: Mapping[str, Any],
@@ -1796,10 +2817,16 @@ __all__ = [
     "ExecutableTargetAdapterError",
     "ExecutableTargetPlanHandoff",
     "PeekCurrentFacts",
+    "StaticCoreEqualDeferredOpenIntent",
+    "StaticCoreEqualFullPortfolioDecision",
+    "StaticCoreEqualFullPortfolioPhaseHandoff",
     "StaticCoreEqualKeylessDecision",
+    "StaticCoreEqualPhaseBoundary",
     "build_executable_target_plan",
+    "build_static_core_equal_full_portfolio_keyless_decision",
     "build_static_core_equal_keyless_safety_flat_decision",
     "build_static_core_equal_keyless_target_decision",
     "build_trusted_keyless_executable_target_plan",
+    "full_portfolio_phase_plan_id_from_preimage",
     "peek_current_facts_to_snapshot",
 ]

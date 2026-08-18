@@ -235,6 +235,7 @@ def test_phase_a_images_use_dedicated_control_and_execution_entries() -> None:
         ROOT / "deployments/phase-a/Containerfile.execution-orchestrator"
     ).read_text(encoding="utf-8")
     assert "app.control_api:app" in control
+    assert "COPY shared/commodity_execution /app/shared/commodity_execution" in control
     assert '--port", "8081' in control
     assert "COPY backend/app/control_ws_ticket.py" in control
     assert "frontend/dist" not in control
