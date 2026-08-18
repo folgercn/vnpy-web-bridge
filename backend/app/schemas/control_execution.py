@@ -19,6 +19,7 @@ from jsonschema import Draft202012Validator
 from shared.commodity_execution import KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION
 
 from app.execution.models import (
+    EPOCH_TIMESTAMP,
     IDENTIFIER_RE,
     SHA256_RE,
     UTC_RE,
@@ -81,6 +82,204 @@ def _load_status_validator() -> Draft202012Validator:
 
 
 _STATUS_VALIDATOR = _load_status_validator()
+
+
+_LEADER_TOKEN_FIELDS = frozenset(
+    {
+        "scope",
+        "owner_id",
+        "held",
+        "epoch",
+        "fencing_token",
+        "lease_expires_at",
+        "instance_id",
+    }
+)
+_LEADER_STATUS_FIELDS = _LEADER_TOKEN_FIELDS | {"state"}
+_LEADER_STATES = frozenset({"ACTIVE", "EXPIRED_BOUND", "RELEASED"})
+
+
+def _detached_object(value: Any, *, name: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{name} must be an object")
+    try:
+        return json.loads(
+            json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True)
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} is not canonical JSON") from exc
+
+
+def _validate_leader_common(
+    candidate: dict[str, Any], *, fields: frozenset[str]
+) -> None:
+    if set(candidate) != fields:
+        raise ValueError("execution leader fields are not exact")
+    if (
+        not isinstance(candidate["scope"], str)
+        or IDENTIFIER_RE.fullmatch(candidate["scope"]) is None
+    ):
+        raise ValueError("execution leader scope is invalid")
+    owner_id = candidate["owner_id"]
+    instance_id = candidate["instance_id"]
+    if owner_id and (
+        not isinstance(owner_id, str) or IDENTIFIER_RE.fullmatch(owner_id) is None
+    ):
+        raise ValueError("execution leader owner_id is invalid")
+    if not isinstance(owner_id, str):
+        raise ValueError("execution leader owner_id is invalid")
+    if owner_id:
+        if (
+            not isinstance(instance_id, str)
+            or IDENTIFIER_RE.fullmatch(instance_id) is None
+        ):
+            raise ValueError("execution leader instance_id is invalid")
+    elif instance_id != "":
+        raise ValueError("released execution leader retains an instance_id")
+    for field in ("epoch", "fencing_token"):
+        value = candidate[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"execution leader {field} is invalid")
+    if not isinstance(candidate["held"], bool):
+        raise ValueError("execution leader held is invalid")
+    if (
+        not isinstance(candidate["lease_expires_at"], str)
+        or UTC_RE.fullmatch(candidate["lease_expires_at"]) is None
+    ):
+        raise ValueError("execution leader lease_expires_at is invalid")
+    if owner_id and (candidate["epoch"] < 1 or candidate["fencing_token"] < 1):
+        raise ValueError("owned execution leader is missing a fence")
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionLeaderTokenProjection:
+    """Strict Control-side projection of one currently held lease token."""
+
+    value: dict[str, Any]
+
+    @classmethod
+    def from_mapping(cls, value: Any) -> ExecutionLeaderTokenProjection:
+        candidate = _detached_object(value, name="execution leader token")
+        _validate_leader_common(candidate, fields=_LEADER_TOKEN_FIELDS)
+        if (
+            candidate["held"] is not True
+            or not candidate["owner_id"]
+            or not candidate["instance_id"]
+            or candidate["lease_expires_at"] == EPOCH_TIMESTAMP
+        ):
+            raise ValueError("execution leader token is not held")
+        return cls(candidate)
+
+    @classmethod
+    def model_validate(cls, value: Any) -> ExecutionLeaderTokenProjection:
+        return cls.from_mapping(value)
+
+    def model_dump(self, *, mode: str = "python") -> dict[str, Any]:
+        del mode
+        return json.loads(json.dumps(self.value, ensure_ascii=False))
+
+    def token_dict(self) -> dict[str, Any]:
+        token = self.model_dump()
+        token.pop("held")
+        return token
+
+    @property
+    def owner_id(self) -> str:
+        return str(self.value["owner_id"])
+
+    @property
+    def instance_id(self) -> str:
+        return str(self.value["instance_id"])
+
+    @property
+    def scope(self) -> str:
+        return str(self.value["scope"])
+
+    @property
+    def epoch(self) -> int:
+        return int(self.value["epoch"])
+
+    @property
+    def fencing_token(self) -> int:
+        return int(self.value["fencing_token"])
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionLeaderStatusProjection:
+    """Strict read-only lease status with an explicit durable binding state."""
+
+    value: dict[str, Any]
+
+    @classmethod
+    def from_mapping(cls, value: Any) -> ExecutionLeaderStatusProjection:
+        candidate = _detached_object(value, name="execution leader status")
+        _validate_leader_common(candidate, fields=_LEADER_STATUS_FIELDS)
+        state = candidate["state"]
+        if not isinstance(state, str) or state not in _LEADER_STATES:
+            raise ValueError("execution leader state is invalid")
+        owner_id = candidate["owner_id"]
+        instance_id = candidate["instance_id"]
+        expiry = candidate["lease_expires_at"]
+        if state == "ACTIVE":
+            valid = (
+                candidate["held"] is True
+                and bool(owner_id)
+                and bool(instance_id)
+                and expiry != EPOCH_TIMESTAMP
+            )
+        elif state == "EXPIRED_BOUND":
+            valid = (
+                candidate["held"] is False
+                and bool(owner_id)
+                and bool(instance_id)
+                and expiry != EPOCH_TIMESTAMP
+            )
+        else:
+            valid = (
+                candidate["held"] is False
+                and owner_id == ""
+                and instance_id == ""
+                and expiry == EPOCH_TIMESTAMP
+            )
+        if not valid:
+            raise ValueError("execution leader status has mixed state bindings")
+        return cls(candidate)
+
+    @classmethod
+    def model_validate(cls, value: Any) -> ExecutionLeaderStatusProjection:
+        return cls.from_mapping(value)
+
+    def model_dump(self, *, mode: str = "python") -> dict[str, Any]:
+        del mode
+        return json.loads(json.dumps(self.value, ensure_ascii=False))
+
+    @property
+    def held(self) -> bool:
+        return bool(self.value["held"])
+
+    @property
+    def state(self) -> str:
+        return str(self.value["state"])
+
+    @property
+    def owner_id(self) -> str:
+        return str(self.value["owner_id"])
+
+    @property
+    def instance_id(self) -> str:
+        return str(self.value["instance_id"])
+
+    @property
+    def scope(self) -> str:
+        return str(self.value["scope"])
+
+    @property
+    def epoch(self) -> int:
+        return int(self.value["epoch"])
+
+    @property
+    def fencing_token(self) -> int:
+        return int(self.value["fencing_token"])
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,6 +448,8 @@ ExecutionStatusDTO = ExecutionStatusProjection
 ExecutionStatusProjectionDTO = ExecutionStatusProjection
 ExecutionCompletionDTO = ExecutionCompletionProjection
 ExecutionCompletionProjectionDTO = ExecutionCompletionProjection
+ExecutionLeaderStatusDTO = ExecutionLeaderStatusProjection
+ExecutionLeaderTokenDTO = ExecutionLeaderTokenProjection
 
 
 __all__ = [
@@ -258,6 +459,10 @@ __all__ = [
     "ExecutionCompletionDTO",
     "ExecutionCompletionProjection",
     "ExecutionCompletionProjectionDTO",
+    "ExecutionLeaderStatusDTO",
+    "ExecutionLeaderStatusProjection",
+    "ExecutionLeaderTokenDTO",
+    "ExecutionLeaderTokenProjection",
     "ExecutionStatusDTO",
     "ExecutionStatusProjection",
     "ExecutionStatusProjectionDTO",

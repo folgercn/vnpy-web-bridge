@@ -61,6 +61,15 @@ def test_phase_b_artifact_image_dependency_selects_its_consumers() -> None:
     assert result["phase_b_gate_blocked"] is False
 
 
+def test_issue362_execution_control_test_selects_custody_contract_owner() -> None:
+    result = classify_phase_b(
+        ["backend/tests/unit/test_issue362_execution_control_plumbing.py"]
+    )
+    assert result["phase_b_gate_blocked"] is False
+    assert result["selected_rule_ids"] == ["phase-b-execution-control-custody-tests"]
+    assert result["selected_units"] == ["artifact-custody"]
+
+
 def test_phase_b_simnow_runner_package_rebuilds_the_reviewed_dependency_group() -> None:
     for path in (
         "deployments/phase-b/Containerfile.simnow-runner",

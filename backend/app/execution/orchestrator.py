@@ -233,8 +233,8 @@ class ExecutionOrchestrator:
         token: LeaderToken | Mapping[str, Any] | None = None,
         *,
         now: datetime | None = None,
-    ) -> None:
-        self.fencer.release(token, now=now)
+    ) -> LeaderToken:
+        return self.fencer.release(token, now=now)
 
     def leader_acquire(
         self, owner_id: str, *, now: datetime | None = None
@@ -247,7 +247,51 @@ class ExecutionOrchestrator:
         *,
         now: datetime | None = None,
     ) -> dict[str, Any]:
+        if token is None:
+            raise FencingError("explicit renew fencing token is required")
+        if isinstance(token, Mapping):
+            token_fields = {
+                "scope",
+                "owner_id",
+                "epoch",
+                "fencing_token",
+                "lease_expires_at",
+                "instance_id",
+            }
+            if set(token) != token_fields:
+                raise FencingError("renew fencing token fields are not exact")
         return self.renew_leader(token, now=now).as_dict()
+
+    def leader_release(
+        self,
+        token: LeaderToken | Mapping[str, Any] | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        if token is None:
+            raise FencingError("explicit release fencing token is required")
+        if isinstance(token, Mapping):
+            token_fields = {
+                "scope",
+                "owner_id",
+                "epoch",
+                "fencing_token",
+                "lease_expires_at",
+                "instance_id",
+            }
+            if set(token) != token_fields:
+                raise FencingError("release fencing token fields are not exact")
+        released = self.release_leader(token, now=now)
+        return {
+            "scope": released.scope,
+            "owner_id": "",
+            "held": False,
+            "epoch": released.epoch,
+            "fencing_token": released.fencing_token,
+            "lease_expires_at": EPOCH_TIMESTAMP,
+            "instance_id": "",
+            "state": "RELEASED",
+        }
 
     def leader_status(self) -> dict[str, Any]:
         return self.fencer.current_lease()
@@ -738,7 +782,9 @@ class ExecutionOrchestrator:
             }
         raise CommandValidationError(f"unsupported command {command}")
 
-    def _prepare_control_cancellation(self, *, emergency_stop_only: bool = False) -> None:
+    def _prepare_control_cancellation(
+        self, *, emergency_stop_only: bool = False
+    ) -> None:
         state = self.repository.snapshot()
         active_ids = [
             str(intent_id)
@@ -873,9 +919,7 @@ class ExecutionOrchestrator:
                 plan["state"] = "TERMINAL"
                 plan["version"] = int(plan.get("version", 0)) + 1
             state["lifecycle"] = (
-                "HALTED_UNKNOWN_OUTCOME"
-                if state.get("unknown_outcomes")
-                else "READY"
+                "HALTED_UNKNOWN_OUTCOME" if state.get("unknown_outcomes") else "READY"
             )
             state["audit"].append(
                 {
@@ -978,7 +1022,9 @@ class ExecutionOrchestrator:
             try:
                 outcome = self.gateway.query_intent(intent, context)
                 if not isinstance(outcome, Mapping):
-                    raise GatewayUnavailable("gateway returned an invalid intent outcome")
+                    raise GatewayUnavailable(
+                        "gateway returned an invalid intent outcome"
+                    )
             except Exception as exc:  # noqa: BLE001 - any gateway exception leaves outcome unknown
                 outcomes[intent_id] = {"state": "UNKNOWN", "error": str(exc)}
                 continue
@@ -1099,10 +1145,11 @@ class ExecutionOrchestrator:
             or any(plan.get(field) != evidence[field] for field in proof_fields)
             or authority.get("state") != "ENABLED"
             or authority.get("artifact_id") != evidence["authority_artifact_id"]
-            or authority.get("artifact_hash")
-            != evidence["authority_artifact_sha256"]
+            or authority.get("artifact_hash") != evidence["authority_artifact_sha256"]
         ):
-            raise PlanRejected("internal finalization evidence does not bind active plan")
+            raise PlanRejected(
+                "internal finalization evidence does not bind active plan"
+            )
         terminal_states = {"TERMINAL", "RECONCILED", "CANCELLED"}
         plan_intents = [
             raw
@@ -1592,10 +1639,14 @@ class ExecutionOrchestrator:
         emergency_cancel = action == "cancel" and emergency_stop_only
         if state.get("unknown_outcomes") and not emergency_cancel:
             raise UnknownOutcomeError("unknown broker outcome requires query/reconcile")
-        if state.get("lifecycle") in {
-            "HALTED_RECONCILE_REQUIRED",
-            "HALTED_UNKNOWN_OUTCOME",
-        } and not emergency_cancel:
+        if (
+            state.get("lifecycle")
+            in {
+                "HALTED_RECONCILE_REQUIRED",
+                "HALTED_UNKNOWN_OUTCOME",
+            }
+            and not emergency_cancel
+        ):
             raise RestartReconciliationRequired(
                 "orchestrator lifecycle does not admit mutation"
             )

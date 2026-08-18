@@ -116,6 +116,16 @@ def test_frontend_and_control_changes_are_independent_from_execution() -> None:
     assert control["execution_safety_required"] is False
 
 
+def test_issue362_execution_control_tests_select_both_runtime_contract_owners() -> None:
+    result = classify_phase_a(
+        ["backend/tests/unit/test_issue362_execution_control_plumbing.py"]
+    )
+    assert result["release_blocked"] is False
+    assert result["selected_rule_ids"] == ["phase-a-shared-control-execution-schema"]
+    assert result["selected_units"] == ["control-api", "execution-orchestrator"]
+    assert result["execution_safety_required"] is True
+
+
 def test_execution_changes_select_only_execution_and_raise_safety_flag() -> None:
     for path in (
         "backend/app/execution/orchestrator.py",

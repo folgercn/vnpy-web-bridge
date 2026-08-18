@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from .errors import (
     ClockRollbackError,
+    CommandValidationError,
     FencingError,
     LeaseNotHeldError,
     RepositoryUnavailableError,
@@ -169,7 +170,7 @@ class LeaderFencer:
         token: LeaderToken | Mapping[str, Any] | None = None,
         *,
         now: datetime | None = None,
-    ) -> None:
+    ) -> LeaderToken:
         supplied = self._coerce_token(token or self._token)
         current = self._clock(now)
 
@@ -182,6 +183,7 @@ class LeaderFencer:
         self.repository.mutate(writer)
         if self._token == supplied:
             self._token = None
+        return supplied
 
     def validate(
         self,
@@ -239,12 +241,15 @@ class LeaderFencer:
         state = self.repository.snapshot()
         lease = dict(state["lease"])
         try:
-            expiry = _parse_timestamp(
-                str(lease.get("lease_expires_at", EPOCH_TIMESTAMP))
-            )
-            lease["held"] = bool(lease.get("owner_id")) and expiry > utc_now()
-        except (FencingError, TypeError, ValueError):
+            expiry = _parse_timestamp(str(lease["lease_expires_at"]))
+        except (CommandValidationError, TypeError, ValueError) as exc:
+            raise RepositoryUnavailableError("durable lease expiry is invalid") from exc
+        if lease["owner_id"]:
+            lease["held"] = expiry > utc_now()
+            lease["state"] = "ACTIVE" if lease["held"] else "EXPIRED_BOUND"
+        else:
             lease["held"] = False
+            lease["state"] = "RELEASED"
         return lease
 
     def _coerce_token(
@@ -305,15 +310,13 @@ class LeaderFencer:
         ):
             raise FencingError("stale or foreign fencing token")
         expiry = _parse_timestamp(str(lease.get("lease_expires_at", EPOCH_TIMESTAMP)))
+        # Release may accept an already-expired lease, but it must still bind
+        # the exact durable lease identity.  A caller cannot splice a matching
+        # owner/epoch/fence/instance onto a different expiry.
+        if supplied.lease_expires_at != lease.get("lease_expires_at"):
+            raise FencingError("fencing lease expiry mismatch")
         if not allow_expired and expiry <= now:
             raise FencingError("fencing lease is expired")
-        # A token copied from another lease with a later/different expiry is not
-        # valid even when the high-water values happen to match.
-        if (
-            supplied.lease_expires_at != lease.get("lease_expires_at")
-            and not allow_expired
-        ):
-            raise FencingError("fencing lease expiry mismatch")
 
 
 SingleLeaderFencer = LeaderFencer

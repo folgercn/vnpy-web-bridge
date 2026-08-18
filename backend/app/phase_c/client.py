@@ -17,6 +17,7 @@ from .adapters import (
 from .models import (
     AuthorizationCommandDTO,
     AuthorizationStatusDTO,
+    CustodyCurrentVersionDTO,
     CustodyReceiptDTO,
     ExecutionProjectionDTO,
     SignedArtifactUploadDTO,
@@ -29,6 +30,7 @@ CustodyInstallReceipt = CustodyReceiptDTO | TrustedKeylessCustodyReceiptDTO
 
 
 class PhaseCWorkflowClient(Protocol):
+    def custody_current_version(self) -> CustodyCurrentVersionDTO: ...
     def install(self, request: SignedArtifactUploadDTO) -> CustodyReceiptDTO: ...
     def install_trusted_keyless_target_plan(
         self, request: TrustedKeylessTargetPlanUploadDTO
@@ -53,6 +55,9 @@ class OfflineFakeWorkflowClient:
     def __init__(self, adapter: OfflineFakeWorkflowAdapter | None = None) -> None:
         self.adapter = adapter or OfflineFakeWorkflowAdapter()
 
+    def custody_current_version(self) -> CustodyCurrentVersionDTO:
+        return CustodyCurrentVersionDTO(version=self.adapter.custody.version)
+
     def install(self, request: SignedArtifactUploadDTO) -> CustodyReceiptDTO:
         return self.adapter.custody.install(request)
 
@@ -60,7 +65,9 @@ class OfflineFakeWorkflowClient:
         self, request: TrustedKeylessTargetPlanUploadDTO
     ) -> TrustedKeylessCustodyReceiptDTO:
         del request
-        raise WorkflowAdapterError("trusted keyless custody is unavailable in offline fake")
+        raise WorkflowAdapterError(
+            "trusted keyless custody is unavailable in offline fake"
+        )
 
     def custody_receipt(self, receipt_id: str) -> CustodyInstallReceipt | None:
         return self.adapter.custody.receipt(receipt_id)
@@ -174,6 +181,56 @@ class RemotePhaseCWorkflowClient:
             raise WorkflowAdapterError("private Phase C response is invalid") from exc
         return body if isinstance(body, dict) else None
 
+    def custody_current_version(self) -> CustodyCurrentVersionDTO:
+        try:
+            with httpx.Client(
+                timeout=self.settings.timeout_seconds,
+                transport=self.transport,
+                headers={
+                    "X-Phase-C-Principal": "control-api",
+                    "X-Phase-C-Custody-Secret": self.settings.custody_secret,
+                },
+            ) as client:
+                response = client.get(
+                    f"{self.settings.custody_url}/internal/v1/current-version"
+                )
+        except (
+            httpx.TimeoutException,
+            asyncio.TimeoutError,
+            httpx.NetworkError,
+            httpx.HTTPError,
+        ) as exc:
+            raise WorkflowAdapterError(
+                "private Phase C custody version is unavailable",
+                status_code=503,
+            ) from exc
+        try:
+            raw = response.json()
+        except ValueError as exc:
+            raise WorkflowAdapterError(
+                "private Phase C custody version response is invalid",
+                detail={"status_code": response.status_code},
+                status_code=502,
+            ) from exc
+        if response.status_code >= 400:
+            detail = (
+                raw.get("detail", raw.get("error", raw))
+                if isinstance(raw, dict)
+                else raw
+            )
+            raise WorkflowAdapterError(
+                "private Phase C custody version request was rejected",
+                detail=detail,
+                status_code=response.status_code,
+            )
+        try:
+            return CustodyCurrentVersionDTO.model_validate(raw)
+        except (TypeError, ValueError) as exc:
+            raise WorkflowAdapterError(
+                "private Phase C custody version response is invalid",
+                status_code=502,
+            ) from exc
+
     def install(self, request: SignedArtifactUploadDTO) -> CustodyReceiptDTO:
         raw = self._request(
             self.settings.custody_url,
@@ -280,6 +337,9 @@ class UnconfiguredPhaseCWorkflowClient:
 
     def install(self, request: SignedArtifactUploadDTO) -> CustodyReceiptDTO:
         del request
+        self._unavailable()
+
+    def custody_current_version(self) -> CustodyCurrentVersionDTO:
         self._unavailable()
 
     def install_trusted_keyless_target_plan(

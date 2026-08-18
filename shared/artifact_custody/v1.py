@@ -135,6 +135,7 @@ class ArtifactCustody:
         writer_epoch: int,
         schema_registry: Mapping[str, Mapping[str, Any] | Callable[[Any], None]],
         clock: Callable[[], str] = _utc_now,
+        read_only: bool = False,
     ) -> None:
         self.root = Path(root)
         self.writer_id = _safe_id(writer_id, "CUSTODY_WRITER_ID_INVALID")
@@ -146,9 +147,12 @@ class ArtifactCustody:
             raise CustodyError("CUSTODY_WRITER_EPOCH_INVALID")
         if not schema_registry:
             raise CustodyError("CUSTODY_SCHEMA_REGISTRY_REQUIRED")
+        if not isinstance(read_only, bool):
+            raise CustodyError("CUSTODY_READ_ONLY_FLAG_INVALID")
         self.writer_epoch = writer_epoch
         self.schema_registry = dict(schema_registry)
         self.clock = clock
+        self.read_only = read_only
         self._root_fd = -1
         self._lock_fd = -1
         self._dirs: dict[str, int] = {}
@@ -178,7 +182,11 @@ class ArtifactCustody:
         try:
             if not self.root.is_absolute() or self.root.resolve() != self.root:
                 raise CustodyError("CUSTODY_ROOT_NOT_PINNED")
-            self.root.mkdir(mode=0o700, parents=False, exist_ok=True)
+            if self.read_only:
+                if not self.root.exists():
+                    raise CustodyError("CUSTODY_ROOT_NOT_FOUND")
+            else:
+                self.root.mkdir(mode=0o700, parents=False, exist_ok=True)
             flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
@@ -189,30 +197,40 @@ class ArtifactCustody:
                 or stat.S_IMODE(root_stat.st_mode) != 0o700
             ):
                 raise CustodyError("CUSTODY_ROOT_PERMISSIONS_INVALID")
-            lock_flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
+            lock_flags = (
+                os.O_RDONLY if self.read_only else os.O_RDWR | os.O_CREAT
+            ) | os.O_CLOEXEC
             if hasattr(os, "O_NOFOLLOW"):
                 lock_flags |= os.O_NOFOLLOW
             self._lock_fd = os.open(
-                ".writer.lock", lock_flags, 0o600, dir_fd=self._root_fd
+                ".writer.lock",
+                lock_flags,
+                0o600,
+                dir_fd=self._root_fd,
             )
             try:
-                fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                mode = fcntl.LOCK_SH if self.read_only else fcntl.LOCK_EX
+                fcntl.flock(self._lock_fd, mode | fcntl.LOCK_NB)
             except BlockingIOError as exc:
                 raise CustodyError("CUSTODY_WRITER_ALREADY_ACTIVE") from exc
             for name in ("artifacts", "receipts", "epochs", ".tmp"):
-                self._dirs[name] = self._open_child_dir(name)
-            self._claim_epoch()
+                self._dirs[name] = self._open_child_dir(name, create=not self.read_only)
+            if self.read_only:
+                self._read_epoch_claims()
+            else:
+                self._claim_epoch()
             self.audit()
         except Exception:
             self.close()
             raise
 
-    def _open_child_dir(self, name: str) -> int:
-        try:
-            os.mkdir(name, 0o700, dir_fd=self._root_fd)
-            os.fsync(self._root_fd)
-        except FileExistsError:
-            pass
+    def _open_child_dir(self, name: str, *, create: bool = True) -> int:
+        if create:
+            try:
+                os.mkdir(name, 0o700, dir_fd=self._root_fd)
+                os.fsync(self._root_fd)
+            except FileExistsError:
+                pass
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
@@ -226,7 +244,7 @@ class ArtifactCustody:
             raise CustodyError("CUSTODY_DIRECTORY_PERMISSIONS_INVALID")
         return fd
 
-    def _claim_epoch(self) -> None:
+    def _read_epoch_claims(self) -> tuple[int, dict[int, str]]:
         maximum = 0
         claims: dict[int, str] = {}
         for name in os.listdir(self._dirs["epochs"]):
@@ -252,6 +270,10 @@ class ArtifactCustody:
             if prior != expected["writer_id"]:
                 raise CustodyError("CUSTODY_EPOCH_LEDGER_FORK")
             maximum = max(maximum, expected["writer_epoch"])
+        return maximum, claims
+
+    def _claim_epoch(self) -> None:
+        maximum, claims = self._read_epoch_claims()
         prior_writer = claims.get(self.writer_epoch)
         if prior_writer is not None:
             if prior_writer != self.writer_id:
@@ -330,6 +352,8 @@ class ArtifactCustody:
         return value, raw
 
     def _publish_create_only(self, directory: str, final_name: str, raw: bytes) -> None:
+        if self.read_only:
+            raise CustodyError("CUSTODY_READ_ONLY")
         target_fd = self._dirs[directory]
         temp_name = f"{self.writer_id}.{self.writer_epoch}.{uuid.uuid4().hex}.tmp"
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
@@ -630,9 +654,7 @@ class ArtifactCustody:
                 signed,
                 keyring=record["signed_artifact_keyring"],
                 expected_domain=record["signed_artifact_expected_domain"],
-                expected_key_purpose=record[
-                    "signed_artifact_expected_key_purpose"
-                ],
+                expected_key_purpose=record["signed_artifact_expected_key_purpose"],
             )
         except ContractError as exc:
             raise CustodyError(f"CUSTODY_SIGNED_ARTIFACT_{exc.code}") from exc
