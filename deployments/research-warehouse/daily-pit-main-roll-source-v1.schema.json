@@ -1,0 +1,547 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/folgercn/vnpy-web-bridge/deployments/research-warehouse/daily-pit-main-roll-source-v1.schema.json",
+  "title": "Research Warehouse daily PIT-main unverified foundation v1",
+  "description": "Unverified, no-authority research foundation only. All nested lineage is caller-claimed, not verified. No installer, scheduler, event producer, SimNow or live execution consumer may consume v1. Only a future verified v2 contract that independently reconstructs and verifies all input lineage may become consumable.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "source_kind",
+    "derivation_id",
+    "official_day",
+    "execution_day",
+    "following_official_day",
+    "roll_change_detected",
+    "changed_products",
+    "input_lineage_status",
+    "installable",
+    "event_ready",
+    "execution_lane",
+    "production_allowed",
+    "live_trading_authorized",
+    "countable_forward",
+    "official_forward_claimed",
+    "mains",
+    "claimed_lineage",
+    "authority"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "vnpy_research_commodity_daily_pit_main_roll_source_v1"
+    },
+    "artifact_id": {
+      "type": "string",
+      "pattern": "^daily-roll-[0-9a-f]{64}$"
+    },
+    "source_kind": {
+      "const": "DAILY_PIT_MAIN_ROLL_ONLY"
+    },
+    "derivation_id": {
+      "const": "FROZEN_OI_DESC_DELIVERY_ASC_EXACT_ASC_ROLL_SOURCE_V1"
+    },
+    "official_day": {
+      "$ref": "#/$defs/day"
+    },
+    "execution_day": {
+      "$ref": "#/$defs/day"
+    },
+    "following_official_day": {
+      "$ref": "#/$defs/day"
+    },
+    "roll_change_detected": {
+      "type": "boolean",
+      "description": "True only when the research comparison detects at least one changed product. This is not readiness, a trigger, an authorization, or a dispatch decision."
+    },
+    "changed_products": {
+      "type": "array",
+      "maxItems": 10,
+      "uniqueItems": true,
+      "description": "Products whose selected daily PIT main differs from the caller-supplied unverified predecessor map. Detection only; this list cannot authorize or trigger execution.",
+      "items": {
+        "$ref": "#/$defs/product"
+      }
+    },
+    "input_lineage_status": {
+      "const": "UNVERIFIED_FOUNDATION_ONLY",
+      "description": "Applies to every item in claimed_lineage, including custody, calendar, policy and predecessor claims. V1 does not establish continuity or authenticity."
+    },
+    "installable": {
+      "const": false,
+      "description": "V1 must not be installed."
+    },
+    "event_ready": {
+      "const": false,
+      "description": "V1 cannot create or authorize an executable event."
+    },
+    "execution_lane": {
+      "const": "simnow_shakedown",
+      "description": "Research classification only; this does not make v1 consumable by the SimNow lane."
+    },
+    "production_allowed": {
+      "const": false
+    },
+    "live_trading_authorized": {
+      "const": false
+    },
+    "countable_forward": {
+      "const": false
+    },
+    "official_forward_claimed": {
+      "const": false
+    },
+    "mains": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": {
+        "$ref": "#/$defs/main"
+      }
+    },
+    "claimed_lineage": {
+      "$ref": "#/$defs/claimedLineage",
+      "description": "Caller-claimed self-bindings only. This object is not verified lineage and cannot be used as installation or event authority."
+    },
+    "authority": {
+      "$ref": "#/$defs/authority"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "day": {
+      "type": "string",
+      "format": "date",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{8,128}$"
+    },
+    "product": {
+      "enum": [
+        "ag",
+        "al",
+        "au",
+        "bu",
+        "cu",
+        "rb",
+        "ru",
+        "sc",
+        "sp",
+        "zn"
+      ]
+    },
+    "exchange": {
+      "enum": [
+        "SHFE",
+        "INE"
+      ]
+    },
+    "exactContract": {
+      "type": "string",
+      "pattern": "^(SHFE|INE)\\.[a-z]{2}[0-9]{4}$"
+    },
+    "main": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "product",
+        "exchange",
+        "previous_exact_contract",
+        "exact_contract",
+        "changed",
+        "delivery_yyyymm",
+        "settlement",
+        "open_interest",
+        "eligible_contract_count",
+        "ranked_contracts_sha256",
+        "official_last_trading_day",
+        "execution_day_dte",
+        "following_official_day_dte"
+      ],
+      "properties": {
+        "product": {
+          "$ref": "#/$defs/product"
+        },
+        "exchange": {
+          "$ref": "#/$defs/exchange"
+        },
+        "previous_exact_contract": {
+          "$ref": "#/$defs/exactContract"
+        },
+        "exact_contract": {
+          "$ref": "#/$defs/exactContract"
+        },
+        "changed": {
+          "type": "boolean"
+        },
+        "delivery_yyyymm": {
+          "type": "integer",
+          "minimum": 200001,
+          "maximum": 209912
+        },
+        "settlement": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "open_interest": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "eligible_contract_count": {
+          "type": "integer",
+          "minimum": 3,
+          "maximum": 64
+        },
+        "ranked_contracts_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "official_last_trading_day": {
+          "$ref": "#/$defs/day"
+        },
+        "execution_day_dte": {
+          "type": "integer",
+          "minimum": 11
+        },
+        "following_official_day_dte": {
+          "type": "integer",
+          "minimum": 11
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "exchange",
+        "object_id",
+        "observation_id",
+        "revision_id",
+        "raw_sha256",
+        "raw_bytes",
+        "raw_relative_path"
+      ],
+      "properties": {
+        "source_id": {
+          "enum": [
+            "shfe-daily-market-data-v1",
+            "ine-daily-market-data-v1"
+          ]
+        },
+        "exchange": {
+          "$ref": "#/$defs/exchange"
+        },
+        "object_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "observation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "revision_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "raw_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "raw_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216
+        },
+        "raw_relative_path": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 1024,
+          "pattern": "^raw/(?!\\.\\.(?:/|$))(?!.*\\/\\.\\.(?:/|$))[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$"
+        }
+      }
+    },
+    "manifestSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "exchange",
+        "revision_id",
+        "raw_sha256",
+        "raw_bytes",
+        "raw_relative_path"
+      ],
+      "properties": {
+        "source_id": {
+          "enum": [
+            "shfe-daily-market-data-v1",
+            "ine-daily-market-data-v1"
+          ]
+        },
+        "exchange": {
+          "$ref": "#/$defs/exchange"
+        },
+        "revision_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "raw_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "raw_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216
+        },
+        "raw_relative_path": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 1024,
+          "pattern": "^raw/(?!\\.\\.(?:/|$))(?!.*\\/\\.\\.(?:/|$))[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$"
+        }
+      }
+    },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "trade_day",
+        "batch_id",
+        "batch_seal_sha256",
+        "commit_seal_sha256",
+        "manifest_raw_sha256",
+        "commit_receipt_raw_sha256",
+        "operator_state_raw_sha256",
+        "manifest_genesis_seal_sha256",
+        "manifest_head_seal_sha256",
+        "manifest_head_commit_seal_sha256",
+        "commit_anchor_ledger_raw_sha256",
+        "sources"
+      ],
+      "properties": {
+        "trade_day": {
+          "$ref": "#/$defs/day"
+        },
+        "batch_id": {
+          "$ref": "#/$defs/id"
+        },
+        "batch_seal_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "commit_seal_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "manifest_raw_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "commit_receipt_raw_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "operator_state_raw_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "manifest_genesis_seal_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "manifest_head_seal_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "manifest_head_commit_seal_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "commit_anchor_ledger_raw_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "$ref": "#/$defs/manifestSource"
+          }
+        }
+      }
+    },
+    "claimedLineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Caller-claimed inputs and self-bindings. None of these fields prove verified continuity in v1.",
+      "required": [
+        "run_receipt",
+        "sources",
+        "manifest",
+        "calendar",
+        "policy",
+        "contract_registry_raw_sha256",
+        "predecessor_exact_contract_map_sha256",
+        "producer_kernel_id",
+        "frozen_rule_id",
+        "frozen_rule_sha256"
+      ],
+      "properties": {
+        "run_receipt": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "receipt_id",
+            "completed_at",
+            "raw_sha256",
+            "raw_bytes",
+            "registry_raw_sha256"
+          ],
+          "properties": {
+            "receipt_id": {
+              "type": "string",
+              "pattern": "^run-[0-9a-f]{64}$"
+            },
+            "completed_at": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$"
+            },
+            "raw_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "raw_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1048576
+            },
+            "registry_raw_sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "$ref": "#/$defs/source"
+          }
+        },
+        "manifest": {
+          "$ref": "#/$defs/manifest"
+        },
+        "calendar": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "calendar_id",
+            "calendar_raw_sha256",
+            "calendar_availability_anchor_raw_sha256"
+          ],
+          "properties": {
+            "calendar_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "calendar_raw_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "calendar_availability_anchor_raw_sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        },
+        "policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "isolation_policy_raw_sha256",
+            "runtime_input_raw_sha256",
+            "release_tree_manifest_raw_sha256"
+          ],
+          "properties": {
+            "isolation_policy_raw_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "runtime_input_raw_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "release_tree_manifest_raw_sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        },
+        "contract_registry_raw_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "predecessor_exact_contract_map_sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "Self-binding hash of the caller-supplied predecessor map only. It does not prove predecessor continuity or grant execution authority."
+        },
+        "producer_kernel_id": {
+          "const": "commodity_c_fast_pure_producer_kernel_v1"
+        },
+        "frozen_rule_id": {
+          "const": "commodity_fast_tsmom_forward_freeze_v1"
+        },
+        "frozen_rule_sha256": {
+          "const": "d9a6ef4ffb6d74fe0feee8ac8935acbeb79abd4686581611f14135eb5c41040a"
+        }
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account_data_read",
+        "control_authorized",
+        "deployment_authorized",
+        "execution_authorized",
+        "network_beyond_allowlist_authorized",
+        "order_authorized",
+        "permit_authorized",
+        "position_mutation_authorized",
+        "production_authorized",
+        "rpc_authorized",
+        "trading_authorized"
+      ],
+      "properties": {
+        "account_data_read": {
+          "const": false
+        },
+        "control_authorized": {
+          "const": false
+        },
+        "deployment_authorized": {
+          "const": false
+        },
+        "execution_authorized": {
+          "const": false
+        },
+        "network_beyond_allowlist_authorized": {
+          "const": false
+        },
+        "order_authorized": {
+          "const": false
+        },
+        "permit_authorized": {
+          "const": false
+        },
+        "position_mutation_authorized": {
+          "const": false
+        },
+        "production_authorized": {
+          "const": false
+        },
+        "rpc_authorized": {
+          "const": false
+        },
+        "trading_authorized": {
+          "const": false
+        }
+      }
+    }
+  }
+}
