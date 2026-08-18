@@ -6,7 +6,7 @@ code.  Control only forwards these values to independently owned adapters.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -85,6 +85,126 @@ class TrustedKeylessTargetPlanUploadDTO(StrictDTO):
         min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
     )
     artifact: dict[str, Any]
+
+
+class TrustedKeylessTargetPlanInstallContinuationDTO(StrictDTO):
+    """Exact install-only retry for one already-published keyless plan."""
+
+    idempotency_key: str = Field(
+        min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    )
+    correlation_id: str = Field(
+        min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    )
+    publish_receipt_id: str = Field(
+        min_length=8, max_length=192, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    )
+    publish_receipt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    publish_expected_custody_version: int = Field(ge=0)
+    publish_resulting_custody_version: int = Field(ge=1)
+    artifact: dict[str, Any]
+
+    @model_validator(mode="after")
+    def _publish_versions_are_adjacent(
+        self,
+    ) -> TrustedKeylessTargetPlanInstallContinuationDTO:
+        if (
+            self.publish_resulting_custody_version
+            != self.publish_expected_custody_version + 1
+        ):
+            raise ValueError("publish custody versions are not adjacent")
+        return self
+
+
+class TargetPlanPublicationProjectionDTO(AuthorityNegativeDTO):
+    """Read-only Phase-C publication/install evidence for one phase key."""
+
+    schema_version: Literal["phase-c-target-plan-publication-v1"] = (
+        "phase-c-target-plan-publication-v1"
+    )
+    state: Literal["NOT_PUBLISHED", "PUBLISHED_NOT_INSTALLED", "INSTALLED"]
+    idempotency_key: str
+    install_idempotency_key: str
+    observed_custody_version: int = Field(ge=0)
+    custody_state_owner: Literal["artifact-custody"] = "artifact-custody"
+    publisher_principal: Optional[str] = None
+    correlation_id: Optional[str] = None
+    artifact_id: Optional[str] = None
+    artifact_canonical_sha256: Optional[str] = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    artifact_raw_sha256: Optional[str] = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    artifact_schema_ref: Optional[str] = None
+    plan_schema_version: Optional[str] = None
+    plan_id: Optional[str] = None
+    plan_hash: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    plan_phase: Optional[Literal["CLOSE", "OPEN"]] = None
+    publish_receipt_id: Optional[str] = None
+    publish_receipt_sha256: Optional[str] = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    publish_expected_custody_version: Optional[int] = Field(default=None, ge=0)
+    publish_resulting_custody_version: Optional[int] = Field(default=None, ge=1)
+    install_receipt_id: Optional[str] = None
+    install_receipt_sha256: Optional[str] = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    install_expected_custody_version: Optional[int] = Field(default=None, ge=1)
+    install_resulting_custody_version: Optional[int] = Field(default=None, ge=2)
+
+    @model_validator(mode="after")
+    def _state_has_exact_evidence(self) -> TargetPlanPublicationProjectionDTO:
+        if self.install_idempotency_key != f"install-{self.idempotency_key}":
+            raise ValueError("install idempotency does not bind publication")
+        publication = (
+            self.publisher_principal,
+            self.correlation_id,
+            self.artifact_id,
+            self.artifact_canonical_sha256,
+            self.artifact_raw_sha256,
+            self.artifact_schema_ref,
+            self.plan_schema_version,
+            self.plan_id,
+            self.plan_hash,
+            self.plan_phase,
+            self.publish_receipt_id,
+            self.publish_receipt_sha256,
+            self.publish_expected_custody_version,
+            self.publish_resulting_custody_version,
+        )
+        installation = (
+            self.install_receipt_id,
+            self.install_receipt_sha256,
+            self.install_expected_custody_version,
+            self.install_resulting_custody_version,
+        )
+        if self.state == "NOT_PUBLISHED":
+            if any(value is not None for value in publication + installation):
+                raise ValueError("unpublished projection contains custody evidence")
+            return self
+        if any(value is None for value in publication):
+            raise ValueError("published projection lacks custody evidence")
+        if (
+            self.publish_resulting_custody_version
+            != self.publish_expected_custody_version + 1  # type: ignore[operator]
+        ):
+            raise ValueError("publish custody versions are not adjacent")
+        if self.state == "PUBLISHED_NOT_INSTALLED":
+            if any(value is not None for value in installation):
+                raise ValueError("uninstalled projection contains install evidence")
+            return self
+        if any(value is None for value in installation):
+            raise ValueError("installed projection lacks install evidence")
+        if (
+            self.install_expected_custody_version
+            != self.publish_resulting_custody_version
+            or self.install_resulting_custody_version
+            != self.install_expected_custody_version + 1  # type: ignore[operator]
+        ):
+            raise ValueError("install custody versions do not continue publication")
+        return self
 
 
 class CustodyCurrentVersionDTO(AuthorityNegativeDTO):
