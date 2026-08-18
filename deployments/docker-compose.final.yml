@@ -93,7 +93,10 @@ services:
       postgres: { condition: service_healthy }
       gateway-rpc-request-proxy: { condition: service_healthy }
       gateway-rpc-publish-proxy: { condition: service_healthy }
-    volumes: [execution_state:/var/lib/vnpy-execution]
+    volumes:
+      - execution_state:/var/lib/vnpy-execution
+      - market_data_state:/run/market-data:ro
+      - market_projection:/run/market-projection:ro
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]

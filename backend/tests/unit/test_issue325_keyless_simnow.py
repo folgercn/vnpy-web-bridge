@@ -643,6 +643,7 @@ def test_simnow_runner_image_keeps_the_real_import_closure_and_no_direct_gateway
         "backend/app/execution/__init__.py",
         "backend/app/execution/errors.py",
         "backend/app/execution/executable_target_adapter.py",
+        "backend/app/execution/formal_tick_reader.py",
         "backend/app/execution/gateway_contracts.py",
         "backend/app/execution/models.py",
         "backend/app/phase_c/__init__.py",
@@ -911,7 +912,9 @@ def test_safety_flat_rejects_noncanonical_or_unknown_exact_contract(
 
 
 @pytest.mark.parametrize("reason", ["stale", "wrong contract", "bad acknowledgement"])
-def test_safety_flat_rejects_invalid_verified_tick(reason: str, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_safety_flat_rejects_invalid_verified_tick(
+    reason: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     module = _run_once_module(f"issue353_runner_bad_safety_flat_tick_{reason}")
     snapshot = {
         "targets": [
@@ -1070,7 +1073,9 @@ def _install_fake_runner_dependencies(
                 )
                 and completion_reconcile_error
             ):
-                raise module.ExecutionClientError("completion reconciliation unavailable")
+                raise module.ExecutionClientError(
+                    "completion reconciliation unavailable"
+                )
             if (
                 envelope["command"] == "reconcile"
                 and envelope["idempotency_key"].startswith(
@@ -1084,12 +1089,9 @@ def _install_fake_runner_dependencies(
                         | {"idempotency_key": envelope["idempotency_key"]}
                     )
                 }
-            if (
-                envelope["command"] == "reconcile"
-                and envelope["idempotency_key"].startswith(
-                    "simnow-run-once-final-reconcile-"
-                )
-            ):
+            if envelope["command"] == "reconcile" and envelope[
+                "idempotency_key"
+            ].startswith("simnow-run-once-final-reconcile-"):
                 return final_response or _final_reconcile_response(
                     idempotency_key=envelope["idempotency_key"]
                 )
@@ -1184,7 +1186,9 @@ def _install_fake_runner_dependencies(
             "ask",
         ),
     )
-    monkeypatch.setattr(module, "_require_tick_boundary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        module, "_require_tick_boundary", lambda *_args, **_kwargs: None
+    )
     return SimpleNamespace(
         calls=calls, commands=commands, receipt_queries=receipt_queries
     )

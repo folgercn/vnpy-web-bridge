@@ -245,6 +245,8 @@ PHASE_B_RULES = (
         exact=(
             "deployments/phase-b/Containerfile.simnow-runner",
             "deployments/phase-b/requirements-simnow-runner.txt",
+            "backend/app/execution/formal_tick_reader.py",
+            "backend/tests/unit/test_issue362_formal_tick_reader.py",
             "scripts/simnow_keyless_pilot.py",
         ),
         shared=True,
@@ -360,7 +362,9 @@ PHASE_B_SCOPE_PREFIXES = (
 )
 PHASE_B_SCOPE_EXACT = {
     ".github/workflows/ci.yml",
+    "backend/app/execution/formal_tick_reader.py",
     "backend/requirements.phase-b-verifier.txt",
+    "backend/tests/unit/test_issue362_formal_tick_reader.py",
     "backend/tests/unit/test_issue362_execution_control_plumbing.py",
     "deployments/docker-compose.phase-b.yml",
     "scripts/ci/classify_changes.py",
