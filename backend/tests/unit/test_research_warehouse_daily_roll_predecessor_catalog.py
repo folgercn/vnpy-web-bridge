@@ -11,6 +11,7 @@ import stat
 import sys
 from types import SimpleNamespace
 
+from jsonschema import Draft202012Validator, FormatChecker
 import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -819,3 +820,216 @@ def test_catalog_artifact_path_rejects_escape(tmp_path: Path, relative: str) -> 
         match="artifact path is unsafe",
     ):
         catalog._artifact_path(tmp_path, relative)
+
+
+def _catalog_tree_snapshot(root: Path) -> dict[str, tuple[int, int, int, bytes]]:
+    snapshot = {}
+    for path in sorted(root.rglob("*")):
+        info = path.lstat()
+        raw = path.read_bytes() if stat.S_ISREG(info.st_mode) else b""
+        snapshot[str(path.relative_to(root))] = (
+            stat.S_IMODE(info.st_mode),
+            info.st_nlink,
+            info.st_size,
+            raw,
+        )
+    return snapshot
+
+
+def test_current_head_proof_is_restart_stable_shared_locked_and_zero_write(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    kwargs, _inputs, holder, genesis, linked = _linked_setup(monkeypatch, tmp_path)
+    root = catalog.catalog_root(kwargs["operator_state"].path)
+    before = _catalog_tree_snapshot(root)
+    lock_modes: list[bool] = []
+    load_count = 0
+    lock_held = False
+    load_catalog = catalog._load_catalog
+
+    @contextmanager
+    def shared_lock(_path: Path, *, exclusive: bool):
+        nonlocal lock_held
+        lock_modes.append(exclusive)
+        lock_held = True
+        try:
+            yield
+        finally:
+            lock_held = False
+
+    def reload_state(_path: Path):
+        nonlocal load_count
+        assert lock_held is True
+        load_count += 1
+        return replace(holder["state"])
+
+    def load_catalog_while_locked(*args, **kwargs):
+        assert lock_held is True
+        return load_catalog(*args, **kwargs)
+
+    def unexpected_write(*_args, **_kwargs):
+        pytest.fail("read-only current-head proof attempted a catalog write")
+
+    monkeypatch.setattr(catalog, "operator_state_lock", shared_lock)
+    monkeypatch.setattr(catalog, "load_operator_state", reload_state)
+    monkeypatch.setattr(catalog, "_load_catalog", load_catalog_while_locked)
+    monkeypatch.setattr(catalog, "_prepare_catalog", unexpected_write)
+    monkeypatch.setattr(catalog, "_recover_catalog_partial", unexpected_write)
+    monkeypatch.setattr(catalog, "_atomic_root_write", unexpected_write)
+
+    first = catalog.load_current_catalog_head(kwargs["operator_state"].path)
+    second = catalog.load_current_catalog_head(kwargs["operator_state"].path)
+
+    assert first == second
+    assert load_count == 2
+    assert lock_modes == [False, False]
+    assert first.receipt_raw == linked.receipt_raw
+    assert first.receipt_raw_sha256 == sha256(linked.receipt_raw)
+    assert first.artifact_raw == linked.artifact_raw
+    assert first.artifact_raw_sha256 == sha256(linked.artifact_raw)
+    assert first.operator_state_raw_sha256 == holder["state"].raw_sha256
+    assert first.operator_manifest_sequence == 2
+    assert (
+        first.manifest_genesis_seal_sha256
+        == holder["state"].payload["manifest_genesis_seal_sha256"]
+    )
+    assert (
+        first.manifest_head_seal_sha256
+        == holder["state"].payload["manifest_head_seal_sha256"]
+    )
+    assert (
+        first.manifest_head_commit_seal_sha256
+        == holder["state"].payload["manifest_head_commit_seal_sha256"]
+    )
+    assert (
+        first.commit_anchor_ledger_raw_sha256
+        == holder["state"].payload["commit_anchor_ledger_raw_sha256"]
+    )
+    assert first.last_trade_day == "2026-07-02"
+    assert first.authority == linked.receipt["authority"]
+    assert set(first.authority.values()) == {False}
+    assert _catalog_tree_snapshot(root) == before
+
+    schema_path = (
+        ROOT
+        / "deployments/research-warehouse/daily-roll-predecessor-catalog-receipt-v1.schema.json"
+    )
+    schema = json.loads(schema_path.read_bytes())
+    Draft202012Validator.check_schema(schema)
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    validator.validate(json.loads(genesis.receipt_raw))
+    validator.validate(json.loads(first.receipt_raw))
+    forged_authority = json.loads(first.receipt_raw)
+    forged_authority["authority"]["order_authorized"] = True
+    assert validator.is_valid(forged_authority) is False
+
+
+def test_current_head_proof_rejects_current_root_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    kwargs, _inputs, holder = _genesis_setup(monkeypatch, tmp_path)
+    catalog.publish_predecessor_artifact(**kwargs)
+    holder["state"] = replace(holder["state"], raw_sha256="f" * 64)
+
+    with pytest.raises(
+        catalog.DailyRollPredecessorCatalogError,
+        match="not bound to current root",
+    ):
+        catalog.load_current_catalog_head(kwargs["operator_state"].path)
+
+
+def test_current_head_proof_rejects_old_head_after_root_advance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    kwargs, _inputs, holder = _genesis_setup(monkeypatch, tmp_path)
+    catalog.publish_predecessor_artifact(**kwargs)
+    holder["state"] = replace(
+        _state("2026-07-02", "9" * 64, "a" * 64, sequence=2),
+        path=kwargs["operator_state"].path,
+    )
+
+    with pytest.raises(
+        catalog.DailyRollPredecessorCatalogError,
+        match="not bound to current root",
+    ):
+        catalog.load_current_catalog_head(kwargs["operator_state"].path)
+
+
+def test_current_head_proof_rejects_tamper_anywhere_in_catalog_chain(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    kwargs, _inputs, _holder, genesis, _linked = _linked_setup(monkeypatch, tmp_path)
+    root = catalog.catalog_root(kwargs["operator_state"].path)
+    genesis_path = root / "receipts" / "2026-07-01.json"
+    tampered = dict(genesis.receipt)
+    tampered["operator_state_raw_sha256"] = "f" * 64
+    tampered["receipt_id"] = catalog._receipt_id(tampered)
+    genesis_path.chmod(0o644)
+    genesis_path.write_bytes(canonical_json_line(tampered))
+    genesis_path.chmod(0o444)
+
+    with pytest.raises(catalog.DailyRollPredecessorCatalogError):
+        catalog.load_current_catalog_head(kwargs["operator_state"].path)
+
+
+def test_current_head_proof_rejects_symlinked_receipt_without_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    kwargs, _inputs, _holder = _genesis_setup(monkeypatch, tmp_path)
+    catalog.publish_predecessor_artifact(**kwargs)
+    root = catalog.catalog_root(kwargs["operator_state"].path)
+    receipt_path = root / "receipts" / "2026-07-01.json"
+    external = tmp_path / "external-receipt.json"
+    external.write_bytes(receipt_path.read_bytes())
+    external.chmod(0o444)
+    receipt_path.unlink()
+    receipt_path.symlink_to(external)
+
+    with pytest.raises(
+        catalog.DailyRollPredecessorCatalogError,
+        match="current catalog head verification failed",
+    ):
+        catalog.load_current_catalog_head(kwargs["operator_state"].path)
+
+    assert receipt_path.is_symlink()
+
+
+def test_current_head_proof_rejects_multi_link_catalog_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    kwargs, _inputs, _holder = _genesis_setup(monkeypatch, tmp_path)
+    catalog.publish_predecessor_artifact(**kwargs)
+    root = catalog.catalog_root(kwargs["operator_state"].path)
+    receipt_path = root / "receipts" / "2026-07-01.json"
+    os.link(receipt_path, tmp_path / "extra-receipt-link.json")
+
+    with pytest.raises(
+        catalog.DailyRollPredecessorCatalogError,
+        match="current catalog head verification failed",
+    ):
+        catalog.load_current_catalog_head(kwargs["operator_state"].path)
+
+
+def test_current_head_proof_rejects_empty_catalog_without_creating_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    kwargs, _inputs, _holder = _genesis_setup(monkeypatch, tmp_path)
+    root = catalog.catalog_root(kwargs["operator_state"].path)
+    (root / "artifacts").mkdir(parents=True)
+    (root / "receipts").mkdir()
+    before = _catalog_tree_snapshot(root)
+
+    with pytest.raises(
+        catalog.DailyRollPredecessorCatalogError,
+        match="catalog is empty",
+    ):
+        catalog.load_current_catalog_head(kwargs["operator_state"].path)
+
+    assert _catalog_tree_snapshot(root) == before
