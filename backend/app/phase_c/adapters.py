@@ -38,10 +38,15 @@ class WorkflowAdapterError(RuntimeError):
         *,
         detail: Any = None,
         status_code: int | None = None,
+        code: str | None = None,
+        retryable: bool | None = None,
     ) -> None:
         self.detail = detail
         if status_code is not None:
             self.status_code = status_code
+        if code is not None:
+            self.code = code
+        self.retryable = self.status_code >= 500 if retryable is None else retryable
         super().__init__(message)
 
 

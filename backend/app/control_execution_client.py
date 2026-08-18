@@ -589,12 +589,17 @@ class ExecutionClient:
             "GET", f"{self.recovery_path}/{custody_idempotency_key}"
         )
         try:
-            return ExecutionTargetPlanRecoveryProjection.model_validate(body)
+            projection = ExecutionTargetPlanRecoveryProjection.model_validate(body)
         except (ValueError, TypeError) as exc:
             raise ExecutionProtocolError(
                 "Execution target plan recovery projection 不符合冻结合同",
                 detail={"error": str(exc)},
             ) from exc
+        if projection.value["custody_idempotency_key"] != custody_idempotency_key:
+            raise ExecutionProtocolError(
+                "Execution target plan recovery projection key 不匹配"
+            )
+        return projection
 
     async def ready(self) -> dict[str, Any]:
         """Run Execution's authenticated Gateway/durable-state readiness probe."""

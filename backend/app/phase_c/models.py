@@ -125,29 +125,75 @@ class TargetPlanPublicationProjectionDTO(AuthorityNegativeDTO):
         "phase-c-target-plan-publication-v1"
     )
     state: Literal["NOT_PUBLISHED", "PUBLISHED_NOT_INSTALLED", "INSTALLED"]
-    idempotency_key: str
-    install_idempotency_key: str
+    idempotency_key: str = Field(
+        min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    )
+    install_idempotency_key: str = Field(
+        min_length=16, max_length=136, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    )
     observed_custody_version: int = Field(ge=0)
     custody_state_owner: Literal["artifact-custody"] = "artifact-custody"
-    publisher_principal: Optional[str] = None
-    correlation_id: Optional[str] = None
-    artifact_id: Optional[str] = None
+    publisher_principal: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    )
+    correlation_id: Optional[str] = Field(
+        default=None,
+        min_length=8,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$",
+    )
+    artifact_id: Optional[str] = Field(
+        default=None,
+        min_length=8,
+        max_length=192,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$",
+    )
     artifact_canonical_sha256: Optional[str] = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
     artifact_raw_sha256: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    artifact_schema_ref: Optional[str] = None
-    plan_schema_version: Optional[str] = None
-    plan_id: Optional[str] = None
+    artifact_schema_ref: Optional[
+        Literal[
+            TRUSTED_KEYLESS_TARGET_PLAN_V1_SCHEMA_REF,
+            TRUSTED_KEYLESS_TARGET_PLAN_V2_SCHEMA_REF,
+            TRUSTED_KEYLESS_TARGET_PLAN_V3_SCHEMA_REF,
+        ]
+    ] = None
+    plan_schema_version: Optional[
+        Literal[
+            TRUSTED_KEYLESS_TARGET_PLAN_V1_SCHEMA_REF,
+            TRUSTED_KEYLESS_TARGET_PLAN_V2_SCHEMA_REF,
+            TRUSTED_KEYLESS_TARGET_PLAN_V3_SCHEMA_REF,
+        ]
+    ] = None
+    plan_id: Optional[str] = Field(
+        default=None,
+        min_length=8,
+        max_length=192,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$",
+    )
     plan_hash: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     plan_phase: Optional[Literal["CLOSE", "OPEN"]] = None
-    publish_receipt_id: Optional[str] = None
+    publish_receipt_id: Optional[str] = Field(
+        default=None,
+        min_length=8,
+        max_length=192,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$",
+    )
     publish_receipt_sha256: Optional[str] = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
     publish_expected_custody_version: Optional[int] = Field(default=None, ge=0)
     publish_resulting_custody_version: Optional[int] = Field(default=None, ge=1)
-    install_receipt_id: Optional[str] = None
+    install_receipt_id: Optional[str] = Field(
+        default=None,
+        min_length=8,
+        max_length=192,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$",
+    )
     install_receipt_sha256: Optional[str] = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
@@ -191,6 +237,10 @@ class TargetPlanPublicationProjectionDTO(AuthorityNegativeDTO):
             != self.publish_expected_custody_version + 1  # type: ignore[operator]
         ):
             raise ValueError("publish custody versions are not adjacent")
+        if self.artifact_schema_ref != self.plan_schema_version:
+            raise ValueError("artifact schema does not bind target-plan schema")
+        if self.observed_custody_version < self.publish_resulting_custody_version:  # type: ignore[operator]
+            raise ValueError("observed custody version precedes publication")
         if self.state == "PUBLISHED_NOT_INSTALLED":
             if any(value is not None for value in installation):
                 raise ValueError("uninstalled projection contains install evidence")
@@ -204,6 +254,51 @@ class TargetPlanPublicationProjectionDTO(AuthorityNegativeDTO):
             != self.install_expected_custody_version + 1  # type: ignore[operator]
         ):
             raise ValueError("install custody versions do not continue publication")
+        if self.observed_custody_version < self.install_resulting_custody_version:  # type: ignore[operator]
+            raise ValueError("observed custody version precedes installation")
+        return self
+
+
+class TargetPlanCustodyReceiptEvidenceDTO(AuthorityNegativeDTO):
+    """Pins-only read of one immutable publish/install custody receipt."""
+
+    schema_version: Literal["phase-c-target-plan-receipt-evidence-v1"] = (
+        "phase-c-target-plan-receipt-evidence-v1"
+    )
+    receipt_id: str = Field(
+        min_length=8, max_length=192, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    )
+    receipt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    receipt_type: Literal["publish", "install"]
+    artifact_id: str = Field(
+        min_length=8, max_length=192, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    )
+    artifact_canonical_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    artifact_raw_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    artifact_schema_ref: Literal[
+        TRUSTED_KEYLESS_TARGET_PLAN_V1_SCHEMA_REF,
+        TRUSTED_KEYLESS_TARGET_PLAN_V2_SCHEMA_REF,
+        TRUSTED_KEYLESS_TARGET_PLAN_V3_SCHEMA_REF,
+    ]
+    actor_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    )
+    idempotency_key: str = Field(
+        min_length=8, max_length=136, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    )
+    correlation_id: str = Field(
+        min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    )
+    expected_custody_version: int = Field(ge=0)
+    resulting_custody_version: int = Field(ge=1)
+    custody_state_owner: Literal["artifact-custody"] = "artifact-custody"
+
+    @model_validator(mode="after")
+    def _versions_are_adjacent(self) -> TargetPlanCustodyReceiptEvidenceDTO:
+        if self.resulting_custody_version != self.expected_custody_version + 1:
+            raise ValueError("target-plan receipt custody versions are not adjacent")
         return self
 
 

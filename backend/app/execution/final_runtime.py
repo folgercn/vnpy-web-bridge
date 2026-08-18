@@ -20,6 +20,10 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Protocol
 
+from app.phase_c.models import (
+    TargetPlanCustodyReceiptEvidenceDTO,
+    TargetPlanPublicationProjectionDTO,
+)
 from shared.artifact_contracts.v1 import (
     ContractError as ArtifactContractError,
 )
@@ -53,6 +57,7 @@ from .active_plan_resume import (
 )
 from .errors import (
     AuthorityRejected,
+    GatewayConfigurationError,
     GatewayUnavailable,
     MutationRejected,
     PlanRejected,
@@ -84,6 +89,10 @@ class CustodyReadClient(Protocol):
     def receipt_by_idempotency(
         self, idempotency_key: str
     ) -> Mapping[str, Any] | None: ...
+
+    def target_plan_publication(self, idempotency_key: str) -> Mapping[str, Any]: ...
+
+    def target_plan_receipt(self, receipt_id: str) -> Mapping[str, Any] | None: ...
 
     def artifact(self, artifact_id: str) -> Mapping[str, Any] | None: ...
 
@@ -327,6 +336,18 @@ class _CallableCustodyClient:
         del idempotency_key
         return None
 
+    def target_plan_publication(self, idempotency_key: str) -> Mapping[str, Any]:
+        return TargetPlanPublicationProjectionDTO(
+            state="NOT_PUBLISHED",
+            idempotency_key=idempotency_key,
+            install_idempotency_key=f"install-{idempotency_key}",
+            observed_custody_version=0,
+        ).model_dump(mode="json")
+
+    def target_plan_receipt(self, receipt_id: str) -> Mapping[str, Any] | None:
+        del receipt_id
+        return None
+
     def artifact(self, artifact_id: str) -> Mapping[str, Any] | None:
         return None
 
@@ -482,7 +503,7 @@ class FinalExecutionRuntime:
             raise PlanRejected("SIMNOW preview receipt does not identify a target plan")
         try:
             response = self.custody.artifact(receipt.artifact_id)
-        except (AuthorityRejected, PlanRejected):
+        except (AuthorityRejected, PlanRejected, GatewayConfigurationError):
             raise
         except Exception as exc:
             raise GatewayUnavailable(
@@ -535,6 +556,137 @@ class FinalExecutionRuntime:
             raise PlanRejected("custody target plan receipt scope/expiry mismatch")
         self._plan_from_value(plan)
         return plan, receipt, envelope_raw_sha256
+
+    def _target_plan_from_publication(
+        self, publication: TargetPlanPublicationProjectionDTO
+    ) -> tuple[TargetPlan, str]:
+        """Rehash one published artifact against every authenticated pin."""
+
+        if publication.state == "NOT_PUBLISHED" or publication.artifact_id is None:
+            raise PlanRejected("custody publication does not identify an artifact")
+        try:
+            response = self.custody.artifact(publication.artifact_id)
+        except (AuthorityRejected, PlanRejected, GatewayConfigurationError):
+            raise
+        except Exception as exc:
+            raise GatewayUnavailable(
+                "custody publication artifact lookup outcome is unknown"
+            ) from exc
+        if response is None:
+            raise AuthorityRejected("custody publication artifact is unavailable")
+        if not isinstance(response, Mapping) or set(response) != {
+            "artifact_id",
+            "artifact_raw_sha256",
+            "artifact",
+        }:
+            raise PlanRejected("custody publication artifact response is not exact")
+        artifact_value = response["artifact"]
+        if not isinstance(artifact_value, Mapping):
+            raise PlanRejected("custody publication artifact is not an object")
+        try:
+            artifact = validate_artifact_envelope(artifact_value)
+            artifact_envelope_sha256 = sha256_bytes(canonical_json_line(artifact))
+            plan = TargetPlan.from_mapping(
+                artifact["payload"], max_order_volume=self.max_order_volume
+            )
+        except (ArtifactContractError, CommodityExecutionContractError) as exc:
+            raise PlanRejected("custody publication artifact is invalid") from exc
+        if (
+            response["artifact_id"] != publication.artifact_id
+            or response["artifact_raw_sha256"] != artifact_envelope_sha256
+            or artifact["artifact_id"] != publication.artifact_id
+            or artifact["artifact_type"] != "simnow-target-plan"
+            or artifact["trust_domain"] != "runtime_authorization"
+            or artifact["canonical_sha256"] != publication.artifact_canonical_sha256
+            or artifact["raw_sha256"] != publication.artifact_raw_sha256
+            or artifact["schema_ref"] != publication.artifact_schema_ref
+            or artifact["schema_ref"] != publication.plan_schema_version
+            or artifact["schema_ref"] != plan.raw["schema_version"]
+            or plan.plan_id != publication.plan_id
+            or plan.plan_hash != publication.plan_hash
+            or plan.raw["phase"] != publication.plan_phase
+            or artifact["scope"] != plan.raw["scope"]
+            or (
+                self.allowed_scope is not None
+                and artifact["scope"] != self.allowed_scope
+            )
+            or not plan.is_trusted_keyless_simnow
+        ):
+            raise PlanRejected("custody publication artifact/plan binding mismatches")
+        self._plan_from_value(plan)
+        return plan, artifact_envelope_sha256
+
+    def _target_plan_receipt_evidence(
+        self, receipt_id: str
+    ) -> TargetPlanCustodyReceiptEvidenceDTO:
+        try:
+            raw = self.custody.target_plan_receipt(receipt_id)
+        except (AuthorityRejected, PlanRejected, GatewayConfigurationError):
+            raise
+        except Exception as exc:
+            raise GatewayUnavailable(
+                "custody target-plan receipt lookup outcome is unknown"
+            ) from exc
+        if raw is None:
+            raise AuthorityRejected("custody target-plan receipt is unavailable")
+        try:
+            evidence = TargetPlanCustodyReceiptEvidenceDTO.model_validate(raw)
+        except (TypeError, ValueError) as exc:
+            raise PlanRejected(
+                "custody target-plan receipt is not strict evidence"
+            ) from exc
+        if evidence.receipt_id != receipt_id:
+            raise PlanRejected("custody target-plan receipt id binding mismatches")
+        return evidence
+
+    @staticmethod
+    def _require_publication_receipt_binding(
+        publication: TargetPlanPublicationProjectionDTO,
+        evidence: TargetPlanCustodyReceiptEvidenceDTO,
+        *,
+        install: bool,
+    ) -> None:
+        if install:
+            expected = {
+                "receipt_id": publication.install_receipt_id,
+                "receipt_sha256": publication.install_receipt_sha256,
+                "receipt_type": "install",
+                "idempotency_key": publication.install_idempotency_key,
+                "expected_custody_version": (
+                    publication.install_expected_custody_version
+                ),
+                "resulting_custody_version": (
+                    publication.install_resulting_custody_version
+                ),
+            }
+        else:
+            expected = {
+                "receipt_id": publication.publish_receipt_id,
+                "receipt_sha256": publication.publish_receipt_sha256,
+                "receipt_type": "publish",
+                "idempotency_key": publication.idempotency_key,
+                "expected_custody_version": (
+                    publication.publish_expected_custody_version
+                ),
+                "resulting_custody_version": (
+                    publication.publish_resulting_custody_version
+                ),
+            }
+        common = {
+            "artifact_id": publication.artifact_id,
+            "artifact_canonical_sha256": publication.artifact_canonical_sha256,
+            "artifact_raw_sha256": publication.artifact_raw_sha256,
+            "artifact_schema_ref": publication.artifact_schema_ref,
+            "actor_id": publication.publisher_principal,
+            "correlation_id": publication.correlation_id,
+        }
+        if any(
+            getattr(evidence, field) != value
+            for field, value in {**expected, **common}.items()
+        ):
+            raise PlanRejected(
+                "custody target-plan receipt/publication binding mismatches"
+            )
 
     def _preview_from_custody(
         self, receipt_id: str, *, require_current_expiry: bool = True
@@ -656,22 +808,33 @@ class FinalExecutionRuntime:
     def recovery_projection(self, *, custody_idempotency_key: str) -> dict[str, Any]:
         """Classify one custody key without changing custody or plan storage.
 
-        A missing receipt is ``BEFORE_CUSTODY``.  A verified receipt/artifact
-        chain is returned with the exact immutable v2 plan identity and an
-        explicit local installation state, so a response lost before preview
-        can reuse the original receipt rather than publish a second identity.
+        The authenticated publication projection distinguishes never-published,
+        published-only, and installed custody state.  This method is read-only:
+        it never publishes, continues an install, or writes the plan repository.
         """
 
         validate_identifier(custody_idempotency_key, "custody_idempotency_key")
         try:
-            raw_receipt = self.custody.receipt_by_idempotency(custody_idempotency_key)
-        except (AuthorityRejected, PlanRejected):
+            raw_publication = self.custody.target_plan_publication(
+                custody_idempotency_key
+            )
+        except (AuthorityRejected, PlanRejected, GatewayConfigurationError):
             raise
         except Exception as exc:
             raise GatewayUnavailable(
-                "custody idempotency lookup outcome is unknown"
+                "custody publication lookup outcome is unknown"
             ) from exc
-        if raw_receipt is None:
+        try:
+            publication = TargetPlanPublicationProjectionDTO.model_validate(
+                raw_publication
+            )
+        except (TypeError, ValueError) as exc:
+            raise PlanRejected(
+                "custody publication projection is not strict evidence"
+            ) from exc
+        if publication.idempotency_key != custody_idempotency_key:
+            raise PlanRejected("custody publication key binding mismatches")
+        if publication.state == "NOT_PUBLISHED":
             preimage = {
                 "schema_version": "web_bridge_execution_target_plan_recovery_v1",
                 "state": "BEFORE_CUSTODY",
@@ -681,17 +844,107 @@ class FinalExecutionRuntime:
                 "countable_forward": False,
             }
             return {**preimage, "recovery_sha256": sha256_json(preimage)}
-        plan, receipt, artifact_envelope_sha256 = (
+        publish_evidence = self._target_plan_receipt_evidence(
+            str(publication.publish_receipt_id)
+        )
+        self._require_publication_receipt_binding(
+            publication, publish_evidence, install=False
+        )
+        plan, artifact_envelope_sha256 = self._target_plan_from_publication(publication)
+        if plan.raw["schema_version"] != KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION:
+            raise PlanRejected("recovery target plan is not v2")
+        if publication.state == "PUBLISHED_NOT_INSTALLED":
+            if self.plans.get(plan.plan_id) is not None:
+                raise PlanRejected(
+                    "local target plan exists without custody install evidence"
+                )
+            install_only_allowed = (
+                publication.observed_custody_version
+                == publication.publish_resulting_custody_version
+            )
+            preimage = {
+                "schema_version": "web_bridge_execution_target_plan_recovery_v2",
+                "state": "CUSTODY_PUBLISHED_NOT_INSTALLED",
+                "custody_idempotency_key": custody_idempotency_key,
+                "custody_install_idempotency_key": publication.install_idempotency_key,
+                "observed_custody_version": publication.observed_custody_version,
+                "publisher_principal": publication.publisher_principal,
+                "correlation_id": publication.correlation_id,
+                "publish_receipt_id": publication.publish_receipt_id,
+                "publish_receipt_sha256": publication.publish_receipt_sha256,
+                "publish_expected_custody_version": (
+                    publication.publish_expected_custody_version
+                ),
+                "publish_resulting_custody_version": (
+                    publication.publish_resulting_custody_version
+                ),
+                "artifact_id": publication.artifact_id,
+                "artifact_canonical_sha256": publication.artifact_canonical_sha256,
+                "artifact_sha256": publication.artifact_raw_sha256,
+                "artifact_schema_ref": publication.artifact_schema_ref,
+                "artifact_envelope_sha256": artifact_envelope_sha256,
+                "installed": False,
+                "install_only_allowed": install_only_allowed,
+                "recovery_action": (
+                    "INSTALL_ONLY" if install_only_allowed else "STOP_VERSION_DRIFT"
+                ),
+                "target_plan_schema_version": plan.raw["schema_version"],
+                "plan_id": plan.plan_id,
+                "plan_hash": plan.plan_hash,
+                "phase": plan.raw["phase"],
+                "lineage": dict(plan.raw["lineage"]),
+                "account_scope": plan.raw["account_scope"],
+                "environment": plan.raw["environment"],
+                "gateway_name": plan.raw["gateway_name"],
+                "generated_at": plan.raw["generated_at"],
+                "expires_at": plan.raw["expires_at"],
+                "expected_before_position_hash": plan.raw[
+                    "expected_before_position_hash"
+                ],
+                "expected_after_position_hash": plan.raw[
+                    "expected_after_position_hash"
+                ],
+                "order_set_sha256": plan.raw["order_set_sha256"],
+                "production_allowed": False,
+                "live_trading_authorized": False,
+                "countable_forward": False,
+            }
+            return {**preimage, "recovery_sha256": sha256_json(preimage)}
+
+        install_evidence = self._target_plan_receipt_evidence(
+            str(publication.install_receipt_id)
+        )
+        self._require_publication_receipt_binding(
+            publication, install_evidence, install=True
+        )
+        try:
+            raw_receipt = self.custody.receipt(str(publication.install_receipt_id))
+        except (AuthorityRejected, PlanRejected, GatewayConfigurationError):
+            raise
+        except Exception as exc:
+            raise GatewayUnavailable(
+                "custody install receipt lookup outcome is unknown"
+            ) from exc
+        if raw_receipt is None:
+            raise AuthorityRejected("custody install receipt is unavailable")
+        receipt_plan, receipt, receipt_envelope_sha256 = (
             self._target_plan_from_custody_receipt(
                 raw_receipt, require_current_expiry=False
             )
         )
         if not isinstance(receipt, TrustedKeylessCustodyReceipt):
             raise PlanRejected("recovery receipt is not trusted keyless custody")
-        if plan.raw["schema_version"] != KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION:
-            raise PlanRejected("recovery target plan is not v2")
-        if receipt.raw["idempotency_key"] != f"install-{custody_idempotency_key}":
-            raise PlanRejected("recovery custody idempotency binding mismatches")
+        if (
+            receipt_plan.as_dict() != plan.as_dict()
+            or receipt_envelope_sha256 != artifact_envelope_sha256
+            or receipt.receipt_id != publication.install_receipt_id
+            or receipt.raw["idempotency_key"] != publication.install_idempotency_key
+            or receipt.raw["custody_version"]
+            != publication.install_resulting_custody_version
+            or receipt.artifact_id != publication.artifact_id
+            or receipt.artifact_sha256 != publication.artifact_raw_sha256
+        ):
+            raise PlanRejected("custody installation/publication binding mismatches")
         installed = self.plans.get(plan.plan_id)
         if installed is not None:
             try:
@@ -714,7 +967,7 @@ class FinalExecutionRuntime:
                 else "CUSTODY_PUBLISHED_NOT_PREVIEWED"
             ),
             "custody_idempotency_key": custody_idempotency_key,
-            "custody_install_idempotency_key": receipt.raw["idempotency_key"],
+            "custody_install_idempotency_key": publication.install_idempotency_key,
             "custody_version": receipt.raw["custody_version"],
             "receipt_id": receipt.receipt_id,
             "receipt_sha256": receipt.receipt_sha256,

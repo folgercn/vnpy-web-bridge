@@ -194,6 +194,53 @@ def test_publication_projection_is_authenticated_and_zero_write_when_absent(
     assert not root.exists()
 
 
+def test_publication_projection_allows_only_dedicated_execution_read_credential(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    artifact = _artifact()
+    _publish_only(service, artifact)
+    before = _tree(service.settings.root)
+    path = "/internal/v1/target-plan-publications/by-idempotency/" + PUBLISH_KEY
+    execution_headers = {
+        "X-Phase-C-Principal": "execution-orchestrator",
+        "X-Phase-C-Custody-Secret": "issue362-execution-read-secret",
+    }
+    with TestClient(create_app(service)) as client:
+        missing_secret = client.get(
+            path,
+            headers={"X-Phase-C-Principal": "execution-orchestrator"},
+        )
+        wrong_secret = client.get(
+            path,
+            headers={
+                **execution_headers,
+                "X-Phase-C-Custody-Secret": HEADERS["X-Phase-C-Custody-Secret"],
+            },
+        )
+        wrong_principal = client.get(
+            path,
+            headers={
+                "X-Phase-C-Principal": "phase-c-execution",
+                "X-Phase-C-Custody-Secret": "issue362-execution-read-secret",
+            },
+        )
+        response = client.get(path, headers=execution_headers)
+
+    assert missing_secret.status_code == 401
+    assert wrong_secret.status_code == 401
+    assert wrong_principal.status_code == 401
+    assert response.status_code == 200
+    projection = response.json()
+    assert projection["state"] == "PUBLISHED_NOT_INSTALLED"
+    assert projection["publisher_principal"] == "control-api"
+    assert projection["correlation_id"] == CORRELATION_ID
+    assert projection["artifact_schema_ref"] == projection["plan_schema_version"]
+    assert "artifact" not in projection
+    assert "orders" not in projection
+    assert _tree(service.settings.root) == before
+
+
 def test_existing_incomplete_root_is_retryable_not_false_unpublished(
     tmp_path: Path,
 ) -> None:
@@ -367,9 +414,7 @@ def test_install_only_http_writer_contention_is_retryable(tmp_path: Path) -> Non
     assert response.status_code == 503
     assert response.json()["detail"] == {
         "code": "PHASE_C_CUSTODY_WRITER_BUSY",
-        "message": (
-            "custody writer is temporarily busy; retry the exact same intent"
-        ),
+        "message": ("custody writer is temporarily busy; retry the exact same intent"),
         "retryable": True,
     }
     assert _tree(service.settings.root) == before
@@ -506,7 +551,9 @@ def test_install_only_http_is_authenticated_and_never_republishes(
     path = "/internal/v1/install-published-keyless-simnow-target-plan"
 
     with TestClient(create_app(service)) as client:
-        assert client.post(path, json=request.model_dump(mode="json")).status_code == 401
+        assert (
+            client.post(path, json=request.model_dump(mode="json")).status_code == 401
+        )
         response = client.post(
             path, json=request.model_dump(mode="json"), headers=HEADERS
         )

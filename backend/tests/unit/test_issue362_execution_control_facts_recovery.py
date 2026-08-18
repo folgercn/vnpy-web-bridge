@@ -20,8 +20,11 @@ from app.execution import (
     DurableTargetPlanRepository,
     ExecutionOrchestrator,
     GatewaySnapshot,
+    GatewayConfigurationError,
     InMemoryExecutionRepository,
     InMemoryGateway,
+    AuthorityRejected,
+    PlanRejected,
     SnapshotRejected,
 )
 from app.execution.final_runtime import CustodyReadClient, FinalExecutionRuntime
@@ -525,6 +528,15 @@ class _CustodyReader:
     def receipt_by_idempotency(self, idempotency_key: str):
         return self.service.receipt_by_idempotency(idempotency_key)
 
+    def target_plan_publication(self, idempotency_key: str):
+        return self.service.target_plan_publication(idempotency_key).model_dump(
+            mode="json"
+        )
+
+    def target_plan_receipt(self, receipt_id: str):
+        evidence = self.service.target_plan_receipt_evidence(receipt_id)
+        return evidence.model_dump(mode="json") if evidence is not None else None
+
     def artifact(self, artifact_id: str):
         return self.service.artifact_for_execution(artifact_id)
 
@@ -548,10 +560,9 @@ def _empty_custody(tmp_path: Path) -> ArtifactCustodyService:
     )
 
 
-def _custody(tmp_path: Path) -> tuple[ArtifactCustodyService, dict[str, object]]:
-    service = _empty_custody(tmp_path)
+def _v2_artifact() -> dict[str, object]:
     plan = _v2_plan()
-    artifact = new_artifact_envelope(
+    return new_artifact_envelope(
         artifact_type="simnow-target-plan",
         trust_domain="runtime_authorization",
         producer_id="issue362-recovery-fixture",
@@ -563,6 +574,11 @@ def _custody(tmp_path: Path) -> tuple[ArtifactCustodyService, dict[str, object]]
         predecessor_refs=[],
         lineage=[],
     )
+
+
+def _custody(tmp_path: Path) -> tuple[ArtifactCustodyService, dict[str, object]]:
+    service = _empty_custody(tmp_path)
+    artifact = _v2_artifact()
     receipt = service.publish_trusted_keyless_target_plan(
         TrustedKeylessTargetPlanUploadDTO(
             idempotency_key=CUSTODY_PUBLISH_KEY,
@@ -573,6 +589,22 @@ def _custody(tmp_path: Path) -> tuple[ArtifactCustodyService, dict[str, object]]
         principal="control-api",
     )
     return service, receipt
+
+
+def _published_only_custody(
+    tmp_path: Path,
+) -> tuple[ArtifactCustodyService, dict[str, object], dict[str, object]]:
+    service = _empty_custody(tmp_path)
+    artifact = _v2_artifact()
+    with service._custody() as custody:
+        published = custody.publish(
+            artifact,
+            actor_id="control-api",
+            idempotency_key=CUSTODY_PUBLISH_KEY,
+            correlation_id="issue362-recovery-correlation-0001",
+            expected_version=0,
+        )
+    return service, artifact, published
 
 
 def _runtime(
@@ -607,6 +639,217 @@ def _tree(root: Path) -> dict[str, bytes]:
         for path in sorted(root.rglob("*"))
         if path.is_file()
     }
+
+
+def test_recovery_publish_only_is_strict_install_only_and_zero_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CONTROL_EXECUTION_SHARED_SECRET", EXECUTION_SECRET)
+    custody, artifact, published = _published_only_custody(tmp_path)
+    runtime, plans = _runtime(tmp_path, custody)
+    plan_before = _tree(plans.root)
+    custody_before = _tree(custody.settings.root)
+    execution_before = runtime.orchestrator.repository.snapshot()
+
+    projection = runtime.recovery_projection(
+        custody_idempotency_key=CUSTODY_PUBLISH_KEY
+    )
+
+    assert projection["schema_version"] == (
+        "web_bridge_execution_target_plan_recovery_v2"
+    )
+    assert projection["state"] == "CUSTODY_PUBLISHED_NOT_INSTALLED"
+    assert projection["publish_receipt_id"] == published["receipt_id"]
+    assert projection["publish_expected_custody_version"] == 0
+    assert projection["publish_resulting_custody_version"] == 1
+    assert projection["observed_custody_version"] == 1
+    assert projection["artifact_id"] == artifact["artifact_id"]
+    assert projection["artifact_canonical_sha256"] == artifact["canonical_sha256"]
+    assert projection["artifact_sha256"] == artifact["raw_sha256"]
+    assert projection["artifact_schema_ref"] == artifact["schema_ref"]
+    assert projection["plan_id"] == artifact["payload"]["plan_id"]  # type: ignore[index]
+    assert projection["plan_hash"] == artifact["payload"]["plan_hash"]  # type: ignore[index]
+    assert projection["installed"] is False
+    assert projection["install_only_allowed"] is True
+    assert projection["recovery_action"] == "INSTALL_ONLY"
+    assert projection["production_allowed"] is False
+    assert projection["live_trading_authorized"] is False
+    assert projection["countable_forward"] is False
+    assert projection["recovery_sha256"] == sha256_json(
+        {key: value for key, value in projection.items() if key != "recovery_sha256"}
+    )
+    assert _tree(plans.root) == plan_before
+    assert _tree(custody.settings.root) == custody_before
+    assert runtime.orchestrator.repository.snapshot() == execution_before
+
+    client = ExecutionClient(
+        ExecutionClientSettings(
+            base_url="http://execution", shared_secret=EXECUTION_SECRET
+        ),
+        transport=httpx.ASGITransport(app=create_execution_app(runtime)),
+    )
+    typed = asyncio.run(client.target_plan_recovery(CUSTODY_PUBLISH_KEY))
+    assert typed.state == "CUSTODY_PUBLISHED_NOT_INSTALLED"
+    assert typed.plan_id == artifact["payload"]["plan_id"]  # type: ignore[index]
+    assert _tree(plans.root) == plan_before
+    assert _tree(custody.settings.root) == custody_before
+
+
+def test_recovery_publish_only_version_drift_is_explicit_stop_without_writes(
+    tmp_path: Path,
+) -> None:
+    custody, artifact, _published = _published_only_custody(tmp_path)
+    unrelated = new_artifact_envelope(
+        artifact_type="simnow-target-plan",
+        trust_domain="runtime_authorization",
+        producer_id="issue362-unrelated-publisher",
+        producer_version="v1",
+        schema_ref=str(artifact["schema_ref"]),
+        payload=artifact["payload"],
+        generated_at=str(artifact["generated_at"]),
+        scope=artifact["scope"],  # type: ignore[arg-type]
+        predecessor_refs=[],
+        lineage=[],
+    )
+    with custody._custody() as writer:
+        writer.publish(
+            unrelated,
+            actor_id="control-api",
+            idempotency_key="issue362-unrelated-publication-0002",
+            correlation_id="issue362-unrelated-correlation-0002",
+            expected_version=1,
+        )
+    runtime, plans = _runtime(tmp_path, custody)
+    plan_before = _tree(plans.root)
+    custody_before = _tree(custody.settings.root)
+
+    projection = runtime.recovery_projection(
+        custody_idempotency_key=CUSTODY_PUBLISH_KEY
+    )
+
+    assert projection["state"] == "CUSTODY_PUBLISHED_NOT_INSTALLED"
+    assert projection["observed_custody_version"] == 2
+    assert projection["publish_resulting_custody_version"] == 1
+    assert projection["install_only_allowed"] is False
+    assert projection["recovery_action"] == "STOP_VERSION_DRIFT"
+    assert _tree(plans.root) == plan_before
+    assert _tree(custody.settings.root) == custody_before
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("artifact_id", "artifact-issue362-cross-splice-0001"),
+        ("artifact_canonical_sha256", "d" * 64),
+        ("artifact_raw_sha256", "e" * 64),
+        ("publisher_principal", "foreign-publisher"),
+        ("correlation_id", "issue362-foreign-correlation-0001"),
+        ("publish_receipt_id", "receipt-" + "9" * 64),
+        ("publish_receipt_sha256", "8" * 64),
+        ("publish_expected_custody_version", 4),
+        ("publish_resulting_custody_version", 5),
+        ("plan_id", "static-core-equal-cross-splice-0001"),
+        ("plan_hash", "f" * 64),
+        ("plan_phase", "CLOSE"),
+    ],
+)
+def test_recovery_publish_only_rehash_rejects_cross_spliced_pins(
+    tmp_path: Path, field: str, replacement: object
+) -> None:
+    custody, _artifact, _published = _published_only_custody(tmp_path)
+    runtime, plans = _runtime(tmp_path, custody)
+    original = runtime.custody.target_plan_publication
+
+    def cross_spliced(idempotency_key: str):
+        return {**original(idempotency_key), field: replacement}
+
+    runtime.custody.target_plan_publication = cross_spliced  # type: ignore[method-assign]
+    before = _tree(plans.root)
+    with pytest.raises((AuthorityRejected, PlanRejected)):
+        runtime.recovery_projection(custody_idempotency_key=CUSTODY_PUBLISH_KEY)
+    assert _tree(plans.root) == before
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("install_receipt_id", "receipt-" + "7" * 64),
+        ("install_receipt_sha256", "6" * 64),
+        ("install_expected_custody_version", 6),
+        ("install_resulting_custody_version", 7),
+    ],
+)
+def test_recovery_installed_rejects_each_cross_spliced_install_receipt_pin(
+    tmp_path: Path, field: str, replacement: object
+) -> None:
+    custody, _receipt = _custody(tmp_path)
+    runtime, plans = _runtime(tmp_path, custody)
+    original = runtime.custody.target_plan_publication
+
+    def cross_spliced(idempotency_key: str):
+        return {**original(idempotency_key), field: replacement}
+
+    runtime.custody.target_plan_publication = cross_spliced  # type: ignore[method-assign]
+    plan_before = _tree(plans.root)
+    custody_before = _tree(custody.settings.root)
+    with pytest.raises((AuthorityRejected, PlanRejected)):
+        runtime.recovery_projection(custody_idempotency_key=CUSTODY_PUBLISH_KEY)
+    assert _tree(plans.root) == plan_before
+    assert _tree(custody.settings.root) == custody_before
+
+
+@pytest.mark.parametrize("install", [False, True], ids=["publish", "install"])
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("receipt_id", "receipt-" + "1" * 64),
+        ("receipt_sha256", "2" * 64),
+        ("receipt_type", "consume"),
+        ("artifact_id", "artifact-issue362-receipt-splice-0001"),
+        ("artifact_canonical_sha256", "3" * 64),
+        ("artifact_raw_sha256", "4" * 64),
+        ("artifact_schema_ref", "web-bridge-simnow-keyless-target-plan-v1"),
+        ("actor_id", "foreign-publisher"),
+        ("idempotency_key", "issue362-foreign-receipt-key-0001"),
+        ("correlation_id", "issue362-foreign-receipt-correlation-0001"),
+        ("expected_custody_version", 8),
+        ("resulting_custody_version", 9),
+    ],
+)
+def test_recovery_rejects_each_tampered_raw_receipt_evidence_pin(
+    tmp_path: Path, install: bool, field: str, replacement: object
+) -> None:
+    if install:
+        custody, _receipt = _custody(tmp_path)
+    else:
+        custody, _artifact, _published = _published_only_custody(tmp_path)
+    runtime, plans = _runtime(tmp_path, custody)
+    projection = runtime.custody.target_plan_publication(CUSTODY_PUBLISH_KEY)
+    receipt_id = (
+        projection["install_receipt_id"]
+        if install
+        else projection["publish_receipt_id"]
+    )
+    original = runtime.custody.target_plan_receipt
+
+    def tampered(wanted_receipt_id: str):
+        value = original(wanted_receipt_id)
+        assert value is not None
+        if wanted_receipt_id == receipt_id:
+            return {**value, field: replacement}
+        return value
+
+    runtime.custody.target_plan_receipt = tampered  # type: ignore[method-assign]
+    plan_before = _tree(plans.root)
+    custody_before = _tree(custody.settings.root)
+    with pytest.raises((AuthorityRejected, PlanRejected)):
+        runtime.recovery_projection(custody_idempotency_key=CUSTODY_PUBLISH_KEY)
+    assert _tree(plans.root) == plan_before
+    assert _tree(custody.settings.root) == custody_before
+    gateway = runtime.orchestrator.gateway
+    assert gateway.send_calls == []  # type: ignore[attr-defined]
+    assert gateway.cancel_calls == []  # type: ignore[attr-defined]
+    assert gateway.query_calls == []  # type: ignore[attr-defined]
 
 
 def test_recovery_response_lost_before_preview_projects_original_plan_without_writes(
@@ -874,11 +1117,62 @@ def test_phase_c_http_tamper_remains_nonretryable_execution_recovery_evidence(
     )
     assert response.json()["detail"]["retryable"] is False
     assert (
-        "PHASE_C_CUSTODY_IDEMPOTENCY_EVIDENCE_INVALID"
+        "PHASE_C_TARGET_PLAN_PUBLICATION_EVIDENCE_INVALID"
         in (response.json()["detail"]["message"])
     )
     assert _tree(custody.settings.root) == custody_before
     assert _tree(plans.root) == plans_before
+
+
+@pytest.mark.parametrize(
+    "secret", ["issue362-wrong-read-secret", "issue362-rotated-stale-secret"]
+)
+def test_recovery_custody_auth_rejection_is_nonretryable_and_zero_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, secret: str
+) -> None:
+    monkeypatch.setenv("CONTROL_EXECUTION_SHARED_SECRET", EXECUTION_SECRET)
+    custody, _receipt = _custody(tmp_path)
+    custody_before = _tree(custody.settings.root)
+
+    with _serve_phase_c_http(create_custody_app(custody)) as custody_url:
+        runtime, plans = _runtime_with_custody_reader(
+            tmp_path,
+            _HttpCustodyReadClient(base_url=custody_url, secret=secret),
+        )
+        plans_before = _tree(plans.root)
+        execution_before = runtime.orchestrator.repository.snapshot()
+        gateway = runtime.orchestrator.gateway
+        gateway_before = (
+            list(gateway.send_calls),  # type: ignore[attr-defined]
+            list(gateway.cancel_calls),  # type: ignore[attr-defined]
+            list(gateway.query_calls),  # type: ignore[attr-defined]
+        )
+        with TestClient(create_execution_app(runtime)) as client:
+            response = client.get(
+                "/internal/v1/recovery/target-plans/by-custody-idempotency/"
+                + CUSTODY_PUBLISH_KEY,
+                headers=EXECUTION_HEADERS,
+            )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "code": "EXECUTION_RECOVERY_AUTHENTICATION_REJECTED",
+        "message": "custody read authentication was rejected",
+        "retryable": False,
+    }
+    assert _tree(custody.settings.root) == custody_before
+    assert _tree(plans.root) == plans_before
+    assert runtime.orchestrator.repository.snapshot() == execution_before
+    assert (
+        list(gateway.send_calls),  # type: ignore[attr-defined]
+        list(gateway.cancel_calls),  # type: ignore[attr-defined]
+        list(gateway.query_calls),  # type: ignore[attr-defined]
+    ) == gateway_before
+
+
+def test_missing_execution_custody_secret_is_permanent_configuration_error() -> None:
+    with pytest.raises(GatewayConfigurationError):
+        _HttpCustodyReadClient(base_url="http://custody", secret="")
 
 
 def test_phase_c_http_artifact_contract_damage_remains_nonretryable_evidence(
@@ -934,7 +1228,7 @@ def test_recovery_dependency_unknown_has_stable_retryable_503(
     def unavailable(_: str):
         raise TimeoutError("custody read timed out")
 
-    runtime.custody.receipt_by_idempotency = unavailable  # type: ignore[method-assign]
+    runtime.custody.target_plan_publication = unavailable  # type: ignore[method-assign]
     app = create_execution_app(runtime)
     path = (
         "/internal/v1/recovery/target-plans/by-custody-idempotency/"
@@ -945,7 +1239,7 @@ def test_recovery_dependency_unknown_has_stable_retryable_503(
     assert response.status_code == 503
     assert response.json()["detail"] == {
         "code": "EXECUTION_RECOVERY_DEPENDENCY_UNAVAILABLE",
-        "message": "custody idempotency lookup outcome is unknown",
+        "message": "custody publication lookup outcome is unknown",
         "retryable": True,
     }
 
@@ -975,7 +1269,7 @@ def test_recovery_tamper_has_stable_nonretryable_stop_code(
     assert response.status_code == 503
     assert response.json()["detail"] == {
         "code": "EXECUTION_RECOVERY_EVIDENCE_UNAVAILABLE",
-        "message": "custody target plan artifact/receipt binding mismatch",
+        "message": "custody publication artifact/plan binding mismatches",
         "retryable": False,
     }
     assert _tree(plans.root) == before

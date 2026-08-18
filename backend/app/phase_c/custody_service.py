@@ -30,6 +30,7 @@ from app.phase_c.models import (
     CustodyCurrentVersionDTO,
     CustodyReceiptDTO,
     SignedArtifactUploadDTO,
+    TargetPlanCustodyReceiptEvidenceDTO,
     TargetPlanPublicationProjectionDTO,
     TrustedKeylessTargetPlanInstallContinuationDTO,
     TrustedKeylessTargetPlanUploadDTO,
@@ -674,6 +675,67 @@ class ArtifactCustodyService:
         except CustodyError as exc:
             _raise_custody_mutation_failure(exc)
 
+    def target_plan_receipt_evidence(
+        self, receipt_id: str
+    ) -> TargetPlanCustodyReceiptEvidenceDTO | None:
+        """Return pins for one immutable keyless publish/install receipt."""
+
+        if self._read_root_absent():
+            return None
+        try:
+            with self._custody(read_only=True) as custody:
+                raw = custody.read_receipt(receipt_id)
+                artifact = custody.read_artifact(str(raw["artifact_id"]))
+            try:
+                artifact, _plan = self._trusted_keyless_target_plan(artifact)
+            except WorkflowAdapterError as exc:
+                raise CustodyEvidenceReadError(
+                    "custody target-plan receipt artifact is invalid"
+                ) from exc
+            receipt_type = raw.get("receipt_type")
+            if receipt_type not in {"publish", "install"}:
+                raise CustodyEvidenceReadError(
+                    "custody target-plan receipt type is invalid"
+                )
+            self._assert_receipt_artifact_binding(
+                raw,
+                artifact,
+                receipt_type=receipt_type,
+                idempotency_key=str(raw["idempotency_key"]),
+            )
+            return TargetPlanCustodyReceiptEvidenceDTO(
+                receipt_id=raw["receipt_id"],
+                receipt_sha256=self._receipt_sha256(raw),
+                receipt_type=receipt_type,
+                artifact_id=artifact["artifact_id"],
+                artifact_canonical_sha256=artifact["canonical_sha256"],
+                artifact_raw_sha256=artifact["raw_sha256"],
+                artifact_schema_ref=artifact["schema_ref"],
+                actor_id=raw["actor_id"],
+                idempotency_key=raw["idempotency_key"],
+                correlation_id=raw["correlation_id"],
+                expected_custody_version=raw["expected_version"],
+                resulting_custody_version=raw["resulting_version"],
+            )
+        except CustodyEvidenceReadError:
+            raise
+        except CustodyError as exc:
+            if exc.code in {
+                "CUSTODY_RECEIPT_NOT_FOUND",
+                "CUSTODY_ARTIFACT_NOT_FOUND",
+                "CUSTODY_ROOT_NOT_FOUND",
+            }:
+                return None
+            _raise_custody_read_failure(exc, subject="target-plan receipt")
+        except OSError as exc:
+            raise WorkflowAdapterError(
+                "custody target-plan receipt read is unavailable", status_code=503
+            ) from exc
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CustodyEvidenceReadError(
+                "custody target-plan receipt evidence is invalid"
+            ) from exc
+
     def receipt(self, receipt_id: str) -> CustodyReceiptDTO | dict[str, Any] | None:
         if self._read_root_absent():
             return None
@@ -914,7 +976,14 @@ def create_app(service: ArtifactCustodyService | None = None) -> FastAPI:
     def target_plan_publication(
         idempotency_key: str, request: Request
     ) -> dict[str, Any]:
-        control_auth(request)
+        # Publication recovery is a pins-only projection: it contains no
+        # order payload.  Control and Execution use distinct credentials to
+        # read the same immutable custody evidence.
+        principal = request.headers.get("X-Phase-C-Principal", "")
+        if principal == "execution-orchestrator":
+            execution_read_auth(request)
+        else:
+            control_auth(request)
         try:
             return target.target_plan_publication(idempotency_key).model_dump(
                 mode="json"
@@ -934,7 +1003,7 @@ def create_app(service: ArtifactCustodyService | None = None) -> FastAPI:
                 detail={
                     "code": exc.code,
                     "message": str(exc),
-                    "retryable": exc.status_code >= 500,
+                    "retryable": exc.retryable,
                 },
             ) from exc
 
@@ -963,9 +1032,38 @@ def create_app(service: ArtifactCustodyService | None = None) -> FastAPI:
                 detail={
                     "code": exc.code,
                     "message": str(exc),
-                    "retryable": exc.status_code >= 500,
+                    "retryable": exc.retryable,
                 },
             ) from exc
+
+    @app.get("/internal/v1/target-plan-receipts/{receipt_id}")
+    def target_plan_receipt_evidence(
+        receipt_id: str, request: Request
+    ) -> dict[str, Any]:
+        execution_read_auth(request)
+        try:
+            result = target.target_plan_receipt_evidence(receipt_id)
+        except CustodyEvidenceReadError as exc:
+            raise HTTPException(
+                503,
+                detail={
+                    "code": "PHASE_C_TARGET_PLAN_RECEIPT_EVIDENCE_INVALID",
+                    "message": str(exc),
+                    "retryable": False,
+                },
+            ) from exc
+        except WorkflowAdapterError as exc:
+            raise HTTPException(
+                503,
+                detail={
+                    "code": "PHASE_C_TARGET_PLAN_RECEIPT_READ_UNAVAILABLE",
+                    "message": str(exc),
+                    "retryable": exc.retryable,
+                },
+            ) from exc
+        if result is None:
+            raise HTTPException(404, "target-plan receipt not found")
+        return result.model_dump(mode="json")
 
     @app.get("/internal/v1/receipts/{receipt_id}")
     def receipt(receipt_id: str, request: Request) -> dict[str, Any]:

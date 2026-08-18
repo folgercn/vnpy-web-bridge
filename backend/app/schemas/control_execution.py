@@ -1196,6 +1196,46 @@ _RECOVERY_BOUND_FIELDS = frozenset(
         "recovery_sha256",
     }
 )
+_RECOVERY_PUBLISHED_NOT_INSTALLED_FIELDS = frozenset(
+    {
+        "schema_version",
+        "state",
+        "custody_idempotency_key",
+        "custody_install_idempotency_key",
+        "observed_custody_version",
+        "publisher_principal",
+        "correlation_id",
+        "publish_receipt_id",
+        "publish_receipt_sha256",
+        "publish_expected_custody_version",
+        "publish_resulting_custody_version",
+        "artifact_id",
+        "artifact_canonical_sha256",
+        "artifact_sha256",
+        "artifact_schema_ref",
+        "artifact_envelope_sha256",
+        "installed",
+        "install_only_allowed",
+        "recovery_action",
+        "target_plan_schema_version",
+        "plan_id",
+        "plan_hash",
+        "phase",
+        "lineage",
+        "account_scope",
+        "environment",
+        "gateway_name",
+        "generated_at",
+        "expires_at",
+        "expected_before_position_hash",
+        "expected_after_position_hash",
+        "order_set_sha256",
+        "production_allowed",
+        "live_trading_authorized",
+        "countable_forward",
+        "recovery_sha256",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1228,6 +1268,111 @@ class ExecutionTargetPlanRecoveryProjection:
                     "execution before-custody recovery identity is invalid"
                 )
             _strict_sha(candidate["recovery_sha256"], field="recovery_sha256")
+            preimage = {
+                key: candidate[key] for key in candidate if key != "recovery_sha256"
+            }
+            if candidate["recovery_sha256"] != sha256_json(preimage):
+                raise ValueError("execution target plan recovery hash does not close")
+            return cls(candidate)
+        if fields == _RECOVERY_PUBLISHED_NOT_INSTALLED_FIELDS:
+            if (
+                candidate["schema_version"]
+                != "web_bridge_execution_target_plan_recovery_v2"
+                or candidate["state"] != "CUSTODY_PUBLISHED_NOT_INSTALLED"
+                or candidate["target_plan_schema_version"]
+                != KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION
+                or candidate["artifact_schema_ref"]
+                != candidate["target_plan_schema_version"]
+                or candidate["installed"] is not False
+                or not isinstance(candidate["install_only_allowed"], bool)
+                or candidate["recovery_action"]
+                != (
+                    "INSTALL_ONLY"
+                    if candidate["install_only_allowed"]
+                    else "STOP_VERSION_DRIFT"
+                )
+                or candidate["phase"] not in {"CLOSE", "OPEN"}
+                or candidate["environment"] != "SIMNOW"
+                or candidate["gateway_name"] != "CTP"
+                or any(
+                    candidate[field] is not False
+                    for field in (
+                        "production_allowed",
+                        "live_trading_authorized",
+                        "countable_forward",
+                    )
+                )
+            ):
+                raise ValueError(
+                    "execution published-only recovery identity is invalid"
+                )
+            for field in (
+                "custody_idempotency_key",
+                "custody_install_idempotency_key",
+                "publisher_principal",
+                "correlation_id",
+                "publish_receipt_id",
+                "artifact_id",
+                "plan_id",
+                "account_scope",
+            ):
+                if (
+                    not isinstance(candidate[field], str)
+                    or IDENTIFIER_RE.fullmatch(candidate[field]) is None
+                ):
+                    raise ValueError(
+                        f"execution published-only recovery {field} is invalid"
+                    )
+            if candidate["custody_install_idempotency_key"] != (
+                f"install-{candidate['custody_idempotency_key']}"
+            ):
+                raise ValueError(
+                    "execution published-only recovery custody key mismatches"
+                )
+            for field in (
+                "observed_custody_version",
+                "publish_expected_custody_version",
+                "publish_resulting_custody_version",
+            ):
+                _strict_nonnegative_int(candidate[field], field=field)
+            if (
+                candidate["publish_resulting_custody_version"]
+                != candidate["publish_expected_custody_version"] + 1
+                or candidate["observed_custody_version"]
+                < candidate["publish_resulting_custody_version"]
+                or candidate["install_only_allowed"]
+                is not (
+                    candidate["observed_custody_version"]
+                    == candidate["publish_resulting_custody_version"]
+                )
+            ):
+                raise ValueError(
+                    "execution published-only recovery custody version is invalid"
+                )
+            for field in (
+                "publish_receipt_sha256",
+                "artifact_canonical_sha256",
+                "artifact_sha256",
+                "artifact_envelope_sha256",
+                "plan_hash",
+                "expected_before_position_hash",
+                "expected_after_position_hash",
+                "order_set_sha256",
+                "recovery_sha256",
+            ):
+                _strict_sha(candidate[field], field=field)
+            for field in ("generated_at", "expires_at"):
+                _strict_utc(candidate[field], field=field)
+            lineage = candidate["lineage"]
+            if (
+                not isinstance(lineage, Mapping)
+                or set(lineage) != _COMPLETION_LINEAGE_FIELDS
+            ):
+                raise ValueError(
+                    "execution published-only recovery lineage is not exact"
+                )
+            for field in _COMPLETION_LINEAGE_FIELDS:
+                _strict_sha(lineage[field], field=f"lineage.{field}")
             preimage = {
                 key: candidate[key] for key in candidate if key != "recovery_sha256"
             }
