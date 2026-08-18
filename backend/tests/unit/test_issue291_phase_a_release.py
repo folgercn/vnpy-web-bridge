@@ -246,6 +246,26 @@ def test_unknown_phase_a_deployment_asset_fails_closed() -> None:
     assert result["selected_units"] == []
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "deployments/research-warehouse/daily-pit-main-roll-source-v1.schema.json",
+        "scripts/research_warehouse/daily_pit_main_roll_source.py",
+    ],
+)
+def test_issue362_unverified_research_foundation_is_preserved_exactly(
+    path: str,
+) -> None:
+    result = classify_phase_a([path])
+
+    assert result["release_blocked"] is False
+    assert result["selected_rule_ids"] == [
+        "phase-a-preserved-issue362-research-foundation"
+    ]
+    assert result["selected_units"] == []
+    assert result["dependency_closure"] == []
+
+
 @pytest.mark.parametrize("path", CURRENT_PHASE_B_CHANGED_PATHS)
 def test_current_phase_b_paths_are_preserved_without_phase_a_units(path: str) -> None:
     result = classify_phase_a([path])

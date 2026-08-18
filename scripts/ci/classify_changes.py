@@ -418,6 +418,15 @@ PHASE_A_PHASE_C_PRESERVED_PREFIXES = (
     "shared/commodity_execution/",
 )
 
+# Issue #362's daily PIT-main detector is a no-authority Research foundation.
+# These exact paths neither enter a Phase A image nor authorize a runtime
+# consumer.  Keep the list narrow until a separately reviewed verified source
+# contract and installer exist.
+PHASE_A_ISSUE362_RESEARCH_FOUNDATION_EXACT = (
+    "deployments/research-warehouse/daily-pit-main-roll-source-v1.schema.json",
+    "scripts/research_warehouse/daily_pit_main_roll_source.py",
+)
+
 
 def _phase_a_dependency_closure(selected_units: set[str]) -> set[str]:
     """Expand selected primary services to their reviewed image closure."""
@@ -666,6 +675,11 @@ PHASE_A_RULES = (
         "phase-a-preserved-phase-c",
         exact=PHASE_A_PHASE_C_PRESERVED_EXACT,
         prefix=PHASE_A_PHASE_C_PRESERVED_PREFIXES,
+        kind="preserved",
+    ),
+    _phase_a_rule(
+        "phase-a-preserved-issue362-research-foundation",
+        exact=PHASE_A_ISSUE362_RESEARCH_FOUNDATION_EXACT,
         kind="preserved",
     ),
     _phase_a_rule(
