@@ -641,6 +641,7 @@ PHASE_A_RULES = (
             "backend/app/execution/models.py",
             "backend/app/execution/errors.py",
             "backend/app/schemas/control_execution.py",
+            "backend/tests/unit/test_issue362_full_account_ownership.py",
             "docs/schemas/web-bridge-control-execution-command-v1.schema.json",
             "docs/schemas/web-bridge-execution-status-v1.schema.json",
         ),

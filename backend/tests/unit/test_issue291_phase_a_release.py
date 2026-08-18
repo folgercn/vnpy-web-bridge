@@ -117,13 +117,20 @@ def test_frontend_and_control_changes_are_independent_from_execution() -> None:
 
 
 def test_issue362_execution_control_tests_select_both_runtime_contract_owners() -> None:
-    result = classify_phase_a(
-        ["backend/tests/unit/test_issue362_execution_control_plumbing.py"]
-    )
-    assert result["release_blocked"] is False
-    assert result["selected_rule_ids"] == ["phase-a-shared-control-execution-schema"]
-    assert result["selected_units"] == ["control-api", "execution-orchestrator"]
-    assert result["execution_safety_required"] is True
+    for path in (
+        "backend/tests/unit/test_issue362_execution_control_plumbing.py",
+        "backend/tests/unit/test_issue362_full_account_ownership.py",
+    ):
+        result = classify_phase_a([path])
+        assert result["release_blocked"] is False
+        assert result["selected_rule_ids"] == [
+            "phase-a-shared-control-execution-schema"
+        ]
+        assert result["selected_units"] == [
+            "control-api",
+            "execution-orchestrator",
+        ]
+        assert result["execution_safety_required"] is True
 
 
 def test_execution_changes_select_only_execution_and_raise_safety_flag() -> None:

@@ -315,6 +315,7 @@ class ExecutionOrchestrator:
         snapshot: GatewaySnapshot | Mapping[str, Any],
         *,
         observed_at: datetime | None = None,
+        projection_version: int = 2,
     ) -> dict[str, Any]:
         """Return one fresh, full-account, read-only broker fact projection.
 
@@ -434,8 +435,10 @@ class ExecutionOrchestrator:
             raise SnapshotRejected(
                 "full-account facts are not bound to the reconciled Execution status"
             )
+        if projection_version not in {1, 2}:
+            raise SnapshotRejected("full-account facts projection version is invalid")
         preimage = {
-            "schema_version": "web_bridge_execution_account_facts_v1",
+            "schema_version": f"web_bridge_execution_account_facts_v{projection_version}",
             "service": SERVICE,
             "service_version": self.service_version,
             "account_scope": self.scope,
@@ -452,7 +455,46 @@ class ExecutionOrchestrator:
             "active_orders": active_orders,
             "status_binding": status_binding,
         }
+        if projection_version == 2:
+            send_intents = _detached_json(state["send_intents"])
+            terminal_states = {"RECONCILED", "CANCELLED", "TERMINAL"}
+            nonterminal_count = sum(
+                not isinstance(raw, Mapping) or raw.get("state") not in terminal_states
+                for raw in send_intents.values()
+            )
+            plan_state = status["plan"]["state"]
+            if (
+                status["lifecycle"] != "READY"
+                or plan_state not in {"IDLE", "TERMINAL"}
+                or current.active_order_count != 0
+                or active_orders
+                or nonterminal_count != 0
+            ):
+                raise SnapshotRejected(
+                    "full-account facts are not execution-planner ready"
+                )
+            preimage["execution_binding"] = {
+                "state_version": status["state_version"],
+                "plan_state": plan_state,
+                "send_intents": send_intents,
+                "send_intents_sha256": sha256_json(send_intents),
+                "nonterminal_send_intent_count": nonterminal_count,
+            }
         return {**preimage, "account_facts_sha256": sha256_json(preimage)}
+
+    def account_facts_projection_v1(
+        self,
+        snapshot: GatewaySnapshot | Mapping[str, Any],
+        *,
+        observed_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Retain the historical v1 projection for non-#362 consumers."""
+
+        return self.account_facts_projection(
+            snapshot,
+            observed_at=observed_at,
+            projection_version=1,
+        )
 
     overview = status
     status_projection = status

@@ -22,6 +22,7 @@ from app.execution import (
     GatewaySnapshot,
     InMemoryExecutionRepository,
     InMemoryGateway,
+    SnapshotRejected,
 )
 from app.execution.final_runtime import CustodyReadClient, FinalExecutionRuntime
 from app.execution_orchestrator import (
@@ -163,14 +164,14 @@ def _orchestrator(
     return service
 
 
-def _fresh_snapshot() -> GatewaySnapshot:
+def _fresh_snapshot(*, with_active_order: bool = False) -> GatewaySnapshot:
     positions = _positions()
-    orders = _active_orders()
+    orders = _active_orders() if with_active_order else {}
     return GatewaySnapshot(
         snapshot_id="snapshot-issue362-full-account-0001",
         generation=4,
         connected=True,
-        active_order_count=1,
+        active_order_count=len(orders),
         position_snapshot_hash=sha256_json(positions),
         observed_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         orders=orders,
@@ -197,9 +198,10 @@ def test_account_facts_is_authenticated_full_closed_and_read_only(
     assert body["environment"] == ENVIRONMENT
     assert body["connected"] is True and body["fresh"] is True
     assert body["positions"] == _positions()
-    assert body["active_orders"] == _active_orders()
+    assert body["schema_version"] == "web_bridge_execution_account_facts_v2"
+    assert body["active_orders"] == {}
     assert body["position_snapshot_hash"] == sha256_json(_positions())
-    assert body["active_orders_sha256"] == sha256_json(_active_orders())
+    assert body["active_orders_sha256"] == sha256_json({})
     assert body["account_facts_sha256"] == sha256_json(
         {key: value for key, value in body.items() if key != "account_facts_sha256"}
     )
@@ -218,6 +220,13 @@ def test_account_facts_is_authenticated_full_closed_and_read_only(
         body["status_binding"]["snapshot_identity_mode"]
         == "GENERATION_FACT_HASH_EQUIVALENT"
     )
+    assert body["execution_binding"] == {
+        "state_version": before["state_version"],
+        "plan_state": "IDLE",
+        "send_intents": {},
+        "send_intents_sha256": sha256_json({}),
+        "nonterminal_send_intent_count": 0,
+    }
     assert service.repository.snapshot() == before
 
     async def read_with_client() -> dict[str, object]:
@@ -232,13 +241,70 @@ def test_account_facts_is_authenticated_full_closed_and_read_only(
     assert asyncio.run(read_with_client())["snapshot_id"] == body["snapshot_id"]
 
 
+def test_account_facts_v2_binds_terminal_execution_state_and_preserves_v1() -> None:
+    snapshot = _fresh_snapshot()
+    active = _orchestrator(snapshot)
+    active.repository.mutate(
+        lambda state: state["plan"].update(
+            {
+                "state": "ACTIVE",
+                "plan_id": "issue362-active-plan-0001",
+                "plan_hash": "a" * 64,
+            }
+        )
+    )
+
+    with pytest.raises(SnapshotRejected, match="planner ready"):
+        active.account_facts_projection(snapshot)
+    v1 = active.account_facts_projection_v1(snapshot)
+    assert v1["schema_version"] == "web_bridge_execution_account_facts_v1"
+    assert "execution_binding" not in v1
+
+    terminal = _orchestrator(snapshot)
+    intent_id = "issue362-terminal-intent-0001"
+    idempotency_key = "issue362-terminal-intent-key-0001"
+    intent = {
+        "intent_id": intent_id,
+        "idempotency_key": idempotency_key,
+        "state": "TERMINAL",
+        "plan_id": "issue362-terminal-plan-0001",
+        "plan_hash": "b" * 64,
+        "leader_epoch": 1,
+        "fencing_token": 1,
+        "created_at": snapshot.observed_at,
+    }
+    terminal.repository.mutate(
+        lambda state: (
+            state["send_intents"].update({intent_id: intent}),
+            state["intent_keys"].update({idempotency_key: intent_id}),
+        )
+    )
+    facts = terminal.account_facts_projection(snapshot)
+    assert facts["execution_binding"]["send_intents"] == {intent_id: intent}
+    assert facts["execution_binding"]["send_intents_sha256"] == sha256_json(
+        {intent_id: intent}
+    )
+    assert facts["execution_binding"]["nonterminal_send_intent_count"] == 0
+
+    pending = _orchestrator(snapshot)
+    pending_intent = {**intent, "state": "PERSISTED"}
+    pending.repository.mutate(
+        lambda state: (
+            state["send_intents"].update({intent_id: pending_intent}),
+            state["intent_keys"].update({idempotency_key: intent_id}),
+        )
+    )
+    with pytest.raises(SnapshotRejected, match="planner ready"):
+        pending.account_facts_projection(snapshot)
+
+
 @pytest.mark.parametrize(
     ("change", "message"),
     [
         ({"connected": False}, "disconnected"),
         ({"fresh": False}, "not fresh"),
         ({"account_scope": "account:foreign"}, "scope mismatch"),
-        ({"active_order_count": 0}, "order closure"),
+        ({"active_order_count": 1}, "order closure"),
         ({"position_snapshot_hash": "f" * 64}, "position hash"),
     ],
 )
@@ -318,7 +384,7 @@ def test_account_facts_rejects_same_count_different_durable_active_order_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("CONTROL_EXECUTION_SHARED_SECRET", EXECUTION_SECRET)
-    fresh = _fresh_snapshot()
+    fresh = _fresh_snapshot(with_active_order=True)
     service = _orchestrator(fresh)
     service.repository.mutate(
         lambda state: state["broker"].update(
