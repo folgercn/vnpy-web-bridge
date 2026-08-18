@@ -74,6 +74,29 @@ class DailyRollPredecessorCatalogError(RegistryError):
 
 
 @dataclass(frozen=True)
+class CurrentCatalogHeadProof:
+    """Exact immutable catalog head bound to the current Warehouse root.
+
+    The two raw values are the canonical bytes read from root custody.  This
+    proof is deliberately read-only and carries no install, dispatch, account,
+    order, or trading authority.
+    """
+
+    receipt_raw: bytes
+    receipt_raw_sha256: str
+    artifact_raw: bytes
+    artifact_raw_sha256: str
+    operator_state_raw_sha256: str
+    operator_manifest_sequence: int
+    manifest_genesis_seal_sha256: str
+    manifest_head_seal_sha256: str
+    manifest_head_commit_seal_sha256: str
+    commit_anchor_ledger_raw_sha256: str
+    last_trade_day: str
+    authority: dict[str, bool]
+
+
+@dataclass(frozen=True)
 class CatalogEntry:
     receipt_raw: bytes
     receipt: dict[str, Any]
@@ -1022,6 +1045,90 @@ def publish_predecessor_artifact(
                 "daily roll catalog publication readback mismatch"
             )
         return verified.head
+
+
+def load_current_catalog_head(
+    operator_state_path: Path,
+) -> CurrentCatalogHeadProof:
+    """Load the full catalog and bind its unique head to the current root.
+
+    The operator state is intentionally accepted by path, not by caller-built
+    value.  It is reloaded while the shared operator lock is held, and the
+    complete immutable catalog chain is verified inside that same lock.  This
+    reader never prepares directories, recovers partials, or writes state.
+    """
+
+    state_path = Path(operator_state_path)
+    try:
+        with operator_state_lock(state_path, exclusive=False):
+            current = load_operator_state(state_path)
+            loaded = _load_catalog(catalog_root(state_path))
+            head = loaded.head
+            if head is None:
+                raise DailyRollPredecessorCatalogError(
+                    "daily roll predecessor catalog is empty"
+                )
+            receipt = head.receipt
+            artifact = head.artifact
+            lineage = artifact["verified_lineage"]
+            artifact_state = lineage["operator_state"]
+            artifact_manifest = lineage["manifest"]
+            current_payload = current.payload
+            if (
+                receipt["official_day"] != current_payload["last_trade_day"]
+                or artifact["official_day"] != current_payload["last_trade_day"]
+                or receipt["operator_state_raw_sha256"] != current.raw_sha256
+                or artifact_state["raw_sha256"] != current.raw_sha256
+                or receipt["operator_manifest_sequence"]
+                != current_payload["manifest_sequence"]
+                or artifact_state["manifest_sequence"]
+                != current_payload["manifest_sequence"]
+                or artifact_state["manifest_genesis_seal_sha256"]
+                != current_payload["manifest_genesis_seal_sha256"]
+                or receipt["manifest_head_seal_sha256"]
+                != current_payload["manifest_head_seal_sha256"]
+                or artifact_state["manifest_head_seal_sha256"]
+                != current_payload["manifest_head_seal_sha256"]
+                or artifact_manifest["batch_seal_sha256"]
+                != current_payload["manifest_head_seal_sha256"]
+                or receipt["manifest_head_commit_seal_sha256"]
+                != current_payload["manifest_head_commit_seal_sha256"]
+                or artifact_state["manifest_head_commit_seal_sha256"]
+                != current_payload["manifest_head_commit_seal_sha256"]
+                or artifact_manifest["commit_seal_sha256"]
+                != current_payload["manifest_head_commit_seal_sha256"]
+                or artifact_state["commit_anchor_ledger_raw_sha256"]
+                != current_payload["commit_anchor_ledger_raw_sha256"]
+            ):
+                raise DailyRollPredecessorCatalogError(
+                    "daily roll catalog head is not bound to current root"
+                )
+            return CurrentCatalogHeadProof(
+                receipt_raw=head.receipt_raw,
+                receipt_raw_sha256=sha256(head.receipt_raw),
+                artifact_raw=head.artifact_raw,
+                artifact_raw_sha256=sha256(head.artifact_raw),
+                operator_state_raw_sha256=current.raw_sha256,
+                operator_manifest_sequence=current_payload["manifest_sequence"],
+                manifest_genesis_seal_sha256=current_payload[
+                    "manifest_genesis_seal_sha256"
+                ],
+                manifest_head_seal_sha256=current_payload["manifest_head_seal_sha256"],
+                manifest_head_commit_seal_sha256=current_payload[
+                    "manifest_head_commit_seal_sha256"
+                ],
+                commit_anchor_ledger_raw_sha256=current_payload[
+                    "commit_anchor_ledger_raw_sha256"
+                ],
+                last_trade_day=current_payload["last_trade_day"],
+                authority=false_authority(),
+            )
+    except DailyRollPredecessorCatalogError:
+        raise
+    except (KeyError, OSError, TypeError, ValueError, RegistryError) as exc:
+        raise DailyRollPredecessorCatalogError(
+            "daily roll current catalog head verification failed"
+        ) from exc
 
 
 def _load_linked_predecessor_locked(
