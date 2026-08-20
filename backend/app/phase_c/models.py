@@ -120,8 +120,21 @@ class TrustedKeylessTargetPlanUploadDTO(StrictDTO):
     artifact: dict[str, Any]
 
 
+class TrustedKeylessSimnowScopeDTO(StrictDTO):
+    """The fixed non-production account tuple carried as a publication pin."""
+
+    account_scope: Literal["account:windows"]
+    environment: Literal["SIMNOW"]
+    gateway_name: Literal["CTP"]
+
+
 class TrustedKeylessTargetPlanInstallContinuationDTO(StrictDTO):
-    """Exact install-only retry for one already-published keyless plan."""
+    """Pins-only install continuation for one stored keyless target plan.
+
+    The order-bearing artifact is deliberately absent.  Custody resolves the
+    immutable envelope from its own publication receipt and revalidates it
+    before recording the install transition.
+    """
 
     idempotency_key: str = Field(
         min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
@@ -129,13 +142,43 @@ class TrustedKeylessTargetPlanInstallContinuationDTO(StrictDTO):
     correlation_id: str = Field(
         min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
     )
+    publisher_principal: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    )
     publish_receipt_id: str = Field(
         min_length=8, max_length=192, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
     )
     publish_receipt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     publish_expected_custody_version: int = Field(ge=0)
     publish_resulting_custody_version: int = Field(ge=1)
-    artifact: dict[str, Any]
+    artifact_id: str = Field(
+        min_length=8, max_length=192, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    )
+    artifact_canonical_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    artifact_raw_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    artifact_schema_ref: Literal[
+        TRUSTED_KEYLESS_TARGET_PLAN_V1_SCHEMA_REF,
+        TRUSTED_KEYLESS_TARGET_PLAN_V2_SCHEMA_REF,
+        TRUSTED_KEYLESS_TARGET_PLAN_V3_SCHEMA_REF,
+    ]
+    plan_schema_version: Literal[
+        TRUSTED_KEYLESS_TARGET_PLAN_V1_SCHEMA_REF,
+        TRUSTED_KEYLESS_TARGET_PLAN_V2_SCHEMA_REF,
+        TRUSTED_KEYLESS_TARGET_PLAN_V3_SCHEMA_REF,
+    ]
+    plan_id: str = Field(
+        min_length=8, max_length=192, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    )
+    plan_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    plan_phase: Literal["CLOSE", "OPEN"]
+    scope: TrustedKeylessSimnowScopeDTO
+    plan_expires_at: str = Field(
+        min_length=20,
+        max_length=64,
+        pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$",
+    )
 
     @model_validator(mode="after")
     def _publish_versions_are_adjacent(
@@ -146,6 +189,8 @@ class TrustedKeylessTargetPlanInstallContinuationDTO(StrictDTO):
             != self.publish_expected_custody_version + 1
         ):
             raise ValueError("publish custody versions are not adjacent")
+        if self.artifact_schema_ref != self.plan_schema_version:
+            raise ValueError("artifact schema does not bind target-plan schema")
         return self
 
 
@@ -517,6 +562,13 @@ class TargetPlanPublicationProjectionDTO(AuthorityNegativeDTO):
     )
     plan_hash: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     plan_phase: Optional[Literal["CLOSE", "OPEN"]] = None
+    scope: Optional[TrustedKeylessSimnowScopeDTO] = None
+    plan_expires_at: Optional[str] = Field(
+        default=None,
+        min_length=20,
+        max_length=64,
+        pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$",
+    )
     publish_receipt_id: Optional[str] = Field(
         default=None,
         min_length=8,
@@ -555,6 +607,8 @@ class TargetPlanPublicationProjectionDTO(AuthorityNegativeDTO):
             self.plan_id,
             self.plan_hash,
             self.plan_phase,
+            self.scope,
+            self.plan_expires_at,
             self.publish_receipt_id,
             self.publish_receipt_sha256,
             self.publish_expected_custody_version,
@@ -689,7 +743,11 @@ class CustodyReceiptDTO(AuthorityNegativeDTO):
 class TrustedKeylessCustodyReceiptDTO(AuthorityNegativeDTO):
     """Strict receipt returned only by the fixed-tuple keyless custody route."""
 
-    receipt_id: str
+    receipt_id: str = Field(
+        min_length=8,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$",
+    )
     receipt_type: Literal["install"]
     artifact_id: str
     artifact_type: Literal["simnow-target-plan"]

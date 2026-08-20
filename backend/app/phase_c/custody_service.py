@@ -614,6 +614,8 @@ class ArtifactCustodyService:
                     "plan_id": plan.raw["plan_id"],
                     "plan_hash": plan.raw["plan_hash"],
                     "plan_phase": plan.raw["phase"],
+                    "scope": plan.raw["scope"],
+                    "plan_expires_at": plan.raw["expires_at"],
                     "publish_receipt_id": published["receipt_id"],
                     "publish_receipt_sha256": self._receipt_sha256(published),
                     "publish_expected_custody_version": published["expected_version"],
@@ -649,7 +651,13 @@ class ArtifactCustodyService:
         *,
         principal: str,
     ) -> dict[str, Any]:
-        """Continue only the install half of an exact prior publication."""
+        """Install the stored artifact bound by an exact publication receipt.
+
+        The shared-lock projection is only an availability/preflight check.
+        Every publication, envelope, schema and plan pin is re-read under the
+        custody writer's exclusive lock immediately before the sole allowed
+        mutation: ``record("install", ...)``.
+        """
 
         if not self.settings.trusted_keyless_simnow_enabled:
             raise WorkflowAdapterError("trusted keyless SIMNOW custody is disabled")
@@ -658,9 +666,9 @@ class ArtifactCustodyService:
             raise TargetPlanPublicationNotFoundError(
                 "target-plan publication does not exist; install cannot continue"
             )
-        artifact, _plan = self._trusted_keyless_target_plan(payload.artifact)
         if (
-            projection.publisher_principal != principal
+            payload.publisher_principal != principal
+            or projection.publisher_principal != payload.publisher_principal
             or projection.correlation_id != payload.correlation_id
             or projection.publish_receipt_id != payload.publish_receipt_id
             or projection.publish_receipt_sha256 != payload.publish_receipt_sha256
@@ -668,10 +676,16 @@ class ArtifactCustodyService:
             != payload.publish_expected_custody_version
             or projection.publish_resulting_custody_version
             != payload.publish_resulting_custody_version
-            or projection.artifact_id != artifact["artifact_id"]
-            or projection.artifact_canonical_sha256 != artifact["canonical_sha256"]
-            or projection.artifact_raw_sha256 != artifact["raw_sha256"]
-            or projection.artifact_schema_ref != artifact["schema_ref"]
+            or projection.artifact_id != payload.artifact_id
+            or projection.artifact_canonical_sha256 != payload.artifact_canonical_sha256
+            or projection.artifact_raw_sha256 != payload.artifact_raw_sha256
+            or projection.artifact_schema_ref != payload.artifact_schema_ref
+            or projection.plan_schema_version != payload.plan_schema_version
+            or projection.plan_id != payload.plan_id
+            or projection.plan_hash != payload.plan_hash
+            or projection.plan_phase != payload.plan_phase
+            or projection.scope != payload.scope
+            or projection.plan_expires_at != payload.plan_expires_at
         ):
             raise IdempotencyConflictError(
                 "install continuation does not match the original publication"
@@ -679,13 +693,20 @@ class ArtifactCustodyService:
         try:
             with self._custody() as custody:
                 published = custody.read_receipt_by_idempotency(payload.idempotency_key)
-                stored_artifact = custody.read_artifact(artifact["artifact_id"])
-                if canonical_json_line(stored_artifact) != canonical_json_line(
-                    artifact
+                published_by_id = custody.read_receipt(payload.publish_receipt_id)
+                if canonical_json_line(published) != canonical_json_line(
+                    published_by_id
                 ):
                     raise CustodyEvidenceReadError(
-                        "install continuation artifact bytes do not match publication"
+                        "install continuation publication receipt is cross-spliced"
                     )
+                stored_artifact = custody.read_artifact(str(published["artifact_id"]))
+                try:
+                    artifact, plan = self._trusted_keyless_target_plan(stored_artifact)
+                except WorkflowAdapterError as exc:
+                    raise CustodyEvidenceReadError(
+                        "stored install continuation target-plan artifact is invalid"
+                    ) from exc
                 self._assert_receipt_artifact_binding(
                     published,
                     artifact,
@@ -695,16 +716,46 @@ class ArtifactCustodyService:
                 if (
                     published["receipt_id"] != payload.publish_receipt_id
                     or self._receipt_sha256(published) != payload.publish_receipt_sha256
-                    or published["actor_id"] != principal
+                    or published["actor_id"] != payload.publisher_principal
+                    or payload.publisher_principal != principal
                     or published["correlation_id"] != payload.correlation_id
                     or published["expected_version"]
                     != payload.publish_expected_custody_version
                     or published["resulting_version"]
                     != payload.publish_resulting_custody_version
+                    or artifact["artifact_id"] != payload.artifact_id
+                    or artifact["canonical_sha256"] != payload.artifact_canonical_sha256
+                    or artifact["raw_sha256"] != payload.artifact_raw_sha256
+                    or artifact["schema_ref"] != payload.artifact_schema_ref
+                    or plan.raw["schema_version"] != payload.plan_schema_version
+                    or plan.raw["plan_id"] != payload.plan_id
+                    or plan.raw["plan_hash"] != payload.plan_hash
+                    or plan.raw["phase"] != payload.plan_phase
+                    or plan.raw["scope"] != payload.scope.model_dump(mode="json")
+                    or plan.raw["expires_at"] != payload.plan_expires_at
                 ):
                     raise IdempotencyConflictError(
                         "install continuation publication binding changed"
                     )
+                installed_before = self._read_optional_receipt(
+                    custody, f"install-{payload.idempotency_key}"
+                )
+                if installed_before is not None:
+                    self._assert_receipt_artifact_binding(
+                        installed_before,
+                        artifact,
+                        receipt_type="install",
+                        idempotency_key=f"install-{payload.idempotency_key}",
+                    )
+                    if (
+                        installed_before["actor_id"] != principal
+                        or installed_before["correlation_id"] != payload.correlation_id
+                        or installed_before["expected_version"]
+                        != payload.publish_resulting_custody_version
+                    ):
+                        raise CustodyEvidenceReadError(
+                            "stored install continuation receipt binding is invalid"
+                        )
                 installed = custody.record(
                     "install",
                     artifact["artifact_id"],

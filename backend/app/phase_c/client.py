@@ -354,18 +354,36 @@ class RemotePhaseCWorkflowClient:
     ) -> TrustedKeylessCustodyReceiptDTO:
         try:
             receipt = TrustedKeylessCustodyReceiptDTO.model_validate(raw)
-            artifact = validate_artifact_envelope(request.artifact)
-            payload = artifact["payload"]
+            if isinstance(request, TrustedKeylessTargetPlanUploadDTO):
+                artifact = validate_artifact_envelope(request.artifact)
+                payload = artifact["payload"]
+                artifact_id = artifact["artifact_id"]
+                artifact_raw_sha256 = artifact["raw_sha256"]
+                artifact_schema_ref = artifact["schema_ref"]
+                scope = artifact["scope"]
+                payload_schema_ref = (
+                    payload.get("schema_version")
+                    if isinstance(payload, Mapping)
+                    else None
+                )
+                expires_at = (
+                    payload.get("expires_at") if isinstance(payload, Mapping) else None
+                )
+            else:
+                artifact_id = request.artifact_id
+                artifact_raw_sha256 = request.artifact_raw_sha256
+                artifact_schema_ref = request.artifact_schema_ref
+                payload_schema_ref = request.plan_schema_version
+                scope = request.scope.model_dump(mode="json")
+                expires_at = request.plan_expires_at
             if (
-                not isinstance(payload, Mapping)
-                or artifact["schema_ref"] != payload.get("schema_version")
-                or receipt.idempotency_key != f"install-{request.idempotency_key}"
-                or receipt.artifact_id != artifact["artifact_id"]
-                or receipt.artifact_sha256 != artifact["raw_sha256"]
-                or receipt.schema_ref != artifact["schema_ref"]
-                or receipt.scope != artifact["scope"]
-                or receipt.scope != payload.get("scope")
-                or receipt.expires_at != payload.get("expires_at")
+                receipt.idempotency_key != f"install-{request.idempotency_key}"
+                or artifact_schema_ref != payload_schema_ref
+                or receipt.artifact_id != artifact_id
+                or receipt.artifact_sha256 != artifact_raw_sha256
+                or receipt.schema_ref != artifact_schema_ref
+                or receipt.scope != scope
+                or receipt.expires_at != expires_at
                 or receipt.custody_version != custody_version
             ):
                 raise ValueError("trusted keyless receipt identity mismatches")
