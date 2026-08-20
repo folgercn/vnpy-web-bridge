@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 from app.phase_c.adapters import UnknownOutcomeError, WorkflowAdapterError
@@ -145,14 +147,27 @@ def test_remote_keyless_publish_uses_dedicated_custody_contract() -> None:
 def _continuation(
     artifact: dict[str, object] | None = None,
 ) -> TrustedKeylessTargetPlanInstallContinuationDTO:
+    stored = artifact or _artifact()
+    plan = stored["payload"]
+    assert isinstance(plan, dict)
     return TrustedKeylessTargetPlanInstallContinuationDTO(
         idempotency_key="keyless-publish-0001",
         correlation_id="keyless-correlation-0001",
+        publisher_principal="control-api",
         publish_receipt_id="receipt-" + "a" * 64,
         publish_receipt_sha256="b" * 64,
         publish_expected_custody_version=0,
         publish_resulting_custody_version=1,
-        artifact=artifact or {},
+        artifact_id=str(stored["artifact_id"]),
+        artifact_canonical_sha256=str(stored["canonical_sha256"]),
+        artifact_raw_sha256=str(stored["raw_sha256"]),
+        artifact_schema_ref=KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+        plan_schema_version=KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+        plan_id=str(plan["plan_id"]),
+        plan_hash=str(plan["plan_hash"]),
+        plan_phase="OPEN",
+        scope=stored["scope"],
+        plan_expires_at=str(plan["expires_at"]),
     )
 
 
@@ -173,6 +188,51 @@ def test_remote_install_only_transport_unknown_requires_exact_query() -> None:
         ),
         "query_same_intent_only": True,
     }
+
+
+def test_remote_install_only_posts_publication_pins_without_artifact_raw() -> None:
+    artifact = _artifact()
+    continuation = _continuation(artifact)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == (
+            "/internal/v1/install-published-keyless-simnow-target-plan"
+        )
+        body = json.loads(request.content)
+        assert "artifact" not in body
+        assert "orders" not in json.dumps(body, sort_keys=True)
+        assert body["artifact_id"] == artifact["artifact_id"]
+        assert body["publish_receipt_id"] == continuation.publish_receipt_id
+        return httpx.Response(
+            200,
+            json={
+                "receipt_id": "keyless-install-remote-0001",
+                "receipt_type": "install",
+                "artifact_id": artifact["artifact_id"],
+                "artifact_type": "simnow-target-plan",
+                "trust_domain": "runtime_authorization",
+                "schema_ref": artifact["schema_ref"],
+                "artifact_sha256": artifact["raw_sha256"],
+                "scope": artifact["scope"],
+                "expires_at": "2099-01-01T00:00:00Z",
+                "custody_version": 2,
+                "idempotency_key": "install-keyless-publish-0001",
+                "verified": True,
+                "installed": True,
+                "custody_writer": "artifact-custody",
+                "production_allowed": False,
+                "live_trading_authorized": False,
+                "countable_forward": False,
+            },
+        )
+
+    client = RemotePhaseCWorkflowClient(
+        PhaseCRemoteSettings("http://custody", "http://execution", "c", "e"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    receipt = client.install_published_trusted_keyless_target_plan(continuation)
+    assert receipt.custody_version == 2
 
 
 def test_remote_install_only_preserves_structured_stop_retry_error() -> None:
@@ -255,6 +315,62 @@ def test_remote_install_only_2xx_unclassifiable_is_unknown_query_only(
     )
     with pytest.raises(UnknownOutcomeError) as caught:
         client.install_published_trusted_keyless_target_plan(_continuation())
+    assert caught.value.retryable is False
+    assert caught.value.detail == {
+        "query_path": (
+            "/internal/v1/target-plan-publications/by-idempotency/keyless-publish-0001"
+        ),
+        "query_same_intent_only": True,
+    }
+
+
+@pytest.mark.parametrize(
+    "receipt_id",
+    ["", "r", "receipt/invalid", "r" * 129],
+    ids=["empty", "short", "invalid-character", "overlong"],
+)
+def test_remote_install_only_2xx_invalid_receipt_id_is_unknown_without_resend(
+    receipt_id: str,
+) -> None:
+    artifact = _artifact()
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={
+                "receipt_id": receipt_id,
+                "receipt_type": "install",
+                "artifact_id": artifact["artifact_id"],
+                "artifact_type": "simnow-target-plan",
+                "trust_domain": "runtime_authorization",
+                "schema_ref": artifact["schema_ref"],
+                "artifact_sha256": artifact["raw_sha256"],
+                "scope": artifact["scope"],
+                "expires_at": "2099-01-01T00:00:00Z",
+                "custody_version": 2,
+                "idempotency_key": "install-keyless-publish-0001",
+                "verified": True,
+                "installed": True,
+                "custody_writer": "artifact-custody",
+                "production_allowed": False,
+                "live_trading_authorized": False,
+                "countable_forward": False,
+            },
+        )
+
+    client = RemotePhaseCWorkflowClient(
+        PhaseCRemoteSettings("http://custody", "http://execution", "c", "e"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(UnknownOutcomeError) as caught:
+        client.install_published_trusted_keyless_target_plan(_continuation(artifact))
+
+    assert calls == 1
+    assert caught.value.code == "PHASE_C_UNKNOWN_OUTCOME"
     assert caught.value.retryable is False
     assert caught.value.detail == {
         "query_path": (

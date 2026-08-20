@@ -122,7 +122,7 @@ def target_plan_publication(idempotency_key: str, _: Reader) -> dict[str, Any]:
 def install_published_keyless_simnow_target_plan(
     payload: TrustedKeylessTargetPlanInstallContinuationDTO, _: Admin
 ) -> dict[str, Any]:
-    """Continue the exact prior publish; this route can never republish."""
+    """Install custody's stored artifact from pins; no raw plan is accepted."""
 
     try:
         result = phase_c_workflow_client.install_published_trusted_keyless_target_plan(

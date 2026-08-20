@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from copy import deepcopy
 from pathlib import Path
 from threading import Barrier, Event, Lock
 
 import pytest
+from pydantic import ValidationError
 from app.phase_c.adapters import (
     ExpectedVersionError,
     IdempotencyConflictError,
@@ -154,12 +154,12 @@ def _publish_only(
 
 def _continuation(
     projection: TargetPlanPublicationProjectionDTO,
-    base_artifact: dict[str, object],
     **changes: object,
 ) -> TrustedKeylessTargetPlanInstallContinuationDTO:
     raw: dict[str, object] = {
         "idempotency_key": projection.idempotency_key,
         "correlation_id": projection.correlation_id,
+        "publisher_principal": projection.publisher_principal,
         "publish_receipt_id": projection.publish_receipt_id,
         "publish_receipt_sha256": projection.publish_receipt_sha256,
         "publish_expected_custody_version": (
@@ -168,10 +168,61 @@ def _continuation(
         "publish_resulting_custody_version": (
             projection.publish_resulting_custody_version
         ),
-        "artifact": base_artifact,
+        "artifact_id": projection.artifact_id,
+        "artifact_canonical_sha256": projection.artifact_canonical_sha256,
+        "artifact_raw_sha256": projection.artifact_raw_sha256,
+        "artifact_schema_ref": projection.artifact_schema_ref,
+        "plan_schema_version": projection.plan_schema_version,
+        "plan_id": projection.plan_id,
+        "plan_hash": projection.plan_hash,
+        "plan_phase": projection.plan_phase,
+        "scope": projection.scope,
+        "plan_expires_at": projection.plan_expires_at,
     }
     raw.update(changes)
     return TrustedKeylessTargetPlanInstallContinuationDTO.model_validate(raw)
+
+
+def test_install_continuation_contract_is_pins_only() -> None:
+    service_artifact = _artifact()
+    raw = {
+        "idempotency_key": PUBLISH_KEY,
+        "correlation_id": CORRELATION_ID,
+        "publisher_principal": "control-api",
+        "publish_receipt_id": "receipt-" + "a" * 64,
+        "publish_receipt_sha256": "b" * 64,
+        "publish_expected_custody_version": 0,
+        "publish_resulting_custody_version": 1,
+        "artifact_id": service_artifact["artifact_id"],
+        "artifact_canonical_sha256": service_artifact["canonical_sha256"],
+        "artifact_raw_sha256": service_artifact["raw_sha256"],
+        "artifact_schema_ref": KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+        "plan_schema_version": KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+        "plan_id": service_artifact["payload"]["plan_id"],  # type: ignore[index]
+        "plan_hash": service_artifact["payload"]["plan_hash"],  # type: ignore[index]
+        "plan_phase": "OPEN",
+        "scope": service_artifact["scope"],
+        "plan_expires_at": "2099-01-01T00:00:00Z",
+    }
+    request = TrustedKeylessTargetPlanInstallContinuationDTO.model_validate(raw)
+
+    assert "artifact" not in TrustedKeylessTargetPlanInstallContinuationDTO.model_fields
+    assert "orders" not in request.model_dump(mode="json")
+    with pytest.raises(ValidationError):
+        TrustedKeylessTargetPlanInstallContinuationDTO.model_validate(
+            {**raw, "artifact": service_artifact}
+        )
+    with pytest.raises(ValidationError):
+        TrustedKeylessTargetPlanInstallContinuationDTO.model_validate(
+            {
+                **raw,
+                "scope": {
+                    "account_scope": "account:foreign",
+                    "environment": "SIMNOW",
+                    "gateway_name": "CTP",
+                },
+            }
+        )
 
 
 def test_publication_projection_is_authenticated_and_zero_write_when_absent(
@@ -286,7 +337,7 @@ def test_install_only_continues_once_and_response_lost_retry_is_exact(
     service = _service(tmp_path)
     artifact = _artifact()
     _publish_only(service, artifact)
-    request = _continuation(service.target_plan_publication(PUBLISH_KEY), artifact)
+    request = _continuation(service.target_plan_publication(PUBLISH_KEY))
 
     first = service.install_published_trusted_keyless_target_plan(
         request, principal="control-api"
@@ -307,13 +358,55 @@ def test_install_only_continues_once_and_response_lost_retry_is_exact(
     assert installed.install_resulting_custody_version == 2
 
 
+def test_stored_install_performs_one_record_and_zero_publish_or_gateway(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = _service(tmp_path)
+    artifact = _artifact()
+    _publish_only(service, artifact)
+    request = _continuation(service.target_plan_publication(PUBLISH_KEY))
+    original_record = ArtifactCustody.record
+    record_calls = 0
+
+    def forbidden_publish(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise AssertionError("stored continuation must never republish")
+
+    def counted_record(
+        custody: ArtifactCustody,
+        receipt_type: str,
+        artifact_id: str,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        nonlocal record_calls
+        record_calls += 1
+        return original_record(  # type: ignore[return-value]
+            custody,
+            receipt_type,
+            artifact_id,
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr(ArtifactCustody, "publish", forbidden_publish)
+    monkeypatch.setattr(ArtifactCustody, "publish_signed", forbidden_publish)
+    monkeypatch.setattr(ArtifactCustody, "record", counted_record)
+
+    receipt = service.install_published_trusted_keyless_target_plan(
+        request, principal="control-api"
+    )
+
+    assert receipt["custody_version"] == 2
+    assert record_calls == 1
+    assert not hasattr(service, "gateway")
+
+
 def test_concurrent_install_only_busy_retry_converges_without_duplicate_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service = _service(tmp_path)
     artifact = _artifact()
     _publish_only(service, artifact)
-    request = _continuation(service.target_plan_publication(PUBLISH_KEY), artifact)
+    request = _continuation(service.target_plan_publication(PUBLISH_KEY))
     original_projection = service.target_plan_publication
     original_record = ArtifactCustody.record
     projection_barrier = Barrier(2)
@@ -401,7 +494,7 @@ def test_install_only_http_writer_contention_is_retryable(tmp_path: Path) -> Non
     service = _service(tmp_path)
     artifact = _artifact()
     _publish_only(service, artifact)
-    request = _continuation(service.target_plan_publication(PUBLISH_KEY), artifact)
+    request = _continuation(service.target_plan_publication(PUBLISH_KEY))
     path = "/internal/v1/install-published-keyless-simnow-target-plan"
     before = _tree(service.settings.root)
 
@@ -445,7 +538,7 @@ def test_install_only_exact_retry_recovers_an_already_installed_publication(
     before = _tree(service.settings.root)
 
     recovered = service.install_published_trusted_keyless_target_plan(
-        _continuation(projection, artifact), principal="control-api"
+        _continuation(projection), principal="control-api"
     )
 
     assert recovered == installed
@@ -460,11 +553,21 @@ def test_install_only_rejects_unknown_and_all_cross_spliced_bindings(
     unknown = TrustedKeylessTargetPlanInstallContinuationDTO(
         idempotency_key=PUBLISH_KEY,
         correlation_id=CORRELATION_ID,
+        publisher_principal="control-api",
         publish_receipt_id="receipt-" + "a" * 64,
         publish_receipt_sha256="b" * 64,
         publish_expected_custody_version=0,
         publish_resulting_custody_version=1,
-        artifact=artifact,
+        artifact_id=str(artifact["artifact_id"]),
+        artifact_canonical_sha256=str(artifact["canonical_sha256"]),
+        artifact_raw_sha256=str(artifact["raw_sha256"]),
+        artifact_schema_ref=KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+        plan_schema_version=KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+        plan_id=str(artifact["payload"]["plan_id"]),  # type: ignore[index]
+        plan_hash=str(artifact["payload"]["plan_hash"]),  # type: ignore[index]
+        plan_phase="OPEN",
+        scope=artifact["scope"],
+        plan_expires_at="2099-01-01T00:00:00Z",
     )
     with pytest.raises(WorkflowAdapterError, match="does not exist"):
         service.install_published_trusted_keyless_target_plan(
@@ -476,7 +579,9 @@ def test_install_only_rejects_unknown_and_all_cross_spliced_bindings(
     projection = service.target_plan_publication(PUBLISH_KEY)
     before = _tree(service.settings.root)
     mismatches = (
-        {"artifact": _artifact(2)},
+        {"artifact_id": str(_artifact(2)["artifact_id"])},
+        {"artifact_canonical_sha256": "e" * 64},
+        {"artifact_raw_sha256": "f" * 64},
         {"publish_receipt_id": "receipt-" + "c" * 64},
         {"publish_receipt_sha256": "d" * 64},
         {
@@ -484,19 +589,27 @@ def test_install_only_rejects_unknown_and_all_cross_spliced_bindings(
             "publish_resulting_custody_version": 8,
         },
         {"correlation_id": "issue362-event-open-cross-splice"},
+        {"publisher_principal": "phase-c-execution"},
+        {"plan_id": "static-core-equal-open-cross-splice"},
+        {"plan_hash": "c" * 64},
+        {"plan_phase": "CLOSE"},
+        {"plan_expires_at": "2098-01-01T00:00:00Z"},
     )
     for changes in mismatches:
         with pytest.raises(IdempotencyConflictError):
             service.install_published_trusted_keyless_target_plan(
-                _continuation(projection, artifact, **changes),
+                _continuation(projection, **changes),
                 principal="control-api",
             )
 
-    wrong_schema = deepcopy(artifact)
-    wrong_schema["schema_ref"] = KEYLESS_TARGET_PLAN_SCHEMA_VERSION
-    with pytest.raises(WorkflowAdapterError, match="tuple is invalid"):
+    with pytest.raises(IdempotencyConflictError):
         service.install_published_trusted_keyless_target_plan(
-            _continuation(projection, wrong_schema), principal="control-api"
+            _continuation(
+                projection,
+                artifact_schema_ref=KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
+                plan_schema_version=KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
+            ),
+            principal="control-api",
         )
     assert _tree(service.settings.root) == before
 
@@ -517,7 +630,7 @@ def test_install_only_fails_closed_on_custody_version_drift(tmp_path: Path) -> N
 
     with pytest.raises(ExpectedVersionError):
         service.install_published_trusted_keyless_target_plan(
-            _continuation(projection, artifact), principal="control-api"
+            _continuation(projection), principal="control-api"
         )
 
     assert _tree(service.settings.root) == before
@@ -547,7 +660,7 @@ def test_install_only_http_is_authenticated_and_never_republishes(
     service = _service(tmp_path)
     artifact = _artifact()
     _publish_only(service, artifact)
-    request = _continuation(service.target_plan_publication(PUBLISH_KEY), artifact)
+    request = _continuation(service.target_plan_publication(PUBLISH_KEY))
     path = "/internal/v1/install-published-keyless-simnow-target-plan"
 
     with TestClient(create_app(service)) as client:
@@ -563,17 +676,64 @@ def test_install_only_http_is_authenticated_and_never_republishes(
     assert service.current_version().version == 2
 
 
+def test_install_only_http_rejects_authenticated_foreign_principal(
+    tmp_path: Path,
+) -> None:
+    service = ArtifactCustodyService(
+        CustodySettings(
+            tmp_path / "custody",
+            "artifact-custody",
+            1,
+            HEADERS["X-Phase-C-Custody-Secret"],
+            frozenset({"control-api", "phase-c-execution"}),
+            {},
+            "issue362-execution-read-secret",
+            None,
+            True,
+        )
+    )
+    artifact = _artifact()
+    _publish_only(service, artifact)
+    request = _continuation(service.target_plan_publication(PUBLISH_KEY))
+    before = _tree(service.settings.root)
+    foreign_headers = {
+        "X-Phase-C-Principal": "phase-c-execution",
+        "X-Phase-C-Custody-Secret": HEADERS["X-Phase-C-Custody-Secret"],
+    }
+
+    with TestClient(create_app(service)) as client:
+        response = client.post(
+            "/internal/v1/install-published-keyless-simnow-target-plan",
+            json=request.model_dump(mode="json"),
+            headers=foreign_headers,
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "PHASE_C_IDEMPOTENCY_CONFLICT"
+    assert _tree(service.settings.root) == before
+
+
 def test_install_only_http_exposes_stop_vs_retry_contract(tmp_path: Path) -> None:
     service = _service(tmp_path)
     artifact = _artifact()
     unknown = TrustedKeylessTargetPlanInstallContinuationDTO(
         idempotency_key=PUBLISH_KEY,
         correlation_id=CORRELATION_ID,
+        publisher_principal="control-api",
         publish_receipt_id="receipt-" + "a" * 64,
         publish_receipt_sha256="b" * 64,
         publish_expected_custody_version=0,
         publish_resulting_custody_version=1,
-        artifact=artifact,
+        artifact_id=str(artifact["artifact_id"]),
+        artifact_canonical_sha256=str(artifact["canonical_sha256"]),
+        artifact_raw_sha256=str(artifact["raw_sha256"]),
+        artifact_schema_ref=KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+        plan_schema_version=KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+        plan_id=str(artifact["payload"]["plan_id"]),  # type: ignore[index]
+        plan_hash=str(artifact["payload"]["plan_hash"]),  # type: ignore[index]
+        plan_phase="OPEN",
+        scope=artifact["scope"],
+        plan_expires_at="2099-01-01T00:00:00Z",
     )
     path = "/internal/v1/install-published-keyless-simnow-target-plan"
 
