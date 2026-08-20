@@ -18,6 +18,7 @@ from typing import Any
 
 from shared.commodity_execution import (
     CommodityExecutionContractError,
+    KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
     sha256_json,
     target_position_projection_hash,
 )
@@ -26,6 +27,7 @@ from ..core.commodity_strategy_identity import COMMODITY_FROZEN_SECTOR_MAP_V1
 from ..schemas.control_execution import (
     ExecutionAccountFactsProjectionV2,
     ExecutionCompletionProjection,
+    ExecutionTargetPlanRecoveryProjection,
 )
 from .clock import FUTURE_SKEW_SECONDS, SNAPSHOT_STALE_SECONDS
 
@@ -199,6 +201,11 @@ class FullAccountOwnershipReason(str, Enum):
     CLOSE_COMPLETION_TARGET_ALREADY_SATISFIED = (
         "CLOSE_COMPLETION_TARGET_ALREADY_SATISFIED"
     )
+    SAME_EVENT_CLOSE_EXPECTED_INVALID = "SAME_EVENT_CLOSE_EXPECTED_INVALID"
+    SAME_EVENT_CLOSE_EVENT_ROOT_MISMATCH = "SAME_EVENT_CLOSE_EVENT_ROOT_MISMATCH"
+    SAME_EVENT_CLOSE_RECOVERY_BINDING_MISMATCH = (
+        "SAME_EVENT_CLOSE_RECOVERY_BINDING_MISMATCH"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +263,62 @@ class ExpectedPredecessorCompletionBinding:
 
 
 @dataclass(frozen=True, slots=True)
+class ExpectedSameEventCloseCompletionBinding:
+    """Independent installed-event root for one same-event CLOSE completion.
+
+    The expected root is created from the installed event identity and the
+    exact canonical recovery projection while the CLOSE plan is installed or
+    active.  It intentionally has no constructor or helper that accepts an
+    actual completion: the archived completion is a later runtime result, not
+    a source of its own expected identity.
+    """
+
+    installed_event_id: str
+    installed_event_raw_sha256: str
+    close_recovery_raw: bytes
+    close_recovery_raw_sha256: str
+
+    def _validated_recovery(self) -> dict[str, Any]:
+        if (
+            not isinstance(self.installed_event_id, str)
+            or _ID_RE.fullmatch(self.installed_event_id) is None
+            or not isinstance(self.installed_event_raw_sha256, str)
+            or _SHA_RE.fullmatch(self.installed_event_raw_sha256) is None
+            or not isinstance(self.close_recovery_raw_sha256, str)
+            or _SHA_RE.fullmatch(self.close_recovery_raw_sha256) is None
+            or not isinstance(self.close_recovery_raw, bytes)
+            or hashlib.sha256(self.close_recovery_raw).hexdigest()
+            != self.close_recovery_raw_sha256
+        ):
+            raise ValueError("same-event CLOSE expected root is invalid")
+        raw = _parse_canonical_raw(self.close_recovery_raw)
+        recovery = ExecutionTargetPlanRecoveryProjection.from_mapping(raw).as_dict()
+        if (
+            recovery["schema_version"] != "web_bridge_execution_target_plan_recovery_v3"
+            or recovery["state"] != "INSTALLED"
+            or recovery["installed"] is not True
+            or recovery["target_plan_schema_version"]
+            != KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION
+            or recovery["phase"] != "CLOSE"
+            or recovery["account_scope"] != _ACCOUNT_SCOPE
+            or recovery["environment"] != _ENVIRONMENT
+            or recovery["gateway_name"] != "CTP"
+            or recovery["start_quote_proof_state"] != "STARTED_MATCHED"
+            or recovery["start_quote_proof_sha256"] is None
+            or recovery["can_start_same_plan"] is not False
+        ):
+            raise ValueError("same-event CLOSE recovery is not exact and started")
+        return recovery
+
+    def validates(self) -> bool:
+        try:
+            self._validated_recovery()
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        return True
+
+
+@dataclass(frozen=True, slots=True)
 class DesiredContinuousTargetBinding:
     """Exact source-event and independently replayed monthly target binding."""
 
@@ -285,6 +348,14 @@ class FullAccountOwnershipClassification:
     current_target_position_hash: str | None
     desired_target_position_hash: str | None
     predecessor_target_position_hash: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidatedOwnershipInputs:
+    current_hash: str
+    desired: _ValidatedDesiredTarget
+    desired_hash: str
+    flat_hash: str
 
 
 def _result(
@@ -708,30 +779,32 @@ def _completion_mapping(
     return ExecutionCompletionProjection.from_mapping(raw).as_dict()
 
 
-def classify_full_account_ownership(
+def _canonical_completion_mapping(value: Any) -> dict[str, Any]:
+    """Validate the exact canonical bytes returned for one completion archive."""
+
+    raw = _parse_canonical_raw(value)
+    return ExecutionCompletionProjection.from_mapping(raw).as_dict()
+
+
+def _validate_account_and_desired(
     *,
     account_facts: ExecutionAccountFactsProjectionV2 | Mapping[str, Any],
-    predecessor_mode: FullAccountPredecessorMode,
-    expected_predecessor: ExpectedPredecessorCompletionBinding | None,
-    completion: ExecutionCompletionProjection | Mapping[str, Any] | None,
     desired_target: DesiredContinuousTargetBinding,
     now: datetime,
-) -> FullAccountOwnershipClassification:
-    """Classify ownership only after one exact, planner-ready account read."""
-
+) -> tuple[_ValidatedOwnershipInputs | None, FullAccountOwnershipClassification | None]:
     if (
         not isinstance(now, datetime)
         or now.tzinfo is None
         or now.utcoffset() != timezone.utc.utcoffset(now)
     ):
-        return _result(
+        return None, _result(
             FullAccountOwnershipDisposition.STOP,
             FullAccountOwnershipReason.ACCOUNT_FACTS_INVALID,
         )
     try:
         raw_facts = _detached_mapping(account_facts)
     except (TypeError, ValueError, json.JSONDecodeError):
-        return _result(
+        return None, _result(
             FullAccountOwnershipDisposition.STOP,
             FullAccountOwnershipReason.ACCOUNT_FACTS_INVALID,
         )
@@ -739,28 +812,26 @@ def classify_full_account_ownership(
     try:
         facts = ExecutionAccountFactsProjectionV2.from_mapping(raw_facts).as_dict()
     except (TypeError, ValueError, json.JSONDecodeError):
-        return _result(
+        return None, _result(
             FullAccountOwnershipDisposition.STOP,
             facts_failure or FullAccountOwnershipReason.ACCOUNT_FACTS_INVALID,
         )
     if facts_failure is not None:
-        return _result(FullAccountOwnershipDisposition.STOP, facts_failure)
+        return None, _result(FullAccountOwnershipDisposition.STOP, facts_failure)
     if facts["account_scope"] != _ACCOUNT_SCOPE or facts["environment"] != _ENVIRONMENT:
-        return _result(
+        return None, _result(
             FullAccountOwnershipDisposition.STOP,
             FullAccountOwnershipReason.ACCOUNT_SCOPE_MISMATCH,
         )
     if not _positions_in_frozen_universe(facts["positions"]):
-        return _result(
+        return None, _result(
             FullAccountOwnershipDisposition.STOP,
             FullAccountOwnershipReason.ACCOUNT_POSITION_OUTSIDE_FROZEN_UNIVERSE,
         )
     current_hash: str | None = None
     try:
         current_hash = target_position_projection_hash(
-            facts["positions"],
-            account_scope=_ACCOUNT_SCOPE,
-            environment=_ENVIRONMENT,
+            facts["positions"], account_scope=_ACCOUNT_SCOPE, environment=_ENVIRONMENT
         )
         validated_desired = _desired_positions(desired_target)
         desired_hash = target_position_projection_hash(
@@ -777,11 +848,206 @@ def classify_full_account_ownership(
         ValueError,
         json.JSONDecodeError,
     ):
-        return _result(
+        return None, _result(
             FullAccountOwnershipDisposition.STOP,
             FullAccountOwnershipReason.DESIRED_TARGET_BINDING_INVALID,
             current=current_hash,
         )
+    return (
+        _ValidatedOwnershipInputs(
+            current_hash=current_hash,
+            desired=validated_desired,
+            desired_hash=desired_hash,
+            flat_hash=flat_hash,
+        ),
+        None,
+    )
+
+
+def classify_same_event_close_completion(
+    *,
+    account_facts: ExecutionAccountFactsProjectionV2 | Mapping[str, Any],
+    expected_close: ExpectedSameEventCloseCompletionBinding,
+    completion_raw: bytes,
+    desired_target: DesiredContinuousTargetBinding,
+    now: datetime,
+) -> FullAccountOwnershipClassification:
+    """Close one independently rooted same-event CLOSE boundary.
+
+    The result is only a pure ownership classification.  In particular,
+    ``RESUME_AFTER_CLOSE`` says a caller may freshly plan the event's OPEN
+    phase; it is never an OPEN plan, dispatch permission, or mutation
+    authority.
+    """
+
+    validated, failure = _validate_account_and_desired(
+        account_facts=account_facts,
+        desired_target=desired_target,
+        now=now,
+    )
+    if failure is not None:
+        return failure
+    if validated is None:  # pragma: no cover - private helper closes both variants.
+        return _result(
+            FullAccountOwnershipDisposition.STOP,
+            FullAccountOwnershipReason.ACCOUNT_FACTS_INVALID,
+        )
+    current_hash = validated.current_hash
+    desired_hash = validated.desired_hash
+
+    if not isinstance(expected_close, ExpectedSameEventCloseCompletionBinding):
+        return _result(
+            FullAccountOwnershipDisposition.STOP,
+            FullAccountOwnershipReason.SAME_EVENT_CLOSE_EXPECTED_INVALID,
+            current=current_hash,
+            desired=desired_hash,
+        )
+    try:
+        recovery = expected_close._validated_recovery()
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return _result(
+            FullAccountOwnershipDisposition.STOP,
+            FullAccountOwnershipReason.SAME_EVENT_CLOSE_EXPECTED_INVALID,
+            current=current_hash,
+            desired=desired_hash,
+        )
+    if (
+        expected_close.installed_event_id != desired_target.event_id
+        or expected_close.installed_event_raw_sha256
+        != desired_target.source_event_raw_sha256
+        or hashlib.sha256(desired_target.source_event_raw).hexdigest()
+        != expected_close.installed_event_raw_sha256
+    ):
+        return _result(
+            FullAccountOwnershipDisposition.STOP,
+            FullAccountOwnershipReason.SAME_EVENT_CLOSE_EVENT_ROOT_MISMATCH,
+            current=current_hash,
+            desired=desired_hash,
+            predecessor=recovery["expected_after_position_hash"],
+        )
+    lineage = recovery["lineage"]
+    if (
+        lineage["static_core_equal_sha256"] != desired_target.static_core_equal_sha256
+        or lineage["position_manager_sha256"] != desired_target.position_manager_sha256
+        or lineage["final_target_sha256"] != desired_target.lineage_final_target_sha256
+    ):
+        return _result(
+            FullAccountOwnershipDisposition.STOP,
+            FullAccountOwnershipReason.SAME_EVENT_CLOSE_RECOVERY_BINDING_MISMATCH,
+            current=current_hash,
+            desired=desired_hash,
+            predecessor=recovery["expected_after_position_hash"],
+        )
+    close_after_hash = recovery["expected_after_position_hash"]
+    if current_hash != close_after_hash:
+        return _result(
+            FullAccountOwnershipDisposition.STOP,
+            FullAccountOwnershipReason.COMPLETED_TARGET_POSITION_MISMATCH,
+            current=current_hash,
+            desired=desired_hash,
+            predecessor=close_after_hash,
+        )
+
+    try:
+        completed = _canonical_completion_mapping(completion_raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return _result(
+            FullAccountOwnershipDisposition.STOP,
+            FullAccountOwnershipReason.COMPLETION_INVALID,
+            current=current_hash,
+            desired=desired_hash,
+            predecessor=close_after_hash,
+        )
+    expected_completion = {
+        "plan_id": recovery["plan_id"],
+        "plan_hash": recovery["plan_hash"],
+        "schema_version": recovery["target_plan_schema_version"],
+        "phase": "CLOSE",
+        "lineage": recovery["lineage"],
+        "expected_after_position_hash": close_after_hash,
+        "target_position_hash": close_after_hash,
+        "execution_run_id": recovery["execution_run_id"],
+        "creation_quote_proof_sha256": recovery["creation_quote_proof_sha256"],
+        "start_quote_proof_sha256": recovery["start_quote_proof_sha256"],
+    }
+    if any(completed[field] != value for field, value in expected_completion.items()):
+        return _result(
+            FullAccountOwnershipDisposition.STOP,
+            FullAccountOwnershipReason.COMPLETION_BINDING_MISMATCH,
+            current=current_hash,
+            desired=desired_hash,
+            predecessor=close_after_hash,
+        )
+    try:
+        archived_at = datetime.fromisoformat(
+            completed["archived_at"].replace("Z", "+00:00")
+        )
+        generated_at = datetime.fromisoformat(
+            recovery["generated_at"].replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):  # DTOs already make this defensive only.
+        return _result(
+            FullAccountOwnershipDisposition.STOP,
+            FullAccountOwnershipReason.COMPLETION_INVALID,
+            current=current_hash,
+            desired=desired_hash,
+            predecessor=close_after_hash,
+        )
+    if (
+        archived_at < generated_at
+        or (archived_at - now).total_seconds() > FUTURE_SKEW_SECONDS
+    ):
+        return _result(
+            FullAccountOwnershipDisposition.STOP,
+            FullAccountOwnershipReason.COMPLETION_BINDING_MISMATCH,
+            current=current_hash,
+            desired=desired_hash,
+            predecessor=close_after_hash,
+        )
+    if current_hash == desired_hash:
+        return _result(
+            FullAccountOwnershipDisposition.ALREADY_COMPLETED_MATCHED,
+            FullAccountOwnershipReason.CLOSE_COMPLETION_TARGET_ALREADY_SATISFIED,
+            current=current_hash,
+            desired=desired_hash,
+            predecessor=close_after_hash,
+        )
+    return _result(
+        FullAccountOwnershipDisposition.RESUME_AFTER_CLOSE,
+        FullAccountOwnershipReason.CLOSE_COMPLETION_BOUNDARY_MATCHED,
+        current=current_hash,
+        desired=desired_hash,
+        predecessor=close_after_hash,
+    )
+
+
+def classify_full_account_ownership(
+    *,
+    account_facts: ExecutionAccountFactsProjectionV2 | Mapping[str, Any],
+    predecessor_mode: FullAccountPredecessorMode,
+    expected_predecessor: ExpectedPredecessorCompletionBinding | None,
+    completion: ExecutionCompletionProjection | Mapping[str, Any] | None,
+    desired_target: DesiredContinuousTargetBinding,
+    now: datetime,
+) -> FullAccountOwnershipClassification:
+    """Classify ownership only after one exact, planner-ready account read."""
+
+    validated, failure = _validate_account_and_desired(
+        account_facts=account_facts,
+        desired_target=desired_target,
+        now=now,
+    )
+    if failure is not None:
+        return failure
+    if validated is None:  # pragma: no cover - private helper closes both variants.
+        return _result(
+            FullAccountOwnershipDisposition.STOP,
+            FullAccountOwnershipReason.ACCOUNT_FACTS_INVALID,
+        )
+    current_hash = validated.current_hash
+    validated_desired = validated.desired
+    desired_hash = validated.desired_hash
+    flat_hash = validated.flat_hash
 
     if not isinstance(predecessor_mode, FullAccountPredecessorMode):
         return _result(
@@ -952,9 +1218,11 @@ def classify_full_account_ownership(
 __all__ = [
     "DesiredContinuousTargetBinding",
     "ExpectedPredecessorCompletionBinding",
+    "ExpectedSameEventCloseCompletionBinding",
     "FullAccountOwnershipClassification",
     "FullAccountOwnershipDisposition",
     "FullAccountOwnershipReason",
     "FullAccountPredecessorMode",
     "classify_full_account_ownership",
+    "classify_same_event_close_completion",
 ]
