@@ -1161,7 +1161,18 @@ def validate_simnow_continuous_event_v1(value: Any) -> dict[str, Any]:
     official_day = _day(daily["official_day"], "daily official day")
     execution_day = _day(daily["execution_day"], "daily execution day")
     _day(daily["catalog_last_trade_day"], "catalog last trade day")
-    if monthly["execution_day"] != official_day or not official_day < execution_day:
+    monthly_execution_day = _day(monthly["execution_day"], "monthly execution day")
+    if (
+        not official_day < execution_day
+        or (
+            payload["trigger_kind"] == "MONTHLY_REBALANCE"
+            and monthly_execution_day != official_day
+        )
+        or (
+            payload["trigger_kind"] == "ROLL_ONLY"
+            and not monthly_execution_day < official_day
+        )
+    ):
         raise ContinuousEventContractError(
             "monthly/daily official execution-day ordering mismatches"
         )
@@ -1279,28 +1290,10 @@ def validate_simnow_continuous_event_v1(value: Any) -> dict[str, Any]:
             != completion_lineage["position_manager_sha256"]
             or predecessor["final_target_sha256"]
             != completion_lineage["final_target_sha256"]
-            or (
-                completion["phase"] == "CLOSE"
-                and completion["target_position_hash"] != desired_position_hash
-            )
         ):
             raise ContinuousEventContractError("predecessor is not terminal/current")
     else:
         raise ContinuousEventContractError("predecessor mode is invalid")
-    if (
-        mode == "COMPLETION"
-        and predecessor["completion_phase"] == "CLOSE"
-        and (
-            predecessor["static_core_equal_sha256"]
-            != monthly["static_core_equal_sha256"]
-            or predecessor["position_manager_sha256"]
-            != monthly["position_manager_sha256"]
-            or predecessor["final_target_sha256"] != monthly["final_target_sha256"]
-        )
-    ):
-        raise ContinuousEventContractError(
-            "predecessor lineage/root binding mismatches"
-        )
     if payload["trigger_kind"] == "ROLL_ONLY":
         if (
             mode != "COMPLETION"
