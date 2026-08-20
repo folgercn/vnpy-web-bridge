@@ -12,13 +12,16 @@ from app.core.commodity_strategy_identity import COMMODITY_FROZEN_SECTOR_MAP_V1
 from app.execution.full_account_ownership import (
     DesiredContinuousTargetBinding,
     ExpectedPredecessorCompletionBinding,
+    ExpectedSameEventCloseCompletionBinding,
     FullAccountOwnershipDisposition as Disposition,
     FullAccountOwnershipReason as Reason,
     FullAccountPredecessorMode as PredecessorMode,
     classify_full_account_ownership,
+    classify_same_event_close_completion,
 )
 from shared.commodity_execution import (
     KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+    KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
     sha256_json,
     target_position_projection_hash,
 )
@@ -379,6 +382,91 @@ def _completion(
     }
 
 
+def _same_event_close_expected(
+    desired: DesiredContinuousTargetBinding,
+    *,
+    before_positions: dict[str, dict[str, object]],
+    after_positions: dict[str, dict[str, object]],
+) -> tuple[ExpectedSameEventCloseCompletionBinding, dict[str, Any]]:
+    before_hash = target_position_projection_hash(
+        before_positions, account_scope=SCOPE, environment=ENVIRONMENT
+    )
+    after_hash = target_position_projection_hash(
+        after_positions, account_scope=SCOPE, environment=ENVIRONMENT
+    )
+    recovery = {
+        "schema_version": "web_bridge_execution_target_plan_recovery_v3",
+        "state": "INSTALLED",
+        "custody_idempotency_key": "issue362-same-event-close-0001",
+        "custody_install_idempotency_key": ("install-issue362-same-event-close-0001"),
+        "custody_version": 12,
+        "receipt_id": "receipt-issue362-same-event-close-0001",
+        "receipt_sha256": "8" * 64,
+        "artifact_id": "artifact-issue362-same-event-close-0001",
+        "artifact_sha256": "9" * 64,
+        "artifact_envelope_sha256": "a" * 64,
+        "installed": True,
+        "target_plan_schema_version": KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
+        "plan_id": "static-core-full-close-same-event-0001",
+        "plan_hash": "b" * 64,
+        "phase": "CLOSE",
+        "lineage": {
+            "static_core_equal_sha256": desired.static_core_equal_sha256,
+            "position_manager_sha256": desired.position_manager_sha256,
+            "final_target_sha256": desired.lineage_final_target_sha256,
+        },
+        "account_scope": SCOPE,
+        "environment": ENVIRONMENT,
+        "gateway_name": "CTP",
+        "generated_at": "2026-08-18T08:57:00Z",
+        "expires_at": "2026-08-18T09:07:00Z",
+        "expected_before_position_hash": before_hash,
+        "expected_after_position_hash": after_hash,
+        "order_set_sha256": "c" * 64,
+        "production_allowed": False,
+        "live_trading_authorized": False,
+        "countable_forward": False,
+        "execution_run_id": "execution-run-same-event-close-0001",
+        "creation_quote_proof_sha256": "d" * 64,
+        "start_quote_proof_state": "STARTED_MATCHED",
+        "start_quote_proof_sha256": "e" * 64,
+        "can_start_same_plan": False,
+    }
+    recovery["recovery_sha256"] = sha256_json(recovery)
+    recovery_raw = _canonical_line(recovery)
+    return (
+        ExpectedSameEventCloseCompletionBinding(
+            installed_event_id=desired.event_id,
+            installed_event_raw_sha256=desired.source_event_raw_sha256,
+            close_recovery_raw=recovery_raw,
+            close_recovery_raw_sha256=hashlib.sha256(recovery_raw).hexdigest(),
+        ),
+        recovery,
+    )
+
+
+def _same_event_close_completion_raw(
+    recovery: dict[str, Any],
+    *,
+    archived_at: str = "2026-08-18T08:59:00Z",
+) -> bytes:
+    return _canonical_line(
+        {
+            "plan_id": recovery["plan_id"],
+            "plan_hash": recovery["plan_hash"],
+            "schema_version": recovery["target_plan_schema_version"],
+            "phase": "CLOSE",
+            "lineage": recovery["lineage"],
+            "expected_after_position_hash": recovery["expected_after_position_hash"],
+            "target_position_hash": recovery["expected_after_position_hash"],
+            "archived_at": archived_at,
+            "execution_run_id": recovery["execution_run_id"],
+            "creation_quote_proof_sha256": recovery["creation_quote_proof_sha256"],
+            "start_quote_proof_sha256": recovery["start_quote_proof_sha256"],
+        }
+    )
+
+
 def _expected(
     completion: dict[str, Any],
     *,
@@ -606,6 +694,267 @@ def test_close_completion_zero_mutation_or_exact_boundary_resume() -> None:
     assert resume.disposition is Disposition.RESUME_AFTER_CLOSE
     assert resume.reason_code is Reason.CLOSE_COMPLETION_BOUNDARY_MATCHED
     assert mismatch.reason_code is Reason.COMPLETED_TARGET_POSITION_MISMATCH
+
+
+def test_same_event_close_requires_valid_fresh_rooted_boundary() -> None:
+    old_desired, before = _desired({"ag": 1}, current_month="10")
+    del old_desired
+    desired, _ = _desired({"ag": 1}, current_month="12")
+    expected, recovery = _same_event_close_expected(
+        desired,
+        before_positions=before,
+        after_positions={},
+    )
+
+    result = classify_same_event_close_completion(
+        account_facts=_facts({}),
+        expected_close=expected,
+        completion_raw=_same_event_close_completion_raw(recovery),
+        desired_target=desired,
+        now=NOW,
+    )
+
+    assert result.disposition is Disposition.RESUME_AFTER_CLOSE
+    assert result.reason_code is Reason.CLOSE_COMPLETION_BOUNDARY_MATCHED
+    assert (
+        result.predecessor_target_position_hash
+        == recovery["expected_after_position_hash"]
+    )
+
+
+def test_same_event_close_only_target_is_terminal_not_open_authority() -> None:
+    old_desired, before = _desired({"ag": 1}, current_month="10")
+    del old_desired
+    desired, _ = _desired({})
+    expected, recovery = _same_event_close_expected(
+        desired,
+        before_positions=before,
+        after_positions={},
+    )
+
+    result = classify_same_event_close_completion(
+        account_facts=_facts({}),
+        expected_close=expected,
+        completion_raw=_same_event_close_completion_raw(recovery),
+        desired_target=desired,
+        now=NOW,
+    )
+
+    assert result.disposition is Disposition.ALREADY_COMPLETED_MATCHED
+    assert result.reason_code is Reason.CLOSE_COMPLETION_TARGET_ALREADY_SATISFIED
+    assert not hasattr(result, "target_plan")
+    assert not hasattr(result, "open_authorized")
+
+
+def test_same_event_close_foreign_or_noncanonical_completion_stops() -> None:
+    _old_desired, before = _desired({"ag": 1}, current_month="10")
+    desired, _ = _desired({"ag": 1}, current_month="12")
+    expected, recovery = _same_event_close_expected(
+        desired,
+        before_positions=before,
+        after_positions={},
+    )
+    foreign = json.loads(_same_event_close_completion_raw(recovery))
+    foreign["plan_id"] = "static-core-full-close-foreign-event-0001"
+    foreign_raw = _canonical_line(foreign)
+    noncanonical_raw = json.dumps(foreign, indent=2, sort_keys=True).encode()
+
+    foreign_result = classify_same_event_close_completion(
+        account_facts=_facts({}),
+        expected_close=expected,
+        completion_raw=foreign_raw,
+        desired_target=desired,
+        now=NOW,
+    )
+    noncanonical_result = classify_same_event_close_completion(
+        account_facts=_facts({}),
+        expected_close=expected,
+        completion_raw=noncanonical_raw,
+        desired_target=desired,
+        now=NOW,
+    )
+
+    assert foreign_result.reason_code is Reason.COMPLETION_BINDING_MISMATCH
+    assert noncanonical_result.reason_code is Reason.COMPLETION_INVALID
+
+
+def test_same_event_close_missing_or_foreign_installed_event_root_stops() -> None:
+    _old_desired, before = _desired({"ag": 1}, current_month="10")
+    desired, _ = _desired({"ag": 1}, current_month="12")
+    expected, recovery = _same_event_close_expected(
+        desired,
+        before_positions=before,
+        after_positions={},
+    )
+    missing = replace(expected, installed_event_raw_sha256=None)  # type: ignore[arg-type]
+    foreign = replace(expected, installed_event_id="continuous-event-foreign-root")
+
+    missing_result = classify_same_event_close_completion(
+        account_facts=_facts({}),
+        expected_close=missing,
+        completion_raw=_same_event_close_completion_raw(recovery),
+        desired_target=desired,
+        now=NOW,
+    )
+    foreign_result = classify_same_event_close_completion(
+        account_facts=_facts({}),
+        expected_close=foreign,
+        completion_raw=_same_event_close_completion_raw(recovery),
+        desired_target=desired,
+        now=NOW,
+    )
+
+    assert missing_result.reason_code is Reason.SAME_EVENT_CLOSE_EXPECTED_INVALID
+    assert foreign_result.reason_code is Reason.SAME_EVENT_CLOSE_EVENT_ROOT_MISMATCH
+
+
+def test_same_event_close_fully_rehashed_recovery_lineage_stops() -> None:
+    _old_desired, before = _desired({"ag": 1}, current_month="10")
+    desired, _ = _desired({"ag": 1}, current_month="12")
+    expected, recovery = _same_event_close_expected(
+        desired,
+        before_positions=before,
+        after_positions={},
+    )
+    rehashed = json.loads(expected.close_recovery_raw)
+    rehashed["lineage"]["final_target_sha256"] = "f" * 64
+    rehashed["recovery_sha256"] = sha256_json(
+        {key: value for key, value in rehashed.items() if key != "recovery_sha256"}
+    )
+    rehashed_raw = _canonical_line(rehashed)
+    tampered_expected = replace(
+        expected,
+        close_recovery_raw=rehashed_raw,
+        close_recovery_raw_sha256=hashlib.sha256(rehashed_raw).hexdigest(),
+    )
+
+    result = classify_same_event_close_completion(
+        account_facts=_facts({}),
+        expected_close=tampered_expected,
+        completion_raw=_same_event_close_completion_raw(recovery),
+        desired_target=desired,
+        now=NOW,
+    )
+
+    assert result.reason_code is Reason.SAME_EVENT_CLOSE_RECOVERY_BINDING_MISMATCH
+
+
+def test_same_event_close_stale_facts_or_current_position_drift_stops() -> None:
+    _old_desired, before = _desired({"ag": 1}, current_month="10")
+    desired, _ = _desired({"ag": 1}, current_month="12")
+    expected, recovery = _same_event_close_expected(
+        desired,
+        before_positions=before,
+        after_positions={},
+    )
+    completion_raw = _same_event_close_completion_raw(recovery)
+
+    stale = classify_same_event_close_completion(
+        account_facts=_facts({}, observed_at=NOW - timedelta(seconds=61)),
+        expected_close=expected,
+        completion_raw=completion_raw,
+        desired_target=desired,
+        now=NOW,
+    )
+    drifted = classify_same_event_close_completion(
+        account_facts=_facts(before),
+        expected_close=expected,
+        completion_raw=completion_raw,
+        desired_target=desired,
+        now=NOW,
+    )
+
+    assert stale.reason_code is Reason.ACCOUNT_FACTS_STALE
+    assert drifted.reason_code is Reason.COMPLETED_TARGET_POSITION_MISMATCH
+
+
+@pytest.mark.parametrize(
+    ("facts", "reason"),
+    [
+        (
+            _facts(schema_version="web_bridge_execution_account_facts_v1"),
+            Reason.ACCOUNT_FACTS_V2_REQUIRED,
+        ),
+        (_facts(unknown_outcomes=1), Reason.ACCOUNT_UNKNOWN_OUTCOMES),
+        (
+            _facts(
+                active_orders={
+                    "same-event-active-order-0001": {
+                        "gateway_name": "CTP",
+                        "symbol": "ag2610",
+                    }
+                }
+            ),
+            Reason.ACCOUNT_ACTIVE_ORDERS,
+        ),
+        (
+            _facts(
+                send_intents={
+                    "same-event-pending-intent-0001": {
+                        "intent_id": "same-event-pending-intent-0001",
+                        "state": "PERSISTED",
+                    }
+                }
+            ),
+            Reason.ACCOUNT_SEND_INTENTS_PENDING,
+        ),
+    ],
+)
+def test_same_event_close_requires_v2_zero_open_execution_state(
+    facts: dict[str, Any], reason: Reason
+) -> None:
+    _old_desired, before = _desired({"ag": 1}, current_month="10")
+    desired, _ = _desired({"ag": 1}, current_month="12")
+    expected, recovery = _same_event_close_expected(
+        desired,
+        before_positions=before,
+        after_positions={},
+    )
+
+    result = classify_same_event_close_completion(
+        account_facts=facts,
+        expected_close=expected,
+        completion_raw=_same_event_close_completion_raw(recovery),
+        desired_target=desired,
+        now=NOW,
+    )
+
+    assert result.disposition is Disposition.STOP
+    assert result.reason_code is reason
+
+
+def test_same_event_close_rejects_fully_rehashed_actual_proof_and_future_archive() -> (
+    None
+):
+    _old_desired, before = _desired({"ag": 1}, current_month="10")
+    desired, _ = _desired({"ag": 1}, current_month="12")
+    expected, recovery = _same_event_close_expected(
+        desired,
+        before_positions=before,
+        after_positions={},
+    )
+    proof_changed = json.loads(_same_event_close_completion_raw(recovery))
+    proof_changed["start_quote_proof_sha256"] = "f" * 64
+
+    wrong_proof = classify_same_event_close_completion(
+        account_facts=_facts({}),
+        expected_close=expected,
+        completion_raw=_canonical_line(proof_changed),
+        desired_target=desired,
+        now=NOW,
+    )
+    future_archive = classify_same_event_close_completion(
+        account_facts=_facts({}),
+        expected_close=expected,
+        completion_raw=_same_event_close_completion_raw(
+            recovery, archived_at="2026-08-18T09:00:31Z"
+        ),
+        desired_target=desired,
+        now=NOW,
+    )
+
+    assert wrong_proof.reason_code is Reason.COMPLETION_BINDING_MISMATCH
+    assert future_archive.reason_code is Reason.COMPLETION_BINDING_MISMATCH
 
 
 @pytest.mark.parametrize(
