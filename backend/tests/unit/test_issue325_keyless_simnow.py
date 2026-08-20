@@ -743,6 +743,7 @@ def test_simnow_runner_image_keeps_the_real_import_closure_and_no_direct_gateway
         "backend/app/schemas/__init__.py",
         "backend/app/schemas/control_execution.py",
         "backend/app/execution/__init__.py",
+        "backend/app/execution/clock.py",
         "backend/app/execution/errors.py",
         "backend/app/execution/executable_target_adapter.py",
         "backend/app/execution/formal_tick_reader.py",
