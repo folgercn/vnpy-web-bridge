@@ -13,10 +13,10 @@ all authority remains false.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import commodity_c_fast_pure_producer_kernel as frozen
 import commodity_relative_vol_snapshot_producer as thermostat_producer
@@ -57,6 +57,9 @@ from .static_core_baseline import (
 
 EXECUTION_LANE = "simnow_shakedown"
 FINAL_TARGET_SCHEMA_VERSION = "commodity_static_core_equal_final_target_projection_v1"
+PLANNER_BUNDLE_SCHEMA_VERSION = (
+    "vnpy_research_verified_monthly_static_core_equal_planner_bundle_v1"
+)
 MAX_CONTRACT_REGISTRY_RAW_BYTES = 1024 * 1024
 MAX_FINAL_TARGET_RAW_BYTES = 4 * 1024 * 1024
 
@@ -111,6 +114,221 @@ class VerifiedMonthlyFinalTarget:
             position_manager_sha256=self.position_manager_sha256,
             baseline_batch_raw_sha256=self.baseline_batch_raw_sha256,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedMonthlyPlannerBundle:
+    """Immutable replay bytes required by the full-portfolio pure planner.
+
+    The public replay that returns this value accepts only Warehouse paths and
+    immutable root pins.  It never accepts caller-built producer artifacts or
+    claimed lineage hashes.  Mapping properties parse fresh values from the
+    exact canonical replay bytes so callers cannot mutate the retained bundle.
+    """
+
+    final_target: VerifiedMonthlyFinalTarget
+    static_core_equal_projection_raw: bytes
+    static_core_equal_projection_raw_sha256: str
+    static_core_equal_freeze_contract_raw: bytes
+    static_core_equal_freeze_contract_raw_sha256: str
+    static_core_equal_target_evidence_raw: bytes
+    static_core_equal_target_evidence_raw_sha256: str
+    position_manager_snapshot_raw: bytes
+    position_manager_snapshot_raw_sha256: str
+    authority: dict[str, bool]
+    planner_bundle_sha256: str = dataclass_field(init=False)
+
+    def __post_init__(self) -> None:
+        if type(self.final_target) is not VerifiedMonthlyFinalTarget:
+            raise VerifiedMonthlyFinalTargetError(
+                "monthly planner bundle final target type is invalid"
+            )
+        payloads = _validated_planner_bundle_payloads(self)
+        projection, _freeze, target, snapshot = payloads
+        if (
+            sha256(self.static_core_equal_projection_raw)
+            != self.final_target.static_core_equal_sha256
+            or _planner_artifact_digest(projection, "freeze_contract")
+            != self.static_core_equal_freeze_contract_raw_sha256
+            or _planner_artifact_digest(projection, "target_evidence")
+            != self.static_core_equal_target_evidence_raw_sha256
+            or self.position_manager_snapshot_raw_sha256
+            != self.final_target.position_manager_sha256
+        ):
+            raise VerifiedMonthlyFinalTargetError(
+                "monthly planner bundle is cross-spliced from another replay"
+            )
+        rebuilt_final = _final_projection(
+            target_evidence=target,
+            snapshot=snapshot,
+        )
+        if (
+            canonical_json_line(rebuilt_final) != self.final_target.final_target_raw
+            or sha256(canonical_json(rebuilt_final))
+            != self.final_target.final_target_sha256
+            or tuple(
+                (row["product"], row["target_quantity"])
+                for row in rebuilt_final["targets"]
+            )
+            != self.final_target.quantity_vector
+            or tuple(
+                (row["product"], row["exact_contract"]) for row in target["targets"]
+            )
+            != self.final_target.monthly_exact_contract_map
+            or self.authority != false_authority()
+            or self.final_target.authority != false_authority()
+        ):
+            raise VerifiedMonthlyFinalTargetError(
+                "monthly planner bundle final target binding is invalid"
+            )
+        object.__setattr__(
+            self,
+            "planner_bundle_sha256",
+            sha256(
+                canonical_json(
+                    {
+                        "schema_version": PLANNER_BUNDLE_SCHEMA_VERSION,
+                        "static_core_equal_projection_raw_sha256": (
+                            self.static_core_equal_projection_raw_sha256
+                        ),
+                        "static_core_equal_freeze_contract_raw_sha256": (
+                            self.static_core_equal_freeze_contract_raw_sha256
+                        ),
+                        "static_core_equal_target_evidence_raw_sha256": (
+                            self.static_core_equal_target_evidence_raw_sha256
+                        ),
+                        "position_manager_snapshot_raw_sha256": (
+                            self.position_manager_snapshot_raw_sha256
+                        ),
+                        "final_target_raw_sha256": (
+                            self.final_target.final_target_raw_sha256
+                        ),
+                        "current_catalog_receipt_raw_sha256": (
+                            self.final_target.current_catalog_receipt_raw_sha256
+                        ),
+                        "current_catalog_artifact_raw_sha256": (
+                            self.final_target.current_catalog_artifact_raw_sha256
+                        ),
+                        "operator_state_raw_sha256": (
+                            self.final_target.operator_state_raw_sha256
+                        ),
+                        "authority": self.authority,
+                    }
+                )
+            ),
+        )
+
+    @property
+    def static_core_equal_projection(self) -> Mapping[str, Any]:
+        return _planner_bundle_object(
+            self.static_core_equal_projection_raw,
+            "monthly planner STATIC_CORE_EQUAL projection",
+        )
+
+    @property
+    def static_core_equal_freeze_contract(self) -> Mapping[str, Any]:
+        return _planner_bundle_object(
+            self.static_core_equal_freeze_contract_raw,
+            "monthly planner STATIC_CORE_EQUAL freeze contract",
+        )
+
+    @property
+    def static_core_equal_target_evidence(self) -> Mapping[str, Any]:
+        return _planner_bundle_object(
+            self.static_core_equal_target_evidence_raw,
+            "monthly planner STATIC_CORE_EQUAL target evidence",
+        )
+
+    @property
+    def position_manager_snapshot(self) -> Mapping[str, Any]:
+        return _planner_bundle_object(
+            self.position_manager_snapshot_raw,
+            "monthly planner position-manager snapshot",
+        )
+
+    @property
+    def position_manager_sha256(self) -> str:
+        return self.position_manager_snapshot_raw_sha256
+
+
+@dataclass(frozen=True, slots=True)
+class _VerifiedMonthlyReplayEvidence:
+    final_target: VerifiedMonthlyFinalTarget
+    static_core_equal_projection_raw: bytes
+    static_core_equal_freeze_contract_raw: bytes
+    static_core_equal_target_evidence_raw: bytes
+    position_manager_snapshot_raw: bytes
+
+
+def _planner_bundle_object(raw: bytes, label: str) -> dict[str, Any]:
+    try:
+        value = parse_json_strict(raw, label)
+    except RegistryError as exc:
+        raise VerifiedMonthlyFinalTargetError(
+            f"{label} is not one canonical object"
+        ) from exc
+    if not isinstance(value, dict) or canonical_json(value) != raw:
+        raise VerifiedMonthlyFinalTargetError(f"{label} is not one canonical object")
+    return value
+
+
+def _planner_artifact_digest(projection: dict[str, Any], role: str) -> object:
+    digests = projection.get("artifact_digests")
+    if not isinstance(digests, list):
+        raise VerifiedMonthlyFinalTargetError(
+            "monthly planner bundle artifact digests are invalid"
+        )
+    matches = [
+        item.get("sha256")
+        for item in digests
+        if isinstance(item, dict) and item.get("role") == role
+    ]
+    if len(matches) != 1:
+        raise VerifiedMonthlyFinalTargetError(
+            "monthly planner bundle artifact digests are invalid"
+        )
+    return matches[0]
+
+
+def _validated_planner_bundle_payloads(
+    bundle: VerifiedMonthlyPlannerBundle,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    fields = (
+        (
+            bundle.static_core_equal_projection_raw,
+            bundle.static_core_equal_projection_raw_sha256,
+            "monthly planner STATIC_CORE_EQUAL projection",
+        ),
+        (
+            bundle.static_core_equal_freeze_contract_raw,
+            bundle.static_core_equal_freeze_contract_raw_sha256,
+            "monthly planner STATIC_CORE_EQUAL freeze contract",
+        ),
+        (
+            bundle.static_core_equal_target_evidence_raw,
+            bundle.static_core_equal_target_evidence_raw_sha256,
+            "monthly planner STATIC_CORE_EQUAL target evidence",
+        ),
+        (
+            bundle.position_manager_snapshot_raw,
+            bundle.position_manager_snapshot_raw_sha256,
+            "monthly planner position-manager snapshot",
+        ),
+    )
+    result: list[dict[str, Any]] = []
+    for raw, expected_sha256, label in fields:
+        if type(raw) is not bytes or not raw or len(raw) > MAX_FINAL_TARGET_RAW_BYTES:
+            raise VerifiedMonthlyFinalTargetError(f"{label} resource limit exceeded")
+        try:
+            normalized_sha256 = require_sha(expected_sha256, label + " hash")
+        except RegistryError as exc:
+            raise VerifiedMonthlyFinalTargetError(
+                f"{label} raw hash is invalid"
+            ) from exc
+        if normalized_sha256 != sha256(raw):
+            raise VerifiedMonthlyFinalTargetError(f"{label} raw hash changed")
+        result.append(_planner_bundle_object(raw, label))
+    return result[0], result[1], result[2], result[3]
 
 
 def _root_pins(state: OperatorState) -> dict[str, str]:
@@ -364,7 +582,7 @@ def _contract_map_sha(value: tuple[tuple[str, str], ...]) -> str:
     )
 
 
-def replay_verified_monthly_final_target(
+def _replay_verified_monthly_evidence(
     *,
     runtime_input_path: Path,
     expected_runtime_input_raw_sha256: str,
@@ -381,7 +599,7 @@ def replay_verified_monthly_final_target(
     contract_registry_path: Path,
     expected_contract_registry_raw_sha256: str,
     source_month: str,
-) -> VerifiedMonthlyFinalTarget:
+) -> _VerifiedMonthlyReplayEvidence:
     """Independently replay one monthly economic target from current custody.
 
     The current catalog proof is loaded internally and re-bound to the
@@ -588,7 +806,7 @@ def replay_verified_monthly_final_target(
             static_sha = sha256(canonical_json(static_result.producer_projection))
             position_sha = thermostat_result.snapshot_draft_sha256
             final_sha = sha256(canonical_json(projection))
-            return VerifiedMonthlyFinalTarget(
+            final_target = VerifiedMonthlyFinalTarget(
                 source_month=source_month,
                 execution_day=execution_day.isoformat(),
                 static_core_equal_sha256=static_sha,
@@ -606,9 +824,145 @@ def replay_verified_monthly_final_target(
                 operator_state_raw_sha256=state.raw_sha256,
                 authority=false_authority(),
             )
+            return _VerifiedMonthlyReplayEvidence(
+                final_target=final_target,
+                static_core_equal_projection_raw=canonical_json(
+                    static_result.producer_projection
+                ),
+                static_core_equal_freeze_contract_raw=static_result.artifacts[
+                    "freeze_contract"
+                ],
+                static_core_equal_target_evidence_raw=static_result.artifacts[
+                    "target_evidence"
+                ],
+                position_manager_snapshot_raw=thermostat_result.snapshot_draft,
+            )
     except VerifiedMonthlyFinalTargetError:
         raise
     except (KeyError, OSError, TypeError, ValueError, RegistryError) as exc:
         raise VerifiedMonthlyFinalTargetError(
             "monthly final target replay failed closed"
         ) from exc
+
+
+def replay_verified_monthly_final_target(
+    *,
+    runtime_input_path: Path,
+    expected_runtime_input_raw_sha256: str,
+    operator_state_path: Path,
+    expected_operator_state_raw_sha256: str,
+    history_receipt_path: Path,
+    expected_history_receipt_raw_sha256: str,
+    manifest_public_key_path: Path,
+    expected_manifest_public_key_raw_sha256: str,
+    signed_baseline_batch_path: Path,
+    business_public_key_path: Path,
+    expected_business_public_key_raw_sha256: str,
+    expected_business_signer_key_id: str,
+    contract_registry_path: Path,
+    expected_contract_registry_raw_sha256: str,
+    source_month: str,
+) -> VerifiedMonthlyFinalTarget:
+    """Independently replay one monthly economic target from current custody.
+
+    The current catalog proof is loaded internally and re-bound to the
+    operator state while one shared lock covers manifest verification, exact
+    raw loading and both pure-producer replays.  Missing historical bytes,
+    incomplete normal-run supplemental receipts, a source-month timing gap or
+    any root drift fails closed.
+    """
+
+    replay = _replay_verified_monthly_evidence(
+        runtime_input_path=runtime_input_path,
+        expected_runtime_input_raw_sha256=expected_runtime_input_raw_sha256,
+        operator_state_path=operator_state_path,
+        expected_operator_state_raw_sha256=expected_operator_state_raw_sha256,
+        history_receipt_path=history_receipt_path,
+        expected_history_receipt_raw_sha256=expected_history_receipt_raw_sha256,
+        manifest_public_key_path=manifest_public_key_path,
+        expected_manifest_public_key_raw_sha256=(
+            expected_manifest_public_key_raw_sha256
+        ),
+        signed_baseline_batch_path=signed_baseline_batch_path,
+        business_public_key_path=business_public_key_path,
+        expected_business_public_key_raw_sha256=(
+            expected_business_public_key_raw_sha256
+        ),
+        expected_business_signer_key_id=expected_business_signer_key_id,
+        contract_registry_path=contract_registry_path,
+        expected_contract_registry_raw_sha256=expected_contract_registry_raw_sha256,
+        source_month=source_month,
+    )
+    return replay.final_target
+
+
+def replay_verified_monthly_planner_bundle(
+    *,
+    runtime_input_path: Path,
+    expected_runtime_input_raw_sha256: str,
+    operator_state_path: Path,
+    expected_operator_state_raw_sha256: str,
+    history_receipt_path: Path,
+    expected_history_receipt_raw_sha256: str,
+    manifest_public_key_path: Path,
+    expected_manifest_public_key_raw_sha256: str,
+    signed_baseline_batch_path: Path,
+    business_public_key_path: Path,
+    expected_business_public_key_raw_sha256: str,
+    expected_business_signer_key_id: str,
+    contract_registry_path: Path,
+    expected_contract_registry_raw_sha256: str,
+    source_month: str,
+) -> VerifiedMonthlyPlannerBundle:
+    """Replay current Warehouse roots into the pure planner's exact inputs.
+
+    This Research-side bridge deliberately has the same root-pinned input
+    surface as the final-target replay.  It does not accept caller-built
+    artifact mappings, dataclasses or claimed producer hashes.
+    """
+
+    replay = _replay_verified_monthly_evidence(
+        runtime_input_path=runtime_input_path,
+        expected_runtime_input_raw_sha256=expected_runtime_input_raw_sha256,
+        operator_state_path=operator_state_path,
+        expected_operator_state_raw_sha256=expected_operator_state_raw_sha256,
+        history_receipt_path=history_receipt_path,
+        expected_history_receipt_raw_sha256=expected_history_receipt_raw_sha256,
+        manifest_public_key_path=manifest_public_key_path,
+        expected_manifest_public_key_raw_sha256=(
+            expected_manifest_public_key_raw_sha256
+        ),
+        signed_baseline_batch_path=signed_baseline_batch_path,
+        business_public_key_path=business_public_key_path,
+        expected_business_public_key_raw_sha256=(
+            expected_business_public_key_raw_sha256
+        ),
+        expected_business_signer_key_id=expected_business_signer_key_id,
+        contract_registry_path=contract_registry_path,
+        expected_contract_registry_raw_sha256=expected_contract_registry_raw_sha256,
+        source_month=source_month,
+    )
+    return VerifiedMonthlyPlannerBundle(
+        final_target=replay.final_target,
+        static_core_equal_projection_raw=(replay.static_core_equal_projection_raw),
+        static_core_equal_projection_raw_sha256=sha256(
+            replay.static_core_equal_projection_raw
+        ),
+        static_core_equal_freeze_contract_raw=(
+            replay.static_core_equal_freeze_contract_raw
+        ),
+        static_core_equal_freeze_contract_raw_sha256=sha256(
+            replay.static_core_equal_freeze_contract_raw
+        ),
+        static_core_equal_target_evidence_raw=(
+            replay.static_core_equal_target_evidence_raw
+        ),
+        static_core_equal_target_evidence_raw_sha256=sha256(
+            replay.static_core_equal_target_evidence_raw
+        ),
+        position_manager_snapshot_raw=replay.position_manager_snapshot_raw,
+        position_manager_snapshot_raw_sha256=sha256(
+            replay.position_manager_snapshot_raw
+        ),
+        authority=false_authority(),
+    )

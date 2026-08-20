@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 import base64
 import json
 import math
@@ -25,6 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from app.execution.executable_target_adapter import (
     _position_manager_final_projection,
     _static_core_equal_outputs,
+    build_full_portfolio_quote_requests,
+    build_static_core_equal_full_portfolio_keyless_decision,
 )
 import commodity_c_fast_pure_producer_kernel as frozen
 from research_warehouse.calendar_models import CalendarDay, OfficialCalendar
@@ -45,8 +47,11 @@ import research_warehouse.continuous_event_selector as selector
 from research_warehouse.verified_daily_pit_main_roll_source import (
     BuiltVerifiedDailyPitMainRollSource,
 )
+from shared.commodity_execution import KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION
 from test_research_warehouse_pit_source_view import PRODUCT_BASE, _TestAnchor, _inputs
 from test_research_warehouse_static_core_baseline import _contract_registry
+from test_issue353_static_core_keyless import _snapshot
+from test_issue362_full_portfolio_planner import _formal_quote
 
 RUNTIME_SHA = "9" * 64
 OPERATOR_SHA = "4" * 64
@@ -592,6 +597,143 @@ def test_public_replay_accepts_no_caller_built_proof_or_claimed_hash() -> None:
     assert "static_core_equal_sha256" not in parameters
     assert "position_manager_sha256" not in parameters
     assert "final_target_sha256" not in parameters
+
+    planner_parameters = inspect.signature(
+        monthly.replay_verified_monthly_planner_bundle
+    ).parameters
+    for caller_built in (
+        "final_target",
+        "static_core_equal_projection",
+        "static_core_equal_freeze_contract",
+        "static_core_equal_target_evidence",
+        "position_manager_snapshot",
+        "position_manager_sha256",
+    ):
+        assert caller_built not in planner_parameters
+
+
+def test_root_replay_planner_bundle_builds_explicit_v3_plan_without_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    kwargs, _state_value = _install_root_mocks(monkeypatch, tmp_path)
+    before = _tree(tmp_path)
+
+    bundle = monthly.replay_verified_monthly_planner_bundle(**kwargs)
+    legacy = monthly.replay_verified_monthly_final_target(**kwargs)
+
+    assert bundle.final_target == legacy
+    assert _tree(tmp_path) == before
+    assert set(bundle.authority.values()) == {False}
+    assert bundle.position_manager_sha256 == legacy.position_manager_sha256
+    assert len(bundle.planner_bundle_sha256) == 64
+
+    planner_inputs = {
+        "static_core_equal_projection": bundle.static_core_equal_projection,
+        "static_core_equal_freeze_contract": (bundle.static_core_equal_freeze_contract),
+        "static_core_equal_target_evidence": (bundle.static_core_equal_target_evidence),
+        "position_manager_snapshot": bundle.position_manager_snapshot,
+        "position_manager_sha256": bundle.position_manager_sha256,
+    }
+    now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    event_generated_at = "2030-01-01T00:00:00Z"
+    reconciliation = {"state": "RECONCILED", "unknown_outcomes": 0}
+    requirements = build_full_portfolio_quote_requests(
+        **planner_inputs,
+        current_facts=_snapshot({}),
+        reconciliation=reconciliation,
+        run_id="issue362-monthly-replay-0001",
+        event_generated_at=event_generated_at,
+        now=now,
+        target_plan_version=3,
+    )
+    quotes = {
+        row.exact_contract: _formal_quote(
+            row.exact_contract,
+            price_side=row.request.price_side,
+            price_tick=row.request.price_tick,
+            ingest_seq=index,
+            received_at_utc=event_generated_at,
+        )
+        for index, row in enumerate(requirements.requirements, start=1)
+    }
+    decision = build_static_core_equal_full_portfolio_keyless_decision(
+        **planner_inputs,
+        current_facts=_snapshot({}),
+        reconciliation=reconciliation,
+        quote_requirements=requirements,
+        formal_quotes_by_exact_contract=quotes,
+        run_id="issue362-monthly-replay-0001",
+        event_generated_at=event_generated_at,
+        expires_at="2099-01-01T00:00:00Z",
+        now=now,
+        target_plan_version=3,
+    )
+
+    assert requirements.phase == "OPEN"
+    assert requirements.input_binding.target_plan_version == 3
+    assert decision.close_handoff is None
+    assert decision.open_handoff is not None
+    assert decision.open_handoff.target_plan["schema_version"] == (
+        KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION
+    )
+    assert (
+        decision.open_handoff.target_plan["creation_quote_proof"]["start_authorized"]
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw_field", "sha_field", "mutate"),
+    (
+        (
+            "static_core_equal_projection_raw",
+            "static_core_equal_projection_raw_sha256",
+            lambda value: value.__setitem__("status", "CROSS_SPLICED"),
+        ),
+        (
+            "static_core_equal_freeze_contract_raw",
+            "static_core_equal_freeze_contract_raw_sha256",
+            lambda value: value["D_exact_contract"].__setitem__(
+                "entry", "CROSS_SPLICED"
+            ),
+        ),
+        (
+            "static_core_equal_target_evidence_raw",
+            "static_core_equal_target_evidence_raw_sha256",
+            lambda value: value.__setitem__("signal_netting", "CROSS_SPLICED"),
+        ),
+        (
+            "position_manager_snapshot_raw",
+            "position_manager_snapshot_raw_sha256",
+            lambda value: value.__setitem__("raw_scale", 0.999),
+        ),
+    ),
+)
+def test_planner_bundle_rejects_every_component_cross_splice_with_full_rehash(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    raw_field: str,
+    sha_field: str,
+    mutate,
+) -> None:
+    kwargs, _state_value = _install_root_mocks(monkeypatch, tmp_path)
+    bundle = monthly.replay_verified_monthly_planner_bundle(**kwargs)
+    spliced = json.loads(getattr(bundle, raw_field))
+    mutate(spliced)
+    spliced_raw = canonical_json(spliced)
+
+    with pytest.raises(
+        monthly.VerifiedMonthlyFinalTargetError,
+        match="cross-spliced|final target binding",
+    ):
+        replace(
+            bundle,
+            **{
+                raw_field: spliced_raw,
+                sha_field: sha256(spliced_raw),
+            },
+        )
 
 
 def test_runtime_paths_readonly_open_is_byte_stable_and_never_creates(
