@@ -14,6 +14,14 @@ from shared.artifact_contracts.v1 import (
     ContractError as ArtifactContractError,
 )
 from shared.artifact_contracts.v1 import validate_artifact_envelope
+from shared.phase_c_workflow.continuous_event_v1 import (
+    CONTINUOUS_EVENT_ARTIFACT_TYPE,
+    CONTINUOUS_EVENT_SCHEMA_VERSION,
+    CONTINUOUS_EVENT_SCOPE,
+    CONTINUOUS_EVENT_TRUST_DOMAIN,
+    ContinuousEventContractError,
+    validate_simnow_continuous_event_v1,
+)
 
 from .adapters import (
     OfflineFakeWorkflowAdapter,
@@ -23,18 +31,27 @@ from .adapters import (
 from .models import (
     AuthorizationCommandDTO,
     AuthorizationStatusDTO,
+    ContinuousEventPublicationProjectionDTO,
     CustodyCurrentVersionDTO,
     CustodyReceiptDTO,
     ExecutionProjectionDTO,
     SignedArtifactUploadDTO,
     TargetPlanPublicationProjectionDTO,
     TRUSTED_KEYLESS_TARGET_PLAN_SCHEMA_REFS,
+    TrustedKeylessContinuousEventArtifactDTO,
+    TrustedKeylessContinuousEventInstallContinuationDTO,
+    TrustedKeylessContinuousEventReceiptDTO,
+    TrustedKeylessContinuousEventUploadDTO,
     TrustedKeylessCustodyReceiptDTO,
     TrustedKeylessTargetPlanInstallContinuationDTO,
     TrustedKeylessTargetPlanUploadDTO,
 )
 
-CustodyInstallReceipt = CustodyReceiptDTO | TrustedKeylessCustodyReceiptDTO
+CustodyInstallReceipt = (
+    CustodyReceiptDTO
+    | TrustedKeylessCustodyReceiptDTO
+    | TrustedKeylessContinuousEventReceiptDTO
+)
 
 
 class PhaseCWorkflowClient(Protocol):
@@ -49,6 +66,18 @@ class PhaseCWorkflowClient(Protocol):
     def install_published_trusted_keyless_target_plan(
         self, request: TrustedKeylessTargetPlanInstallContinuationDTO
     ) -> TrustedKeylessCustodyReceiptDTO: ...
+    def install_trusted_keyless_continuous_event(
+        self, request: TrustedKeylessContinuousEventUploadDTO
+    ) -> TrustedKeylessContinuousEventReceiptDTO: ...
+    def continuous_event_publication(
+        self, idempotency_key: str
+    ) -> ContinuousEventPublicationProjectionDTO: ...
+    def install_published_trusted_keyless_continuous_event(
+        self, request: TrustedKeylessContinuousEventInstallContinuationDTO
+    ) -> TrustedKeylessContinuousEventReceiptDTO: ...
+    def installed_continuous_event(
+        self, idempotency_key: str
+    ) -> TrustedKeylessContinuousEventArtifactDTO | None: ...
     def custody_receipt(self, receipt_id: str) -> CustodyInstallReceipt | None: ...
     def custody_receipt_by_idempotency(
         self, idempotency_key: str
@@ -100,6 +129,38 @@ class OfflineFakeWorkflowClient:
         raise WorkflowAdapterError(
             "trusted keyless custody continuation is unavailable in offline fake"
         )
+
+    def install_trusted_keyless_continuous_event(
+        self, request: TrustedKeylessContinuousEventUploadDTO
+    ) -> TrustedKeylessContinuousEventReceiptDTO:
+        del request
+        raise WorkflowAdapterError(
+            "trusted keyless continuous event custody is unavailable in offline fake"
+        )
+
+    def continuous_event_publication(
+        self, idempotency_key: str
+    ) -> ContinuousEventPublicationProjectionDTO:
+        return ContinuousEventPublicationProjectionDTO(
+            state="NOT_PUBLISHED",
+            idempotency_key=idempotency_key,
+            install_idempotency_key=f"install-{idempotency_key}",
+            observed_custody_version=self.adapter.custody.version,
+        )
+
+    def install_published_trusted_keyless_continuous_event(
+        self, request: TrustedKeylessContinuousEventInstallContinuationDTO
+    ) -> TrustedKeylessContinuousEventReceiptDTO:
+        del request
+        raise WorkflowAdapterError(
+            "continuous event continuation is unavailable in offline fake"
+        )
+
+    def installed_continuous_event(
+        self, idempotency_key: str
+    ) -> TrustedKeylessContinuousEventArtifactDTO | None:
+        del idempotency_key
+        return None
 
     def custody_receipt(self, receipt_id: str) -> CustodyInstallReceipt | None:
         return self.adapter.custody.receipt(receipt_id)
@@ -316,6 +377,44 @@ class RemotePhaseCWorkflowClient:
         ) as exc:
             raise cls._unknown_mutation_response(query_path=query_path) from exc
 
+    @classmethod
+    def _event_receipt_for_request(
+        cls,
+        raw: dict[str, Any] | None,
+        *,
+        request: TrustedKeylessContinuousEventUploadDTO
+        | TrustedKeylessContinuousEventInstallContinuationDTO,
+        query_path: str,
+        custody_version: int,
+    ) -> TrustedKeylessContinuousEventReceiptDTO:
+        try:
+            receipt = TrustedKeylessContinuousEventReceiptDTO.model_validate(raw)
+            artifact = validate_artifact_envelope(request.artifact)
+            event = validate_simnow_continuous_event_v1(artifact["payload"])
+            if (
+                artifact["artifact_type"] != CONTINUOUS_EVENT_ARTIFACT_TYPE
+                or artifact["trust_domain"] != CONTINUOUS_EVENT_TRUST_DOMAIN
+                or artifact["schema_ref"] != CONTINUOUS_EVENT_SCHEMA_VERSION
+                or artifact["scope"] != CONTINUOUS_EVENT_SCOPE
+                or receipt.idempotency_key != f"install-{request.idempotency_key}"
+                or receipt.artifact_id != artifact["artifact_id"]
+                or receipt.artifact_sha256 != artifact["raw_sha256"]
+                or request.idempotency_key != event["event_id"]
+                or receipt.event_id != event["event_id"]
+                or receipt.trigger_kind != event["trigger_kind"]
+                or receipt.daily_official_day != event["daily"]["official_day"]
+                or receipt.custody_version != custody_version
+            ):
+                raise ValueError("continuous event receipt identity mismatches")
+            return receipt
+        except (
+            ArtifactContractError,
+            ContinuousEventContractError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise cls._unknown_mutation_response(query_path=query_path) from exc
+
     def custody_current_version(self) -> CustodyCurrentVersionDTO:
         try:
             with httpx.Client(
@@ -450,12 +549,127 @@ class RemotePhaseCWorkflowClient:
             custody_version=request.publish_resulting_custody_version + 1,
         )
 
+    def install_trusted_keyless_continuous_event(
+        self,
+        request: TrustedKeylessContinuousEventUploadDTO,
+    ) -> TrustedKeylessContinuousEventReceiptDTO:
+        query_path = (
+            "/internal/v1/continuous-event-publications/by-idempotency/"
+            f"{request.idempotency_key}"
+        )
+        raw = self._request(
+            self.settings.custody_url,
+            self.settings.custody_secret,
+            "POST",
+            "/internal/v1/publish-keyless-simnow-continuous-event",
+            request.model_dump(mode="json"),
+            mutation=True,
+            unknown_query_path=query_path,
+        )
+        return self._event_receipt_for_request(
+            raw,
+            request=request,
+            query_path=query_path,
+            custody_version=request.expected_custody_version + 2,
+        )
+
+    def continuous_event_publication(
+        self,
+        idempotency_key: str,
+    ) -> ContinuousEventPublicationProjectionDTO:
+        raw = self._request(
+            self.settings.custody_url,
+            self.settings.custody_secret,
+            "GET",
+            "/internal/v1/continuous-event-publications/by-idempotency/"
+            f"{idempotency_key}",
+        )
+        try:
+            projection = ContinuousEventPublicationProjectionDTO.model_validate(raw)
+        except (TypeError, ValueError) as exc:
+            raise WorkflowAdapterError(
+                "private Phase C continuous event publication response is invalid",
+                code="PHASE_C_RESPONSE_BINDING_INVALID",
+                status_code=502,
+                retryable=False,
+            ) from exc
+        if projection.idempotency_key != idempotency_key or (
+            projection.state != "NOT_PUBLISHED"
+            and projection.event_id != idempotency_key
+        ):
+            raise WorkflowAdapterError(
+                "private Phase C continuous event publication key mismatches",
+                code="PHASE_C_RESPONSE_BINDING_INVALID",
+                status_code=502,
+                retryable=False,
+            )
+        return projection
+
+    def install_published_trusted_keyless_continuous_event(
+        self,
+        request: TrustedKeylessContinuousEventInstallContinuationDTO,
+    ) -> TrustedKeylessContinuousEventReceiptDTO:
+        query_path = (
+            "/internal/v1/continuous-event-publications/by-idempotency/"
+            f"{request.idempotency_key}"
+        )
+        raw = self._request(
+            self.settings.custody_url,
+            self.settings.custody_secret,
+            "POST",
+            "/internal/v1/install-published-keyless-simnow-continuous-event",
+            request.model_dump(mode="json"),
+            mutation=True,
+            unknown_query_path=query_path,
+        )
+        return self._event_receipt_for_request(
+            raw,
+            request=request,
+            query_path=query_path,
+            custody_version=request.publish_resulting_custody_version + 1,
+        )
+
+    def installed_continuous_event(
+        self,
+        idempotency_key: str,
+    ) -> TrustedKeylessContinuousEventArtifactDTO | None:
+        raw = self._request(
+            self.settings.custody_url,
+            self.settings.custody_secret,
+            "GET",
+            f"/internal/v1/continuous-events/by-idempotency/{idempotency_key}",
+        )
+        if raw is None:
+            return None
+        try:
+            result = TrustedKeylessContinuousEventArtifactDTO.model_validate(raw)
+        except (TypeError, ValueError) as exc:
+            raise WorkflowAdapterError(
+                "private Phase C continuous event response is invalid",
+                code="PHASE_C_RESPONSE_BINDING_INVALID",
+                status_code=502,
+                retryable=False,
+            ) from exc
+        if (
+            result.idempotency_key != idempotency_key
+            or result.artifact["payload"]["event_id"] != idempotency_key
+        ):
+            raise WorkflowAdapterError(
+                "private Phase C continuous event key mismatches",
+                code="PHASE_C_RESPONSE_BINDING_INVALID",
+                status_code=502,
+                retryable=False,
+            )
+        return result
+
     @staticmethod
     def _custody_receipt(raw: dict[str, Any] | None) -> CustodyInstallReceipt | None:
         if raw is None:
             return None
         if raw.get("schema_ref") in TRUSTED_KEYLESS_TARGET_PLAN_SCHEMA_REFS:
             return TrustedKeylessCustodyReceiptDTO.model_validate(raw)
+        if raw.get("schema_ref") == CONTINUOUS_EVENT_SCHEMA_VERSION:
+            return TrustedKeylessContinuousEventReceiptDTO.model_validate(raw)
         return CustodyReceiptDTO.model_validate(raw)
 
     def custody_receipt(self, receipt_id: str) -> CustodyInstallReceipt | None:
@@ -553,6 +767,30 @@ class UnconfiguredPhaseCWorkflowClient:
         self, request: TrustedKeylessTargetPlanInstallContinuationDTO
     ) -> TrustedKeylessCustodyReceiptDTO:
         del request
+        self._unavailable()
+
+    def install_trusted_keyless_continuous_event(
+        self, request: TrustedKeylessContinuousEventUploadDTO
+    ) -> TrustedKeylessContinuousEventReceiptDTO:
+        del request
+        self._unavailable()
+
+    def continuous_event_publication(
+        self, idempotency_key: str
+    ) -> ContinuousEventPublicationProjectionDTO:
+        del idempotency_key
+        self._unavailable()
+
+    def install_published_trusted_keyless_continuous_event(
+        self, request: TrustedKeylessContinuousEventInstallContinuationDTO
+    ) -> TrustedKeylessContinuousEventReceiptDTO:
+        del request
+        self._unavailable()
+
+    def installed_continuous_event(
+        self, idempotency_key: str
+    ) -> TrustedKeylessContinuousEventArtifactDTO | None:
+        del idempotency_key
         self._unavailable()
 
     def custody_receipt(self, receipt_id: str) -> CustodyInstallReceipt | None:

@@ -18,6 +18,8 @@ from app.phase_c.adapters import WorkflowAdapterError
 from app.phase_c.client import phase_c_workflow_client
 from app.phase_c.models import (
     AuthorizationCommandDTO,
+    TrustedKeylessContinuousEventInstallContinuationDTO,
+    TrustedKeylessContinuousEventUploadDTO,
     SignedArtifactUploadDTO,
     SigningRequestCreateDTO,
     TrustedKeylessTargetPlanInstallContinuationDTO,
@@ -128,6 +130,69 @@ def install_published_keyless_simnow_target_plan(
         )
     except WorkflowAdapterError as exc:
         raise _adapter_error(exc) from exc
+    return ok(result.model_dump(mode="json"))
+
+
+@router.post("/artifacts/upload-keyless-simnow-continuous-event")
+def upload_keyless_simnow_continuous_event(
+    payload: TrustedKeylessContinuousEventUploadDTO,
+    _: Admin,
+) -> dict[str, Any]:
+    """Forward one verified event to custody without granting plan authority."""
+
+    try:
+        result = phase_c_workflow_client.install_trusted_keyless_continuous_event(
+            payload
+        )
+    except WorkflowAdapterError as exc:
+        raise _adapter_error(exc) from exc
+    return ok(result.model_dump(mode="json"))
+
+
+@router.get("/custody/continuous-event-publications/{idempotency_key}")
+def continuous_event_publication(
+    idempotency_key: str,
+    _: Reader,
+) -> dict[str, Any]:
+    try:
+        result = phase_c_workflow_client.continuous_event_publication(idempotency_key)
+    except WorkflowAdapterError as exc:
+        raise _adapter_error(exc) from exc
+    return ok(result.model_dump(mode="json"))
+
+
+@router.post("/custody/install-published-keyless-simnow-continuous-event")
+def install_published_keyless_simnow_continuous_event(
+    payload: TrustedKeylessContinuousEventInstallContinuationDTO,
+    _: Admin,
+) -> dict[str, Any]:
+    try:
+        result = (
+            phase_c_workflow_client.install_published_trusted_keyless_continuous_event(
+                payload
+            )
+        )
+    except WorkflowAdapterError as exc:
+        raise _adapter_error(exc) from exc
+    return ok(result.model_dump(mode="json"))
+
+
+@router.get("/custody/continuous-events/{idempotency_key}")
+def installed_continuous_event(
+    idempotency_key: str,
+    _: Reader,
+) -> dict[str, Any]:
+    try:
+        result = phase_c_workflow_client.installed_continuous_event(idempotency_key)
+    except WorkflowAdapterError as exc:
+        raise _adapter_error(exc) from exc
+    if result is None:
+        raise AppError(
+            "continuous event 尚未安装",
+            code="PHASE_C_CONTINUOUS_EVENT_NOT_INSTALLED",
+            status_code=404,
+            detail={"fail_closed": True},
+        )
     return ok(result.model_dump(mode="json"))
 
 
