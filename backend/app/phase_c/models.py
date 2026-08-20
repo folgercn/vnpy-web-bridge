@@ -6,10 +6,21 @@ code.  Control only forwards these values to independently owned adapters.
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from shared.artifact_contracts.v1 import validate_artifact_envelope
+from shared.phase_c_workflow.continuous_event_v1 import (
+    CONTINUOUS_EVENT_ARTIFACT_TYPE,
+    CONTINUOUS_EVENT_SCHEMA_VERSION,
+    CONTINUOUS_EVENT_SCOPE,
+    CONTINUOUS_EVENT_TRUST_DOMAIN,
+    canonical_json_line,
+    sha256_bytes,
+    validate_simnow_continuous_event_v1,
+)
 from shared.phase_c_workflow.v1 import (
     AUTHORIZATION_COMMAND_SCHEMA_VERSION,
     FALSE_AUTHORITY_FLAGS,
@@ -25,6 +36,18 @@ TRUSTED_KEYLESS_TARGET_PLAN_SCHEMA_REFS = frozenset(
         TRUSTED_KEYLESS_TARGET_PLAN_V3_SCHEMA_REF,
     }
 )
+TRUSTED_KEYLESS_CONTINUOUS_EVENT_SCHEMA_REF = CONTINUOUS_EVENT_SCHEMA_VERSION
+
+
+def _canonical_day(value: str | None, label: str) -> None:
+    if not isinstance(value, str):
+        raise ValueError(f"{label} is invalid")
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{label} is invalid") from exc
+    if parsed.isoformat() != value:
+        raise ValueError(f"{label} is not canonical")
 
 
 class StrictDTO(BaseModel):
@@ -35,6 +58,14 @@ class AuthorityNegativeDTO(StrictDTO):
     production_allowed: Literal[False] = False
     live_trading_authorized: Literal[False] = False
     countable_forward: Literal[False] = False
+
+
+class ContinuousEventAuthorityNegativeDTO(AuthorityNegativeDTO):
+    official_forward_claimed: Literal[False] = False
+    target_plan_authorized: Literal[False] = False
+    dispatch_authorized: Literal[False] = False
+    order_authorized: Literal[False] = False
+    position_mutation_authorized: Literal[False] = False
 
 
 class SigningRequestCreateDTO(StrictDTO):
@@ -115,6 +146,315 @@ class TrustedKeylessTargetPlanInstallContinuationDTO(StrictDTO):
             != self.publish_expected_custody_version + 1
         ):
             raise ValueError("publish custody versions are not adjacent")
+        return self
+
+
+class TrustedKeylessContinuousEventUploadDTO(StrictDTO):
+    """Publish/install one strict, authority-negative continuous event."""
+
+    idempotency_key: str = Field(
+        min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    )
+    expected_custody_version: int = Field(ge=0)
+    correlation_id: str = Field(
+        min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    )
+    artifact: dict[str, Any]
+
+
+class TrustedKeylessContinuousEventInstallContinuationDTO(StrictDTO):
+    """Install-only continuation for one already-published event."""
+
+    idempotency_key: str = Field(
+        min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    )
+    correlation_id: str = Field(
+        min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    )
+    publish_receipt_id: str = Field(
+        min_length=8, max_length=192, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    )
+    publish_receipt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    publish_expected_custody_version: int = Field(ge=0)
+    publish_resulting_custody_version: int = Field(ge=1)
+    artifact: dict[str, Any]
+
+    @model_validator(mode="after")
+    def _publish_versions_are_adjacent(
+        self,
+    ) -> TrustedKeylessContinuousEventInstallContinuationDTO:
+        if (
+            self.publish_resulting_custody_version
+            != self.publish_expected_custody_version + 1
+        ):
+            raise ValueError("event publish custody versions are not adjacent")
+        return self
+
+
+class ContinuousEventPublicationProjectionDTO(ContinuousEventAuthorityNegativeDTO):
+    """Pins-only three-state recovery projection for one continuous event."""
+
+    schema_version: Literal["phase-c-continuous-event-publication-v1"] = (
+        "phase-c-continuous-event-publication-v1"
+    )
+    state: Literal["NOT_PUBLISHED", "PUBLISHED_NOT_INSTALLED", "INSTALLED"]
+    idempotency_key: str = Field(
+        min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    )
+    install_idempotency_key: str = Field(
+        min_length=16, max_length=136, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    )
+    observed_custody_version: int = Field(ge=0)
+    custody_state_owner: Literal["artifact-custody"] = "artifact-custody"
+    publisher_principal: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    )
+    correlation_id: Optional[str] = Field(
+        default=None,
+        min_length=8,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$",
+    )
+    artifact_id: Optional[str] = Field(
+        default=None,
+        min_length=8,
+        max_length=192,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$",
+    )
+    artifact_canonical_sha256: Optional[str] = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    artifact_raw_sha256: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    artifact_schema_ref: Optional[Literal[CONTINUOUS_EVENT_SCHEMA_VERSION]] = None
+    event_id: Optional[str] = Field(
+        default=None,
+        min_length=8,
+        max_length=192,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$",
+    )
+    source_event_raw_sha256: Optional[str] = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    selection_id: Optional[str] = Field(
+        default=None,
+        min_length=8,
+        max_length=192,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$",
+    )
+    selection_sha256: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    selection_raw_sha256: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    candidate_id: Optional[str] = Field(
+        default=None,
+        min_length=8,
+        max_length=192,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$",
+    )
+    trigger_kind: Optional[Literal["MONTHLY_REBALANCE", "ROLL_ONLY"]] = None
+    monthly_final_target_sha256: Optional[str] = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    daily_artifact_id: Optional[str] = Field(
+        default=None,
+        min_length=8,
+        max_length=192,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$",
+    )
+    daily_artifact_raw_sha256: Optional[str] = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    daily_official_day: Optional[str] = Field(
+        default=None, min_length=10, max_length=10
+    )
+    desired_target_position_hash: Optional[str] = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    account_facts_id: Optional[str] = Field(
+        default=None,
+        min_length=8,
+        max_length=192,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$",
+    )
+    account_facts_sha256: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    predecessor_mode: Optional[Literal["GENESIS_FLAT", "COMPLETION"]] = None
+    predecessor_terminal_target_id: Optional[str] = Field(
+        default=None,
+        min_length=8,
+        max_length=192,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$",
+    )
+    predecessor_terminal_target_raw_sha256: Optional[str] = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    publish_receipt_id: Optional[str] = Field(
+        default=None,
+        min_length=8,
+        max_length=192,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$",
+    )
+    publish_receipt_sha256: Optional[str] = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    publish_expected_custody_version: Optional[int] = Field(default=None, ge=0)
+    publish_resulting_custody_version: Optional[int] = Field(default=None, ge=1)
+    install_receipt_id: Optional[str] = Field(
+        default=None,
+        min_length=8,
+        max_length=192,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$",
+    )
+    install_receipt_sha256: Optional[str] = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    install_expected_custody_version: Optional[int] = Field(default=None, ge=1)
+    install_resulting_custody_version: Optional[int] = Field(default=None, ge=2)
+
+    @model_validator(mode="after")
+    def _state_has_exact_evidence(self) -> ContinuousEventPublicationProjectionDTO:
+        if self.install_idempotency_key != f"install-{self.idempotency_key}":
+            raise ValueError("event install idempotency does not bind publication")
+        publication = (
+            self.publisher_principal,
+            self.correlation_id,
+            self.artifact_id,
+            self.artifact_canonical_sha256,
+            self.artifact_raw_sha256,
+            self.artifact_schema_ref,
+            self.event_id,
+            self.source_event_raw_sha256,
+            self.selection_id,
+            self.selection_sha256,
+            self.selection_raw_sha256,
+            self.candidate_id,
+            self.trigger_kind,
+            self.monthly_final_target_sha256,
+            self.daily_artifact_id,
+            self.daily_artifact_raw_sha256,
+            self.daily_official_day,
+            self.desired_target_position_hash,
+            self.account_facts_id,
+            self.account_facts_sha256,
+            self.predecessor_mode,
+            self.publish_receipt_id,
+            self.publish_receipt_sha256,
+            self.publish_expected_custody_version,
+            self.publish_resulting_custody_version,
+        )
+        installation = (
+            self.install_receipt_id,
+            self.install_receipt_sha256,
+            self.install_expected_custody_version,
+            self.install_resulting_custody_version,
+        )
+        if self.state == "NOT_PUBLISHED":
+            if any(value is not None for value in publication + installation) or any(
+                value is not None
+                for value in (
+                    self.predecessor_terminal_target_id,
+                    self.predecessor_terminal_target_raw_sha256,
+                )
+            ):
+                raise ValueError("unpublished event contains custody evidence")
+            return self
+        if any(value is None for value in publication):
+            raise ValueError("published event lacks custody evidence")
+        if self.event_id != self.idempotency_key:
+            raise ValueError("published event ID does not bind idempotency")
+        _canonical_day(self.daily_official_day, "event daily official day")
+        if (
+            self.publish_resulting_custody_version
+            != self.publish_expected_custody_version + 1  # type: ignore[operator]
+            or self.observed_custody_version < self.publish_resulting_custody_version  # type: ignore[operator]
+        ):
+            raise ValueError("event publish custody versions are invalid")
+        terminal = (
+            self.predecessor_terminal_target_id,
+            self.predecessor_terminal_target_raw_sha256,
+        )
+        if self.predecessor_mode == "GENESIS_FLAT" and any(
+            value is not None for value in terminal
+        ):
+            raise ValueError("Genesis event carries terminal predecessor pins")
+        if self.predecessor_mode == "COMPLETION" and any(
+            value is None for value in terminal
+        ):
+            raise ValueError("completion event lacks terminal predecessor pins")
+        if self.state == "PUBLISHED_NOT_INSTALLED":
+            if any(value is not None for value in installation):
+                raise ValueError("uninstalled event contains install evidence")
+            return self
+        if any(value is None for value in installation) or (
+            self.install_expected_custody_version
+            != self.publish_resulting_custody_version
+            or self.install_resulting_custody_version
+            != self.install_expected_custody_version + 1  # type: ignore[operator]
+            or self.observed_custody_version < self.install_resulting_custody_version  # type: ignore[operator]
+        ):
+            raise ValueError("event install custody versions are invalid")
+        return self
+
+
+class TrustedKeylessContinuousEventReceiptDTO(ContinuousEventAuthorityNegativeDTO):
+    """Install receipt that can never be presented as TargetPlan authority."""
+
+    receipt_id: str
+    receipt_type: Literal["install"]
+    artifact_id: str
+    artifact_type: Literal[CONTINUOUS_EVENT_ARTIFACT_TYPE]
+    trust_domain: Literal[CONTINUOUS_EVENT_TRUST_DOMAIN]
+    schema_ref: Literal[CONTINUOUS_EVENT_SCHEMA_VERSION]
+    artifact_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    event_id: str
+    trigger_kind: Literal["MONTHLY_REBALANCE", "ROLL_ONLY"]
+    daily_official_day: str = Field(min_length=10, max_length=10)
+    custody_version: int = Field(ge=1)
+    idempotency_key: str
+    verified: Literal[True]
+    installed: Literal[True]
+    custody_writer: Literal["artifact-custody"]
+
+    @model_validator(mode="after")
+    def _event_id_binds_install_idempotency(
+        self,
+    ) -> TrustedKeylessContinuousEventReceiptDTO:
+        if self.idempotency_key != f"install-{self.event_id}":
+            raise ValueError("event receipt ID does not bind idempotency")
+        _canonical_day(self.daily_official_day, "event receipt daily official day")
+        return self
+
+
+class TrustedKeylessContinuousEventArtifactDTO(ContinuousEventAuthorityNegativeDTO):
+    """Control-only readback of one strict event envelope."""
+
+    schema_version: Literal["phase-c-continuous-event-artifact-v1"] = (
+        "phase-c-continuous-event-artifact-v1"
+    )
+    idempotency_key: str = Field(
+        min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    )
+    artifact_id: str
+    artifact_raw_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    artifact: dict[str, Any]
+
+    @model_validator(mode="after")
+    def _artifact_is_exact_event(self) -> TrustedKeylessContinuousEventArtifactDTO:
+        envelope = validate_artifact_envelope(self.artifact)
+        payload = validate_simnow_continuous_event_v1(envelope["payload"])
+        if (
+            envelope["artifact_id"] != self.artifact_id
+            or sha256_bytes(canonical_json_line(envelope)) != self.artifact_raw_sha256
+            or envelope["artifact_type"] != CONTINUOUS_EVENT_ARTIFACT_TYPE
+            or envelope["trust_domain"] != CONTINUOUS_EVENT_TRUST_DOMAIN
+            or envelope["schema_ref"] != CONTINUOUS_EVENT_SCHEMA_VERSION
+            or envelope["scope"] != CONTINUOUS_EVENT_SCOPE
+            or envelope["generated_at"] != payload["verified_at"]
+            or payload["event_id"] != self.idempotency_key
+            or envelope["predecessor_refs"]
+            or envelope["lineage"]
+        ):
+            raise ValueError("continuous event artifact identity mismatches")
         return self
 
 
