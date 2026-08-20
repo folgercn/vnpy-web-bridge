@@ -28,6 +28,7 @@ from app.phase_c.adapters import (
     WorkflowAdapterError,
 )
 from app.phase_c.models import (
+    ContinuousEventHeadDTO,
     ContinuousEventPublicationProjectionDTO,
     CustodyCurrentVersionDTO,
     CustodyReceiptDTO,
@@ -95,6 +96,7 @@ class CustodyWriterBusyError(WorkflowAdapterError):
 
 
 _PHASE_IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
+_HEAD_REQUEST_NONCE_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 _RETRYABLE_CUSTODY_READ_CODES = frozenset(
@@ -794,6 +796,95 @@ class ArtifactCustodyService:
             custody_writer="artifact-custody",
         )
 
+    def _continuous_event_projection_from_receipts(
+        self,
+        *,
+        published: dict[str, Any],
+        installed: dict[str, Any] | None,
+        artifact: dict[str, Any],
+        observed_version: int,
+    ) -> ContinuousEventPublicationProjectionDTO:
+        try:
+            artifact, event = self._trusted_keyless_continuous_event(artifact)
+        except WorkflowAdapterError as exc:
+            raise CustodyEvidenceReadError(
+                "custody continuous event publication artifact is invalid"
+            ) from exc
+        key = str(event["event_id"])
+        install_key = f"install-{key}"
+        self._assert_receipt_artifact_binding(
+            published,
+            artifact,
+            receipt_type="publish",
+            idempotency_key=key,
+        )
+        if installed is not None:
+            self._assert_receipt_artifact_binding(
+                installed,
+                artifact,
+                receipt_type="install",
+                idempotency_key=install_key,
+            )
+            if (
+                installed.get("actor_id") != published.get("actor_id")
+                or installed.get("correlation_id") != published.get("correlation_id")
+                or installed.get("expected_version")
+                != published.get("resulting_version")
+            ):
+                raise CustodyEvidenceReadError(
+                    "custody continuous event install lineage is invalid"
+                )
+        monthly = event["monthly"]
+        daily = event["daily"]
+        desired = event["desired_target"]
+        facts = event["account_facts"]
+        predecessor = event["predecessor"]
+        common: dict[str, Any] = {
+            "state": "INSTALLED"
+            if installed is not None
+            else "PUBLISHED_NOT_INSTALLED",
+            "idempotency_key": key,
+            "install_idempotency_key": install_key,
+            "observed_custody_version": observed_version,
+            "publisher_principal": published["actor_id"],
+            "correlation_id": published["correlation_id"],
+            "artifact_id": artifact["artifact_id"],
+            "artifact_canonical_sha256": artifact["canonical_sha256"],
+            "artifact_raw_sha256": artifact["raw_sha256"],
+            "artifact_schema_ref": artifact["schema_ref"],
+            "event_id": event["event_id"],
+            "source_event_raw_sha256": event["source_event_raw_sha256"],
+            "selection_id": event["selection_id"],
+            "selection_sha256": event["selection_sha256"],
+            "selection_raw_sha256": event["selection_raw_sha256"],
+            "candidate_id": event["candidate_id"],
+            "trigger_kind": event["trigger_kind"],
+            "monthly_final_target_sha256": monthly["final_target_sha256"],
+            "daily_artifact_id": daily["artifact_id"],
+            "daily_artifact_raw_sha256": daily["artifact_raw_sha256"],
+            "daily_official_day": daily["official_day"],
+            "desired_target_position_hash": desired["target_position_hash"],
+            "account_facts_id": facts["snapshot_id"],
+            "account_facts_sha256": facts["account_facts_sha256"],
+            "predecessor_mode": predecessor["mode"],
+            "predecessor_terminal_target_id": predecessor["terminal_target_id"],
+            "predecessor_terminal_target_raw_sha256": predecessor[
+                "terminal_target_raw_sha256"
+            ],
+            "publish_receipt_id": published["receipt_id"],
+            "publish_receipt_sha256": self._receipt_sha256(published),
+            "publish_expected_custody_version": published["expected_version"],
+            "publish_resulting_custody_version": published["resulting_version"],
+        }
+        if installed is not None:
+            common.update(
+                install_receipt_id=installed["receipt_id"],
+                install_receipt_sha256=self._receipt_sha256(installed),
+                install_expected_custody_version=installed["expected_version"],
+                install_resulting_custody_version=installed["resulting_version"],
+            )
+        return ContinuousEventPublicationProjectionDTO.model_validate(common)
+
     def publish_trusted_keyless_continuous_event(
         self,
         payload: TrustedKeylessContinuousEventUploadDTO,
@@ -873,89 +964,12 @@ class ArtifactCustodyService:
                         observed_custody_version=observed_version,
                     )
                 artifact = custody.read_artifact(str(published["artifact_id"]))
-                try:
-                    artifact, event = self._trusted_keyless_continuous_event(artifact)
-                except WorkflowAdapterError as exc:
-                    raise CustodyEvidenceReadError(
-                        "custody continuous event publication artifact is invalid"
-                    ) from exc
-                self._assert_receipt_artifact_binding(
-                    published,
-                    artifact,
-                    receipt_type="publish",
-                    idempotency_key=key,
+                return self._continuous_event_projection_from_receipts(
+                    published=published,
+                    installed=installed,
+                    artifact=artifact,
+                    observed_version=observed_version,
                 )
-                if installed is not None:
-                    self._assert_receipt_artifact_binding(
-                        installed,
-                        artifact,
-                        receipt_type="install",
-                        idempotency_key=install_key,
-                    )
-                    if (
-                        installed.get("actor_id") != published.get("actor_id")
-                        or installed.get("correlation_id")
-                        != published.get("correlation_id")
-                        or installed.get("expected_version")
-                        != published.get("resulting_version")
-                    ):
-                        raise CustodyEvidenceReadError(
-                            "custody continuous event install lineage is invalid"
-                        )
-                monthly = event["monthly"]
-                daily = event["daily"]
-                desired = event["desired_target"]
-                facts = event["account_facts"]
-                predecessor = event["predecessor"]
-                common: dict[str, Any] = {
-                    "state": (
-                        "INSTALLED"
-                        if installed is not None
-                        else "PUBLISHED_NOT_INSTALLED"
-                    ),
-                    "idempotency_key": key,
-                    "install_idempotency_key": install_key,
-                    "observed_custody_version": observed_version,
-                    "publisher_principal": published["actor_id"],
-                    "correlation_id": published["correlation_id"],
-                    "artifact_id": artifact["artifact_id"],
-                    "artifact_canonical_sha256": artifact["canonical_sha256"],
-                    "artifact_raw_sha256": artifact["raw_sha256"],
-                    "artifact_schema_ref": artifact["schema_ref"],
-                    "event_id": event["event_id"],
-                    "source_event_raw_sha256": event["source_event_raw_sha256"],
-                    "selection_id": event["selection_id"],
-                    "selection_sha256": event["selection_sha256"],
-                    "selection_raw_sha256": event["selection_raw_sha256"],
-                    "candidate_id": event["candidate_id"],
-                    "trigger_kind": event["trigger_kind"],
-                    "monthly_final_target_sha256": monthly["final_target_sha256"],
-                    "daily_artifact_id": daily["artifact_id"],
-                    "daily_artifact_raw_sha256": daily["artifact_raw_sha256"],
-                    "daily_official_day": daily["official_day"],
-                    "desired_target_position_hash": desired["target_position_hash"],
-                    "account_facts_id": facts["snapshot_id"],
-                    "account_facts_sha256": facts["account_facts_sha256"],
-                    "predecessor_mode": predecessor["mode"],
-                    "predecessor_terminal_target_id": predecessor["terminal_target_id"],
-                    "predecessor_terminal_target_raw_sha256": predecessor[
-                        "terminal_target_raw_sha256"
-                    ],
-                    "publish_receipt_id": published["receipt_id"],
-                    "publish_receipt_sha256": self._receipt_sha256(published),
-                    "publish_expected_custody_version": published["expected_version"],
-                    "publish_resulting_custody_version": published["resulting_version"],
-                }
-                if installed is not None:
-                    common.update(
-                        install_receipt_id=installed["receipt_id"],
-                        install_receipt_sha256=self._receipt_sha256(installed),
-                        install_expected_custody_version=installed["expected_version"],
-                        install_resulting_custody_version=installed[
-                            "resulting_version"
-                        ],
-                    )
-                return ContinuousEventPublicationProjectionDTO.model_validate(common)
         except CustodyEvidenceReadError:
             raise
         except CustodyError as exc:
@@ -968,6 +982,193 @@ class ArtifactCustodyService:
         except (KeyError, TypeError, ValueError) as exc:
             raise CustodyEvidenceReadError(
                 "custody continuous event publication evidence is invalid"
+            ) from exc
+
+    def continuous_event_head(self, *, request_nonce: str) -> ContinuousEventHeadDTO:
+        """Derive the unique current event from the fully audited custody chain."""
+
+        if (
+            not isinstance(request_nonce, str)
+            or _HEAD_REQUEST_NONCE_RE.fullmatch(request_nonce) is None
+        ):
+            raise WorkflowAdapterError(
+                "continuous event head request nonce is invalid",
+                code="PHASE_C_RESPONSE_BINDING_INVALID",
+                status_code=422,
+                retryable=False,
+            )
+        if self._read_root_absent():
+            return ContinuousEventHeadDTO.sealed(
+                custody_secret=self.settings.secret,
+                state="NO_EVENT",
+                request_nonce=request_nonce,
+                observed_custody_version=0,
+            )
+        try:
+            with self._custody(read_only=True) as custody:
+                snapshot = custody.read_audited_snapshot()
+                observed_version = snapshot.version
+                receipts = snapshot.receipts
+                events: list[dict[str, Any]] = []
+                by_artifact: dict[str, dict[str, Any]] = {}
+                for receipt in receipts:
+                    event_shaped = (
+                        receipt.get("artifact_type") == CONTINUOUS_EVENT_ARTIFACT_TYPE
+                        or receipt.get("schema_ref") == CONTINUOUS_EVENT_SCHEMA_VERSION
+                    )
+                    if not event_shaped:
+                        continue
+                    receipt_type = receipt.get("receipt_type")
+                    artifact_id = str(receipt.get("artifact_id", ""))
+                    if receipt_type == "publish":
+                        if artifact_id in by_artifact:
+                            raise CustodyEvidenceReadError(
+                                "custody continuous event publication is duplicated"
+                            )
+                        artifact = snapshot.artifacts.get(artifact_id)
+                        if artifact is None:
+                            raise CustodyEvidenceReadError(
+                                "custody continuous event artifact is missing"
+                            )
+                        try:
+                            artifact, event = self._trusted_keyless_continuous_event(
+                                artifact
+                            )
+                        except WorkflowAdapterError as exc:
+                            raise CustodyEvidenceReadError(
+                                "custody continuous event head artifact is invalid"
+                            ) from exc
+                        if receipt.get("actor_id") != "control-api":
+                            raise CustodyEvidenceReadError(
+                                "custody continuous event publisher is not Control"
+                            )
+                        self._assert_receipt_artifact_binding(
+                            receipt,
+                            artifact,
+                            receipt_type="publish",
+                            idempotency_key=event["event_id"],
+                        )
+                        official_day = str(event["daily"]["official_day"])
+                        if events:
+                            previous = events[-1]["event"]
+                            previous_day = str(previous["daily"]["official_day"])
+                            if official_day == previous_day:
+                                raise CustodyEvidenceReadError(
+                                    "custody continuous event head has a same-day conflict"
+                                )
+                            if official_day < previous_day:
+                                raise CustodyEvidenceReadError(
+                                    "custody continuous event official day rolled back"
+                                )
+                            if (
+                                event["daily"]["previous_exact_contract_map_sha256"]
+                                != previous["daily"]["exact_contract_map_sha256"]
+                            ):
+                                raise CustodyEvidenceReadError(
+                                    "custody continuous event chain is cross-spliced"
+                                )
+                        item = {
+                            "published": receipt,
+                            "installed": None,
+                            "artifact": artifact,
+                            "event": event,
+                        }
+                        events.append(item)
+                        by_artifact[artifact_id] = item
+                        continue
+                    if receipt_type != "install":
+                        raise CustodyEvidenceReadError(
+                            "custody continuous event lifecycle is invalid"
+                        )
+                    item = by_artifact.get(artifact_id)
+                    if item is None or item["installed"] is not None:
+                        raise CustodyEvidenceReadError(
+                            "custody continuous event install is cross-spliced"
+                        )
+                    published = item["published"]
+                    event = item["event"]
+                    self._assert_receipt_artifact_binding(
+                        receipt,
+                        item["artifact"],
+                        receipt_type="install",
+                        idempotency_key=f"install-{event['event_id']}",
+                    )
+                    if (
+                        receipt.get("actor_id") != "control-api"
+                        or receipt.get("actor_id") != published.get("actor_id")
+                        or receipt.get("correlation_id")
+                        != published.get("correlation_id")
+                        or receipt.get("expected_version")
+                        != published.get("resulting_version")
+                    ):
+                        raise CustodyEvidenceReadError(
+                            "custody continuous event install lineage is invalid"
+                        )
+                    item["installed"] = receipt
+
+                unfinished = [item for item in events if item["installed"] is None]
+                if len(unfinished) > 1:
+                    raise CustodyEvidenceReadError(
+                        "custody continuous event head has multiple unfinished events"
+                    )
+                if unfinished and unfinished[0] is not events[-1]:
+                    raise CustodyEvidenceReadError(
+                        "custody continuous event unfinished state is not current"
+                    )
+                if (
+                    unfinished
+                    and unfinished[0]["published"]["resulting_version"]
+                    != snapshot.version
+                ):
+                    raise CustodyEvidenceReadError(
+                        "custody continuous event unfinished publication is not "
+                        "the custody ledger tail"
+                    )
+                ledger_record_sha256 = snapshot.previous_record_sha256
+                if not events:
+                    return ContinuousEventHeadDTO.sealed(
+                        custody_secret=self.settings.secret,
+                        state="NO_EVENT",
+                        request_nonce=request_nonce,
+                        observed_custody_version=observed_version,
+                        ledger_record_sha256=ledger_record_sha256,
+                    )
+                current = events[-1]
+                projection = self._continuous_event_projection_from_receipts(
+                    published=current["published"],
+                    installed=current["installed"],
+                    artifact=current["artifact"],
+                    observed_version=observed_version,
+                )
+                event_artifact = TrustedKeylessContinuousEventArtifactDTO(
+                    idempotency_key=current["event"]["event_id"],
+                    artifact_id=current["artifact"]["artifact_id"],
+                    artifact_raw_sha256=hashlib.sha256(
+                        canonical_json_line(current["artifact"])
+                    ).hexdigest(),
+                    artifact=current["artifact"],
+                )
+                return ContinuousEventHeadDTO.sealed(
+                    custody_secret=self.settings.secret,
+                    state=projection.state,
+                    request_nonce=request_nonce,
+                    observed_custody_version=observed_version,
+                    ledger_record_sha256=ledger_record_sha256,
+                    publication=projection,
+                    current_event=event_artifact,
+                )
+        except CustodyEvidenceReadError:
+            raise
+        except CustodyError as exc:
+            _raise_custody_read_failure(exc, subject="continuous event head")
+        except OSError as exc:
+            raise WorkflowAdapterError(
+                "custody continuous event head read is unavailable",
+                status_code=503,
+            ) from exc
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CustodyEvidenceReadError(
+                "custody continuous event head evidence is invalid"
             ) from exc
 
     def install_published_trusted_keyless_continuous_event(
@@ -1550,6 +1751,32 @@ def create_app(service: ArtifactCustodyService | None = None) -> FastAPI:
                 503,
                 detail={
                     "code": "PHASE_C_CONTINUOUS_EVENT_PUBLICATION_EVIDENCE_INVALID",
+                    "message": str(exc),
+                    "retryable": False,
+                },
+            ) from exc
+        except WorkflowAdapterError as exc:
+            raise HTTPException(
+                exc.status_code,
+                detail={
+                    "code": exc.code,
+                    "message": str(exc),
+                    "retryable": exc.retryable,
+                },
+            ) from exc
+
+    @app.get("/internal/v1/continuous-event-head")
+    def continuous_event_head(request: Request) -> dict[str, Any]:
+        continuous_event_control_auth(request)
+        try:
+            return target.continuous_event_head(
+                request_nonce=request.headers.get("X-Phase-C-Request-Nonce", "")
+            ).model_dump(mode="json")
+        except CustodyEvidenceReadError as exc:
+            raise HTTPException(
+                503,
+                detail={
+                    "code": "PHASE_C_CONTINUOUS_EVENT_HEAD_EVIDENCE_INVALID",
                     "message": str(exc),
                     "retryable": False,
                 },
