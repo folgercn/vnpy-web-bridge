@@ -434,6 +434,7 @@ PHASE_A_PHASE_C_PRESERVED_PREFIXES = (
 PHASE_A_ISSUE362_RESEARCH_FOUNDATION_EXACT = (
     "backend/tests/unit/test_research_warehouse_daily_roll_predecessor_catalog.py",
     "backend/tests/unit/test_research_warehouse_continuous_event_selector.py",
+    "backend/tests/unit/test_research_warehouse_monthly_due_source.py",
     "backend/tests/unit/test_research_warehouse_verified_daily_pit_main_roll_source.py",
     "backend/tests/unit/test_research_warehouse_verified_monthly_final_target.py",
     "deployments/research-warehouse/daily-pit-main-roll-source-v1.schema.json",
@@ -444,6 +445,7 @@ PHASE_A_ISSUE362_RESEARCH_FOUNDATION_EXACT = (
     "scripts/research_warehouse/daily_roll_predecessor_catalog.py",
     "scripts/research_warehouse/m2_runtime_loader.py",
     "scripts/research_warehouse/m2_runtime_paths.py",
+    "scripts/research_warehouse/monthly_due_source.py",
     "scripts/research_warehouse/verified_daily_pit_main_roll_source.py",
     "scripts/research_warehouse/verified_monthly_final_target.py",
 )
