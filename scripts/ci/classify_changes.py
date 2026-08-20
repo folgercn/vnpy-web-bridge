@@ -247,7 +247,9 @@ PHASE_B_RULES = (
             "deployments/phase-b/requirements-simnow-runner.txt",
             "backend/app/execution/formal_tick_reader.py",
             "backend/tests/unit/test_issue362_formal_tick_reader.py",
+            "backend/tests/unit/test_issue362_simnow_continuous_run_once.py",
             "scripts/simnow_keyless_pilot.py",
+            "scripts/simnow_continuous_run_once.py",
         ),
         shared=True,
     ),
@@ -367,10 +369,12 @@ PHASE_B_SCOPE_EXACT = {
     "backend/tests/unit/test_issue362_formal_tick_reader.py",
     "backend/tests/unit/test_issue362_execution_control_plumbing.py",
     "deployments/docker-compose.phase-b.yml",
+    "backend/tests/unit/test_issue362_simnow_continuous_run_once.py",
     "scripts/ci/classify_changes.py",
     "scripts/ci/phase_b_projection_compose_smoke.sh",
     "scripts/ci/validate_json_schemas.py",
     "scripts/commodity_c_fast_pure_producer_kernel.py",
+    "scripts/simnow_continuous_run_once.py",
     "scripts/phase_b_artifact_custody.py",
     "scripts/phase_b_offline_signer.py",
 }
@@ -450,9 +454,8 @@ PHASE_A_ISSUE362_RESEARCH_FOUNDATION_EXACT = (
     "scripts/research_warehouse/verified_monthly_final_target.py",
 )
 
-# R1 is a contract-only fake-E2E foundation.  It is intentionally absent from
-# every Phase A/Phase B image and deployment manifest until the installed-event
-# TargetPlan adapter and external UID/mount contract are separately reviewed.
+# The continuous runner remains Phase-A preserved: its executable image is
+# owned by the separately reviewed Phase-B SIMNOW packaging closure.
 PHASE_A_ISSUE362_CONTINUOUS_RUNNER_FOUNDATION_EXACT = (
     "scripts/simnow_continuous_run_once.py",
     "backend/tests/unit/test_issue362_simnow_continuous_run_once.py",

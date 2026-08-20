@@ -20,9 +20,11 @@ COPY docs/schemas/web-bridge-execution-status-v1.schema.json /app/docs/schemas/w
 COPY backend/app/schemas/__init__.py /app/backend/app/schemas/__init__.py
 COPY backend/app/schemas/control_execution.py /app/backend/app/schemas/control_execution.py
 COPY backend/app/execution/__init__.py /app/backend/app/execution/__init__.py
+COPY backend/app/execution/clock.py /app/backend/app/execution/clock.py
 COPY backend/app/execution/errors.py /app/backend/app/execution/errors.py
 COPY backend/app/execution/executable_target_adapter.py /app/backend/app/execution/executable_target_adapter.py
 COPY backend/app/execution/formal_tick_reader.py /app/backend/app/execution/formal_tick_reader.py
+COPY backend/app/execution/full_account_ownership.py /app/backend/app/execution/full_account_ownership.py
 COPY backend/app/execution/gateway_contracts.py /app/backend/app/execution/gateway_contracts.py
 COPY backend/app/execution/models.py /app/backend/app/execution/models.py
 COPY backend/app/phase_c/__init__.py /app/backend/app/phase_c/__init__.py
@@ -31,6 +33,65 @@ COPY backend/app/phase_c/client.py /app/backend/app/phase_c/client.py
 COPY backend/app/phase_c/models.py /app/backend/app/phase_c/models.py
 COPY scripts/simnow_keyless_pilot.py /app/scripts/simnow_keyless_pilot.py
 COPY scripts/simnow_run_once.py /app/scripts/simnow_run_once.py
+COPY scripts/simnow_continuous_run_once.py /app/scripts/simnow_continuous_run_once.py
+COPY scripts/research_warehouse/__init__.py /app/scripts/research_warehouse/__init__.py
+COPY scripts/research_warehouse/absence_receipts.py /app/scripts/research_warehouse/absence_receipts.py
+COPY scripts/research_warehouse/acquisition.py /app/scripts/research_warehouse/acquisition.py
+COPY scripts/research_warehouse/acquisition_models.py /app/scripts/research_warehouse/acquisition_models.py
+COPY scripts/research_warehouse/backup_anchor.py /app/scripts/research_warehouse/backup_anchor.py
+COPY scripts/research_warehouse/backup_contracts.py /app/scripts/research_warehouse/backup_contracts.py
+COPY scripts/research_warehouse/backup_custody.py /app/scripts/research_warehouse/backup_custody.py
+COPY scripts/research_warehouse/calendar_anchors.py /app/scripts/research_warehouse/calendar_anchors.py
+COPY scripts/research_warehouse/calendar_models.py /app/scripts/research_warehouse/calendar_models.py
+COPY scripts/research_warehouse/canonical.py /app/scripts/research_warehouse/canonical.py
+COPY scripts/research_warehouse/clock_quality.py /app/scripts/research_warehouse/clock_quality.py
+COPY scripts/research_warehouse/commit_anchors.py /app/scripts/research_warehouse/commit_anchors.py
+COPY scripts/research_warehouse/continuous_event_selector.py /app/scripts/research_warehouse/continuous_event_selector.py
+COPY scripts/research_warehouse/contracts.py /app/scripts/research_warehouse/contracts.py
+COPY scripts/research_warehouse/custody_locks.py /app/scripts/research_warehouse/custody_locks.py
+COPY scripts/research_warehouse/custody_paths.py /app/scripts/research_warehouse/custody_paths.py
+COPY scripts/research_warehouse/custody_transition.py /app/scripts/research_warehouse/custody_transition.py
+COPY scripts/research_warehouse/daily_roll_predecessor_catalog.py /app/scripts/research_warehouse/daily_roll_predecessor_catalog.py
+COPY scripts/research_warehouse/errors.py /app/scripts/research_warehouse/errors.py
+COPY scripts/research_warehouse/file_integrity.py /app/scripts/research_warehouse/file_integrity.py
+COPY scripts/research_warehouse/filesystem.py /app/scripts/research_warehouse/filesystem.py
+COPY scripts/research_warehouse/held_custody.py /app/scripts/research_warehouse/held_custody.py
+COPY scripts/research_warehouse/history_backfill_receipts.py /app/scripts/research_warehouse/history_backfill_receipts.py
+COPY scripts/research_warehouse/m2_acl_custody.py /app/scripts/research_warehouse/m2_acl_custody.py
+COPY scripts/research_warehouse/m2_daily_scheduler.py /app/scripts/research_warehouse/m2_daily_scheduler.py
+COPY scripts/research_warehouse/m2_isolation_contracts.py /app/scripts/research_warehouse/m2_isolation_contracts.py
+COPY scripts/research_warehouse/m2_monitor_facts.py /app/scripts/research_warehouse/m2_monitor_facts.py
+COPY scripts/research_warehouse/m2_operator_defaults.py /app/scripts/research_warehouse/m2_operator_defaults.py
+COPY scripts/research_warehouse/m2_operator_state.py /app/scripts/research_warehouse/m2_operator_state.py
+COPY scripts/research_warehouse/m2_receipts.py /app/scripts/research_warehouse/m2_receipts.py
+COPY scripts/research_warehouse/m2_runtime_input.py /app/scripts/research_warehouse/m2_runtime_input.py
+COPY scripts/research_warehouse/m2_runtime_loader.py /app/scripts/research_warehouse/m2_runtime_loader.py
+COPY scripts/research_warehouse/m2_runtime_paths.py /app/scripts/research_warehouse/m2_runtime_paths.py
+COPY scripts/research_warehouse/manifest_chain.py /app/scripts/research_warehouse/manifest_chain.py
+COPY scripts/research_warehouse/manifest_commits.py /app/scripts/research_warehouse/manifest_commits.py
+COPY scripts/research_warehouse/manifest_contracts.py /app/scripts/research_warehouse/manifest_contracts.py
+COPY scripts/research_warehouse/manifest_envelope.py /app/scripts/research_warehouse/manifest_envelope.py
+COPY scripts/research_warehouse/manifest_validation.py /app/scripts/research_warehouse/manifest_validation.py
+COPY scripts/research_warehouse/manifests.py /app/scripts/research_warehouse/manifests.py
+COPY scripts/research_warehouse/models.py /app/scripts/research_warehouse/models.py
+COPY scripts/research_warehouse/monthly_due_source.py /app/scripts/research_warehouse/monthly_due_source.py
+COPY scripts/research_warehouse/observation_contracts.py /app/scripts/research_warehouse/observation_contracts.py
+COPY scripts/research_warehouse/observation_validation.py /app/scripts/research_warehouse/observation_validation.py
+COPY scripts/research_warehouse/observations.py /app/scripts/research_warehouse/observations.py
+COPY scripts/research_warehouse/official_calendar.py /app/scripts/research_warehouse/official_calendar.py
+COPY scripts/research_warehouse/pit_source_view.py /app/scripts/research_warehouse/pit_source_view.py
+COPY scripts/research_warehouse/policy.py /app/scripts/research_warehouse/policy.py
+COPY scripts/research_warehouse/publication.py /app/scripts/research_warehouse/publication.py
+COPY scripts/research_warehouse/registry.py /app/scripts/research_warehouse/registry.py
+COPY scripts/research_warehouse/revisions.py /app/scripts/research_warehouse/revisions.py
+COPY scripts/research_warehouse/signing.py /app/scripts/research_warehouse/signing.py
+COPY scripts/research_warehouse/source_availability.py /app/scripts/research_warehouse/source_availability.py
+COPY scripts/research_warehouse/static_core_baseline.py /app/scripts/research_warehouse/static_core_baseline.py
+COPY scripts/research_warehouse/timeutil.py /app/scripts/research_warehouse/timeutil.py
+COPY scripts/research_warehouse/transport.py /app/scripts/research_warehouse/transport.py
+COPY scripts/research_warehouse/validation.py /app/scripts/research_warehouse/validation.py
+COPY scripts/research_warehouse/verified_daily_pit_main_roll_source.py /app/scripts/research_warehouse/verified_daily_pit_main_roll_source.py
+COPY scripts/research_warehouse/verified_monthly_final_target.py /app/scripts/research_warehouse/verified_monthly_final_target.py
 COPY scripts/phase_b_workers/__init__.py /app/phase_b_workers/__init__.py
 COPY scripts/phase_b_workers/contracts.py /app/phase_b_workers/contracts.py
 COPY scripts/phase_b_workers/durable.py /app/phase_b_workers/durable.py
@@ -46,7 +107,8 @@ COPY shared/commodity_execution /app/shared/commodity_execution
 COPY shared/phase_c_workflow /app/shared/phase_c_workflow
 COPY shared/trust_contracts /app/shared/trust_contracts
 
-RUN python -m py_compile /app/scripts/simnow_run_once.py /app/scripts/simnow_keyless_pilot.py /app/scripts/commodity_static_core_equal_formula_v1.py /app/scripts/commodity_static_core_equal_pure_producer.py /app/scripts/commodity_relative_vol_snapshot_producer.py /app/backend/app/execution/formal_tick_reader.py /app/phase_b_workers/contracts.py /app/phase_b_workers/durable.py /app/phase_b_workers/projections.py
+RUN python -m py_compile /app/scripts/simnow_run_once.py /app/scripts/simnow_continuous_run_once.py /app/scripts/simnow_keyless_pilot.py /app/scripts/commodity_static_core_equal_formula_v1.py /app/scripts/commodity_static_core_equal_pure_producer.py /app/scripts/commodity_relative_vol_snapshot_producer.py /app/backend/app/execution/clock.py /app/backend/app/execution/formal_tick_reader.py /app/backend/app/execution/full_account_ownership.py /app/phase_b_workers/contracts.py /app/phase_b_workers/durable.py /app/phase_b_workers/projections.py
+RUN python /app/scripts/simnow_continuous_run_once.py --help >/dev/null
 
 USER 65532:65532
 ENTRYPOINT ["python", "/app/scripts/simnow_run_once.py"]

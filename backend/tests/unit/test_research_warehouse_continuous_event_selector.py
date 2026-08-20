@@ -388,6 +388,42 @@ def test_real_verified_genesis_output_is_accepted_as_typed_input(
     )
 
 
+def test_simnow_genesis_bootstrap_allows_only_same_execution_month(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    daily = _daily(mode="LINKED_ROOT_CATALOG", changed_products=())
+    daily["official_day"] = "2026-08-20"
+    daily["execution_day"] = "2026-08-21"
+    built = _patch_daily(monkeypatch, daily)
+    target = _target(execution_day="2026-08-03")
+
+    with pytest.raises(
+        selector.ContinuousEventSelectorError,
+        match="daily official day",
+    ):
+        selector.build_continuous_event_candidate_selection(
+            verified_daily_artifact=built,
+            monthly_candidate=target,
+        )
+
+    selected = selector.build_continuous_event_candidate_selection(
+        verified_daily_artifact=built,
+        monthly_candidate=target,
+        simnow_genesis_bootstrap_execution_month="2026-08",
+    )
+    assert selected.selected_trigger_kind == selector.MONTHLY_REBALANCE
+
+    with pytest.raises(
+        selector.ContinuousEventSelectorError,
+        match="daily official day",
+    ):
+        selector.build_continuous_event_candidate_selection(
+            verified_daily_artifact=built,
+            monthly_candidate=target,
+            simnow_genesis_bootstrap_execution_month="2026-09",
+        )
+
+
 def test_real_linked_catalog_roll_artifact_selects_structural_roll_only(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
