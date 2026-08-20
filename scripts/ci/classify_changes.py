@@ -450,6 +450,14 @@ PHASE_A_ISSUE362_RESEARCH_FOUNDATION_EXACT = (
     "scripts/research_warehouse/verified_monthly_final_target.py",
 )
 
+# R1 is a contract-only fake-E2E foundation.  It is intentionally absent from
+# every Phase A/Phase B image and deployment manifest until the installed-event
+# TargetPlan adapter and external UID/mount contract are separately reviewed.
+PHASE_A_ISSUE362_CONTINUOUS_RUNNER_FOUNDATION_EXACT = (
+    "scripts/simnow_continuous_run_once.py",
+    "backend/tests/unit/test_issue362_simnow_continuous_run_once.py",
+)
+
 
 def _phase_a_dependency_closure(selected_units: set[str]) -> set[str]:
     """Expand selected primary services to their reviewed image closure."""
@@ -705,6 +713,11 @@ PHASE_A_RULES = (
     _phase_a_rule(
         "phase-a-preserved-issue362-research-foundation",
         exact=PHASE_A_ISSUE362_RESEARCH_FOUNDATION_EXACT,
+        kind="preserved",
+    ),
+    _phase_a_rule(
+        "phase-a-preserved-issue362-continuous-runner-foundation",
+        exact=PHASE_A_ISSUE362_CONTINUOUS_RUNNER_FOUNDATION_EXACT,
         kind="preserved",
     ),
     _phase_a_rule(
