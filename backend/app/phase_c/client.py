@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -31,6 +32,7 @@ from .adapters import (
 from .models import (
     AuthorizationCommandDTO,
     AuthorizationStatusDTO,
+    ContinuousEventHeadDTO,
     ContinuousEventPublicationProjectionDTO,
     CustodyCurrentVersionDTO,
     CustodyReceiptDTO,
@@ -72,6 +74,7 @@ class PhaseCWorkflowClient(Protocol):
     def continuous_event_publication(
         self, idempotency_key: str
     ) -> ContinuousEventPublicationProjectionDTO: ...
+    def continuous_event_head(self) -> ContinuousEventHeadDTO: ...
     def install_published_trusted_keyless_continuous_event(
         self, request: TrustedKeylessContinuousEventInstallContinuationDTO
     ) -> TrustedKeylessContinuousEventReceiptDTO: ...
@@ -146,6 +149,11 @@ class OfflineFakeWorkflowClient:
             idempotency_key=idempotency_key,
             install_idempotency_key=f"install-{idempotency_key}",
             observed_custody_version=self.adapter.custody.version,
+        )
+
+    def continuous_event_head(self) -> ContinuousEventHeadDTO:
+        raise WorkflowAdapterError(
+            "authenticated continuous event head is unavailable in offline fake"
         )
 
     def install_published_trusted_keyless_continuous_event(
@@ -237,16 +245,21 @@ class RemotePhaseCWorkflowClient:
         *,
         mutation: bool = False,
         unknown_query_path: str | None = None,
+        request_headers: Mapping[str, str] | None = None,
     ) -> dict[str, Any] | None:
+        headers = dict(request_headers or {})
+        headers.update(
+            {
+                "X-Phase-C-Principal": "control-api",
+                "X-Phase-C-Custody-Secret": secret,
+                "X-Phase-C-Execution-Secret": secret,
+            }
+        )
         try:
             with httpx.Client(
                 timeout=self.settings.timeout_seconds,
                 transport=self.transport,
-                headers={
-                    "X-Phase-C-Principal": "control-api",
-                    "X-Phase-C-Custody-Secret": secret,
-                    "X-Phase-C-Execution-Secret": secret,
-                },
+                headers=headers,
             ) as client:
                 response = client.request(method, f"{base}{path}", json=payload)
         except (
@@ -623,6 +636,35 @@ class RemotePhaseCWorkflowClient:
             )
         return projection
 
+    def continuous_event_head(self) -> ContinuousEventHeadDTO:
+        request_nonce = secrets.token_hex(32)
+        raw = self._request(
+            self.settings.custody_url,
+            self.settings.custody_secret,
+            "GET",
+            "/internal/v1/continuous-event-head",
+            request_headers={"X-Phase-C-Request-Nonce": request_nonce},
+        )
+        try:
+            result = ContinuousEventHeadDTO.model_validate(raw)
+        except (TypeError, ValueError) as exc:
+            raise WorkflowAdapterError(
+                "private Phase C continuous event head response is invalid",
+                code="PHASE_C_RESPONSE_BINDING_INVALID",
+                status_code=502,
+                retryable=False,
+            ) from exc
+        if result.request_nonce != request_nonce or not result.verify_custody_hmac(
+            self.settings.custody_secret
+        ):
+            raise WorkflowAdapterError(
+                "private Phase C continuous event head authentication failed",
+                code="PHASE_C_RESPONSE_BINDING_INVALID",
+                status_code=502,
+                retryable=False,
+            )
+        return result
+
     def install_published_trusted_keyless_continuous_event(
         self,
         request: TrustedKeylessContinuousEventInstallContinuationDTO,
@@ -797,6 +839,9 @@ class UnconfiguredPhaseCWorkflowClient:
         self, idempotency_key: str
     ) -> ContinuousEventPublicationProjectionDTO:
         del idempotency_key
+        self._unavailable()
+
+    def continuous_event_head(self) -> ContinuousEventHeadDTO:
         self._unavailable()
 
     def install_published_trusted_keyless_continuous_event(

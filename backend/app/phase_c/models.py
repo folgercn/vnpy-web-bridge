@@ -6,6 +6,8 @@ code.  Control only forwards these values to independently owned adapters.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 from datetime import date
 from typing import Any, Literal, Optional
 
@@ -500,6 +502,122 @@ class TrustedKeylessContinuousEventArtifactDTO(ContinuousEventAuthorityNegativeD
             or envelope["lineage"]
         ):
             raise ValueError("continuous event artifact identity mismatches")
+        return self
+
+
+class ContinuousEventHeadDTO(ContinuousEventAuthorityNegativeDTO):
+    """Authenticated current event derived only from the custody receipt chain."""
+
+    schema_version: Literal["phase-c-continuous-event-head-v1"] = (
+        "phase-c-continuous-event-head-v1"
+    )
+    state: Literal["NO_EVENT", "PUBLISHED_NOT_INSTALLED", "INSTALLED"]
+    request_nonce: str = Field(pattern=r"^[0-9a-f]{64}$")
+    observed_custody_version: int = Field(ge=0)
+    ledger_record_sha256: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    custody_state_owner: Literal["artifact-custody"] = "artifact-custody"
+    publication: Optional[ContinuousEventPublicationProjectionDTO] = None
+    current_event: Optional[TrustedKeylessContinuousEventArtifactDTO] = None
+    head_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    custody_hmac_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    def _seal_preimage(self) -> dict[str, Any]:
+        return self.model_dump(
+            mode="json",
+            exclude={"head_sha256", "custody_hmac_sha256"},
+        )
+
+    @classmethod
+    def sealed(
+        cls,
+        *,
+        custody_secret: str,
+        **values: Any,
+    ) -> ContinuousEventHeadDTO:
+        if not isinstance(custody_secret, str) or not custody_secret:
+            raise ValueError("custody head seal secret is invalid")
+        provisional = cls.model_construct(
+            head_sha256="0" * 64,
+            custody_hmac_sha256="0" * 64,
+            **values,
+        )
+        preimage = provisional._seal_preimage()
+        raw = canonical_json_line(preimage)
+        return cls.model_validate(
+            {
+                **preimage,
+                "head_sha256": sha256_bytes(raw),
+                "custody_hmac_sha256": hmac.new(
+                    custody_secret.encode("utf-8"),
+                    raw,
+                    hashlib.sha256,
+                ).hexdigest(),
+            }
+        )
+
+    def verify_custody_hmac(self, custody_secret: str) -> bool:
+        if not isinstance(custody_secret, str) or not custody_secret:
+            return False
+        expected = hmac.new(
+            custody_secret.encode("utf-8"),
+            canonical_json_line(self._seal_preimage()),
+            hashlib.sha256,
+        ).hexdigest()
+        return hmac.compare_digest(self.custody_hmac_sha256, expected)
+
+    @model_validator(mode="after")
+    def _head_is_exactly_bound(self) -> ContinuousEventHeadDTO:
+        if self.head_sha256 != sha256_bytes(canonical_json_line(self._seal_preimage())):
+            raise ValueError("event head digest does not close")
+        if (self.observed_custody_version == 0) != (self.ledger_record_sha256 is None):
+            raise ValueError("event head ledger pin does not bind custody version")
+        if self.state == "NO_EVENT":
+            if self.publication is not None or self.current_event is not None:
+                raise ValueError("empty event head carries event evidence")
+            return self
+        if self.publication is None or self.current_event is None:
+            raise ValueError("event head lacks current custody evidence")
+        publication = self.publication
+        current = self.current_event
+        envelope = current.artifact
+        payload = envelope["payload"]
+        monthly = payload["monthly"]
+        daily = payload["daily"]
+        desired = payload["desired_target"]
+        facts = payload["account_facts"]
+        predecessor = payload["predecessor"]
+        if (
+            publication.state != self.state
+            or publication.observed_custody_version != self.observed_custody_version
+            or publication.publisher_principal != "control-api"
+            or publication.idempotency_key != current.idempotency_key
+            or publication.event_id != current.idempotency_key
+            or publication.artifact_id != current.artifact_id
+            or publication.artifact_id != envelope["artifact_id"]
+            or publication.artifact_canonical_sha256 != envelope["canonical_sha256"]
+            or publication.artifact_raw_sha256 != envelope["raw_sha256"]
+            or publication.artifact_schema_ref != envelope["schema_ref"]
+            or publication.source_event_raw_sha256 != payload["source_event_raw_sha256"]
+            or publication.selection_id != payload["selection_id"]
+            or publication.selection_sha256 != payload["selection_sha256"]
+            or publication.selection_raw_sha256 != payload["selection_raw_sha256"]
+            or publication.candidate_id != payload["candidate_id"]
+            or publication.trigger_kind != payload["trigger_kind"]
+            or publication.monthly_final_target_sha256 != monthly["final_target_sha256"]
+            or publication.daily_artifact_id != daily["artifact_id"]
+            or publication.daily_artifact_raw_sha256 != daily["artifact_raw_sha256"]
+            or publication.daily_official_day != daily["official_day"]
+            or publication.desired_target_position_hash
+            != desired["target_position_hash"]
+            or publication.account_facts_id != facts["snapshot_id"]
+            or publication.account_facts_sha256 != facts["account_facts_sha256"]
+            or publication.predecessor_mode != predecessor["mode"]
+            or publication.predecessor_terminal_target_id
+            != predecessor["terminal_target_id"]
+            or publication.predecessor_terminal_target_raw_sha256
+            != predecessor["terminal_target_raw_sha256"]
+        ):
+            raise ValueError("event head publication/artifact binding mismatches")
         return self
 
 

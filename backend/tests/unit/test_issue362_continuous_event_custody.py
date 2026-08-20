@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -17,10 +19,12 @@ from app.phase_c.adapters import (
 from app.phase_c.client import PhaseCRemoteSettings, RemotePhaseCWorkflowClient
 from app.phase_c.custody_service import (
     ArtifactCustodyService,
+    CustodyEvidenceReadError,
     CustodySettings,
     create_app,
 )
 from app.phase_c.models import (
+    ContinuousEventHeadDTO,
     ContinuousEventPublicationProjectionDTO,
     TrustedKeylessCustodyReceiptDTO,
     TrustedKeylessContinuousEventArtifactDTO,
@@ -37,9 +41,11 @@ from research_warehouse import continuous_event_selector as canonical_selector
 
 
 CORRELATION = "continuous-event-correlation-0001"
+HEAD_NONCE = "f" * 64
 HEADERS = {
     "X-Phase-C-Principal": "control-api",
     "X-Phase-C-Custody-Secret": "continuous-event-control-secret",
+    "X-Phase-C-Request-Nonce": HEAD_NONCE,
 }
 AUTHORITY_FIELDS = (
     "account_data_read",
@@ -75,7 +81,13 @@ def _contract(product: str, month: str) -> str:
     return f"{exchange}.{product}26{month}"
 
 
-def _final_target(quantities: dict[str, int]) -> dict[str, Any]:
+def _final_target(
+    quantities: dict[str, int],
+    *,
+    source_month: str = "2026-07",
+    execution_day: str = "2026-07-31",
+    contract_month: str = "09",
+) -> dict[str, Any]:
     return {
         "schema_version": event_contract.FINAL_TARGET_SCHEMA_VERSION,
         "strategy_id": "STATIC_CORE_EQUAL",
@@ -87,8 +99,8 @@ def _final_target(quantities: dict[str, int]) -> dict[str, Any]:
         "d_sleeve_id": "D_DONCHIAN20_EXIT10_NEUTRAL",
         "sector_map_id": "COMMODITY_FROZEN_SECTOR_MAP_V1",
         "position_manager_id": "MONTHLY_RELATIVE_VOL_THERMOSTAT_V1",
-        "source_month": "2026-07",
-        "execution_day": "2026-07-31",
+        "source_month": source_month,
+        "execution_day": execution_day,
         "authority_granted": False,
         "dispatch_allowed": False,
         "production_allowed": False,
@@ -98,7 +110,7 @@ def _final_target(quantities: dict[str, int]) -> dict[str, Any]:
             {
                 "product": product,
                 "sector": event_contract.SECTORS[product],
-                "exact_contract": _contract(product, "09"),
+                "exact_contract": _contract(product, contract_month),
                 "target_quantity": quantities[product],
                 "reference_open_price": float(1000 + index),
                 "multiplier": 10,
@@ -221,21 +233,39 @@ def _artifact(
     suffix: str = "1",
     roll_previous_quantity_delta: int = 0,
     completion_phase: str | None = None,
+    official_day: str = "2026-07-31",
+    execution_day: str = "2026-08-03",
+    source_month: str = "2026-07",
+    monthly_contract_month: str = "09",
+    previous_contract_month: str = "09",
+    previous_ag_contract_month: str | None = None,
+    current_contract_month: str = "10",
 ) -> dict[str, Any]:
     if now is None:
         now = datetime.now(timezone.utc).replace(microsecond=0)
     quantities = {
         product: (1 if product == "ag" else 0) for product in event_contract.PRODUCTS
     }
-    final = _final_target(quantities)
+    final = _final_target(
+        quantities,
+        source_month=source_month,
+        execution_day=official_day,
+        contract_month=monthly_contract_month,
+    )
     final_raw = canonical_json_line(final)
     final_sha = event_contract.sha256_json(final)
     monthly_contracts = {
-        product: _contract(product, "09") for product in event_contract.PRODUCTS
+        product: _contract(product, monthly_contract_month)
+        for product in event_contract.PRODUCTS
     }
-    previous_contracts = dict(monthly_contracts)
+    previous_contracts = {
+        product: _contract(product, previous_contract_month)
+        for product in event_contract.PRODUCTS
+    }
+    if previous_ag_contract_month is not None:
+        previous_contracts["ag"] = _contract("ag", previous_ag_contract_month)
     current_contracts = dict(previous_contracts)
-    current_contracts["ag"] = _contract("ag", "10")
+    current_contracts["ag"] = _contract("ag", current_contract_month)
     quantity_sha = event_contract._quantity_sha(quantities)
     monthly_map_sha = event_contract._map_sha(monthly_contracts)
     previous_map_sha = event_contract._map_sha(previous_contracts)
@@ -248,8 +278,8 @@ def _artifact(
         "trigger_kind": trigger,
         "strategy_id": "STATIC_CORE_EQUAL",
         "execution_lane": "simnow_shakedown",
-        "execution_day": "2026-08-03",
-        "source_month": "2026-07",
+        "execution_day": execution_day,
+        "source_month": source_month,
         "verified_daily_artifact_id": "verified-daily-" + "3" * 64,
         "verified_daily_artifact_raw_sha256": "4" * 64,
         "verified_daily_continuity_mode": (
@@ -303,7 +333,7 @@ def _artifact(
     selection_core = {
         "strategy_id": "STATIC_CORE_EQUAL",
         "execution_lane": "simnow_shakedown",
-        "execution_day": "2026-08-03",
+        "execution_day": execution_day,
         "precedence_rule_id": event_contract.PRECEDENCE_RULE_ID,
         "verified_daily_artifact_id": candidate["verified_daily_artifact_id"],
         "verified_daily_artifact_raw_sha256": candidate[
@@ -430,16 +460,16 @@ def _artifact(
             "static_core_equal_sha256": "1" * 64,
             "position_manager_sha256": "2" * 64,
             "baseline_batch_raw_sha256": "5" * 64,
-            "source_month": "2026-07",
-            "execution_day": "2026-07-31",
+            "source_month": source_month,
+            "execution_day": official_day,
             "quantity_vector_sha256": quantity_sha,
             "monthly_exact_contract_map_sha256": monthly_map_sha,
         },
         "daily": {
             "artifact_id": candidate["verified_daily_artifact_id"],
             "artifact_raw_sha256": candidate["verified_daily_artifact_raw_sha256"],
-            "official_day": "2026-07-31",
-            "execution_day": "2026-08-03",
+            "official_day": official_day,
+            "execution_day": execution_day,
             "continuity_mode": candidate["verified_daily_continuity_mode"],
             "previous_exact_contract_map_sha256": previous_map_sha,
             "exact_contract_map_sha256": current_map_sha,
@@ -451,7 +481,7 @@ def _artifact(
             "manifest_head_seal_sha256": "f" * 64,
             "manifest_head_commit_seal_sha256": "0" * 64,
             "commit_anchor_ledger_raw_sha256": "6" * 64,
-            "catalog_last_trade_day": "2026-08-03",
+            "catalog_last_trade_day": execution_day,
         },
         "desired_target": {
             "target_position_hash": desired_hash,
@@ -641,6 +671,36 @@ def _publish_only(
             actor_id="control-api",
             idempotency_key=key or artifact["payload"]["event_id"],
             correlation_id=CORRELATION,
+            expected_version=version,
+        )
+
+
+def _publish_unrelated_artifact(
+    service: ArtifactCustodyService,
+    *,
+    version: int,
+) -> None:
+    artifact = new_artifact_envelope(
+        artifact_type="map-acceptance",
+        trust_domain="map_acceptance",
+        producer_id="unrelated-control-artifact",
+        producer_version="v1",
+        schema_ref="phase-c-map-acceptance-v1",
+        payload={"unrelated": True},
+        generated_at=datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z"),
+        scope={},
+        predecessor_refs=[],
+        lineage=[],
+    )
+    with service._custody() as custody:
+        custody.publish(
+            artifact,
+            actor_id="control-api",
+            idempotency_key="unrelated-artifact-0001",
+            correlation_id="unrelated-correlation-0001",
             expected_version=version,
         )
 
@@ -1272,3 +1332,390 @@ def test_remote_publication_and_read_reject_foreign_idempotency(
         event_splice_client.continuous_event_publication(key)
     assert raised.value.retryable is False
     assert raised.value.code == "PHASE_C_RESPONSE_BINDING_INVALID"
+
+
+def _next_roll_artifact(*, now: datetime, previous_month: str = "10"):
+    return _artifact(
+        trigger="ROLL_ONLY",
+        now=now,
+        suffix="2",
+        official_day="2026-08-28",
+        execution_day="2026-08-31",
+        source_month="2026-08",
+        previous_ag_contract_month=previous_month,
+        current_contract_month="11",
+    )
+
+
+def test_continuous_event_head_absent_is_control_only_zero_write(
+    tmp_path: Path,
+) -> None:
+    service = _service(
+        tmp_path,
+        allowed_principals=frozenset({"control-api", "phase-c-execution"}),
+    )
+    root = service.settings.root
+    assert service.continuous_event_head(request_nonce=HEAD_NONCE).state == "NO_EVENT"
+    assert not root.exists()
+    with TestClient(create_app(service)) as client:
+        assert client.get("/internal/v1/continuous-event-head").status_code == 401
+        missing_nonce = client.get(
+            "/internal/v1/continuous-event-head",
+            headers={
+                "X-Phase-C-Principal": "control-api",
+                "X-Phase-C-Custody-Secret": HEADERS["X-Phase-C-Custody-Secret"],
+            },
+        )
+        invalid_nonce = client.get(
+            "/internal/v1/continuous-event-head",
+            headers={**HEADERS, "X-Phase-C-Request-Nonce": "not-a-valid-nonce"},
+        )
+        phase_c_execution = client.get(
+            "/internal/v1/continuous-event-head",
+            headers={
+                "X-Phase-C-Principal": "phase-c-execution",
+                "X-Phase-C-Custody-Secret": HEADERS["X-Phase-C-Custody-Secret"],
+            },
+        )
+        execution = client.get(
+            "/internal/v1/continuous-event-head",
+            headers={
+                "X-Phase-C-Principal": "execution-orchestrator",
+                "X-Phase-C-Custody-Secret": ("continuous-event-execution-read-secret"),
+            },
+        )
+        accepted = client.get("/internal/v1/continuous-event-head", headers=HEADERS)
+    assert phase_c_execution.status_code == 401
+    assert execution.status_code == 401
+    assert missing_nonce.status_code == 422
+    assert missing_nonce.json()["detail"]["code"] == (
+        "PHASE_C_RESPONSE_BINDING_INVALID"
+    )
+    assert invalid_nonce.status_code == 422
+    assert accepted.status_code == 200
+    assert accepted.json()["state"] == "NO_EVENT"
+    assert accepted.json()["request_nonce"] == HEAD_NONCE
+    assert accepted.json()["target_plan_authorized"] is False
+    assert not root.exists()
+
+
+def test_continuous_event_head_rejects_incomplete_existing_custody_root(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    root = service.settings.root
+    root.mkdir(mode=0o700)
+    (root / ".writer.lock").touch(mode=0o600)
+    for name in (".tmp", "artifacts", "epochs", "receipts"):
+        (root / name).mkdir(mode=0o700)
+
+    with pytest.raises(CustodyEvidenceReadError, match="evidence is invalid"):
+        service.continuous_event_head(request_nonce=HEAD_NONCE)
+
+
+def test_continuous_event_head_folds_publish_install_and_returns_exact_raw(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    artifact = _artifact()
+    _publish_only(service, artifact)
+    before = _tree(service.settings.root)
+
+    published = service.continuous_event_head(request_nonce=HEAD_NONCE)
+
+    assert published.state == "PUBLISHED_NOT_INSTALLED"
+    assert published.observed_custody_version == 1
+    assert published.publication is not None
+    assert published.publication.event_id == artifact["payload"]["event_id"]
+    assert published.current_event is not None
+    assert published.current_event.artifact == artifact
+    assert published.ledger_record_sha256 is not None
+    assert _tree(service.settings.root) == before
+
+    request = _continuation(published.publication, artifact)
+    service.install_published_trusted_keyless_continuous_event(
+        request,
+        principal="control-api",
+    )
+    after_install = _tree(service.settings.root)
+    installed = service.continuous_event_head(request_nonce=HEAD_NONCE)
+    assert installed.state == "INSTALLED"
+    assert installed.observed_custody_version == 2
+    assert installed.publication is not None
+    assert installed.publication.install_resulting_custody_version == 2
+    assert _tree(service.settings.root) == after_install
+
+    service.install_published_trusted_keyless_continuous_event(
+        request,
+        principal="control-api",
+    )
+    assert _tree(service.settings.root) == after_install
+    assert service.continuous_event_head(request_nonce=HEAD_NONCE) == installed
+
+
+def test_continuous_event_head_accepts_strict_cross_day_map_chain(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    first = _artifact()
+    service.publish_trusted_keyless_continuous_event(
+        _upload(first), principal="control-api"
+    )
+    second = _next_roll_artifact(
+        now=datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=1)
+    )
+    service.publish_trusted_keyless_continuous_event(
+        _upload(second, version=2), principal="control-api"
+    )
+
+    head = service.continuous_event_head(request_nonce=HEAD_NONCE)
+
+    assert head.state == "INSTALLED"
+    assert head.current_event is not None
+    assert head.current_event.idempotency_key == second["payload"]["event_id"]
+    assert head.current_event.artifact == second
+    assert head.observed_custody_version == 4
+
+
+def test_continuous_event_head_rejects_unfinished_before_unrelated_ledger_tail(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    _publish_only(service, _artifact())
+    _publish_unrelated_artifact(service, version=1)
+
+    with pytest.raises(CustodyEvidenceReadError, match="custody ledger tail"):
+        service.continuous_event_head(request_nonce=HEAD_NONCE)
+
+
+def test_continuous_event_head_rejects_multiple_unfinished_events(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    first = _artifact()
+    second = _next_roll_artifact(
+        now=datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=1)
+    )
+    _publish_only(service, first)
+    _publish_only(service, second, version=1)
+
+    with pytest.raises(CustodyEvidenceReadError, match="multiple unfinished"):
+        service.continuous_event_head(request_nonce=HEAD_NONCE)
+
+    second_projection = service.continuous_event_publication(
+        second["payload"]["event_id"]
+    )
+    service.install_published_trusted_keyless_continuous_event(
+        _continuation(second_projection, second),
+        principal="control-api",
+    )
+    with pytest.raises(CustodyEvidenceReadError, match="not current"):
+        service.continuous_event_head(request_nonce=HEAD_NONCE)
+
+
+def test_continuous_event_head_rejects_distinct_same_day_events(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    first = _artifact()
+    service.publish_trusted_keyless_continuous_event(
+        _upload(first), principal="control-api"
+    )
+    second = _artifact(
+        trigger="ROLL_ONLY",
+        now=datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=1),
+        suffix="2",
+    )
+    service.publish_trusted_keyless_continuous_event(
+        _upload(second, version=2), principal="control-api"
+    )
+
+    with pytest.raises(CustodyEvidenceReadError, match="same-day conflict"):
+        service.continuous_event_head(request_nonce=HEAD_NONCE)
+
+
+def test_continuous_event_head_rejects_day_rollback_and_cross_event_splice(
+    tmp_path: Path,
+) -> None:
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    (tmp_path / "rollback").mkdir()
+    rollback_service = _service(tmp_path / "rollback")
+    newer = _artifact(
+        now=now,
+        official_day="2026-08-28",
+        execution_day="2026-08-31",
+        source_month="2026-08",
+    )
+    rollback_service.publish_trusted_keyless_continuous_event(
+        _upload(newer), principal="control-api"
+    )
+    older = _artifact(trigger="ROLL_ONLY", now=now + timedelta(seconds=1), suffix="2")
+    rollback_service.publish_trusted_keyless_continuous_event(
+        _upload(older, version=2), principal="control-api"
+    )
+    with pytest.raises(CustodyEvidenceReadError, match="rolled back"):
+        rollback_service.continuous_event_head(request_nonce=HEAD_NONCE)
+
+    (tmp_path / "splice").mkdir()
+    splice_service = _service(tmp_path / "splice")
+    first = _artifact(now=now)
+    splice_service.publish_trusted_keyless_continuous_event(
+        _upload(first), principal="control-api"
+    )
+    spliced = _next_roll_artifact(now=now + timedelta(seconds=1), previous_month="09")
+    splice_service.publish_trusted_keyless_continuous_event(
+        _upload(spliced, version=2), principal="control-api"
+    )
+    with pytest.raises(CustodyEvidenceReadError, match="cross-spliced"):
+        splice_service.continuous_event_head(request_nonce=HEAD_NONCE)
+
+
+def test_continuous_event_head_rejects_tamper_and_remote_splice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    artifact = _artifact()
+    service.publish_trusted_keyless_continuous_event(
+        _upload(artifact), principal="control-api"
+    )
+    receipt_path = sorted((service.settings.root / "receipts").iterdir())[0]
+    receipt_path.write_bytes(
+        receipt_path.read_bytes().replace(
+            b'"actor_id":"control-api"', b'"actor_id":"control-apx"'
+        )
+    )
+    with pytest.raises(CustodyEvidenceReadError, match="evidence is invalid"):
+        service.continuous_event_head(request_nonce=HEAD_NONCE)
+
+    (tmp_path / "remote").mkdir()
+    valid_service = _service(tmp_path / "remote")
+    valid_service.publish_trusted_keyless_continuous_event(
+        _upload(artifact), principal="control-api"
+    )
+    valid = valid_service.continuous_event_head(request_nonce=HEAD_NONCE)
+    valid_response = valid.model_dump(mode="json")
+    monkeypatch.setattr(
+        "app.phase_c.client.secrets.token_hex", lambda _size: HEAD_NONCE
+    )
+
+    def remote_head(response: dict[str, Any]) -> ContinuousEventHeadDTO:
+        return RemotePhaseCWorkflowClient(
+            PhaseCRemoteSettings(
+                "http://custody",
+                "http://execution",
+                HEADERS["X-Phase-C-Custody-Secret"],
+                "execution-secret",
+            ),
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json=response)
+            ),
+        ).continuous_event_head()
+
+    def reseal(response: dict[str, Any], *, secret: str) -> None:
+        preimage = {
+            key: value
+            for key, value in response.items()
+            if key not in {"head_sha256", "custody_hmac_sha256"}
+        }
+        raw = canonical_json_line(preimage)
+        response["head_sha256"] = hashlib.sha256(raw).hexdigest()
+        response["custody_hmac_sha256"] = hmac.new(
+            secret.encode(), raw, hashlib.sha256
+        ).hexdigest()
+
+    assert remote_head(valid_response) == valid
+
+    projection_splices = {
+        "publisher_principal": "phase-c-execution",
+        "event_id": "continuous-event-" + "9" * 64,
+        "source_event_raw_sha256": "8" * 64,
+        "selection_id": "continuous-selection-" + "7" * 64,
+        "selection_sha256": "6" * 64,
+        "selection_raw_sha256": "5" * 64,
+        "candidate_id": "continuous-candidate-" + "4" * 64,
+        "trigger_kind": "ROLL_ONLY",
+        "monthly_final_target_sha256": "3" * 64,
+        "daily_artifact_id": "verified-daily-" + "2" * 64,
+        "daily_artifact_raw_sha256": "1" * 64,
+        "daily_official_day": "2026-07-30",
+        "desired_target_position_hash": "a" * 64,
+        "account_facts_id": "snapshot-peek-" + "b" * 64,
+        "account_facts_sha256": "c" * 64,
+    }
+    for field, value in projection_splices.items():
+        response = deepcopy(valid_response)
+        response["publication"][field] = value
+        reseal(response, secret=HEADERS["X-Phase-C-Custody-Secret"])
+        with pytest.raises(WorkflowAdapterError) as raised:
+            remote_head(response)
+        assert raised.value.code == "PHASE_C_RESPONSE_BINDING_INVALID", field
+        assert raised.value.retryable is False
+
+    predecessor_splice = deepcopy(valid_response)
+    predecessor_splice["publication"].update(
+        predecessor_mode="COMPLETION",
+        predecessor_terminal_target_id="terminal-target-foreign-0001",
+        predecessor_terminal_target_raw_sha256="e" * 64,
+    )
+    reseal(
+        predecessor_splice,
+        secret=HEADERS["X-Phase-C-Custody-Secret"],
+    )
+    with pytest.raises(WorkflowAdapterError) as raised:
+        remote_head(predecessor_splice)
+    assert raised.value.code == "PHASE_C_RESPONSE_BINDING_INVALID"
+    assert raised.value.retryable is False
+
+    forged_ledger_pin = deepcopy(valid_response)
+    forged_ledger_pin["ledger_record_sha256"] = "d" * 64
+    reseal(forged_ledger_pin, secret="attacker-does-not-know-custody-secret")
+    with pytest.raises(WorkflowAdapterError) as raised:
+        remote_head(forged_ledger_pin)
+    assert raised.value.code == "PHASE_C_RESPONSE_BINDING_INVALID"
+    assert raised.value.retryable is False
+
+
+def test_remote_continuous_event_head_rejects_old_valid_nonce_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    first = _artifact()
+    service.publish_trusted_keyless_continuous_event(
+        _upload(first), principal="control-api"
+    )
+    first_nonce = "1" * 64
+    replay = service.continuous_event_head(request_nonce=first_nonce).model_dump(
+        mode="json"
+    )
+    second = _next_roll_artifact(
+        now=datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=1)
+    )
+    service.publish_trusted_keyless_continuous_event(
+        _upload(second, version=2), principal="control-api"
+    )
+    second_nonce = "2" * 64
+    current = service.continuous_event_head(request_nonce=second_nonce)
+    assert current.observed_custody_version == 4
+    assert current.current_event is not None
+    assert current.current_event.idempotency_key == second["payload"]["event_id"]
+
+    monkeypatch.setattr(
+        "app.phase_c.client.secrets.token_hex", lambda _size: second_nonce
+    )
+    before = _tree(service.settings.root)
+    client = RemotePhaseCWorkflowClient(
+        PhaseCRemoteSettings(
+            "http://custody",
+            "http://execution",
+            HEADERS["X-Phase-C-Custody-Secret"],
+            "execution-secret",
+        ),
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=replay)),
+    )
+    with pytest.raises(WorkflowAdapterError) as raised:
+        client.continuous_event_head()
+    assert raised.value.code == "PHASE_C_RESPONSE_BINDING_INVALID"
+    assert raised.value.retryable is False
+    assert _tree(service.settings.root) == before

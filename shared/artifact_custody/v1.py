@@ -59,6 +59,16 @@ class _State:
     lifecycle: Mapping[str, tuple[str, ...]]
 
 
+@dataclass(frozen=True)
+class AuditedCustodySnapshot:
+    """Detached read-only view produced by one complete ledger replay."""
+
+    version: int
+    previous_record_sha256: str | None
+    receipts: tuple[dict[str, Any], ...]
+    artifacts: Mapping[str, dict[str, Any]]
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -641,6 +651,37 @@ class ArtifactCustody:
             "live": False,
             "countable_forward": False,
         }
+
+    def read_audited_snapshot(self) -> AuditedCustodySnapshot:
+        """Return receipts/artifacts from one complete authenticated replay.
+
+        Discovery callers must derive state from the authenticated ledger, not
+        from directory watches or receipt filenames. ``_load_state`` verifies
+        every immutable record, embedded artifact, hash link, transition and
+        writer epoch before this detached snapshot is returned.
+        """
+
+        if set(os.listdir(self._root_fd)) != {
+            ".writer.lock",
+            ".tmp",
+            "artifacts",
+            "epochs",
+            "receipts",
+        }:
+            raise CustodyError("CUSTODY_ROOT_STATE_INVALID")
+        maximum_epoch, claims = self._read_epoch_claims()
+        if maximum_epoch <= 0 or not claims:
+            raise CustodyError("CUSTODY_EPOCH_LEDGER_CORRUPT")
+        state = self._load_state()
+        return AuditedCustodySnapshot(
+            version=state.version,
+            previous_record_sha256=state.previous_record_sha256,
+            receipts=tuple(dict(record["receipt"]) for record in state.receipts),
+            artifacts={
+                artifact_id: dict(artifact)
+                for artifact_id, artifact in state.artifacts.items()
+            },
+        )
 
     @staticmethod
     def _verify_current_signed_record(record: Mapping[str, Any]) -> None:

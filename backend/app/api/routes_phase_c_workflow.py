@@ -161,6 +161,17 @@ def continuous_event_publication(
     return ok(result.model_dump(mode="json"))
 
 
+@router.get("/custody/continuous-event-head")
+def continuous_event_head(_: Reader) -> dict[str, Any]:
+    """Return the authenticated custody-derived event head for Control only."""
+
+    try:
+        result = phase_c_workflow_client.continuous_event_head()
+    except WorkflowAdapterError as exc:
+        raise _adapter_error(exc) from exc
+    return ok(result.model_dump(mode="json"))
+
+
 @router.post("/custody/install-published-keyless-simnow-continuous-event")
 def install_published_keyless_simnow_continuous_event(
     payload: TrustedKeylessContinuousEventInstallContinuationDTO,
