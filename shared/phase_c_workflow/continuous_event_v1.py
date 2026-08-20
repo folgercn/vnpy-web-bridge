@@ -755,6 +755,12 @@ _COMPLETION_FIELDS = {
     "target_position_hash",
     "archived_at",
 }
+_COMPLETION_V3_FIELDS = {
+    *_COMPLETION_FIELDS,
+    "execution_run_id",
+    "creation_quote_proof_sha256",
+    "start_quote_proof_sha256",
+}
 _COMPLETION_LINEAGE_FIELDS = {
     "static_core_equal_sha256",
     "position_manager_sha256",
@@ -1014,10 +1020,16 @@ def _validate_execution_account_facts_v2(
 
 def _validate_completion(value: str) -> tuple[bytes, dict[str, Any]]:
     raw, completion = _raw(value, "Execution completion")
-    completion = _object(completion, _COMPLETION_FIELDS, "Execution completion")
-    if completion[
-        "schema_version"
-    ] != "web-bridge-simnow-keyless-target-plan-v2" or completion["phase"] not in {
+    fields = set(completion)
+    if fields != _COMPLETION_FIELDS and fields != _COMPLETION_V3_FIELDS:
+        raise ContinuousEventContractError("Execution completion fields are not exact")
+    completion = _object(completion, fields, "Execution completion")
+    expected_schema = (
+        "web-bridge-simnow-keyless-target-plan-v2"
+        if fields == _COMPLETION_FIELDS
+        else "web-bridge-simnow-keyless-target-plan-v3"
+    )
+    if completion["schema_version"] != expected_schema or completion["phase"] not in {
         "CLOSE",
         "OPEN",
     }:
@@ -1029,6 +1041,15 @@ def _validate_completion(value: str) -> tuple[bytes, dict[str, Any]]:
         "target_position_hash",
     ):
         _sha(completion[field], f"Execution completion {field}")
+    if fields == _COMPLETION_V3_FIELDS:
+        _execution_identifier(
+            completion["execution_run_id"], "Execution completion run ID"
+        )
+        for field in (
+            "creation_quote_proof_sha256",
+            "start_quote_proof_sha256",
+        ):
+            _sha(completion[field], f"Execution completion {field}")
     lineage = _object(
         completion["lineage"],
         _COMPLETION_LINEAGE_FIELDS,

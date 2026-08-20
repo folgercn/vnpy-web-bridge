@@ -209,11 +209,12 @@ def _completion(
     target_position_hash: str,
     final_target_sha256: str,
     archived_at: str,
+    schema_version: int = 2,
 ) -> dict[str, Any]:
-    return {
+    completion = {
         "plan_id": f"predecessor-{phase.lower()}-plan-0001",
         "plan_hash": "a" * 64,
-        "schema_version": "web-bridge-simnow-keyless-target-plan-v2",
+        "schema_version": f"web-bridge-simnow-keyless-target-plan-v{schema_version}",
         "phase": phase,
         "lineage": {
             "static_core_equal_sha256": "1" * 64,
@@ -224,6 +225,15 @@ def _completion(
         "target_position_hash": target_position_hash,
         "archived_at": archived_at,
     }
+    if schema_version == 3:
+        completion.update(
+            {
+                "execution_run_id": "execution-run-issue362-0001",
+                "creation_quote_proof_sha256": "8" * 64,
+                "start_quote_proof_sha256": "9" * 64,
+            }
+        )
+    return completion
 
 
 def _artifact(
@@ -233,6 +243,7 @@ def _artifact(
     suffix: str = "1",
     roll_previous_quantity_delta: int = 0,
     completion_phase: str | None = None,
+    completion_schema_version: int = 2,
     official_day: str = "2026-07-31",
     execution_day: str = "2026-08-03",
     source_month: str = "2026-07",
@@ -401,6 +412,7 @@ def _artifact(
             target_position_hash=current_hash,
             final_target_sha256=final_sha,
             archived_at=verified_at,
+            schema_version=completion_schema_version,
         )
         if has_completion
         else None
@@ -964,6 +976,40 @@ def test_terminal_close_completion_is_accepted_but_close_boundary_is_rejected() 
         match="terminal/current",
     ):
         event_contract.validate_simnow_continuous_event_v1(boundary_close["payload"])
+
+
+def test_target_plan_v3_terminal_completion_is_accepted() -> None:
+    artifact = _artifact(
+        completion_phase="OPEN",
+        completion_schema_version=3,
+    )
+
+    accepted = event_contract.validate_simnow_continuous_event_v1(artifact["payload"])
+
+    completion = json.loads(accepted["predecessor"]["completion_raw"])
+    assert completion["schema_version"] == "web-bridge-simnow-keyless-target-plan-v3"
+    assert completion["execution_run_id"] == "execution-run-issue362-0001"
+
+
+def test_target_plan_v3_completion_requires_exact_quote_proof_fields() -> None:
+    artifact = _artifact(
+        completion_phase="OPEN",
+        completion_schema_version=3,
+    )
+    payload = artifact["payload"]
+    completion = json.loads(payload["predecessor"]["completion_raw"])
+    completion.pop("start_quote_proof_sha256")
+    completion_raw = canonical_json_line(completion)
+    payload["predecessor"]["completion_raw"] = completion_raw.decode()
+    payload["predecessor"]["completion_raw_sha256"] = event_contract.sha256_bytes(
+        completion_raw
+    )
+
+    with pytest.raises(
+        event_contract.ContinuousEventContractError,
+        match="completion fields are not exact",
+    ):
+        event_contract.validate_simnow_continuous_event_v1(payload)
 
 
 def test_same_structural_event_cannot_install_under_an_alternate_key(
