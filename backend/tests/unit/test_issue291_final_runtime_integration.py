@@ -31,13 +31,22 @@ def _service(tmp_path: Path) -> ArtifactCustodyService:
             1,
             "control-secret",
             frozenset({"control-api"}),
-            {name: policy for name in ("map_acceptance", "c_fast_acceptance", "runtime_authorization")},
+            {
+                name: policy
+                for name in (
+                    "map_acceptance",
+                    "c_fast_acceptance",
+                    "runtime_authorization",
+                )
+            },
             "execution-read-secret",
         )
     )
 
 
-def test_custody_separates_control_from_execution_target_plan_read(tmp_path: Path) -> None:
+def test_custody_separates_control_from_execution_target_plan_read(
+    tmp_path: Path,
+) -> None:
     service = _service(tmp_path)
     app = create_app(
         ArtifactCustodyService(
@@ -74,9 +83,12 @@ def test_custody_separates_control_from_execution_target_plan_read(tmp_path: Pat
     projection_path = tmp_path / "projection" / "artifact-custody.json"
     assert projection_path.is_file()
     projection = json.loads(projection_path.read_text(encoding="utf-8"))
-    assert validate_projection(
-        projection, expected_service_id="artifact-custody"
-    )["service_id"] == "artifact-custody"
+    assert (
+        validate_projection(projection, expected_service_id="artifact-custody")[
+            "service_id"
+        ]
+        == "artifact-custody"
+    )
 
 
 def test_custody_rejects_reused_control_and_execution_secret(
@@ -99,7 +111,9 @@ def test_custody_rejects_reused_control_and_execution_secret(
         CustodySettings.from_env()
 
 
-def test_custody_target_plan_schema_is_readable_but_fails_closed(tmp_path: Path) -> None:
+def test_custody_target_plan_schema_is_readable_but_fails_closed(
+    tmp_path: Path,
+) -> None:
     service = _service(tmp_path)
     with service._custody() as custody:
         assert TARGET_PLAN_SCHEMA_VERSION in custody.schema_registry
@@ -115,7 +129,10 @@ def test_custody_image_includes_only_the_target_plan_contract_closure() -> None:
     containerfile = (
         ROOT / "deployments/phase-b/Containerfile.artifact-custody"
     ).read_text(encoding="utf-8")
-    assert "COPY shared/commodity_execution /app/shared/commodity_execution" in containerfile
+    assert (
+        "COPY shared/commodity_execution /app/shared/commodity_execution"
+        in containerfile
+    )
     assert "COPY backend/app/execution " not in containerfile
     assert "COPY deployments/phase-a/" not in containerfile
 
@@ -127,9 +144,16 @@ def test_final_compose_keeps_custody_single_writer_and_data_plane_isolated() -> 
     assert "artifact-custody" in services and "phase-c-execution" not in services
     assert services["artifact-custody"]["command"][0] == "app.phase_c_custody:app"
     assert "artifact_custody_projection:/var/lib/phase-b/projection" in raw
-    assert services["execution-orchestrator"]["environment"]["FINAL_EXECUTION_RUNTIME_REQUIRED"] == "true"
     assert (
-        services["execution-orchestrator"]["environment"]["EXECUTION_ALLOW_SIMNOW_EXECUTION"]
+        services["execution-orchestrator"]["environment"][
+            "FINAL_EXECUTION_RUNTIME_REQUIRED"
+        ]
+        == "true"
+    )
+    assert (
+        services["execution-orchestrator"]["environment"][
+            "EXECUTION_ALLOW_SIMNOW_EXECUTION"
+        ]
         == "${EXECUTION_ALLOW_SIMNOW_EXECUTION:-false}"
     )
     assert (
@@ -137,16 +161,27 @@ def test_final_compose_keeps_custody_single_writer_and_data_plane_isolated() -> 
         == "${SIMNOW_EXECUTION_ENABLED:-false}"
     )
     assert (
-        services["artifact-custody"]["environment"]["SIMNOW_TRUSTED_KEYLESS_CUSTODY_ENABLED"]
+        services["artifact-custody"]["environment"][
+            "SIMNOW_TRUSTED_KEYLESS_CUSTODY_ENABLED"
+        ]
         == "${SIMNOW_TRUSTED_KEYLESS_CUSTODY_ENABLED:-false}"
     )
     assert "gateway-egress" not in services["execution-orchestrator"]["networks"]
-    assert services["market-data-worker"]["networks"] == ["market-ingress", "questdb-data"]
-    assert services["gateway-rpc-publish-proxy"]["networks"] == ["gateway-proxy", "gateway-egress", "market-ingress"]
+    assert services["market-data-worker"]["networks"] == [
+        "market-ingress",
+        "questdb-data",
+    ]
+    assert services["gateway-rpc-publish-proxy"]["networks"] == [
+        "gateway-proxy",
+        "gateway-egress",
+        "market-ingress",
+    ]
     assert services["map-producer"]["profiles"] == ["batch"]
     assert services["c-fast-producer"]["profiles"] == ["batch"]
     assert services["signing-authority"]["profiles"] == ["offline-signing"]
-    assert "WAL DEDUP UPSERT KEYS(ts, ingest_id)" in (ROOT / "deployments/final/questdb-market-ticks.sql").read_text(encoding="utf-8")
+    assert "WAL DEDUP UPSERT KEYS(ts, ingest_id)" in (
+        ROOT / "deployments/final/questdb-market-ticks.sql"
+    ).read_text(encoding="utf-8")
     assert "docker-compose.runtime-smoke.yml" in (
         ROOT / "scripts/ci/final_runtime_compose_smoke.sh"
     ).read_text(encoding="utf-8")
@@ -174,7 +209,9 @@ def test_final_compose_keeps_simnow_runner_profiled_and_boundary_limited() -> No
     runner = compose["services"]["simnow-runner"]
 
     assert runner["profiles"] == ["simnow-runner"]
-    assert runner["image"] == "${SIMNOW_RUNNER_IMAGE:-vnpy-web-bridge-simnow-runner:final}"
+    assert (
+        runner["image"] == "${SIMNOW_RUNNER_IMAGE:-vnpy-web-bridge-simnow-runner:final}"
+    )
     assert runner["build"] == {
         "context": "..",
         "dockerfile": "deployments/phase-b/Containerfile.simnow-runner",
@@ -208,9 +245,52 @@ def test_final_compose_keeps_simnow_runner_profiled_and_boundary_limited() -> No
     assert runner["security_opt"] == ["no-new-privileges:true"]
     assert runner["tmpfs"] == ["/tmp"]
     assert "docker.sock" not in repr(runner)
-    assert not {"gateway-proxy", "gateway-egress", "market-ingress", "questdb-data"}.intersection(
-        runner["networks"]
+
+    continuous = compose["services"]["simnow-continuous-runner"]
+    assert continuous["profiles"] == ["simnow-continuous"]
+    assert continuous["image"] == runner["image"]
+    assert continuous["build"] == runner["build"]
+    assert continuous["restart"] == "no"
+    assert continuous["user"] == (
+        "${SIMNOW_CONTINUOUS_UID:?required}:${SIMNOW_CONTINUOUS_GID:?required}"
     )
+    assert continuous["entrypoint"] == [
+        "python",
+        "/app/scripts/simnow_continuous_run_once.py",
+        "--config",
+        "/run/continuous-config/simnow-continuous.json",
+    ]
+    assert continuous["environment"] == {
+        "PRODUCTION": "false",
+        "LIVE_TRADING_AUTHORIZED": "false",
+        "COUNTABLE_FORWARD": "false",
+    }
+    assert continuous["volumes"] == [
+        "${SIMNOW_CONTINUOUS_CONFIG_DIR:?required}:/run/continuous-config:ro",
+        "${SIMNOW_CONTINUOUS_LIBEXEC_ROOT:?required}:/usr/local/libexec/vnpyresearch:ro",
+        "${SIMNOW_CONTINUOUS_WAREHOUSE_ROOT:?required}:/Users/Shared/vnpy-research:ro",
+        "${PHASE_C_CUSTODY_PUBLIC_KEYRING_DIR:?required}:/run/keys:ro",
+        "market_data_state:/run/market-data:ro",
+        "market_projection:/run/market-projection:ro",
+    ]
+    assert continuous["read_only"] is True
+    assert continuous["cap_drop"] == ["ALL"]
+    assert continuous["security_opt"] == ["no-new-privileges:true"]
+    assert continuous["tmpfs"] == ["/tmp"]
+    assert "docker.sock" not in repr(continuous)
+    assert "/private/var/root" not in repr(continuous)
+    assert not {
+        "gateway-proxy",
+        "gateway-egress",
+        "market-ingress",
+        "questdb-data",
+    }.intersection(continuous["networks"])
+    assert not {
+        "gateway-proxy",
+        "gateway-egress",
+        "market-ingress",
+        "questdb-data",
+    }.intersection(runner["networks"])
 
 
 def test_final_compose_questdb_healthcheck_is_strict_and_readonly() -> None:
@@ -273,7 +353,9 @@ def test_final_compose_gates_execution_quality_on_producer_initialized_stream() 
     assert execution_quality["read_only"] is True
 
 
-def test_runtime_smoke_bootstraps_only_a_signed_target_plan_before_http_custody() -> None:
+def test_runtime_smoke_bootstraps_only_a_signed_target_plan_before_http_custody() -> (
+    None
+):
     smoke_compose = yaml.safe_load(
         (ROOT / "deployments/final/docker-compose.runtime-smoke.yml").read_text(
             encoding="utf-8"
@@ -288,9 +370,9 @@ def test_runtime_smoke_bootstraps_only_a_signed_target_plan_before_http_custody(
         encoding="utf-8"
     )
     assert "Ed25519PrivateKey.generate()" in smoke
-    assert "docker cp \"$workdir/keyring.json\"" in smoke
-    assert "docker cp \"$workdir/signed.json\"" in smoke
-    assert "docker wait \"$bootstrap_container\"" in smoke
+    assert 'docker cp "$workdir/keyring.json"' in smoke
+    assert 'docker cp "$workdir/signed.json"' in smoke
+    assert 'docker wait "$bootstrap_container"' in smoke
     assert "SMOKE_ARTIFACT_RAW_SHA256" in smoke
     assert '"X-Phase-C-Principal": "phase-c-execution"' in smoke
     assert (

@@ -291,6 +291,39 @@ services:
     security_opt: ["no-new-privileges:true"]
     tmpfs: [/tmp]
 
+  simnow-continuous-runner:
+    # One root-configured pass. launchd/cron may wake this service, while the
+    # existing file lock and custody/Execution roots remain the only cursors.
+    profiles: [simnow-continuous]
+    image: ${SIMNOW_RUNNER_IMAGE:-vnpy-web-bridge-simnow-runner:final}
+    build: { context: .., dockerfile: deployments/phase-b/Containerfile.simnow-runner }
+    restart: "no"
+    # Match the locked host vnpyresearch UID/GID. The strict Warehouse readers
+    # reject both root and foreign owners for private evidence.
+    user: "${SIMNOW_CONTINUOUS_UID:?required}:${SIMNOW_CONTINUOUS_GID:?required}"
+    entrypoint:
+      - python
+      - /app/scripts/simnow_continuous_run_once.py
+      - --config
+      - /run/continuous-config/simnow-continuous.json
+    environment:
+      <<: *negative_flags
+    networks: [private-control, control-custody]
+    depends_on:
+      artifact-custody: { condition: service_healthy }
+      execution-orchestrator: { condition: service_started }
+    volumes:
+      - ${SIMNOW_CONTINUOUS_CONFIG_DIR:?required}:/run/continuous-config:ro
+      - ${SIMNOW_CONTINUOUS_LIBEXEC_ROOT:?required}:/usr/local/libexec/vnpyresearch:ro
+      - ${SIMNOW_CONTINUOUS_WAREHOUSE_ROOT:?required}:/Users/Shared/vnpy-research:ro
+      - ${PHASE_C_CUSTODY_PUBLIC_KEYRING_DIR:?required}:/run/keys:ro
+      - market_data_state:/run/market-data:ro
+      - market_projection:/run/market-projection:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: [/tmp]
+
   signing-authority:
     profiles: [offline-signing]
     image: ${SIGNING_AUTHORITY_IMAGE:-vnpy-web-bridge-signing-authority:final}

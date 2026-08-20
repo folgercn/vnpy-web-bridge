@@ -630,7 +630,109 @@ def test_simnow_runner_image_keeps_the_real_import_closure_and_no_direct_gateway
         for line in containerfile.splitlines()
         if line.startswith("COPY ")
     }
-    assert copied_sources == {
+    continuous_warehouse_closure = {
+        f"scripts/research_warehouse/{name}.py"
+        for name in {
+            "__init__",
+            "absence_receipts",
+            "acquisition",
+            "acquisition_models",
+            "backup_anchor",
+            "backup_contracts",
+            "backup_custody",
+            "calendar_anchors",
+            "calendar_models",
+            "canonical",
+            "clock_quality",
+            "commit_anchors",
+            "continuous_event_selector",
+            "contracts",
+            "custody_locks",
+            "custody_paths",
+            "custody_transition",
+            "daily_roll_predecessor_catalog",
+            "errors",
+            "file_integrity",
+            "filesystem",
+            "held_custody",
+            "history_backfill_receipts",
+            "m2_acl_custody",
+            "m2_daily_scheduler",
+            "m2_isolation_contracts",
+            "m2_monitor_facts",
+            "m2_operator_defaults",
+            "m2_operator_state",
+            "m2_receipts",
+            "m2_runtime_input",
+            "m2_runtime_loader",
+            "m2_runtime_paths",
+            "manifest_chain",
+            "manifest_commits",
+            "manifest_contracts",
+            "manifest_envelope",
+            "manifest_validation",
+            "manifests",
+            "models",
+            "monthly_due_source",
+            "observation_contracts",
+            "observation_validation",
+            "observations",
+            "official_calendar",
+            "pit_source_view",
+            "policy",
+            "publication",
+            "registry",
+            "revisions",
+            "signing",
+            "source_availability",
+            "static_core_baseline",
+            "timeutil",
+            "transport",
+            "validation",
+            "verified_daily_pit_main_roll_source",
+            "verified_monthly_final_target",
+        }
+    }
+    continuous_source_path = root / "scripts" / "simnow_continuous_run_once.py"
+    continuous_tree = ast.parse(
+        continuous_source_path.read_text(encoding="utf-8"),
+        filename=str(continuous_source_path),
+    )
+    pending = [
+        node.module.removeprefix("research_warehouse.").split(".")[0]
+        for node in ast.walk(continuous_tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.module
+        and node.module.startswith("research_warehouse.")
+    ]
+    resolved = {"__init__"}
+    while pending:
+        module = pending.pop()
+        if module in resolved:
+            continue
+        module_path = root / "scripts" / "research_warehouse" / f"{module}.py"
+        assert module_path.is_file()
+        resolved.add(module)
+        module_tree = ast.parse(
+            module_path.read_text(encoding="utf-8"), filename=str(module_path)
+        )
+        pending.extend(
+            node.module.split(".")[0]
+            for node in ast.walk(module_tree)
+            if isinstance(node, ast.ImportFrom)
+            and node.level == 1
+            and node.module
+            and (
+                root
+                / "scripts"
+                / "research_warehouse"
+                / f"{node.module.split('.')[0]}.py"
+            ).is_file()
+        )
+    assert continuous_warehouse_closure == {
+        f"scripts/research_warehouse/{module}.py" for module in resolved
+    }
+    assert copied_sources == continuous_warehouse_closure | {
         "deployments/phase-b/requirements-simnow-runner.txt",
         "backend/app/__init__.py",
         "backend/app/control_execution_client.py",
@@ -644,6 +746,7 @@ def test_simnow_runner_image_keeps_the_real_import_closure_and_no_direct_gateway
         "backend/app/execution/errors.py",
         "backend/app/execution/executable_target_adapter.py",
         "backend/app/execution/formal_tick_reader.py",
+        "backend/app/execution/full_account_ownership.py",
         "backend/app/execution/gateway_contracts.py",
         "backend/app/execution/models.py",
         "backend/app/phase_c/__init__.py",
@@ -651,6 +754,7 @@ def test_simnow_runner_image_keeps_the_real_import_closure_and_no_direct_gateway
         "backend/app/phase_c/client.py",
         "backend/app/phase_c/models.py",
         "scripts/simnow_keyless_pilot.py",
+        "scripts/simnow_continuous_run_once.py",
         "scripts/simnow_run_once.py",
         "scripts/phase_b_workers/__init__.py",
         "scripts/phase_b_workers/contracts.py",

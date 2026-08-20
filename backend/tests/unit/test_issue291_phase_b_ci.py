@@ -74,6 +74,8 @@ def test_phase_b_simnow_runner_package_rebuilds_the_reviewed_dependency_group() 
     for path in (
         "deployments/phase-b/Containerfile.simnow-runner",
         "deployments/phase-b/requirements-simnow-runner.txt",
+        "scripts/simnow_continuous_run_once.py",
+        "backend/tests/unit/test_issue362_simnow_continuous_run_once.py",
     ):
         result = classify_phase_b([path])
         assert result["phase_b_changed"] is True

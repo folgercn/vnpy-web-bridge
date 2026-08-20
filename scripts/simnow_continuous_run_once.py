@@ -5,14 +5,11 @@ one root-managed configuration path.  Dynamic research/control values (day,
 month, custody version, account facts, completion, clock and clients) are
 resolved privately during the pass and cannot be supplied by a caller.
 
-The production adapter deliberately stops before TargetPlan creation.  The
-repository has all of the individual v3 planning and lifecycle primitives, but
-does not yet expose one private operation that atomically binds those
-primitives to an installed continuous-event root.  Pretending that such an
-operation exists would reopen the trust boundary this runner is intended to
-close.  The state machine is nevertheless executable with the test adapter so
-that ordering, recovery and zero-write invariants are frozen before that last
-adapter is connected.
+The production adapter is recovery-first: installed event and plan custody
+roots are queried before any mutation, every first send requires fresh account
+and formal-quote evidence, and response-loss paths only query the same
+deterministic key.  Real mutation still requires the root-managed
+``simnow_execution_enabled`` switch plus the external night-run gates.
 """
 
 from __future__ import annotations
@@ -28,7 +25,7 @@ import sys
 from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -39,15 +36,26 @@ for candidate in (ROOT, ROOT / "backend", ROOT / "scripts"):
 
 from app.control_execution_client import (  # noqa: E402
     ExecutionClient,
+    ExecutionClientError,
+    ExecutionUnknownOutcomeError,
     ExecutionClientSettings,
 )
 from app.execution.full_account_ownership import (  # noqa: E402
     DesiredContinuousTargetBinding,
     ExpectedPredecessorCompletionBinding,
+    ExpectedSameEventCloseCompletionBinding,
     FullAccountOwnershipDisposition,
     FullAccountPredecessorMode,
     classify_full_account_ownership,
+    classify_same_event_close_completion,
 )
+from app.execution.gateway_contracts import GatewaySnapshot  # noqa: E402
+from app.execution.executable_target_adapter import (  # noqa: E402
+    StaticCoreEqualFullPortfolioPhaseHandoff,
+    build_full_portfolio_quote_requests,
+    build_static_core_equal_full_portfolio_keyless_decision,
+)
+from app.execution.formal_tick_reader import read_formal_tick_bindings  # noqa: E402
 from app.phase_c.adapters import UnknownOutcomeError  # noqa: E402
 from app.phase_c.client import (  # noqa: E402
     PhaseCRemoteSettings,
@@ -57,6 +65,8 @@ from app.phase_c.models import (  # noqa: E402
     ContinuousEventHeadDTO,
     TrustedKeylessContinuousEventInstallContinuationDTO,
     TrustedKeylessContinuousEventUploadDTO,
+    TrustedKeylessTargetPlanInstallContinuationDTO,
+    TrustedKeylessTargetPlanUploadDTO,
 )
 from research_warehouse.continuous_event_selector import (  # noqa: E402
     BuiltContinuousEventSelection,
@@ -89,9 +99,18 @@ from shared.artifact_contracts.v1 import (  # noqa: E402
     validate_artifact_envelope,
 )
 from shared.commodity_execution import (  # noqa: E402
+    KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
     target_position_projection_hash,
 )
 from shared.phase_c_workflow import continuous_event_v1 as event_contract  # noqa: E402
+from simnow_run_once import (  # noqa: E402
+    _accepted_start_receipt,
+    _command,
+    _completed,
+    _completion_state,
+    _final_reconcile_completed,
+    _submit_reconcile_with_ready_snapshot,
+)
 
 
 CONFIG_SCHEMA = "web-bridge-simnow-continuous-run-once-config-v1"
@@ -129,6 +148,15 @@ _CONFIG_FIELDS = frozenset(
         "warehouse_business_signer_key_id",
         "warehouse_contract_registry_path",
         "warehouse_contract_registry_raw_sha256",
+        "bootstrap_source_month",
+        "bootstrap_execution_month",
+        "bootstrap_static_core_equal_sha256",
+        "bootstrap_position_manager_sha256",
+        "bootstrap_final_target_sha256",
+        "simnow_execution_enabled",
+        "plan_expiry_seconds",
+        "completion_timeout_seconds",
+        "completion_poll_seconds",
         "phase_c_custody_url",
         "phase_c_execution_url",
         "phase_c_custody_shared_secret",
@@ -251,8 +279,10 @@ def _require_root_managed(path: Path) -> bytes:
         or not stat.S_ISDIR(parent.st_mode)
         or stat.S_ISLNK(info.st_mode)
         or not stat.S_ISREG(info.st_mode)
-        or parent.st_uid != 0
-        or info.st_uid != 0
+        or parent.st_uid != os.geteuid()
+        or info.st_uid != os.geteuid()
+        or parent.st_gid != os.getegid()
+        or info.st_gid != os.getegid()
         or stat.S_IMODE(parent.st_mode) != 0o700
         or stat.S_IMODE(info.st_mode) != 0o600
         or info.st_nlink != 1
@@ -260,7 +290,7 @@ def _require_root_managed(path: Path) -> bytes:
         or info.st_size > 64 * 1024
     ):
         raise ContinuousRunError(
-            "continuous runner config must be root-owned 0700/0600"
+            "continuous runner config must be service-owned private 0700/0600"
         )
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = -1
@@ -324,8 +354,33 @@ def _load_config(path: Path) -> _Config:
         "warehouse_history_receipt_raw_sha256",
         "warehouse_business_public_key_raw_sha256",
         "warehouse_contract_registry_raw_sha256",
+        "bootstrap_static_core_equal_sha256",
+        "bootstrap_position_manager_sha256",
+        "bootstrap_final_target_sha256",
     ):
         if not _is_sha(value[field]):
+            raise ContinuousRunError(f"{field} is invalid")
+    for field in ("bootstrap_source_month", "bootstrap_execution_month"):
+        candidate = value[field]
+        try:
+            parsed = datetime.fromisoformat(f"{candidate}-01T00:00:00+00:00")
+        except (TypeError, ValueError) as exc:
+            raise ContinuousRunError(f"{field} is invalid") from exc
+        if parsed.strftime("%Y-%m") != candidate:
+            raise ContinuousRunError(f"{field} is invalid")
+    if type(value["simnow_execution_enabled"]) is not bool:
+        raise ContinuousRunError("simnow_execution_enabled is invalid")
+    for field, minimum, maximum in (
+        ("plan_expiry_seconds", 10, 600),
+        ("completion_timeout_seconds", 10, 3600),
+        ("completion_poll_seconds", 0.1, 10),
+    ):
+        candidate = value[field]
+        if (
+            isinstance(candidate, bool)
+            or not isinstance(candidate, (int, float))
+            or not minimum <= float(candidate) <= maximum
+        ):
             raise ContinuousRunError(f"{field} is invalid")
     for field in (
         "phase_c_custody_url",
@@ -341,6 +396,15 @@ def _load_config(path: Path) -> _Config:
     ):
         if not isinstance(value[field], str) or not value[field]:
             raise ContinuousRunError(f"{field} is invalid")
+    if (
+        value["phase_c_custody_url"] != "http://artifact-custody:8091"
+        or value["phase_c_execution_url"] != "http://execution-orchestrator:8090"
+        or value["execution_url"] != "http://execution-orchestrator:8090"
+        or value["leader_owner_id"] != "simnow-continuous-runner-issue362"
+        or value["principal"] != "control-api"
+        or value["operator"] != "simnow-continuous-runner"
+    ):
+        raise ContinuousRunError("continuous runner private identity is invalid")
     return _Config(dict(value))
 
 
@@ -360,8 +424,10 @@ def _one_process(lock_path: Path):
             or not stat.S_ISDIR(parent.st_mode)
             or stat.S_ISLNK(info.st_mode)
             or not stat.S_ISREG(info.st_mode)
-            or parent.st_uid != 0
-            or info.st_uid != 0
+            or parent.st_uid != os.geteuid()
+            or info.st_uid != os.geteuid()
+            or parent.st_gid != os.getegid()
+            or info.st_gid != os.getegid()
             or stat.S_IMODE(parent.st_mode) != 0o700
             or stat.S_IMODE(info.st_mode) != 0o600
             or info.st_nlink != 1
@@ -414,6 +480,23 @@ def _phase_key(event_id: str, phase: str) -> str:
                 "phase": phase,
             }
         )
+    )
+
+
+def _execution_run_id(event_id: str, expected_phase: str | None) -> str:
+    if expected_phase not in {None, *_PHASES}:
+        raise ContinuousRunError("continuous execution phase is invalid")
+    return (
+        "continuous-run-"
+        + _sha256(
+            _canonical(
+                {
+                    "domain": "web-bridge-simnow-continuous-execution-run-v1",
+                    "event_id": event_id,
+                    "expected_phase": expected_phase,
+                }
+            )
+        )[:48]
     )
 
 
@@ -535,6 +618,31 @@ def _require_terminal_closes_head(
         )
 
 
+def _require_intermediate_close_binds_head(
+    head: ContinuousEventHeadDTO, terminal: _TerminalCompletion
+) -> None:
+    current = head.current_event
+    if head.state != "INSTALLED" or current is None:
+        raise ContinuousRunError("intermediate CLOSE lacks installed event root")
+    payload = current.artifact["payload"]
+    monthly = payload["monthly"]
+    if (
+        terminal.completion.get("phase") != "CLOSE"
+        or terminal.recovery.get("custody_idempotency_key")
+        != _phase_key(current.idempotency_key, "CLOSE")
+        or not _completion_matches_recovery(terminal.completion, terminal.recovery)
+        or terminal.completion.get("lineage")
+        != {
+            "static_core_equal_sha256": monthly["static_core_equal_sha256"],
+            "position_manager_sha256": monthly["position_manager_sha256"],
+            "final_target_sha256": monthly["final_target_sha256"],
+        }
+    ):
+        raise ContinuousRunError(
+            "intermediate CLOSE does not bind the installed event root"
+        )
+
+
 def _target_positions(candidate: Mapping[str, Any]) -> dict[str, Any]:
     positions: dict[str, Any] = {}
     for row in candidate["targets"]:
@@ -579,6 +687,23 @@ def _installed_desired_binding(
     if predecessor_head.state != "INSTALLED" or current is None:
         raise ContinuousRunError("ownership predecessor lacks installed event")
     payload = current.artifact["payload"]
+    monthly = payload["monthly"]
+    source_event_raw = payload["source_event_raw"].encode()
+    return DesiredContinuousTargetBinding(
+        event_id=payload["event_id"],
+        source_event_raw=source_event_raw,
+        source_event_raw_sha256=payload["source_event_raw_sha256"],
+        selection_sha256=payload["selection_sha256"],
+        final_target_raw=monthly["final_target_raw"].encode(),
+        final_target_sha256=monthly["final_target_sha256"],
+        static_core_equal_sha256=monthly["static_core_equal_sha256"],
+        position_manager_sha256=monthly["position_manager_sha256"],
+        lineage_final_target_sha256=monthly["final_target_sha256"],
+    )
+
+
+def _event_desired_binding(event: Mapping[str, Any]) -> DesiredContinuousTargetBinding:
+    payload = event["payload"]
     monthly = payload["monthly"]
     source_event_raw = payload["source_event_raw"].encode()
     return DesiredContinuousTargetBinding(
@@ -863,6 +988,15 @@ async def _run_locked(backend: _Backend) -> dict[str, Any]:
     h0 = backend.event_head()
     h0_fingerprint = _head_fingerprint(h0)
     if h0.state == "PUBLISHED_NOT_INSTALLED":
+        if not backend.plan_adapter_ready():
+            return {
+                "status": "STOP",
+                "reason": "INSTALLED_EVENT_PLAN_ADAPTER_UNAVAILABLE",
+                "custody_mutated": False,
+                "leader_mutated": False,
+                "execution_mutated": False,
+                "gateway_mutated": False,
+            }
         try:
             backend.continue_event(h0)
         except UnknownOutcomeError:
@@ -903,13 +1037,30 @@ async def _run_locked(backend: _Backend) -> dict[str, Any]:
             backend, event_id=h0.current_event.idempotency_key
         )
         if terminal is None:
+            lifecycle = await backend.advance_installed_event(
+                event=h0.current_event.artifact,
+                phase_keys=_prior_keys,
+            )
             return {
-                "status": "PRIOR_EVENT_NOT_TERMINAL",
+                "status": "PRIOR_EVENT_ADVANCED",
                 "reason": active or "PRIOR_EVENT_PHASE_MISSING",
-                "custody_mutated": False,
-                "leader_mutated": False,
-                "execution_mutated": False,
-                "gateway_mutated": False,
+                "lifecycle": lifecycle,
+            }
+        if (
+            terminal.completion.get("phase") == "CLOSE"
+            and terminal.completion.get("target_position_hash")
+            != h0.current_event.artifact["payload"]["desired_target"][
+                "target_position_hash"
+            ]
+        ):
+            _require_intermediate_close_binds_head(h0, terminal)
+            lifecycle = await backend.advance_installed_event(
+                event=h0.current_event.artifact,
+                phase_keys=_prior_keys,
+            )
+            return {
+                "status": "PRIOR_EVENT_ADVANCED_AFTER_CLOSE",
+                "lifecycle": lifecycle,
             }
         _require_terminal_closes_head(h0, terminal)
     if r0.selection.event_candidate_raw is None:
@@ -1067,7 +1218,7 @@ async def _run_locked(backend: _Backend) -> dict[str, Any]:
 
 
 class _ProductionBackend:
-    """Real authenticated readers and event custody; plan adapter is fail-closed."""
+    """Authenticated custody, research, planning and Execution lifecycle adapter."""
 
     def __init__(self, config: _Config) -> None:
         self.config = config
@@ -1179,6 +1330,47 @@ class _ProductionBackend:
                 position_manager_sha256=planner.final_target.position_manager_sha256,
                 baseline_batch_raw_sha256=planner.final_target.baseline_batch_raw_sha256,
             )
+        elif head.state == "NO_EVENT" and head.current_event is None:
+            daily_official_day = datetime.fromisoformat(
+                str(daily_payload["official_day"])
+            ).date()
+            execution_month = self.config.raw["bootstrap_execution_month"]
+            if daily_official_day.strftime("%Y-%m") == execution_month:
+                planner = self._planner(
+                    self.config.raw["bootstrap_source_month"], catalog
+                )
+                final = planner.final_target
+                expected = {
+                    "static_core_equal_sha256": self.config.raw[
+                        "bootstrap_static_core_equal_sha256"
+                    ],
+                    "position_manager_sha256": self.config.raw[
+                        "bootstrap_position_manager_sha256"
+                    ],
+                    "final_target_sha256": self.config.raw[
+                        "bootstrap_final_target_sha256"
+                    ],
+                }
+                actual = {
+                    "static_core_equal_sha256": final.static_core_equal_sha256,
+                    "position_manager_sha256": final.position_manager_sha256,
+                    "final_target_sha256": final.final_target_sha256,
+                }
+                if (
+                    actual != expected
+                    or final.source_month != self.config.raw["bootstrap_source_month"]
+                    or final.execution_day[:7] != execution_month
+                    or final.execution_day > daily_payload["official_day"]
+                ):
+                    raise ContinuousRunError(
+                        "SIMNOW Genesis bootstrap monthly root mismatches config"
+                    )
+                monthly_candidate = MonthlyFinalTargetCandidate(
+                    final_target_raw=final.final_target_raw,
+                    static_core_equal_sha256=final.static_core_equal_sha256,
+                    position_manager_sha256=final.position_manager_sha256,
+                    baseline_batch_raw_sha256=final.baseline_batch_raw_sha256,
+                )
         elif head.current_event is not None:
             prior = head.current_event.artifact["payload"]
             source_month = prior["monthly"]["source_month"]
@@ -1204,6 +1396,14 @@ class _ProductionBackend:
             monthly_candidate=monthly_candidate,
             predecessor_monthly_target=predecessor_monthly,
             predecessor_terminal=predecessor_terminal,
+            simnow_genesis_bootstrap_execution_month=(
+                self.config.raw["bootstrap_execution_month"]
+                if head.state == "NO_EVENT"
+                and head.current_event is None
+                and monthly_candidate is not None
+                and due.status != MONTHLY_DUE
+                else None
+            ),
         )
         fixed_source_hashes = {
             field: _sha256(
@@ -1283,22 +1483,717 @@ class _ProductionBackend:
         )
 
     def plan_adapter_ready(self) -> bool:
-        return False
+        return bool(self.config.raw["simnow_execution_enabled"])
+
+    def _actor(self) -> dict[str, str]:
+        return {
+            "service": "control-api",
+            "principal": self.config.raw["principal"],
+            "operator": self.config.raw["operator"],
+            "role": "admin",
+        }
+
+    def _planner_for_installed_event(
+        self, event: Mapping[str, Any]
+    ) -> VerifiedMonthlyPlannerBundle:
+        payload = event["payload"]
+        monthly = payload["monthly"]
+        daily = payload["daily"]
+        catalog = load_current_catalog_head(
+            self.config.path("warehouse_operator_state_path")
+        )
+        if (
+            catalog.receipt_raw_sha256 != daily["catalog_receipt_raw_sha256"]
+            or catalog.artifact_raw_sha256 != daily["catalog_artifact_raw_sha256"]
+            or catalog.operator_state_raw_sha256 != daily["operator_state_raw_sha256"]
+        ):
+            raise ContinuousRunError(
+                "installed event Warehouse root changed before TargetPlan"
+            )
+        planner = self._planner(monthly["source_month"], catalog)
+        final = planner.final_target
+        if (
+            final.final_target_raw.decode() != monthly["final_target_raw"]
+            or final.final_target_raw_sha256 != monthly["final_target_raw_sha256"]
+            or final.final_target_sha256 != monthly["final_target_sha256"]
+            or final.static_core_equal_sha256 != monthly["static_core_equal_sha256"]
+            or final.position_manager_sha256 != monthly["position_manager_sha256"]
+            or final.quantity_vector_sha256 != monthly["quantity_vector_sha256"]
+            or final.monthly_exact_contract_map_sha256
+            != monthly["monthly_exact_contract_map_sha256"]
+        ):
+            raise ContinuousRunError(
+                "installed event monthly planner bundle mismatches custody root"
+            )
+        return planner
+
+    @staticmethod
+    def _gateway_snapshot(value: Mapping[str, Any]) -> GatewaySnapshot:
+        return GatewaySnapshot(
+            snapshot_id=str(value["snapshot_id"]),
+            generation=int(value["generation"]),
+            connected=value["connected"] is True,
+            active_order_count=int(value["active_order_count"]),
+            position_snapshot_hash=str(value["position_snapshot_hash"]),
+            observed_at=str(value["observed_at"]),
+            orders=dict(value["active_orders"]),
+            positions=dict(value["positions"]),
+            account_scope=str(value["account_scope"]),
+            environment=str(value["environment"]),
+            fresh=value["fresh"] is True,
+        )
+
+    async def _build_immediate_plan(
+        self,
+        *,
+        event: Mapping[str, Any],
+        expected_phase: str | None = None,
+    ) -> tuple[StaticCoreEqualFullPortfolioPhaseHandoff | None, str | None]:
+        payload = event["payload"]
+        event_id = str(payload["event_id"])
+        planner = self._planner_for_installed_event(event)
+        projection = await self.execution.reconciliation_snapshot()
+        snapshot = projection.as_dict()
+        binding = snapshot["state_binding"]
+        if (
+            snapshot["active_order_count"] != 0
+            or binding["lifecycle"] != "READY"
+            or binding["reconciliation"]["state"] != "RECONCILED"
+            or binding["reconciliation"]["unknown_outcomes"] != 0
+        ):
+            raise ContinuousRunError(
+                "Execution reconciliation snapshot is not planner-ready"
+            )
+        now = datetime.now(timezone.utc)
+        generated_at = now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        run_id = _execution_run_id(event_id, expected_phase)
+        reconciliation = dict(binding["reconciliation"])
+        gateway = self._gateway_snapshot(snapshot)
+        requirements = build_full_portfolio_quote_requests(
+            static_core_equal_projection=planner.static_core_equal_projection,
+            static_core_equal_freeze_contract=(
+                planner.static_core_equal_freeze_contract
+            ),
+            static_core_equal_target_evidence=(
+                planner.static_core_equal_target_evidence
+            ),
+            position_manager_snapshot=planner.position_manager_snapshot,
+            position_manager_sha256=planner.position_manager_sha256,
+            current_facts=gateway,
+            reconciliation=reconciliation,
+            run_id=run_id,
+            event_generated_at=generated_at,
+            now=now,
+            target_plan_version=3,
+        )
+        formal_quotes: dict[str, Any] = {}
+        if requirements.requirements:
+            bindings = read_formal_tick_bindings(
+                tuple(row.request for row in requirements.requirements),
+                clock=lambda: datetime.now(timezone.utc),
+            )
+            formal_quotes = {
+                row.exact_contract: binding.as_dict()
+                for row, binding in zip(
+                    requirements.requirements, bindings, strict=True
+                )
+            }
+        decision_now = datetime.now(timezone.utc)
+        expiry = (
+            (
+                decision_now
+                + timedelta(seconds=float(self.config.raw["plan_expiry_seconds"]))
+            )
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        decision = build_static_core_equal_full_portfolio_keyless_decision(
+            static_core_equal_projection=planner.static_core_equal_projection,
+            static_core_equal_freeze_contract=(
+                planner.static_core_equal_freeze_contract
+            ),
+            static_core_equal_target_evidence=(
+                planner.static_core_equal_target_evidence
+            ),
+            position_manager_snapshot=planner.position_manager_snapshot,
+            position_manager_sha256=planner.position_manager_sha256,
+            current_facts=gateway,
+            reconciliation=reconciliation,
+            quote_requirements=requirements,
+            formal_quotes_by_exact_contract=formal_quotes,
+            run_id=run_id,
+            event_generated_at=generated_at,
+            expires_at=expiry if requirements.requirements else None,
+            now=decision_now,
+            target_plan_version=3,
+        )
+        if (
+            decision.static_core_equal_sha256
+            != payload["monthly"]["static_core_equal_sha256"]
+            or decision.position_manager_sha256
+            != payload["monthly"]["position_manager_sha256"]
+            or decision.final_target_sha256 != payload["monthly"]["final_target_sha256"]
+            or decision.final_position_hash
+            != payload["desired_target"]["target_position_hash"]
+        ):
+            raise ContinuousRunError(
+                "TargetPlan decision does not bind installed event target"
+            )
+        if decision.noop:
+            return None, None
+        handoff = decision.close_handoff or decision.open_handoff
+        if handoff is None:
+            raise ContinuousRunError("TargetPlan decision has no immediate handoff")
+        phase = str(handoff.target_plan["phase"])
+        if phase != requirements.phase or (
+            expected_phase is not None and phase != expected_phase
+        ):
+            raise ContinuousRunError("TargetPlan immediate phase mismatches recovery")
+        return handoff, phase
+
+    @staticmethod
+    def _recovery_matches_handoff(
+        recovery: Mapping[str, Any],
+        handoff: StaticCoreEqualFullPortfolioPhaseHandoff,
+        *,
+        phase_key: str,
+    ) -> bool:
+        plan = handoff.target_plan
+        return bool(
+            recovery.get("custody_idempotency_key") == phase_key
+            and recovery.get("target_plan_schema_version") == plan.get("schema_version")
+            and recovery.get("plan_id") == plan.get("plan_id")
+            and recovery.get("plan_hash") == plan.get("plan_hash")
+            and recovery.get("phase") == plan.get("phase")
+            and recovery.get("lineage") == plan.get("lineage")
+            and recovery.get("expected_before_position_hash")
+            == plan.get("expected_before_position_hash")
+            and recovery.get("expected_after_position_hash")
+            == plan.get("expected_after_position_hash")
+        )
+
+    @staticmethod
+    def _require_recovery_binds_event(
+        recovery: Mapping[str, Any],
+        event: Mapping[str, Any],
+        *,
+        phase_key: str,
+        phase: str,
+    ) -> None:
+        payload = event["payload"]
+        monthly = payload["monthly"]
+        expected_lineage = {
+            "static_core_equal_sha256": monthly["static_core_equal_sha256"],
+            "position_manager_sha256": monthly["position_manager_sha256"],
+            "final_target_sha256": monthly["final_target_sha256"],
+        }
+        allowed_run_ids = {_execution_run_id(payload["event_id"], None)}
+        if phase == "OPEN":
+            allowed_run_ids.add(_execution_run_id(payload["event_id"], "OPEN"))
+        if (
+            recovery.get("target_plan_schema_version")
+            != KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION
+            or recovery.get("custody_idempotency_key") != phase_key
+            or recovery.get("phase") != phase
+            or recovery.get("lineage") != expected_lineage
+            or recovery.get("execution_run_id") not in allowed_run_ids
+            or (
+                phase == "OPEN"
+                and recovery.get("expected_after_position_hash")
+                != payload["desired_target"]["target_position_hash"]
+            )
+        ):
+            raise ContinuousRunError(
+                "installed TargetPlan does not bind the continuous event root"
+            )
+
+    async def _install_or_recover_plan(
+        self,
+        *,
+        phase_key: str,
+        handoff: StaticCoreEqualFullPortfolioPhaseHandoff | None,
+    ) -> dict[str, Any]:
+        recovery = (await self.execution.target_plan_recovery(phase_key)).as_dict()
+        state = recovery["state"]
+        if state == "BEFORE_CUSTODY":
+            if handoff is None:
+                raise ContinuousRunError("TargetPlan recovery lacks a local handoff")
+            artifact = handoff.trusted_keyless_custody_artifact()
+            version = self.phase_c.custody_current_version().version
+            try:
+                self.phase_c.install_trusted_keyless_target_plan(
+                    TrustedKeylessTargetPlanUploadDTO(
+                        idempotency_key=phase_key,
+                        expected_custody_version=version,
+                        correlation_id=f"continuous-plan-{phase_key[:48]}",
+                        artifact=artifact,
+                    )
+                )
+            except UnknownOutcomeError:
+                pass
+            recovery = (await self.execution.target_plan_recovery(phase_key)).as_dict()
+            state = recovery["state"]
+        if state == "CUSTODY_PUBLISHED_NOT_INSTALLED":
+            if recovery.get("install_only_allowed") is not True:
+                raise ContinuousRunError(
+                    "stored TargetPlan cannot continue after custody version drift"
+                )
+            publication = self.phase_c.target_plan_publication(phase_key)
+            if publication.state != "PUBLISHED_NOT_INSTALLED":
+                raise ContinuousRunError("TargetPlan publication state drifted")
+            try:
+                self.phase_c.install_published_trusted_keyless_target_plan(
+                    TrustedKeylessTargetPlanInstallContinuationDTO(
+                        idempotency_key=phase_key,
+                        correlation_id=str(publication.correlation_id),
+                        publisher_principal=str(publication.publisher_principal),
+                        publish_receipt_id=str(publication.publish_receipt_id),
+                        publish_receipt_sha256=str(publication.publish_receipt_sha256),
+                        publish_expected_custody_version=int(
+                            publication.publish_expected_custody_version
+                        ),
+                        publish_resulting_custody_version=int(
+                            publication.publish_resulting_custody_version
+                        ),
+                        artifact_id=str(publication.artifact_id),
+                        artifact_canonical_sha256=str(
+                            publication.artifact_canonical_sha256
+                        ),
+                        artifact_raw_sha256=str(publication.artifact_raw_sha256),
+                        artifact_schema_ref=publication.artifact_schema_ref,
+                        plan_schema_version=publication.plan_schema_version,
+                        plan_id=str(publication.plan_id),
+                        plan_hash=str(publication.plan_hash),
+                        plan_phase=publication.plan_phase,
+                        scope=publication.scope,
+                        plan_expires_at=str(publication.plan_expires_at),
+                    )
+                )
+            except UnknownOutcomeError:
+                pass
+            recovery = (await self.execution.target_plan_recovery(phase_key)).as_dict()
+            state = recovery["state"]
+        if state not in {"CUSTODY_PUBLISHED_NOT_PREVIEWED", "INSTALLED"}:
+            raise ContinuousRunError("TargetPlan did not reach installed custody")
+        if handoff is not None and not self._recovery_matches_handoff(
+            recovery, handoff, phase_key=phase_key
+        ):
+            raise ContinuousRunError("TargetPlan recovery mismatches planned handoff")
+        return recovery
+
+    async def _release_leader(self, token: Any) -> None:
+        try:
+            await self.execution.release_leader(token)
+        except ExecutionClientError as exc:
+            status = await self.execution.leader_status()
+            if (
+                status.held
+                and status.epoch == token.epoch
+                and status.fencing_token == token.fencing_token
+            ):
+                raise ContinuousRunError(
+                    "Execution leader release outcome remains unknown"
+                ) from exc
+
+    async def _drive_installed_plan(
+        self, recovery: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        plan_id = str(recovery["plan_id"])
+        plan_hash = str(recovery["plan_hash"])
+        phase = str(recovery["phase"])
+        phase_key = str(recovery["custody_idempotency_key"])
+        quote_state = recovery.get("start_quote_proof_state")
+        if quote_state in {
+            "REPLAN_REQUIRED",
+            "SOURCE_UNAVAILABLE",
+            "EVIDENCE_INVALID",
+        }:
+            return {
+                "state": "BLOCKED",
+                "phase": phase,
+                "plan_id": plan_id,
+                "code": str(quote_state),
+                "leader_mutated": False,
+                "execution_mutated": False,
+                "gateway_mutated": False,
+            }
+        actor = self._actor()
+        token = None
+        try:
+            status = (await self.execution.status()).as_dict()
+            if (
+                status.get("plan", {}).get("state") == "TERMINAL"
+                and status.get("plan", {}).get("plan_id") == plan_id
+                and status.get("plan", {}).get("plan_hash") == plan_hash
+            ):
+                completion = await self.execution.completion(plan_id)
+                if completion is None:
+                    raise ContinuousRunError(
+                        "terminal TargetPlan lacks completion archive"
+                    )
+                return {"state": "COMPLETED", "phase": phase, "plan_id": plan_id}
+
+            current_plan = status.get("plan", {})
+            current_state = current_plan.get("state")
+            preview_matches = bool(
+                current_state == "PREVIEWED"
+                and current_plan.get("plan_id") == f"preview-{plan_hash[:16]}"
+                and current_plan.get("plan_hash") == plan_hash
+            )
+            exact_plan_matches = bool(
+                current_plan.get("plan_id") == plan_id
+                and current_plan.get("plan_hash") == plan_hash
+            )
+            if current_state != "IDLE" and not (preview_matches or exact_plan_matches):
+                raise ContinuousRunError(
+                    "Execution holds a foreign non-idle TargetPlan"
+                )
+
+            leader = status.get("leader", {})
+            if leader.get("held"):
+                raise ContinuousRunError(
+                    "Execution leader is already held; wait for exact lease recovery"
+                )
+            token = await self.execution.acquire_leader(
+                self.config.raw["leader_owner_id"]
+            )
+            token = await self.execution.renew_leader(token)
+
+            if recovery.get("start_quote_proof_state") == "STARTED_MATCHED" or (
+                status.get("plan", {}).get("state") == "ACTIVE"
+                and status.get("plan", {}).get("plan_id") == plan_id
+            ):
+                snapshot = await self.execution.reconciliation_snapshot()
+                await self.execution.resume_active_plan(
+                    plan_id=plan_id,
+                    plan_hash=plan_hash,
+                    leader_token=token,
+                    reconciliation_snapshot=snapshot,
+                )
+            else:
+                now = (
+                    datetime.now(timezone.utc)
+                    .replace(microsecond=0)
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                )
+                if status.get("plan", {}).get("state") == "IDLE":
+                    await self.execution.submit(
+                        _command(
+                            name="preview",
+                            suffix=f"continuous-preview-{phase_key[:32]}",
+                            version=status["state_version"],
+                            actor=actor,
+                            now=now,
+                            payload={
+                                "plan_hash": plan_hash,
+                                "artifact_hash": recovery["artifact_sha256"],
+                                "mode": "simnow_preview",
+                                "receipt_id": recovery["receipt_id"],
+                            },
+                        )
+                    )
+                    status = (await self.execution.status()).as_dict()
+                if status.get("reconciliation", {}).get("state") != "RECONCILED":
+                    await _submit_reconcile_with_ready_snapshot(
+                        self.execution,
+                        suffix=f"continuous-reconcile-{phase_key[:32]}",
+                        version=status["state_version"],
+                        actor=actor,
+                        now=now,
+                        reconciliation_run_id=(
+                            f"continuous-reconcile-{phase_key[:40]}"
+                        ),
+                        reason="fresh continuous SIMNOW plan facts",
+                    )
+                    status = (await self.execution.status()).as_dict()
+                if status.get("authority", {}).get("state") != "ENABLED":
+                    await self.execution.submit(
+                        _command(
+                            name="enable",
+                            suffix=f"continuous-enable-{phase_key[:32]}",
+                            version=status["state_version"],
+                            actor=actor,
+                            now=now,
+                            payload={
+                                "authority_artifact_id": plan_id,
+                                "authority_hash": plan_hash,
+                                "expires_at": recovery["expires_at"],
+                                "reason": "trusted continuous SIMNOW custody",
+                            },
+                        )
+                    )
+                    status = (await self.execution.status()).as_dict()
+                token = await self.execution.renew_leader(token)
+                start = _command(
+                    name="start",
+                    suffix=f"continuous-start-{phase_key[:32]}",
+                    version=status["state_version"],
+                    actor=actor,
+                    now=now,
+                    fence={
+                        "leader_epoch": token.epoch,
+                        "fencing_token": token.fencing_token,
+                    },
+                    payload={
+                        "plan_id": plan_id,
+                        "plan_hash": plan_hash,
+                        "reason": "start exact continuous SIMNOW plan",
+                    },
+                )
+                try:
+                    await self.execution.submit(start)
+                except (ExecutionUnknownOutcomeError, ExecutionClientError):
+                    try:
+                        receipt = await self.execution.receipt(
+                            start["idempotency_key"], actor=actor
+                        )
+                    except ExecutionClientError:
+                        receipt = None
+                    if not _accepted_start_receipt(receipt, command=start):
+                        raise ContinuousRunError(
+                            "TargetPlan start outcome is unknown; query only"
+                        )
+
+            deadline = asyncio.get_running_loop().time() + float(
+                self.config.raw["completion_timeout_seconds"]
+            )
+            reconciled_versions: set[int] = set()
+            while True:
+                status = (await self.execution.status()).as_dict()
+                state = _completion_state(status, plan_id=plan_id, plan_hash=plan_hash)
+                if state == "unknown_outcome":
+                    raise ContinuousRunError("TargetPlan has an unknown broker outcome")
+                if state == "ready_for_final_reconcile":
+                    break
+                if state == "pending_intents":
+                    version = status["state_version"]
+                    if version not in reconciled_versions:
+                        token = await self.execution.renew_leader(token)
+                        command, response = await _submit_reconcile_with_ready_snapshot(
+                            self.execution,
+                            suffix=(
+                                f"continuous-completion-{phase_key[:24]}-{version}"
+                            ),
+                            version=version,
+                            actor=actor,
+                            now=datetime.now(timezone.utc)
+                            .replace(microsecond=0)
+                            .isoformat()
+                            .replace("+00:00", "Z"),
+                            reconciliation_run_id=(
+                                f"continuous-completion-{phase_key[:24]}-{version}"
+                            ),
+                            reason="query-only continuous SIMNOW intent reconciliation",
+                        )
+                        reconciled_versions.add(version)
+                        final_status = (await self.execution.status()).as_dict()
+                        if _final_reconcile_completed(
+                            response,
+                            plan_id=plan_id,
+                            plan_hash=plan_hash,
+                            expected_after_position_hash=recovery[
+                                "expected_after_position_hash"
+                            ],
+                            final_status=final_status,
+                            idempotency_key=command["idempotency_key"],
+                        ):
+                            status = final_status
+                            break
+                if asyncio.get_running_loop().time() >= deadline:
+                    return {
+                        "state": "ACTIVE",
+                        "phase": phase,
+                        "plan_id": plan_id,
+                        "reason": f"completion_timeout:{state}",
+                    }
+                await asyncio.sleep(float(self.config.raw["completion_poll_seconds"]))
+
+            if not _completed(status, plan_id=plan_id, plan_hash=plan_hash):
+                token = await self.execution.renew_leader(token)
+                command, response = await _submit_reconcile_with_ready_snapshot(
+                    self.execution,
+                    suffix=f"continuous-final-{phase_key[:32]}",
+                    version=status["state_version"],
+                    actor=actor,
+                    now=datetime.now(timezone.utc)
+                    .replace(microsecond=0)
+                    .isoformat()
+                    .replace("+00:00", "Z"),
+                    reconciliation_run_id=f"continuous-final-{phase_key[:40]}",
+                    reason="final continuous SIMNOW reconciliation",
+                )
+                status = (await self.execution.status()).as_dict()
+                if not _final_reconcile_completed(
+                    response,
+                    plan_id=plan_id,
+                    plan_hash=plan_hash,
+                    expected_after_position_hash=recovery[
+                        "expected_after_position_hash"
+                    ],
+                    final_status=status,
+                    idempotency_key=command["idempotency_key"],
+                ) or not _completed(status, plan_id=plan_id, plan_hash=plan_hash):
+                    raise ContinuousRunError(
+                        "TargetPlan final reconciliation did not archive"
+                    )
+            return {"state": "COMPLETED", "phase": phase, "plan_id": plan_id}
+        finally:
+            if token is not None:
+                await self._release_leader(token)
 
     async def advance_installed_event(
         self, *, event: dict[str, Any], phase_keys: Mapping[str, str]
     ) -> dict[str, Any]:
-        del event, phase_keys
-        # Do not acquire a leader or publish a plan until the installed-event
-        # -> TargetPlan-v3 private adapter exists.  This is the remaining R1
-        # production blocker; fake E2E tests exercise the frozen state machine.
-        return {
-            "state": "BLOCKED",
-            "code": "INSTALLED_EVENT_PLAN_ADAPTER_UNAVAILABLE",
-            "leader_mutated": False,
-            "execution_mutated": False,
-            "gateway_mutated": False,
-        }
+        if not self.config.raw["simnow_execution_enabled"]:
+            return {
+                "state": "BLOCKED",
+                "code": "SIMNOW_EXECUTION_NOT_ENABLED",
+                "leader_mutated": False,
+                "execution_mutated": False,
+                "gateway_mutated": False,
+            }
+        event_contract.validate_simnow_continuous_event_v1(event["payload"])
+        event_id = event["payload"]["event_id"]
+        if any(
+            phase_keys.get(phase) != _phase_key(event_id, phase) for phase in _PHASES
+        ):
+            raise ContinuousRunError("installed event phase keys are foreign")
+
+        close_recovery = (
+            await self.execution.target_plan_recovery(phase_keys["CLOSE"])
+        ).as_dict()
+        open_recovery = (
+            await self.execution.target_plan_recovery(phase_keys["OPEN"])
+        ).as_dict()
+        if open_recovery["state"] != "BEFORE_CUSTODY":
+            installed = await self._install_or_recover_plan(
+                phase_key=phase_keys["OPEN"], handoff=None
+            )
+            self._require_recovery_binds_event(
+                installed,
+                event,
+                phase_key=phase_keys["OPEN"],
+                phase="OPEN",
+            )
+            direct_run_id = _execution_run_id(event_id, None)
+            post_close_run_id = _execution_run_id(event_id, "OPEN")
+            if installed.get("execution_run_id") == post_close_run_id:
+                if close_recovery.get("state") not in {
+                    "CUSTODY_PUBLISHED_NOT_PREVIEWED",
+                    "INSTALLED",
+                }:
+                    raise ContinuousRunError(
+                        "post-CLOSE OPEN lacks installed CLOSE recovery root"
+                    )
+                self._require_recovery_binds_event(
+                    close_recovery,
+                    event,
+                    phase_key=phase_keys["CLOSE"],
+                    phase="CLOSE",
+                )
+                close_completion = await self.execution.completion(
+                    str(close_recovery["plan_id"])
+                )
+                if close_completion is None or not _completion_matches_recovery(
+                    close_completion.as_dict(), close_recovery
+                ):
+                    raise ContinuousRunError(
+                        "post-CLOSE OPEN lacks exact CLOSE completion"
+                    )
+            elif (
+                installed.get("execution_run_id") == direct_run_id
+                and close_recovery.get("state") != "BEFORE_CUSTODY"
+            ):
+                raise ContinuousRunError(
+                    "direct OPEN conflicts with an existing CLOSE plan"
+                )
+            return await self._drive_installed_plan(installed)
+
+        if close_recovery["state"] != "BEFORE_CUSTODY":
+            installed_close = await self._install_or_recover_plan(
+                phase_key=phase_keys["CLOSE"], handoff=None
+            )
+            self._require_recovery_binds_event(
+                installed_close,
+                event,
+                phase_key=phase_keys["CLOSE"],
+                phase="CLOSE",
+            )
+            completion = await self.execution.completion(
+                str(installed_close["plan_id"])
+            )
+            if completion is None:
+                result = await self._drive_installed_plan(installed_close)
+                if result["state"] != "COMPLETED":
+                    return result
+                completion = await self.execution.completion(
+                    str(installed_close["plan_id"])
+                )
+            if completion is None:
+                raise ContinuousRunError("CLOSE completion archive is unavailable")
+            facts = await self.execution.account_facts()
+            recovery_raw = _canonical_line(installed_close)
+            classified = classify_same_event_close_completion(
+                account_facts=facts,
+                expected_close=ExpectedSameEventCloseCompletionBinding(
+                    installed_event_id=event_id,
+                    installed_event_raw_sha256=event["payload"][
+                        "source_event_raw_sha256"
+                    ],
+                    close_recovery_raw=recovery_raw,
+                    close_recovery_raw_sha256=_sha256(recovery_raw),
+                ),
+                completion_raw=_canonical_line(completion.as_dict()),
+                desired_target=_event_desired_binding(event),
+                now=datetime.now(timezone.utc),
+            )
+            if (
+                classified.disposition
+                is FullAccountOwnershipDisposition.ALREADY_COMPLETED_MATCHED
+            ):
+                return {
+                    "state": "COMPLETED",
+                    "phase": "CLOSE",
+                    "plan_id": installed_close["plan_id"],
+                }
+            if (
+                classified.disposition
+                is not FullAccountOwnershipDisposition.RESUME_AFTER_CLOSE
+            ):
+                raise ContinuousRunError(
+                    "same-event CLOSE does not authorize fresh OPEN planning"
+                )
+            handoff, phase = await self._build_immediate_plan(
+                event=event, expected_phase="OPEN"
+            )
+            if handoff is None or phase != "OPEN":
+                raise ContinuousRunError("fresh post-CLOSE OPEN plan is missing")
+            installed_open = await self._install_or_recover_plan(
+                phase_key=phase_keys["OPEN"], handoff=handoff
+            )
+            self._require_recovery_binds_event(
+                installed_open,
+                event,
+                phase_key=phase_keys["OPEN"],
+                phase="OPEN",
+            )
+            return await self._drive_installed_plan(installed_open)
+
+        handoff, phase = await self._build_immediate_plan(event=event)
+        if handoff is None or phase is None:
+            return {"state": "NOOP", "phase": None, "plan_id": None}
+        installed = await self._install_or_recover_plan(
+            phase_key=phase_keys[phase], handoff=handoff
+        )
+        self._require_recovery_binds_event(
+            installed,
+            event,
+            phase_key=phase_keys[phase],
+            phase=phase,
+        )
+        return await self._drive_installed_plan(installed)
 
 
 async def run_once(config_path: Path) -> dict[str, Any]:

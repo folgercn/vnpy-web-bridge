@@ -455,6 +455,7 @@ def build_continuous_event_candidate_selection(
     monthly_candidate: MonthlyFinalTargetCandidate | None = None,
     predecessor_monthly_target: MonthlyFinalTargetCandidate | None = None,
     predecessor_terminal: TerminalPredecessorPinCandidate | None = None,
+    simnow_genesis_bootstrap_execution_month: str | None = None,
 ) -> BuiltContinuousEventSelection:
     """Select at most one structural candidate, permanently not event-ready."""
 
@@ -516,12 +517,26 @@ def build_continuous_event_candidate_selection(
         monthly_payload, monthly_rows, monthly_final_sha, monthly_quantity_sha = (
             _target_input(monthly_candidate, label="monthly candidate")
         )
-        if (
-            _require_day(
-                monthly_payload["execution_day"], "monthly candidate execution day"
+        monthly_execution_day = _require_day(
+            monthly_payload["execution_day"], "monthly candidate execution day"
+        )
+        bootstrap_month = simnow_genesis_bootstrap_execution_month
+        if bootstrap_month is None:
+            monthly_day_matches = monthly_execution_day == official_day
+        else:
+            try:
+                parsed_bootstrap_month = date.fromisoformat(f"{bootstrap_month}-01")
+            except (TypeError, ValueError) as exc:
+                raise ContinuousEventSelectorError(
+                    "SIMNOW Genesis bootstrap execution month is invalid"
+                ) from exc
+            monthly_day_matches = bool(
+                parsed_bootstrap_month.strftime("%Y-%m") == bootstrap_month
+                and monthly_execution_day <= official_day
+                and monthly_execution_day.strftime("%Y-%m") == bootstrap_month
+                and official_day.strftime("%Y-%m") == bootstrap_month
             )
-            != official_day
-        ):
+        if not monthly_day_matches:
             raise ContinuousEventSelectorError(
                 "monthly target does not belong to the daily official day"
             )
@@ -551,6 +566,10 @@ def build_continuous_event_candidate_selection(
             observed_trigger_kinds.append(ROLL_ONLY)
             suppressed_trigger_kinds.append(ROLL_ONLY)
             monthly_precedence_applied = True
+    elif simnow_genesis_bootstrap_execution_month is not None:
+        raise ContinuousEventSelectorError(
+            "SIMNOW Genesis bootstrap requires one monthly target"
+        )
     elif continuity.get("mode") == "GENESIS_STATIC_CORE_EQUAL":
         raise ContinuousEventSelectorError(
             "verified Genesis daily artifact requires its monthly target"

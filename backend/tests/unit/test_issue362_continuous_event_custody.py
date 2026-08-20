@@ -911,14 +911,15 @@ def test_contract_accepts_monthly_and_roll_but_rejects_authority_and_splices() -
     ):
         event_contract.validate_simnow_continuous_event_v1(fully_rehashed["payload"])
 
-    monthly_official_splice = deepcopy(monthly["payload"])
+    monthly_with_predecessor = _artifact(completion_phase="OPEN")
+    monthly_official_splice = deepcopy(monthly_with_predecessor["payload"])
     final_target = json.loads(monthly_official_splice["monthly"]["final_target_raw"])
     final_target["execution_day"] = "2026-07-30"
     _replace_monthly_final_target(monthly_official_splice, final_target)
     fully_rehashed = _reenvelope(monthly_official_splice)
     with pytest.raises(
         event_contract.ContinuousEventContractError,
-        match="official execution-day ordering",
+        match="completion predecessor is incomplete",
     ):
         event_contract.validate_simnow_continuous_event_v1(fully_rehashed["payload"])
 
@@ -1045,6 +1046,43 @@ def test_contract_accepts_monthly_and_roll_but_rejects_authority_and_splices() -
         match="account facts",
     ):
         event_contract.validate_simnow_continuous_event_v1(fully_rehashed["payload"])
+
+
+def test_genesis_monthly_bootstrap_is_same_execution_month_only() -> None:
+    bootstrap = _artifact(
+        official_day="2026-08-20",
+        monthly_execution_day="2026-08-03",
+        execution_day="2026-08-21",
+    )
+    assert (
+        event_contract.validate_simnow_continuous_event_v1(bootstrap["payload"])[
+            "event_id"
+        ]
+        == bootstrap["payload"]["event_id"]
+    )
+
+    non_genesis = _artifact(
+        official_day="2026-08-20",
+        monthly_execution_day="2026-08-03",
+        execution_day="2026-08-21",
+        completion_phase="OPEN",
+    )
+    with pytest.raises(
+        event_contract.ContinuousEventContractError,
+        match="completion predecessor is incomplete",
+    ):
+        event_contract.validate_simnow_continuous_event_v1(non_genesis["payload"])
+
+    next_month = _artifact(
+        official_day="2026-09-01",
+        monthly_execution_day="2026-08-03",
+        execution_day="2026-09-02",
+    )
+    with pytest.raises(
+        event_contract.ContinuousEventContractError,
+        match="official execution-day ordering",
+    ):
+        event_contract.validate_simnow_continuous_event_v1(next_month["payload"])
 
 
 def test_terminal_close_completion_is_structurally_independent_of_next_target() -> None:

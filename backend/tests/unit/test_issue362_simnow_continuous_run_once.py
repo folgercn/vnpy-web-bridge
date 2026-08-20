@@ -23,8 +23,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app.phase_c.adapters import UnknownOutcomeError
 from app.phase_c.models import TrustedKeylessContinuousEventUploadDTO
+from app.execution.models import CommandEnvelope
 from research_warehouse.continuous_event_selector import BuiltContinuousEventSelection
-from scripts.ci.classify_changes import classify_phase_a, classify_phase_b
+from scripts.ci.classify_changes import (
+    PHASE_B_UNITS,
+    classify_phase_a,
+    classify_phase_b,
+)
 from test_issue362_continuous_event_custody import (
     HEAD_NONCE,
     _artifact,
@@ -54,7 +59,7 @@ def _metadata(
     *,
     kind: int,
     mode: int,
-    uid: int = 0,
+    uid: int | None = None,
     nlink: int | None = None,
     size: int | None = None,
     inode_delta: int = 0,
@@ -63,7 +68,7 @@ def _metadata(
     return SimpleNamespace(
         st_dev=actual.st_dev,
         st_ino=actual.st_ino + inode_delta,
-        st_uid=uid,
+        st_uid=os.geteuid() if uid is None else uid,
         st_gid=actual.st_gid,
         st_mode=kind | mode,
         st_nlink=actual.st_nlink if nlink is None else nlink,
@@ -75,6 +80,7 @@ def _install_root_private_metadata(
     monkeypatch: pytest.MonkeyPatch,
     path: Path,
     *,
+    uid: int | None = None,
     file_kind: int = stat.S_IFREG,
     file_mode: int = 0o600,
     parent_mode: int = 0o700,
@@ -89,6 +95,7 @@ def _install_root_private_metadata(
         path,
         kind=file_kind,
         mode=file_mode,
+        uid=uid,
         nlink=nlink,
         size=size,
     )
@@ -149,13 +156,22 @@ def _config_value(tmp_path: Path) -> dict:
         "warehouse_business_signer_key_id": "warehouse-signer-test-0001",
         "warehouse_contract_registry_path": str(tmp_path / "contracts.json"),
         "warehouse_contract_registry_raw_sha256": "5" * 64,
-        "phase_c_custody_url": "http://phase-c-custody.invalid",
-        "phase_c_execution_url": "http://phase-c-execution.invalid",
+        "bootstrap_source_month": "2026-07",
+        "bootstrap_execution_month": "2026-08",
+        "bootstrap_static_core_equal_sha256": "6" * 64,
+        "bootstrap_position_manager_sha256": "7" * 64,
+        "bootstrap_final_target_sha256": "8" * 64,
+        "simnow_execution_enabled": False,
+        "plan_expiry_seconds": 120,
+        "completion_timeout_seconds": 120,
+        "completion_poll_seconds": 1,
+        "phase_c_custody_url": "http://artifact-custody:8091",
+        "phase_c_execution_url": "http://execution-orchestrator:8090",
         "phase_c_custody_shared_secret": "custody-secret-test-0001",
         "phase_c_execution_shared_secret": "execution-read-secret-test-0001",
-        "execution_url": "http://execution.invalid",
+        "execution_url": "http://execution-orchestrator:8090",
         "execution_shared_secret": "execution-control-secret-test-0001",
-        "leader_owner_id": "continuous-runner-test-0001",
+        "leader_owner_id": "simnow-continuous-runner-issue362",
         "principal": "control-api",
         "operator": "simnow-continuous-runner",
         "authority": runner.false_authority(),
@@ -449,6 +465,136 @@ def test_public_seam_is_config_path_only_and_cli_has_no_dynamic_inputs():
     }.issubset(runner._CONFIG_FIELDS)
 
 
+def test_night_run_template_pins_july_bootstrap_and_defaults_disabled():
+    template = json.loads(
+        (
+            ROOT
+            / "docs"
+            / "operations"
+            / "phase-b-issue-362-simnow-continuous-night-run.template.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert set(template) == runner._CONFIG_FIELDS
+    assert template["bootstrap_source_month"] == "2026-07"
+    assert template["bootstrap_execution_month"] == "2026-08"
+    assert template["bootstrap_static_core_equal_sha256"] == (
+        "ac134a0a78e4273df6451ad6106010bdcdeaa801654f4c241fc0782a0d295c51"
+    )
+    assert template["bootstrap_position_manager_sha256"] == (
+        "eee9517b172ffb665cd1ea3895a5cb123e03ee4ea448dd0f97fe096878a1708e"
+    )
+    assert template["bootstrap_final_target_sha256"] == (
+        "5e25217e1eb6f1f6cba42890ef5c817e4740fb1b5e58a8aa72ac40912d20bdef"
+    )
+    assert template["simnow_execution_enabled"] is False
+    assert template["authority"] == runner.false_authority()
+    assert all(
+        "REPLACE" in template[field]
+        for field in (
+            "execution_shared_secret",
+            "phase_c_custody_shared_secret",
+            "phase_c_execution_shared_secret",
+        )
+    )
+
+
+def test_production_warehouse_uses_july_bootstrap_only_inside_august(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    event = _artifact()
+    monthly = event["payload"]["monthly"]
+    value = _config_value(tmp_path)
+    value.update(
+        {
+            "bootstrap_static_core_equal_sha256": monthly["static_core_equal_sha256"],
+            "bootstrap_position_manager_sha256": monthly["position_manager_sha256"],
+            "bootstrap_final_target_sha256": monthly["final_target_sha256"],
+        }
+    )
+    backend = object.__new__(runner._ProductionBackend)
+    backend.config = runner._Config(value)
+    context = SimpleNamespace(
+        runtime_input=SimpleNamespace(
+            raw_sha256=value["warehouse_runtime_input_raw_sha256"]
+        ),
+        calendar=SimpleNamespace(raw_sha256="b" * 64),
+        availability=SimpleNamespace(raw_sha256="c" * 64),
+    )
+    monkeypatch.setattr(runner, "load_runtime_context_readonly", lambda _path: context)
+    monkeypatch.setattr(
+        runner,
+        "resolve_monthly_due_source",
+        lambda **_kwargs: SimpleNamespace(status="NOT_DUE", source_month=None),
+    )
+    monkeypatch.setattr(runner, "read_regular_strict", lambda *_args, **_kwargs: b"x\n")
+
+    daily = event["payload"]["daily"]
+
+    def catalog(official_day: str):
+        raw = runner._canonical_line(
+            {"artifact_id": daily["artifact_id"], "official_day": official_day}
+        )
+        return SimpleNamespace(
+            artifact_raw=raw,
+            artifact_raw_sha256=daily["artifact_raw_sha256"],
+            receipt_raw_sha256=daily["catalog_receipt_raw_sha256"],
+            operator_state_raw_sha256=daily["operator_state_raw_sha256"],
+            operator_manifest_sequence=daily["operator_manifest_sequence"],
+            manifest_genesis_seal_sha256=daily["manifest_genesis_seal_sha256"],
+            manifest_head_seal_sha256=daily["manifest_head_seal_sha256"],
+            manifest_head_commit_seal_sha256=daily["manifest_head_commit_seal_sha256"],
+            commit_anchor_ledger_raw_sha256=daily["commit_anchor_ledger_raw_sha256"],
+            last_trade_day=daily["catalog_last_trade_day"],
+        )
+
+    current_catalog = catalog("2026-08-20")
+    monkeypatch.setattr(
+        runner, "load_current_catalog_head", lambda _path: current_catalog
+    )
+    final = SimpleNamespace(
+        final_target_raw=monthly["final_target_raw"].encode(),
+        static_core_equal_sha256=monthly["static_core_equal_sha256"],
+        position_manager_sha256=monthly["position_manager_sha256"],
+        baseline_batch_raw_sha256=monthly["baseline_batch_raw_sha256"],
+        final_target_sha256=monthly["final_target_sha256"],
+        source_month="2026-07",
+        execution_day="2026-08-03",
+    )
+    planner = SimpleNamespace(final_target=final, planner_bundle_sha256="a" * 64)
+    planner_calls: list[str] = []
+
+    def replay(source_month, _catalog):
+        planner_calls.append(source_month)
+        return planner
+
+    backend._planner = replay
+    selector_calls: list[dict] = []
+
+    def select(**kwargs):
+        selector_calls.append(kwargs)
+        return _selection("continuous-event-bootstrap-test-0001")
+
+    monkeypatch.setattr(runner, "build_continuous_event_candidate_selection", select)
+    head = _service(tmp_path / "custody").continuous_event_head(
+        request_nonce=HEAD_NONCE
+    )
+
+    resolved = backend.warehouse(head)
+
+    assert resolved.planner is planner
+    assert planner_calls == ["2026-07"]
+    assert selector_calls[-1]["monthly_candidate"] is not None
+    assert selector_calls[-1]["simnow_genesis_bootstrap_execution_month"] == "2026-08"
+
+    current_catalog = catalog("2026-09-01")
+    planner_calls.clear()
+    resolved = backend.warehouse(head)
+    assert resolved.planner is None
+    assert planner_calls == []
+    assert selector_calls[-1]["monthly_candidate"] is None
+    assert selector_calls[-1]["simnow_genesis_bootstrap_execution_month"] is None
+
+
 @pytest.mark.parametrize(
     "path",
     [
@@ -456,7 +602,7 @@ def test_public_seam_is_config_path_only_and_cli_has_no_dynamic_inputs():
         "backend/tests/unit/test_issue362_simnow_continuous_run_once.py",
     ],
 )
-def test_runner_is_phase_a_contract_only_and_not_phase_b_packaged(path: str):
+def test_runner_is_phase_a_preserved_and_phase_b_packaged(path: str):
     phase_a = classify_phase_a([path])
     assert phase_a["release_blocked"] is False
     assert phase_a["selected_rule_ids"] == [
@@ -465,8 +611,8 @@ def test_runner_is_phase_a_contract_only_and_not_phase_b_packaged(path: str):
     assert phase_a["selected_units"] == []
     assert phase_a["dependency_closure"] == []
     phase_b = classify_phase_b([path])
-    assert phase_b["phase_b_changed"] is False
-    assert phase_b["selected_units"] == []
+    assert phase_b["phase_b_changed"] is True
+    assert phase_b["selected_units"] == list(PHASE_B_UNITS)
 
 
 def test_phase_keys_are_domain_separated_stable_and_not_caller_selected():
@@ -526,7 +672,26 @@ def test_config_rejects_unsafe_metadata_before_read(
         size=size,
     )
 
-    with pytest.raises(runner.ContinuousRunError, match="root-owned 0700/0600"):
+    with pytest.raises(
+        runner.ContinuousRunError, match="service-owned private 0700/0600"
+    ):
+        runner._load_config(config)
+
+
+def test_config_rejects_foreign_owner_before_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    config = tmp_path / "continuous-runner.json"
+    config.write_bytes(runner._canonical_line(_config_value(tmp_path)))
+    _install_root_private_metadata(
+        monkeypatch,
+        config,
+        uid=os.geteuid() + 1,
+    )
+
+    with pytest.raises(
+        runner.ContinuousRunError, match="service-owned private 0700/0600"
+    ):
         runner._load_config(config)
 
 
@@ -547,6 +712,33 @@ def test_config_rejects_unknown_or_noncanonical_contract(
     _install_root_private_metadata(monkeypatch, config)
 
     with pytest.raises(runner.ContinuousRunError, match="contract mismatch"):
+        runner._load_config(config)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("phase_c_custody_url", "http://attacker.invalid"),
+        ("phase_c_execution_url", "http://attacker.invalid"),
+        ("execution_url", "http://attacker.invalid"),
+        ("leader_owner_id", "foreign-runner-test-0001"),
+        ("principal", "foreign-control"),
+        ("operator", "foreign-operator"),
+    ],
+)
+def test_config_rejects_foreign_private_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: str,
+):
+    config = tmp_path / "continuous-runner.json"
+    candidate = _config_value(tmp_path)
+    candidate[field] = value
+    config.write_bytes(runner._canonical_line(candidate))
+    _install_root_private_metadata(monkeypatch, config)
+
+    with pytest.raises(runner.ContinuousRunError, match="private identity is invalid"):
         runner._load_config(config)
 
 
@@ -697,8 +889,25 @@ def test_published_event_uses_install_only_continuation_even_after_response_loss
     result = asyncio.run(runner._run_locked(backend))
 
     assert result["status"] == "EVENT_STORED_CONTINUATION"
-    assert backend.calls == ["head", "continue-event", "head"]
+    assert backend.calls == ["head", "plan-ready", "continue-event", "head"]
     assert service.continuous_event_head(request_nonce=HEAD_NONCE).state == "INSTALLED"
+
+
+def test_disabled_runner_does_not_continue_published_event(tmp_path: Path):
+    artifact = _artifact()
+    service = _service(tmp_path)
+    _publish_only(service, artifact)
+    backend = FakeBackend(service=service, plan_ready=False)
+    before = service.continuous_event_head(request_nonce=HEAD_NONCE)
+
+    result = asyncio.run(runner._run_locked(backend))
+
+    assert result["status"] == "STOP"
+    assert result["custody_mutated"] is False
+    assert backend.calls == ["head", "plan-ready"]
+    after = service.continuous_event_head(request_nonce=HEAD_NONCE)
+    assert after.state == before.state == "PUBLISHED_NOT_INSTALLED"
+    assert after.observed_custody_version == before.observed_custody_version
 
 
 def test_foreign_recovery_and_completion_fail_before_facts_or_mutations(tmp_path: Path):
@@ -739,12 +948,9 @@ def test_active_or_missing_prior_phase_is_query_only_full_domain_zero_write(
 
     result = asyncio.run(runner._run_locked(backend))
 
-    assert result["status"] == "PRIOR_EVENT_NOT_TERMINAL"
+    assert result["status"] == "PRIOR_EVENT_ADVANCED"
     assert result["reason"] == "CLOSE_ACTIVE_OR_NOT_STARTED"
-    assert result["custody_mutated"] is False
-    assert result["leader_mutated"] is False
-    assert result["execution_mutated"] is False
-    assert result["gateway_mutated"] is False
+    assert result["lifecycle"]["state"] == "FAKE_E2E_COMPLETE"
     assert "facts" not in backend.calls
     assert not any(call.startswith("publish") for call in backend.calls)
 
@@ -761,14 +967,15 @@ def test_installed_active_is_queried_before_no_candidate_can_report_no_event(
 
     result = asyncio.run(runner._run_locked(backend))
 
-    assert result["status"] == "PRIOR_EVENT_NOT_TERMINAL"
+    assert result["status"] == "PRIOR_EVENT_ADVANCED"
     assert result["reason"] == "CLOSE_ACTIVE_OR_NOT_STARTED"
+    assert result["lifecycle"]["state"] == "FAKE_E2E_COMPLETE"
     assert any(call.startswith("recovery:") for call in backend.calls)
     assert "facts" not in backend.calls
     assert not any(call.startswith("publish") for call in backend.calls)
 
 
-@pytest.mark.parametrize("foreign_field", ["target", "lineage"])
+@pytest.mark.parametrize("foreign_field", ["lineage"])
 def test_no_candidate_rejects_terminal_completion_foreign_to_installed_head(
     tmp_path: Path, foreign_field: str
 ):
@@ -1244,6 +1451,488 @@ def test_production_plan_adapter_blocker_stops_before_all_mutations(
     assert result["gateway_mutated"] is False
     assert "custody-version" not in backend.calls
     assert not any(call.startswith("publish") for call in backend.calls)
+
+
+def _production_backend_without_clients(tmp_path: Path, *, enabled: bool):
+    value = _config_value(tmp_path)
+    value["simnow_execution_enabled"] = enabled
+    backend = object.__new__(runner._ProductionBackend)
+    backend.config = runner._Config(value)
+    return backend
+
+
+def test_production_adapter_requires_explicit_root_config_enable(tmp_path: Path):
+    assert (
+        _production_backend_without_clients(
+            tmp_path, enabled=False
+        ).plan_adapter_ready()
+        is False
+    )
+    assert (
+        _production_backend_without_clients(tmp_path, enabled=True).plan_adapter_ready()
+        is True
+    )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("execution_run_id", "foreign-continuous-run-0001"),
+        (
+            "lineage",
+            {
+                "static_core_equal_sha256": "f" * 64,
+                "position_manager_sha256": "e" * 64,
+                "final_target_sha256": "d" * 64,
+            },
+        ),
+        ("expected_after_position_hash", "0" * 64),
+    ],
+)
+def test_installed_open_recovery_must_bind_exact_event_root(field: str, value):
+    event = _artifact()
+    payload = event["payload"]
+    phase_key = runner._phase_key(payload["event_id"], "OPEN")
+    recovery = {
+        "target_plan_schema_version": "web-bridge-simnow-keyless-target-plan-v3",
+        "custody_idempotency_key": phase_key,
+        "phase": "OPEN",
+        "lineage": {
+            "static_core_equal_sha256": payload["monthly"]["static_core_equal_sha256"],
+            "position_manager_sha256": payload["monthly"]["position_manager_sha256"],
+            "final_target_sha256": payload["monthly"]["final_target_sha256"],
+        },
+        "execution_run_id": runner._execution_run_id(payload["event_id"], None),
+        "expected_after_position_hash": payload["desired_target"][
+            "target_position_hash"
+        ],
+    }
+    runner._ProductionBackend._require_recovery_binds_event(
+        recovery, event, phase_key=phase_key, phase="OPEN"
+    )
+
+    recovery[field] = value
+    with pytest.raises(
+        runner.ContinuousRunError,
+        match="does not bind the continuous event root",
+    ):
+        runner._ProductionBackend._require_recovery_binds_event(
+            recovery, event, phase_key=phase_key, phase="OPEN"
+        )
+
+
+@pytest.mark.parametrize(
+    ("run_phase", "close_state", "message"),
+    [
+        ("OPEN", "BEFORE_CUSTODY", "lacks installed CLOSE recovery root"),
+        (None, "INSTALLED", "direct OPEN conflicts"),
+    ],
+)
+def test_open_recovery_requires_unambiguous_close_history(
+    tmp_path: Path,
+    run_phase: str | None,
+    close_state: str,
+    message: str,
+):
+    backend = _production_backend_without_clients(tmp_path, enabled=True)
+    event = _artifact()
+    payload = event["payload"]
+    phase_keys = {
+        phase: runner._phase_key(payload["event_id"], phase) for phase in runner._PHASES
+    }
+    lineage = {
+        "static_core_equal_sha256": payload["monthly"]["static_core_equal_sha256"],
+        "position_manager_sha256": payload["monthly"]["position_manager_sha256"],
+        "final_target_sha256": payload["monthly"]["final_target_sha256"],
+    }
+    close = {
+        "state": close_state,
+        "custody_idempotency_key": phase_keys["CLOSE"],
+    }
+    opened = {
+        "state": "INSTALLED",
+        "target_plan_schema_version": "web-bridge-simnow-keyless-target-plan-v3",
+        "custody_idempotency_key": phase_keys["OPEN"],
+        "phase": "OPEN",
+        "lineage": lineage,
+        "execution_run_id": runner._execution_run_id(payload["event_id"], run_phase),
+        "expected_after_position_hash": payload["desired_target"][
+            "target_position_hash"
+        ],
+        "plan_id": "continuous-open-plan-history-0001",
+        "plan_hash": "a" * 64,
+    }
+
+    class Execution:
+        async def target_plan_recovery(self, key):
+            value = close if key == phase_keys["CLOSE"] else opened
+            return SimpleNamespace(as_dict=lambda: dict(value))
+
+    async def installed(*, phase_key, handoff):
+        assert phase_key == phase_keys["OPEN"]
+        assert handoff is None
+        return opened
+
+    async def drive(_recovery):
+        raise AssertionError("ambiguous OPEN must not reach Execution")
+
+    backend.execution = Execution()
+    backend._install_or_recover_plan = installed
+    backend._drive_installed_plan = drive
+
+    with pytest.raises(runner.ContinuousRunError, match=message):
+        asyncio.run(backend.advance_installed_event(event=event, phase_keys=phase_keys))
+
+
+def test_foreign_non_idle_plan_stops_before_leader_acquire(tmp_path: Path):
+    backend = _production_backend_without_clients(tmp_path, enabled=True)
+
+    class Execution:
+        def __init__(self):
+            self.acquire_calls = 0
+
+        async def status(self):
+            return SimpleNamespace(
+                as_dict=lambda: {
+                    "state_version": 4,
+                    "plan": {
+                        "state": "PREVIEWED",
+                        "plan_id": "foreign-plan-test-0001",
+                        "plan_hash": "f" * 64,
+                    },
+                    "leader": {"held": False},
+                }
+            )
+
+        async def acquire_leader(self, owner_id):
+            del owner_id
+            self.acquire_calls += 1
+
+    execution = Execution()
+    backend.execution = execution
+    with pytest.raises(
+        runner.ContinuousRunError,
+        match="foreign non-idle TargetPlan",
+    ):
+        asyncio.run(
+            backend._drive_installed_plan(
+                {
+                    "plan_id": "expected-plan-test-0001",
+                    "plan_hash": "a" * 64,
+                    "phase": "OPEN",
+                    "custody_idempotency_key": "b" * 64,
+                }
+            )
+        )
+    assert execution.acquire_calls == 0
+
+
+def test_published_target_plan_uses_stored_install_only_and_never_republishes(
+    tmp_path: Path,
+):
+    backend = _production_backend_without_clients(tmp_path, enabled=True)
+    phase_key = "b" * 64
+    installed = {
+        "state": "INSTALLED",
+        "custody_idempotency_key": phase_key,
+        "plan_id": "continuous-plan-test-0001",
+    }
+
+    class Execution:
+        def __init__(self):
+            self.values = [
+                {
+                    "state": "CUSTODY_PUBLISHED_NOT_INSTALLED",
+                    "install_only_allowed": True,
+                },
+                installed,
+            ]
+
+        async def target_plan_recovery(self, key):
+            assert key == phase_key
+            return SimpleNamespace(as_dict=lambda: self.values.pop(0))
+
+    class PhaseC:
+        def __init__(self):
+            self.install_only_calls = 0
+            self.publish_calls = 0
+            self.version_calls = 0
+
+        def target_plan_publication(self, key):
+            assert key == phase_key
+            return SimpleNamespace(
+                state="PUBLISHED_NOT_INSTALLED",
+                correlation_id="continuous-plan-correlation-0001",
+                publisher_principal="control-api",
+                publish_receipt_id="continuous-plan-receipt-0001",
+                publish_receipt_sha256="1" * 64,
+                publish_expected_custody_version=2,
+                publish_resulting_custody_version=3,
+                artifact_id="continuous-plan-artifact-0001",
+                artifact_canonical_sha256="2" * 64,
+                artifact_raw_sha256="3" * 64,
+                artifact_schema_ref=("web-bridge-simnow-keyless-target-plan-v3"),
+                plan_schema_version=("web-bridge-simnow-keyless-target-plan-v3"),
+                plan_id="continuous-plan-test-0001",
+                plan_hash="4" * 64,
+                plan_phase="OPEN",
+                scope={
+                    "account_scope": "account:windows",
+                    "environment": "SIMNOW",
+                    "gateway_name": "CTP",
+                },
+                plan_expires_at="2026-08-20T13:02:00Z",
+            )
+
+        def install_published_trusted_keyless_target_plan(self, request):
+            assert request.idempotency_key == phase_key
+            self.install_only_calls += 1
+
+        def install_trusted_keyless_target_plan(self, request):
+            del request
+            self.publish_calls += 1
+
+        def custody_current_version(self):
+            self.version_calls += 1
+
+    backend.execution = Execution()
+    backend.phase_c = PhaseC()
+
+    result = asyncio.run(
+        backend._install_or_recover_plan(phase_key=phase_key, handoff=None)
+    )
+
+    assert result is installed
+    assert backend.phase_c.install_only_calls == 1
+    assert backend.phase_c.publish_calls == 0
+    assert backend.phase_c.version_calls == 0
+
+
+def test_start_response_loss_queries_exact_receipt_and_never_resends(tmp_path: Path):
+    backend = _production_backend_without_clients(tmp_path, enabled=True)
+    plan_id = "continuous-open-plan-test-0002"
+    plan_hash = "a" * 64
+    intent = {"plan_id": plan_id, "plan_hash": plan_hash, "state": "RECONCILED"}
+    previewed = {
+        "state_version": 7,
+        "lifecycle": "READY",
+        "plan": {
+            "state": "PREVIEWED",
+            "plan_id": f"preview-{plan_hash[:16]}",
+            "plan_hash": plan_hash,
+        },
+        "authority": {"state": "ENABLED"},
+        "leader": {"held": False},
+        "reconciliation": {"state": "RECONCILED", "unknown_outcomes": 0},
+        "broker": {"active_order_count": 0},
+        "send_intents": [],
+        "safe_to_restart": False,
+    }
+    terminal = {
+        **previewed,
+        "state_version": 9,
+        "plan": {"state": "TERMINAL", "plan_id": plan_id, "plan_hash": plan_hash},
+        "authority": {"state": "REVOKED"},
+        "leader": {"held": False},
+        "send_intents": [intent],
+        "safe_to_restart": True,
+    }
+
+    class Execution:
+        def __init__(self):
+            self.calls: list[str] = []
+            self.statuses = [previewed, terminal]
+            self.token = SimpleNamespace(epoch=5, fencing_token=8)
+            self.receipt_value = None
+
+        async def status(self):
+            self.calls.append("status")
+            return SimpleNamespace(as_dict=lambda: self.statuses.pop(0))
+
+        async def acquire_leader(self, owner_id):
+            self.calls.append(f"acquire:{owner_id}")
+            return self.token
+
+        async def renew_leader(self, token):
+            assert token is self.token
+            self.calls.append("renew")
+            return token
+
+        async def submit(self, command):
+            self.calls.append("start")
+            envelope = CommandEnvelope.model_validate(command)
+            self.receipt_value = {
+                "service": envelope.actor.service,
+                "idempotency_key": envelope.idempotency_key,
+                "command_hash": envelope.command_hash(),
+                "command_id": envelope.command_id,
+                "correlation_id": envelope.correlation_id,
+                "actor": envelope.actor.as_dict(),
+                "status": "COMPLETED",
+                "result": {"accepted": True},
+            }
+            raise runner.ExecutionUnknownOutcomeError("response lost")
+
+        async def receipt(self, key, *, actor):
+            assert key == self.receipt_value["idempotency_key"]
+            assert actor["principal"] == "control-api"
+            self.calls.append("receipt")
+            return self.receipt_value
+
+        async def release_leader(self, token):
+            assert token is self.token
+            self.calls.append("release")
+
+    execution = Execution()
+    backend.execution = execution
+    result = asyncio.run(
+        backend._drive_installed_plan(
+            {
+                "plan_id": plan_id,
+                "plan_hash": plan_hash,
+                "phase": "OPEN",
+                "custody_idempotency_key": "b" * 64,
+                "start_quote_proof_state": "READY",
+                "expected_after_position_hash": "c" * 64,
+                "expires_at": "2026-08-20T13:02:00Z",
+                "artifact_sha256": "d" * 64,
+                "receipt_id": "continuous-receipt-test-0002",
+            }
+        )
+    )
+
+    assert result == {"state": "COMPLETED", "phase": "OPEN", "plan_id": plan_id}
+    assert execution.calls.count("start") == 1
+    assert execution.calls.count("receipt") == 1
+    assert execution.calls[-1] == "release"
+
+
+@pytest.mark.parametrize(
+    "quote_state",
+    ["REPLAN_REQUIRED", "SOURCE_UNAVAILABLE", "EVIDENCE_INVALID"],
+)
+def test_start_quote_blockers_stop_before_leader_or_execution_mutation(
+    tmp_path: Path, quote_state: str
+):
+    backend = _production_backend_without_clients(tmp_path, enabled=True)
+
+    class Execution:
+        async def status(self):
+            raise AssertionError("blocked quote state must not read mutable status")
+
+    backend.execution = Execution()
+    result = asyncio.run(
+        backend._drive_installed_plan(
+            {
+                "plan_id": "continuous-plan-blocked-0001",
+                "plan_hash": "a" * 64,
+                "phase": "OPEN",
+                "custody_idempotency_key": "b" * 64,
+                "start_quote_proof_state": quote_state,
+            }
+        )
+    )
+
+    assert result == {
+        "state": "BLOCKED",
+        "phase": "OPEN",
+        "plan_id": "continuous-plan-blocked-0001",
+        "code": quote_state,
+        "leader_mutated": False,
+        "execution_mutated": False,
+        "gateway_mutated": False,
+    }
+
+
+def test_active_plan_recovery_uses_exact_resume_api_and_releases_leader(
+    tmp_path: Path,
+):
+    backend = _production_backend_without_clients(tmp_path, enabled=True)
+    plan_id = "continuous-open-plan-test-0001"
+    plan_hash = "a" * 64
+    intent = {
+        "plan_id": plan_id,
+        "plan_hash": plan_hash,
+        "state": "RECONCILED",
+    }
+    active = {
+        "state_version": 7,
+        "lifecycle": "READY",
+        "plan": {"state": "ACTIVE", "plan_id": plan_id, "plan_hash": plan_hash},
+        "authority": {"state": "ENABLED"},
+        "leader": {"held": False},
+        "reconciliation": {"state": "RECONCILED", "unknown_outcomes": 0},
+        "broker": {"active_order_count": 0},
+        "send_intents": [intent],
+        "safe_to_restart": False,
+    }
+    terminal = {
+        **active,
+        "state_version": 8,
+        "plan": {"state": "TERMINAL", "plan_id": plan_id, "plan_hash": plan_hash},
+        "authority": {"state": "REVOKED"},
+        "leader": {"held": False},
+        "safe_to_restart": True,
+    }
+
+    class Execution:
+        def __init__(self):
+            self.calls: list[str] = []
+            self.statuses = [active, terminal]
+            self.token = SimpleNamespace(epoch=3, fencing_token=4)
+
+        async def status(self):
+            self.calls.append("status")
+            return SimpleNamespace(as_dict=lambda: self.statuses.pop(0))
+
+        async def acquire_leader(self, owner_id):
+            self.calls.append(f"acquire:{owner_id}")
+            return self.token
+
+        async def renew_leader(self, token):
+            assert token is self.token
+            self.calls.append("renew")
+            return token
+
+        async def reconciliation_snapshot(self):
+            self.calls.append("snapshot")
+            return SimpleNamespace()
+
+        async def resume_active_plan(self, **kwargs):
+            assert kwargs["plan_id"] == plan_id
+            assert kwargs["plan_hash"] == plan_hash
+            assert kwargs["leader_token"] is self.token
+            self.calls.append("resume")
+
+        async def release_leader(self, token):
+            assert token is self.token
+            self.calls.append("release")
+
+    execution = Execution()
+    backend.execution = execution
+    result = asyncio.run(
+        backend._drive_installed_plan(
+            {
+                "plan_id": plan_id,
+                "plan_hash": plan_hash,
+                "phase": "OPEN",
+                "custody_idempotency_key": "b" * 64,
+                "start_quote_proof_state": "STARTED_MATCHED",
+                "expected_after_position_hash": "c" * 64,
+            }
+        )
+    )
+
+    assert result == {"state": "COMPLETED", "phase": "OPEN", "plan_id": plan_id}
+    assert execution.calls == [
+        "status",
+        f"acquire:{_config_value(tmp_path)['leader_owner_id']}",
+        "renew",
+        "snapshot",
+        "resume",
+        "status",
+        "release",
+    ]
 
 
 def test_noop_ownership_is_full_domain_zero_write(

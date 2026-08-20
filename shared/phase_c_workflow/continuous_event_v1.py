@@ -1162,11 +1162,17 @@ def validate_simnow_continuous_event_v1(value: Any) -> dict[str, Any]:
     execution_day = _day(daily["execution_day"], "daily execution day")
     _day(daily["catalog_last_trade_day"], "catalog last trade day")
     monthly_execution_day = _day(monthly["execution_day"], "monthly execution day")
+    late_same_month_monthly = bool(
+        payload["trigger_kind"] == "MONTHLY_REBALANCE"
+        and monthly_execution_day < official_day
+        and monthly_execution_day[:7] == official_day[:7]
+    )
     if (
         not official_day < execution_day
         or (
             payload["trigger_kind"] == "MONTHLY_REBALANCE"
             and monthly_execution_day != official_day
+            and not late_same_month_monthly
         )
         or (
             payload["trigger_kind"] == "ROLL_ONLY"
@@ -1257,7 +1263,9 @@ def validate_simnow_continuous_event_v1(value: Any) -> dict[str, Any]:
         ):
             raise ContinuousEventContractError("Genesis predecessor is invalid")
     elif mode == "COMPLETION":
-        if any(predecessor[field] is None for field in nullable):
+        if late_same_month_monthly or any(
+            predecessor[field] is None for field in nullable
+        ):
             raise ContinuousEventContractError("completion predecessor is incomplete")
         completion_raw, completion = _validate_completion(predecessor["completion_raw"])
         for field in (
