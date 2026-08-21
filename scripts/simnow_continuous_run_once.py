@@ -78,6 +78,7 @@ from research_warehouse.continuous_event_selector import (  # noqa: E402
 )
 from research_warehouse.daily_roll_predecessor_catalog import (  # noqa: E402
     CurrentCatalogHeadProof,
+    DailyRollPredecessorCatalogError,
     load_current_catalog_head,
 )
 from research_warehouse.file_integrity import read_regular_strict  # noqa: E402
@@ -1032,7 +1033,25 @@ async def _run_locked(backend: _Backend) -> dict[str, Any]:
             "gateway_mutated": False,
         }
 
-    r0 = backend.warehouse(h0)
+    try:
+        r0 = backend.warehouse(h0)
+    except DailyRollPredecessorCatalogError as exc:
+        if (
+            str(exc) != "daily roll predecessor catalog is empty"
+            or h0.state != "NO_EVENT"
+            or h0.current_event is not None
+        ):
+            raise
+        h1 = backend.event_head()
+        if _head_fingerprint(h1) != h0_fingerprint:
+            raise ContinuousRunError("NO_EVENT custody root drifted before catalog")
+        return {
+            "status": "NO_EVENT",
+            "custody_mutated": False,
+            "leader_mutated": False,
+            "execution_mutated": False,
+            "gateway_mutated": False,
+        }
     terminal: _TerminalCompletion | None = None
     if h0.current_event is not None:
         terminal, _prior_keys, active = await _terminal_completion(

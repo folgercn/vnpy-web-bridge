@@ -907,6 +907,49 @@ def test_no_event_double_reads_roots_and_is_full_domain_zero_write(tmp_path: Pat
     assert backend.calls == ["head", "warehouse", "warehouse", "head"]
 
 
+def test_no_event_missing_predecessor_catalog_is_full_domain_zero_write(
+    tmp_path: Path,
+):
+    backend = FakeBackend(service=_service(tmp_path))
+
+    def missing_catalog(_head):
+        backend.calls.append("warehouse")
+        raise runner.DailyRollPredecessorCatalogError(
+            "daily roll predecessor catalog is empty"
+        )
+
+    backend.warehouse = missing_catalog
+    result = asyncio.run(runner._run_locked(backend))
+
+    assert result == {
+        "status": "NO_EVENT",
+        "custody_mutated": False,
+        "leader_mutated": False,
+        "execution_mutated": False,
+        "gateway_mutated": False,
+    }
+    assert backend.calls == ["head", "warehouse", "head"]
+
+
+def test_no_event_invalid_predecessor_catalog_still_fails_closed(tmp_path: Path):
+    backend = FakeBackend(service=_service(tmp_path))
+
+    def invalid_catalog(_head):
+        backend.calls.append("warehouse")
+        raise runner.DailyRollPredecessorCatalogError(
+            "daily roll catalog head is not bound to current root"
+        )
+
+    backend.warehouse = invalid_catalog
+
+    with pytest.raises(
+        runner.DailyRollPredecessorCatalogError,
+        match="head is not bound to current root",
+    ):
+        asyncio.run(runner._run_locked(backend))
+    assert backend.calls == ["head", "warehouse"]
+
+
 def test_no_event_warehouse_or_event_head_drift_fails_before_any_mutation(
     tmp_path: Path,
 ):
