@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from scripts.ci.classify_changes import classify
+from scripts.ci.classify_changes import classify, classify_phase_b
 from scripts.ci.validate_json_schemas import SCHEMA_DIRECTORIES
 
 
@@ -70,6 +70,47 @@ def test_area_classification_examples() -> None:
     assert classify(["frontend/src/App.tsx"])["frontend_changed"]
     assert not any(classify(["docs/README.md"]).values())
     assert all(classify([], force_all=True).values())
+
+
+def test_simnow_runner_packaging_fastlane_skips_unrelated_heavy_ci() -> None:
+    fastlane = [
+        "deployments/phase-b/Containerfile.simnow-runner",
+        "deployments/phase-b/requirements-simnow-runner.txt",
+        "backend/tests/unit/test_issue325_keyless_simnow.py",
+        "backend/tests/unit/test_issue362_simnow_continuous_run_once.py",
+    ]
+    for path in fastlane:
+        assert not any(classify([path]).values()), path
+
+    for path in fastlane[:2] + fastlane[3:]:
+        phase_b = classify_phase_b([path])
+        assert phase_b["phase_b_changed"] is True
+        assert phase_b["phase_b_shared_contract_changed"] is False
+        assert phase_b["selected_units"] == []
+        assert phase_b["phase_b_gate_blocked"] is False
+
+    test_only = classify_phase_b([fastlane[2]])
+    assert test_only["phase_b_changed"] is False
+    assert test_only["selected_units"] == []
+
+
+def test_simnow_runner_logic_and_shared_execution_still_take_heavy_paths() -> None:
+    runner_logic = classify(["scripts/simnow_continuous_run_once.py"])
+    assert runner_logic["backend_changed"] is True
+    assert runner_logic["image_changed"] is True
+
+    shared_execution = classify(["backend/app/execution/formal_tick_reader.py"])
+    assert shared_execution["backend_changed"] is True
+    assert shared_execution["image_changed"] is True
+
+    for path in (
+        "scripts/simnow_continuous_run_once.py",
+        "backend/app/execution/formal_tick_reader.py",
+    ):
+        phase_b = classify_phase_b([path])
+        assert phase_b["phase_b_changed"] is True
+        assert phase_b["selected_units"] == []
+        assert phase_b["phase_b_gate_blocked"] is False
 
 
 def test_global_schema_gate_includes_research_warehouse_contracts() -> None:
