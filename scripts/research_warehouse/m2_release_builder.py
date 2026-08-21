@@ -19,6 +19,7 @@ from .m2_release_contracts import (
     BUNDLE_SCHEMA,
     COMMIT_PATTERN,
     GENESIS_RELEASE_APP_SOURCE_FILES,
+    GENESIS_RELEASE_SCHEMA_FILES,
     REQUIRED_ENTRYPOINTS,
     REQUIREMENTS_RAW_SHA256,
     regular_bytes,
@@ -46,6 +47,7 @@ def _copy_source_tree(
             "--",
             "scripts/research_warehouse",
             *GENESIS_RELEASE_APP_SOURCE_FILES,
+            *GENESIS_RELEASE_SCHEMA_FILES,
         ],
         check=False,
         capture_output=True,
@@ -53,6 +55,7 @@ def _copy_source_tree(
     if listed.returncode != 0 or not listed.stdout:
         raise RegistryError("cannot enumerate Research source commit")
     paths = []
+    source_paths: list[str] = []
     copied_genesis_modules: set[str] = set()
     for record in listed.stdout.split(b"\0"):
         if not record:
@@ -75,15 +78,21 @@ def _copy_source_tree(
         elif path in GENESIS_RELEASE_APP_SOURCE_FILES:
             relative = PurePosixPath(path.removeprefix("scripts/"))
             copied_genesis_modules.add(path)
+        elif path in GENESIS_RELEASE_SCHEMA_FILES:
+            relative = PurePosixPath(path)
         else:
             raise RegistryError("Research source Git path is outside release closure")
         if relative.is_absolute() or ".." in relative.parts:
             raise RegistryError("Research source Git path is unsafe")
+        source_paths.append(path)
         paths.append((relative, object_id, mode))
-    if not paths or [item[0].as_posix() for item in paths] != sorted(
-        item[0].as_posix() for item in paths
+    if not paths or source_paths != sorted(source_paths) or len(set(source_paths)) != len(
+        source_paths
     ):
         raise RegistryError("Research source Git tree is empty or unsorted")
+    if len({item[0].as_posix() for item in paths}) != len(paths):
+        raise RegistryError("Research source release mapping collides")
+    paths.sort(key=lambda item: item[0].as_posix())
     if copied_genesis_modules != set(GENESIS_RELEASE_APP_SOURCE_FILES):
         raise RegistryError("Genesis publisher release closure is incomplete")
     for relative, object_id, mode in paths:
@@ -94,7 +103,11 @@ def _copy_source_tree(
         )
         if blob.returncode != 0:
             raise RegistryError("cannot read Research source Git blob")
-        target = destination.joinpath(*relative.parts)
+        target = (
+            destination.parent.joinpath(*relative.parts)
+            if relative.parts[0] == "deployments"
+            else destination.joinpath(*relative.parts)
+        )
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(blob.stdout)
         target.chmod(0o755 if mode == "100755" else 0o644)

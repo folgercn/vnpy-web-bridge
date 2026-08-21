@@ -86,6 +86,7 @@ from research_warehouse.m2_isolation_contracts import false_authority  # noqa: E
 from research_warehouse.m2_runtime_loader import (  # noqa: E402
     load_runtime_context_readonly,
 )
+from research_warehouse.timeutil import format_utc, parse_utc  # noqa: E402
 from research_warehouse.monthly_due_source import (  # noqa: E402
     MONTHLY_DUE,
     resolve_monthly_due_source,
@@ -151,6 +152,9 @@ _CONFIG_FIELDS = frozenset(
         "warehouse_business_signer_key_id",
         "warehouse_contract_registry_path",
         "warehouse_contract_registry_raw_sha256",
+        "warehouse_shfe_contract_parameters_path",
+        "warehouse_shfe_contract_parameters_raw_sha256",
+        "warehouse_shfe_contract_parameters_observed_at",
         "bootstrap_source_month",
         "bootstrap_execution_month",
         "bootstrap_static_core_equal_sha256",
@@ -349,6 +353,7 @@ def _load_config(path: Path) -> _Config:
         "warehouse_signed_baseline_batch_path",
         "warehouse_business_public_key_path",
         "warehouse_contract_registry_path",
+        "warehouse_shfe_contract_parameters_path",
     ):
         _require_absolute_path(value[field], field)
     for field in (
@@ -357,6 +362,7 @@ def _load_config(path: Path) -> _Config:
         "warehouse_history_receipt_raw_sha256",
         "warehouse_business_public_key_raw_sha256",
         "warehouse_contract_registry_raw_sha256",
+        "warehouse_shfe_contract_parameters_raw_sha256",
         "bootstrap_static_core_equal_sha256",
         "bootstrap_position_manager_sha256",
         "bootstrap_final_target_sha256",
@@ -371,6 +377,21 @@ def _load_config(path: Path) -> _Config:
             raise ContinuousRunError(f"{field} is invalid") from exc
         if parsed.strftime("%Y-%m") != candidate:
             raise ContinuousRunError(f"{field} is invalid")
+    observed_at = value["warehouse_shfe_contract_parameters_observed_at"]
+    if not isinstance(observed_at, str):
+        raise ContinuousRunError("warehouse_shfe_contract_parameters_observed_at is invalid")
+    try:
+        parsed_observed_at = parse_utc(
+            observed_at, "warehouse_shfe_contract_parameters_observed_at"
+        )
+    except (TypeError, ValueError) as exc:
+        raise ContinuousRunError(
+            "warehouse_shfe_contract_parameters_observed_at is invalid"
+        ) from exc
+    if format_utc(
+        parsed_observed_at, "warehouse_shfe_contract_parameters_observed_at"
+    ) != observed_at:
+        raise ContinuousRunError("warehouse_shfe_contract_parameters_observed_at is invalid")
     if type(value["simnow_execution_enabled"]) is not bool:
         raise ContinuousRunError("simnow_execution_enabled is invalid")
     for field, minimum, maximum in (
@@ -1439,6 +1460,7 @@ class _ProductionBackend:
                 "warehouse_signed_baseline_batch_path",
                 "warehouse_business_public_key_path",
                 "warehouse_contract_registry_path",
+                "warehouse_shfe_contract_parameters_path",
             )
         }
         fingerprint = _sha256(

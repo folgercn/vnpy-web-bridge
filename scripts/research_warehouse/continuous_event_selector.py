@@ -479,13 +479,24 @@ def build_continuous_event_candidate_selection(
     # The explicitly unverified v1 detector cannot reach this validator.  Keep
     # the consumer-side identity gate as a second, stable fail-closed boundary.
     if (
-        daily.get("schema_version")
-        != "vnpy_research_commodity_verified_daily_pit_main_roll_source_v2"
-        or daily.get("input_lineage_status") != "VERIFIED_AT_CONSTRUCTION_V2"
+        (
+            daily.get("schema_version"),
+            daily.get("input_lineage_status"),
+        )
+        not in {
+            (
+                "vnpy_research_commodity_verified_daily_pit_main_roll_source_v2",
+                "VERIFIED_AT_CONSTRUCTION_V2",
+            ),
+            (
+                "vnpy_research_commodity_verified_daily_pit_main_roll_source_v3",
+                "VERIFIED_AT_CONSTRUCTION_V3",
+            ),
+        }
         or daily.get("execution_lane") != EXECUTION_LANE
         or daily.get("authority") != false_authority()
     ):
-        raise ContinuousEventSelectorError("daily artifact is not verified v2")
+        raise ContinuousEventSelectorError("daily artifact is not verified")
     if verified_daily_artifact.artifact_id != daily.get(
         "artifact_id"
     ) or verified_daily_artifact.artifact_raw_sha256 != sha256(raw):

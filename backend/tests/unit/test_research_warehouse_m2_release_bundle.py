@@ -23,6 +23,7 @@ from research_warehouse.m2_python_runtime_archive import prepare_python_runtime
 from research_warehouse.m2_release_builder import _copy_source_tree, build_release_bundle
 from research_warehouse.m2_release_contracts import (
     GENESIS_RELEASE_APP_SOURCE_FILES,
+    GENESIS_RELEASE_SCHEMA_FILES,
     REQUIREMENTS_RAW_SHA256,
     verify_release_bundle,
 )
@@ -110,28 +111,26 @@ def fake_subprocess(monkeypatch: pytest.MonkeyPatch, *, pip_status: int = 0) -> 
         if args[0] == "git" and "status" in args:
             return subprocess.CompletedProcess(args, 0, "", "")
         if args[0] == "git" and "ls-tree" in args:
+            sources = (
+                *GENESIS_RELEASE_SCHEMA_FILES,
+                *GENESIS_RELEASE_APP_SOURCE_FILES,
+                "scripts/research_warehouse/__init__.py",
+                "scripts/research_warehouse/errors.py",
+            )
             additional = b"".join(
                 (
                     b"100644 blob "
-                    + str(index + 4).encode("ascii") * 40
+                    + format(index + 4, "x").encode("ascii") * 40
                     + b"\t"
                     + source.encode("utf-8")
                     + b"\0"
                 )
-                for index, source in enumerate(GENESIS_RELEASE_APP_SOURCE_FILES)
+                for index, source in enumerate(sorted(sources))
             )
             return subprocess.CompletedProcess(
                 args,
                 0,
-                additional
-                + (
-                    b"100644 blob "
-                    + b"2" * 40
-                    + b"\tscripts/research_warehouse/__init__.py\0"
-                    + b"100644 blob "
-                    + b"3" * 40
-                    + b"\tscripts/research_warehouse/errors.py\0"
-                ),
+                additional,
                 b"",
             )
         if args[0] == "git" and "cat-file" in args:
@@ -270,6 +269,8 @@ def test_build_and_verify_bundle_is_exact(
     for source in GENESIS_RELEASE_APP_SOURCE_FILES:
         module = output / "app" / Path(source).name
         assert module.read_bytes() == b"source = True\n"
+    for source in GENESIS_RELEASE_SCHEMA_FILES:
+        assert (output / source).is_file()
     verify_release_bundle(output, manifest)
 
     target = output / "app/research_warehouse/errors.py"
@@ -297,6 +298,11 @@ def test_genesis_publisher_release_app_import_closure_is_clean(
             ["git", "-C", str(REPO_ROOT), "show", f"{source_commit}:{source}"],
         )
         assert (app / Path(source).name).read_bytes() == expected
+    for source in GENESIS_RELEASE_SCHEMA_FILES:
+        expected = subprocess.check_output(
+            ["git", "-C", str(REPO_ROOT), "show", f"{source_commit}:{source}"],
+        )
+        assert (app.parent / source).read_bytes() == expected
 
     completed = subprocess.run(
         [

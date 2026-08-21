@@ -18,9 +18,9 @@ SimNow/production/live trading.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import date, datetime, time
-import math
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -45,6 +45,7 @@ from .m2_runtime_input import require_sha
 from .m2_runtime_loader import RuntimeContext
 from .manifest_commits import commit_receipt_path
 from .pit_source_view import (
+    PitSourceViewError,
     SourcePins,
     _official_month_boundary,
     _verify_business_signature,
@@ -52,10 +53,22 @@ from .pit_source_view import (
     validate_business_key,
     verify_root_pins,
 )
+from .shfe_contract_parameters import (
+    SOURCE_ID as SHFE_CONTRACT_PARAMETERS_SOURCE_ID,
+)
+from .shfe_contract_parameters import (
+    ShfeContractParameterError,
+    ShfeContractParameterEvidence,
+)
+from .shfe_contract_parameters import (
+    endpoint_for_day as shfe_contract_parameters_endpoint,
+)
+from .shfe_contract_parameters import (
+    lineage_for_exact_contract as shfe_contract_parameters_lineage,
+)
 from .static_core_baseline import (
-    BuiltBaseline,
     PLACEHOLDER_SIGNATURE,
-    RECEIPT_SCHEMA as BASELINE_EVIDENCE_SCHEMA,
+    BuiltBaseline,
     _last_trading_day,
     _registry,
     _unsigned_batch,
@@ -63,12 +76,18 @@ from .static_core_baseline import (
     verified_static_baseline_daily_sources,
     verify_built_baseline,
 )
+from .static_core_baseline import (
+    RECEIPT_SCHEMA as BASELINE_EVIDENCE_SCHEMA,
+)
 from .timeutil import format_utc, parse_utc
 
-SCHEMA_VERSION = "vnpy_research_commodity_verified_daily_pit_main_roll_source_v2"
+SCHEMA_VERSION = "vnpy_research_commodity_verified_daily_pit_main_roll_source_v3"
+LEGACY_SCHEMA_VERSION = "vnpy_research_commodity_verified_daily_pit_main_roll_source_v2"
 SOURCE_KIND = "DAILY_PIT_MAIN_ROLL_ONLY"
-DERIVATION_ID = "VERIFIED_FROZEN_OI_DESC_DELIVERY_ASC_EXACT_ASC_ROLL_SOURCE_V2"
-INPUT_LINEAGE_STATUS = "VERIFIED_AT_CONSTRUCTION_V2"
+DERIVATION_ID = "VERIFIED_FROZEN_OI_DESC_DELIVERY_ASC_EXACT_ASC_ROLL_SOURCE_V3"
+LEGACY_DERIVATION_ID = "VERIFIED_FROZEN_OI_DESC_DELIVERY_ASC_EXACT_ASC_ROLL_SOURCE_V2"
+INPUT_LINEAGE_STATUS = "VERIFIED_AT_CONSTRUCTION_V3"
+LEGACY_INPUT_LINEAGE_STATUS = "VERIFIED_AT_CONSTRUCTION_V2"
 EXECUTION_LANE = "simnow_shakedown"
 MIN_DTE_CALENDAR_DAYS = 11
 MAX_ARTIFACT_RAW_BYTES = 4 * 1024 * 1024
@@ -85,9 +104,14 @@ CHINA_TZ = ZoneInfo("Asia/Shanghai")
 EXCHANGES = ("SHFE", "INE")
 SCHEMA_PATH = (
     Path(__file__).resolve().parents[2]
+    / "deployments/research-warehouse/verified-daily-pit-main-roll-source-v3.schema.json"
+)
+SCHEMA_RAW_SHA256 = "9adf24176555d106e6fc37e16c4a02599a03d7f23108f97a5ae4a39c876dc939"
+LEGACY_SCHEMA_PATH = (
+    Path(__file__).resolve().parents[2]
     / "deployments/research-warehouse/verified-daily-pit-main-roll-source-v2.schema.json"
 )
-SCHEMA_RAW_SHA256 = "7457bda8f9541fa2445ef23e3be6f4908c66752812fa9c3a84bc72336d7c9683"
+LEGACY_SCHEMA_RAW_SHA256 = "7457bda8f9541fa2445ef23e3be6f4908c66752812fa9c3a84bc72336d7c9683"
 
 ROOT_KEYS = {
     "schema_version",
@@ -128,7 +152,7 @@ MAIN_KEYS = {
     "execution_day_dte",
     "following_official_day_dte",
 }
-LINEAGE_KEYS = {
+LEGACY_LINEAGE_KEYS = {
     "runtime",
     "calendar",
     "operator_state",
@@ -138,6 +162,9 @@ LINEAGE_KEYS = {
     "contract_registry",
     "continuity",
     "producer",
+}
+LINEAGE_KEYS = LEGACY_LINEAGE_KEYS | {
+    "shfe_contract_parameters"
 }
 RUNTIME_KEYS = {
     "runtime_input_raw_sha256",
@@ -171,6 +198,17 @@ MANIFEST_LINEAGE_KEYS = {
 }
 CONTRACT_REGISTRY_KEYS = {"raw_sha256", "raw_bytes", "expected_raw_sha256"}
 PRODUCER_KEYS = {"producer_kernel_id", "frozen_rule_id", "frozen_rule_sha256"}
+SHFE_CONTRACT_PARAMETER_KEYS = {
+    "source_id",
+    "endpoint",
+    "query_day",
+    "observed_at",
+    "raw_sha256",
+    "raw_bytes",
+    "exact_contract",
+    "instrument_id",
+    "expire_date",
+}
 BASELINE_EVIDENCE_KEYS = {
     "schema_version",
     "derivation_id",
@@ -380,13 +418,21 @@ def _artifact_id(payload: dict[str, Any]) -> str:
 
 
 def _validate_against_root_pinned_schema(payload: dict[str, Any]) -> None:
+    if payload.get("schema_version") == SCHEMA_VERSION:
+        schema_path = SCHEMA_PATH
+        schema_sha = SCHEMA_RAW_SHA256
+    elif payload.get("schema_version") == LEGACY_SCHEMA_VERSION:
+        schema_path = LEGACY_SCHEMA_PATH
+        schema_sha = LEGACY_SCHEMA_RAW_SHA256
+    else:
+        raise VerifiedDailyPitMainRollSourceError("daily roll JSON schema version is invalid")
     schema_raw = read_regular_strict(
-        SCHEMA_PATH,
+        schema_path,
         "daily v2 root-pinned JSON schema",
         limit=512 * 1024,
         private=False,
     )
-    if sha256(schema_raw) != SCHEMA_RAW_SHA256:
+    if sha256(schema_raw) != schema_sha:
         raise VerifiedDailyPitMainRollSourceError(
             "daily v2 JSON schema root pin mismatch"
         )
@@ -1017,7 +1063,8 @@ def _mains(
     daily_source_raw: dict[str, bytes],
     contract_registry: dict[str, dict[str, Any]],
     predecessor: dict[str, str],
-) -> list[dict[str, Any]]:
+    shfe_contract_parameters: ShfeContractParameterEvidence | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, object]]]:
     extracted = {
         exchange: contract_rows_from_daily_raw(
             raw=daily_source_raw[exchange],
@@ -1027,6 +1074,7 @@ def _mains(
         for exchange in EXCHANGES
     }
     result = []
+    expiry_lineage: list[dict[str, object]] = []
     for product in frozen.PRODUCTS:
         spec = frozen.PRODUCT_SPECS[product]
         exchange = str(spec["exchange"])
@@ -1039,11 +1087,52 @@ def _mains(
         except frozen.ProducerKernelError as exc:
             raise VerifiedDailyPitMainRollSourceError(str(exc)) from exc
         exact = str(main["exact_contract"])
-        last_day = _last_trading_day(
-            context.calendar,
-            delivery_yyyymm=int(main["delivery_yyyymm"]),
-            rule=str(contract_registry[product]["last_trading_day_rule"]),
-        )
+        delivery_yyyymm = int(main["delivery_yyyymm"])
+        rule = str(contract_registry[product]["last_trading_day_rule"])
+        delivery_year, delivery_month = divmod(delivery_yyyymm, 100)
+        threshold = date(delivery_year, delivery_month, 15)
+        if rule == "SHFE_DELIVERY_MONTH_15TH_NEXT_OFFICIAL_V1":
+            calendar_last_day = None
+            if threshold <= context.calendar.valid_to:
+                try:
+                    calendar_last_day = _last_trading_day(
+                        context.calendar,
+                        delivery_yyyymm=delivery_yyyymm,
+                        rule=rule,
+                    )
+                except PitSourceViewError:
+                    # A partial delivery month cannot prove a post-15th
+                    # official day.  Only exact exchange expiry evidence may
+                    # bridge that horizon.
+                    calendar_last_day = None
+            if shfe_contract_parameters is None:
+                if calendar_last_day is None:
+                    raise VerifiedDailyPitMainRollSourceError(
+                        "daily v2 SHFE expiry evidence is required outside calendar coverage"
+                    )
+                last_day = calendar_last_day
+            else:
+                try:
+                    expiry = shfe_contract_parameters_lineage(
+                        shfe_contract_parameters, exact_contract=exact
+                    )
+                except ShfeContractParameterError as exc:
+                    raise VerifiedDailyPitMainRollSourceError(str(exc)) from exc
+                parameter_last_day = _day(
+                    expiry["expire_date"], "daily v2 SHFE contract EXPIREDATE"
+                )
+                if calendar_last_day is not None and parameter_last_day != calendar_last_day:
+                    raise VerifiedDailyPitMainRollSourceError(
+                        "daily v2 SHFE calendar/EXPIREDATE disagreement"
+                    )
+                last_day = calendar_last_day or parameter_last_day
+                expiry_lineage.append(expiry)
+        else:
+            last_day = _last_trading_day(
+                context.calendar,
+                delivery_yyyymm=delivery_yyyymm,
+                rule=rule,
+            )
         execution_dte = (last_day - execution_day).days
         following_dte = (last_day - following_day).days
         if (
@@ -1060,7 +1149,7 @@ def _mains(
                 "previous_exact_contract": predecessor[product],
                 "exact_contract": exact,
                 "changed": predecessor[product] != exact,
-                "delivery_yyyymm": int(main["delivery_yyyymm"]),
+                "delivery_yyyymm": delivery_yyyymm,
                 "settlement": float(main["settlement"]),
                 "open_interest": float(main["open_interest"]),
                 "eligible_contract_count": len(ranked),
@@ -1070,7 +1159,7 @@ def _mains(
                 "following_official_day_dte": following_dte,
             }
         )
-    return result
+    return result, expiry_lineage
 
 
 def build_verified_daily_pit_main_roll_source(
@@ -1083,6 +1172,7 @@ def build_verified_daily_pit_main_roll_source(
     official_day: str,
     contract_registry_raw: bytes,
     expected_contract_registry_raw_sha256: str,
+    shfe_contract_parameters: ShfeContractParameterEvidence | None = None,
     genesis: GenesisContinuity | None = None,
     predecessor: PredecessorContinuity | None = None,
 ) -> BuiltVerifiedDailyPitMainRollSource:
@@ -1169,7 +1259,7 @@ def build_verified_daily_pit_main_roll_source(
             )
         else:
             predecessor_map, continuity = _linked_map(verified.predecessor_entry)
-        mains = _mains(
+        mains, shfe_contract_parameter_lineage = _mains(
             context=context,
             official_day=day,
             execution_day=execution_day,
@@ -1177,6 +1267,7 @@ def build_verified_daily_pit_main_roll_source(
             daily_source_raw=verified.daily_source_raw,
             contract_registry=contract_registry,
             predecessor=predecessor_map,
+            shfe_contract_parameters=shfe_contract_parameters,
         )
         changed = [row["product"] for row in mains if row["changed"]]
         receipt = verified.receipt
@@ -1261,6 +1352,7 @@ def build_verified_daily_pit_main_roll_source(
                     "frozen_rule_id": frozen.FROZEN_RULE_ID,
                     "frozen_rule_sha256": frozen.FROZEN_RULE_SHA256,
                 },
+                "shfe_contract_parameters": shfe_contract_parameter_lineage,
             },
             "authority": false_authority(),
         }
@@ -1286,11 +1378,22 @@ def _validate_structural_daily_pit_main_roll_source(raw: bytes) -> dict[str, Any
     if bounded != canonical_json_line(payload):
         raise VerifiedDailyPitMainRollSourceError("daily v2 artifact is not canonical")
     _validate_against_root_pinned_schema(payload)
+    schema_version = payload["schema_version"]
+    if schema_version == SCHEMA_VERSION:
+        expected_derivation = DERIVATION_ID
+        expected_status = INPUT_LINEAGE_STATUS
+        expected_lineage_keys = LINEAGE_KEYS
+    elif schema_version == LEGACY_SCHEMA_VERSION:
+        expected_derivation = LEGACY_DERIVATION_ID
+        expected_status = LEGACY_INPUT_LINEAGE_STATUS
+        expected_lineage_keys = LEGACY_LINEAGE_KEYS
+    else:
+        raise VerifiedDailyPitMainRollSourceError("daily roll schema version mismatch")
     if (
-        payload["schema_version"] != SCHEMA_VERSION
+        payload["schema_version"] not in {SCHEMA_VERSION, LEGACY_SCHEMA_VERSION}
         or payload["source_kind"] != SOURCE_KIND
-        or payload["derivation_id"] != DERIVATION_ID
-        or payload["input_lineage_status"] != INPUT_LINEAGE_STATUS
+        or payload["derivation_id"] != expected_derivation
+        or payload["input_lineage_status"] != expected_status
         or payload["execution_lane"] != EXECUTION_LANE
         or any(
             payload[field] is not False
@@ -1358,7 +1461,7 @@ def _validate_structural_daily_pit_main_roll_source(raw: bytes) -> dict[str, Any
     ] is not bool(changed):
         raise VerifiedDailyPitMainRollSourceError("daily v2 change summary mismatch")
     lineage = payload["verified_lineage"]
-    if not isinstance(lineage, dict) or set(lineage) != LINEAGE_KEYS:
+    if not isinstance(lineage, dict) or set(lineage) != expected_lineage_keys:
         raise VerifiedDailyPitMainRollSourceError("daily v2 lineage fields mismatch")
     expected_sections = {
         "runtime": RUNTIME_KEYS,
@@ -1374,6 +1477,55 @@ def _validate_structural_daily_pit_main_roll_source(raw: bytes) -> dict[str, Any
             raise VerifiedDailyPitMainRollSourceError(
                 "daily v2 lineage section mismatch"
             )
+    expiry_evidence = lineage.get("shfe_contract_parameters", [])
+    if not isinstance(expiry_evidence, list) or len(expiry_evidence) > len(frozen.PRODUCTS):
+        raise VerifiedDailyPitMainRollSourceError(
+            "daily v2 SHFE contract parameter lineage is invalid"
+        )
+    expected_shfe = {
+        current_map[row["product"]]
+        for row in mains
+        if row["exchange"] == "SHFE"
+    }
+    evidence_contracts: set[str] = set()
+    for row in expiry_evidence:
+        if not isinstance(row, dict) or set(row) != SHFE_CONTRACT_PARAMETER_KEYS:
+            raise VerifiedDailyPitMainRollSourceError(
+                "daily v2 SHFE contract parameter lineage is invalid"
+            )
+        exact = row["exact_contract"]
+        if (
+            not isinstance(exact, str)
+            or exact not in expected_shfe
+            or exact in evidence_contracts
+            or row["source_id"] != SHFE_CONTRACT_PARAMETERS_SOURCE_ID
+            or row["instrument_id"] != exact.removeprefix("SHFE.")
+            or row["endpoint"]
+            != shfe_contract_parameters_endpoint(
+                _day(row["query_day"], "daily v2 SHFE parameter query day")
+            )
+        ):
+            raise VerifiedDailyPitMainRollSourceError(
+                "daily v2 SHFE contract parameter identity mismatch"
+            )
+        expiry = _day(row["expire_date"], "daily v2 SHFE parameter expiry")
+        parse_utc(row["observed_at"], "daily v2 SHFE parameter observed_at")
+        require_sha(row["raw_sha256"], "daily v2 SHFE parameter raw")
+        if (
+            isinstance(row["raw_bytes"], bool)
+            or not isinstance(row["raw_bytes"], int)
+            or not 1 <= row["raw_bytes"] <= 4 * 1024 * 1024
+            or expiry != _day(
+                next(item for item in mains if item["exact_contract"] == exact)[
+                    "official_last_trading_day"
+                ],
+                "daily v2 SHFE parameter/main expiry",
+            )
+        ):
+            raise VerifiedDailyPitMainRollSourceError(
+                "daily v2 SHFE contract parameter binding mismatch"
+            )
+        evidence_contracts.add(exact)
     sources = lineage["sources"]
     if (
         not isinstance(sources, list)

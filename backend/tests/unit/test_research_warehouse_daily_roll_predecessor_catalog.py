@@ -23,7 +23,7 @@ import research_warehouse.daily_roll_predecessor_catalog as catalog
 import research_warehouse.m2_runtime_loader as runtime_loader
 import research_warehouse.verified_daily_pit_main_roll_source as verified_roll
 from research_warehouse import pit_source_view
-from research_warehouse.canonical import canonical_json_line, sha256
+from research_warehouse.canonical import canonical_json, canonical_json_line, sha256
 from test_research_warehouse_verified_daily_pit_main_roll_source import (
     _kwargs,
     _state,
@@ -122,6 +122,9 @@ def _protected_inputs(tmp_path: Path, *, runtime_sha: str = "0" * 64) -> catalog
         business_signer_key_id="research-signer-test-0001",
         contract_registry_path=tmp_path / "contracts.json",
         contract_registry_raw_sha256="4" * 64,
+        shfe_contract_parameters_path=tmp_path / "shfe-contracts.dat",
+        shfe_contract_parameters_raw_sha256="5" * 64,
+        shfe_contract_parameters_observed_at="2026-08-20T01:02:03.000000Z",
         source_month="2026-06",
     )
 
@@ -310,13 +313,35 @@ def test_protected_genesis_replays_in_child_then_publishes_sequence_one(
         signed_baseline_batch_path=tmp_path / "signed-baseline.json",
         business_public_key_path=genesis.business_public_key_path,
         business_public_key_raw_sha256=kwargs["pins"].baseline_public_key_raw_sha256,
-        business_signer_key_id=genesis.expected_business_signer_key_id,
+            business_signer_key_id=genesis.expected_business_signer_key_id,
+        )
+    parameter_raw = canonical_json(
+        {
+            "ContractBaseInfo": [
+                {
+                    "INSTRUMENTID": f"{product}2610",
+                    "EXCHANGEID": "SHFE",
+                    "COMMODITYID": product,
+                    "TRADINGDAY": "20260701",
+                    "EXPIREDATE": "20261015",
+                }
+                for product in verified_roll.frozen.PRODUCTS
+                if verified_roll.frozen.PRODUCT_SPECS[product]["exchange"] == "SHFE"
+            ],
+            "report_date": "20260701",
+            "update_date": "20260701 16:20:09",
+        }
+    )
+    protected = replace(
+        protected,
+        shfe_contract_parameters_raw_sha256=sha256(parameter_raw),
     )
     private_evidence_raws = {
         protected.history_receipt_path: b"history-private-proof",
         protected.contract_registry_path: registry_raw,
         protected.signed_baseline_batch_path: genesis.signed_baseline_batch_raw,
         protected.business_public_key_path: b"business-key-private-proof",
+        protected.shfe_contract_parameters_path: parameter_raw,
     }
     original_strict_read = catalog.read_regular_strict
     original_lstat = Path.lstat
