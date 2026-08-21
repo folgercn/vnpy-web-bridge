@@ -21,6 +21,7 @@ from shared.commodity_execution import (
     FORMAL_QUOTE_PROOF_SCHEMA_VERSION,
     KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
     KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
+    V3_FORMAL_QUOTE_MAX_AGE_SECONDS,
     before_position_projection_hash,
     canonical_before_position_projection,
     canonical_target_position_projection,
@@ -1039,7 +1040,7 @@ def test_quote_aware_v3_is_explicit_and_close_still_defers_open() -> None:
     assert plan["creation_quote_proof"] == {
         "schema_version": FORMAL_QUOTE_PROOF_SCHEMA_VERSION,
         "validated_at_utc": EVENT_GENERATED_AT,
-        "max_age_seconds": 2,
+        "max_age_seconds": V3_FORMAL_QUOTE_MAX_AGE_SECONDS,
         "future_skew_seconds": 2,
         "journal_authenticated": False,
         "start_authorized": False,
@@ -1082,7 +1083,7 @@ def test_roll_quote_binding_requires_exact_frozen_tick_identity_and_freshness() 
         _decision(
             selected=_targets(cu=1),
             positions=positions,
-            quote_overrides={old_contract: {"received_at_utc": "2029-12-31T23:59:57Z"}},
+            quote_overrides={old_contract: {"received_at_utc": "2029-12-31T23:59:54Z"}},
         )
 
     with pytest.raises(ExecutableTargetAdapterError, match="identity is invalid"):

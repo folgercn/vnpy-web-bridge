@@ -75,7 +75,7 @@ from .formal_tick_reader import (
     FormalTickReadError,
     FormalTickRequest,
     FormalTickSourceUnavailable,
-    read_formal_tick_bindings,
+    read_simnow_continuous_v3_formal_tick_bindings,
 )
 from .models import CommandEnvelope, LeaderToken, validate_identifier
 from .orchestrator import CommandResponse, ExecutionOrchestrator
@@ -397,7 +397,7 @@ class FinalExecutionRuntime:
         max_order_volume: int = 1,
         formal_tick_bindings_reader: Callable[
             [tuple[FormalTickRequest, ...]], tuple[FormalTickBinding, ...]
-        ] = read_formal_tick_bindings,
+        ] = read_simnow_continuous_v3_formal_tick_bindings,
         quote_clock: Callable[[], datetime] = utc_now,
     ) -> None:
         if orchestrator.environment.upper() != "SIMNOW":

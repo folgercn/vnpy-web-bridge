@@ -19,16 +19,16 @@ from typing import Any
 
 from shared.commodity_execution import (
     KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
+    V3_FORMAL_QUOTE_MAX_AGE_SECONDS,
     TargetPlan,
     sha256_json,
 )
 
 from .formal_tick_reader import (
     FORMAL_TICK_FUTURE_SKEW_SECONDS,
-    FORMAL_TICK_MAX_AGE_SECONDS,
     FormalTickBinding,
     FormalTickRequest,
-    read_formal_tick_bindings,
+    read_simnow_continuous_v3_formal_tick_bindings,
 )
 from .models import SHA256_RE, UTC_RE, format_utc, validate_identifier
 
@@ -161,7 +161,8 @@ def validate_execution_start_quote_proof(
     if (
         raw["schema_version"] != EXECUTION_START_QUOTE_PROOF_SCHEMA_VERSION
         or type(raw["max_age_seconds"]) is not float
-        or raw["max_age_seconds"] != FORMAL_TICK_MAX_AGE_SECONDS
+        or raw["max_age_seconds"]
+        != V3_FORMAL_QUOTE_MAX_AGE_SECONDS
         or type(raw["future_skew_seconds"]) is not float
         or raw["future_skew_seconds"] != FORMAL_TICK_FUTURE_SKEW_SECONDS
         or raw["journal_authenticated"] is not True
@@ -237,7 +238,10 @@ def validate_execution_start_quote_proof(
             )
         received_at = datetime.fromisoformat(binding["received_at_utc"][:-1] + "+00:00")
         age = (validated_at - received_at).total_seconds()
-        if age > FORMAL_TICK_MAX_AGE_SECONDS or age < -FORMAL_TICK_FUTURE_SKEW_SECONDS:
+        if (
+            age > V3_FORMAL_QUOTE_MAX_AGE_SECONDS
+            or age < -FORMAL_TICK_FUTURE_SKEW_SECONDS
+        ):
             raise ExecutionStartQuoteProofError(
                 "execution start quote binding is stale or from the future"
             )
@@ -312,7 +316,7 @@ def build_execution_start_quote_proof(
     order_refs: Sequence[str] | None = None,
     reader: Callable[
         [tuple[FormalTickRequest, ...]], tuple[FormalTickBinding, ...]
-    ] = read_formal_tick_bindings,
+    ] = read_simnow_continuous_v3_formal_tick_bindings,
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> dict[str, Any]:
     """Read one atomic formal snapshot and bind it to exact immutable orders."""
@@ -392,7 +396,7 @@ def build_execution_start_quote_proof(
         "schema_version": EXECUTION_START_QUOTE_PROOF_SCHEMA_VERSION,
         **common,
         "validated_at_utc": format_utc(now),
-        "max_age_seconds": FORMAL_TICK_MAX_AGE_SECONDS,
+        "max_age_seconds": V3_FORMAL_QUOTE_MAX_AGE_SECONDS,
         "future_skew_seconds": FORMAL_TICK_FUTURE_SKEW_SECONDS,
         "journal_authenticated": True,
         "start_authorized": True,

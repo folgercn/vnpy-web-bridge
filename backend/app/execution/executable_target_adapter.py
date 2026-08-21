@@ -33,6 +33,7 @@ from shared.commodity_execution import (
     KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
     TARGET_PLAN_SCHEMA_VERSION,
     TRUSTED_KEYLESS_SIMNOW_SCOPE,
+    V3_FORMAL_QUOTE_MAX_AGE_SECONDS,
     CommodityExecutionContractError,
     TargetPlan,
     VerifiedCustodyReceipt,
@@ -101,7 +102,6 @@ _STATIC_CORE_EQUAL_EXCHANGE_BY_PRODUCT = {
     product: "INE" if product == "sc" else "SHFE"
     for product in _STATIC_CORE_EQUAL_PRODUCTS
 }
-_FULL_PORTFOLIO_QUOTE_MAX_AGE_SECONDS = 2
 _FULL_PORTFOLIO_QUOTE_FUTURE_SKEW_SECONDS = 2
 _FULL_PORTFOLIO_IDENTITY_SCHEMA_VERSION = (
     "commodity_static_core_equal_phase_identity_preimage_v1"
@@ -2297,7 +2297,7 @@ def _full_portfolio_formal_quote(
         )
     age = (now - observed).total_seconds()
     if (
-        age > _FULL_PORTFOLIO_QUOTE_MAX_AGE_SECONDS
+        age > V3_FORMAL_QUOTE_MAX_AGE_SECONDS
         or age < -_FULL_PORTFOLIO_QUOTE_FUTURE_SKEW_SECONDS
     ):
         raise ExecutableTargetAdapterError(
@@ -2460,7 +2460,7 @@ def _full_portfolio_plan_handoff(
     creation_quote_proof = {
         "schema_version": FORMAL_QUOTE_PROOF_SCHEMA_VERSION,
         "validated_at_utc": quote_validated_at,
-        "max_age_seconds": _FULL_PORTFOLIO_QUOTE_MAX_AGE_SECONDS,
+        "max_age_seconds": V3_FORMAL_QUOTE_MAX_AGE_SECONDS,
         "future_skew_seconds": _FULL_PORTFOLIO_QUOTE_FUTURE_SKEW_SECONDS,
         # This foundation retains deterministic creation evidence only.  A
         # later Execution admission must authenticate it against the journal

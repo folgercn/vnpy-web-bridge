@@ -31,6 +31,7 @@ from shared.commodity_execution import (
     CommodityExecutionContractError,
     TargetPlan,
     TrustedKeylessCustodyReceipt,
+    V3_FORMAL_QUOTE_MAX_AGE_SECONDS,
     build_trusted_keyless_target_plan_v3,
     sha256_json,
     trusted_keyless_target_plan_v3_plan_id,
@@ -70,7 +71,7 @@ def _v3_fields() -> dict:
         "creation_quote_proof": {
             "schema_version": FORMAL_QUOTE_PROOF_SCHEMA_VERSION,
             "validated_at_utc": "2030-01-01T00:00:00Z",
-            "max_age_seconds": 2,
+            "max_age_seconds": V3_FORMAL_QUOTE_MAX_AGE_SECONDS,
             "future_skew_seconds": 2,
             "journal_authenticated": False,
             "start_authorized": False,
@@ -175,8 +176,29 @@ def test_v3_is_strict_authority_negative_and_recomputes_identity_from_payload() 
     assert plan["production_allowed"] is False
     assert plan["live_trading_authorized"] is False
     assert plan["countable_forward"] is False
+    assert (
+        plan["creation_quote_proof"]["max_age_seconds"]
+        == V3_FORMAL_QUOTE_MAX_AGE_SECONDS
+    )
     assert plan["creation_quote_proof"]["journal_authenticated"] is False
     assert plan["creation_quote_proof"]["start_authorized"] is False
+
+
+def test_v3_creation_quote_age_policy_is_exact_hash_bound_and_not_tunable() -> None:
+    plan = _v3_plan()
+    tampered = deepcopy(plan)
+    tampered["creation_quote_proof"]["max_age_seconds"] = 2.0
+
+    assert plan["plan_hash"] != sha256_json(
+        {key: value for key, value in tampered.items() if key != "plan_hash"}
+    )
+    with pytest.raises(CommodityExecutionContractError, match="policy is invalid"):
+        TargetPlan.from_mapping(tampered)
+
+    fields = _v3_fields()
+    fields["creation_quote_proof"]["max_age_seconds"] = 2.0
+    with pytest.raises(CommodityExecutionContractError, match="policy is invalid"):
+        build_trusted_keyless_target_plan_v3(**fields)
 
 
 def test_v3_run_and_quote_material_change_identity_and_tamper_fails_closed() -> None:

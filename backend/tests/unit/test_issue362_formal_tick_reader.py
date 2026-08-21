@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import inspect
 import json
 import os
 from dataclasses import replace
@@ -18,6 +19,7 @@ from phase_b_workers.durable import (
 )
 from phase_b_workers.projections import build_projection, publish_projection
 from scripts.ci.classify_changes import classify_phase_a, classify_phase_b
+from shared.commodity_execution import V3_FORMAL_QUOTE_MAX_AGE_SECONDS
 
 ROOT = Path(__file__).resolve().parents[3]
 NOW = datetime(2030, 1, 1, tzinfo=timezone.utc)
@@ -269,6 +271,53 @@ def test_reader_rejects_stale_or_future_tick(tmp_path: Path, delta: timedelta) -
     _write_state(tmp_path, received_at=NOW + delta)
     with pytest.raises(ValueError, match="stale or from the future"):
         _read(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("age_seconds", "accepted"),
+    [
+        (4.999, True),
+        (V3_FORMAL_QUOTE_MAX_AGE_SECONDS, True),
+        (V3_FORMAL_QUOTE_MAX_AGE_SECONDS + 0.001, False),
+    ],
+)
+def test_continuous_v3_reader_has_a_fixed_five_second_age_policy(
+    tmp_path: Path, age_seconds: float, accepted: bool
+) -> None:
+    request = reader.FormalTickRequest("ru2609.SHFE", "bid", 0.2)
+    _write_state(tmp_path, received_at=NOW - timedelta(seconds=age_seconds))
+
+    assert "max_age_seconds" not in inspect.signature(
+        reader.read_simnow_continuous_v3_formal_tick_bindings
+    ).parameters
+
+    if accepted:
+        bindings = reader.read_simnow_continuous_v3_formal_tick_bindings(
+            (request,),
+            state_dir=tmp_path,
+            projection_dir=tmp_path / "projection",
+            clock=lambda: NOW,
+        )
+        assert bindings[0].vt_symbol == request.vt_symbol
+    else:
+        with pytest.raises(ValueError, match="stale or from the future"):
+            reader.read_simnow_continuous_v3_formal_tick_bindings(
+                (request,),
+                state_dir=tmp_path,
+                projection_dir=tmp_path / "projection",
+                clock=lambda: NOW,
+            )
+
+
+def test_legacy_reader_keeps_its_two_second_age_policy(tmp_path: Path) -> None:
+    _write_state(tmp_path, received_at=NOW - timedelta(seconds=2))
+    assert _read(tmp_path, side="bid").vt_symbol == "ru2609.SHFE"
+
+    late = tmp_path / "late"
+    late.mkdir()
+    _write_state(late, received_at=NOW - timedelta(seconds=2.001))
+    with pytest.raises(ValueError, match="stale or from the future"):
+        _read(late, side="bid")
 
 
 @pytest.mark.parametrize("kind", ["symlink", "nonregular", "mode", "nlink"])
