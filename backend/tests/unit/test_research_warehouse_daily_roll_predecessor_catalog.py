@@ -320,6 +320,15 @@ def test_protected_genesis_replays_in_child_then_publishes_sequence_one(
 
     monkeypatch.setattr(catalog, "_drop_to_protected_replay_identity", lambda **_v: None)
     monkeypatch.setattr(
+        catalog,
+        "_prepare_protected_replay_identity_context",
+        lambda **_values: catalog._ProtectedReplayIdentityContext(
+            platform="linux",
+            directory_memberships=frozenset({20}),
+            write_protected_paths=(),
+        ),
+    )
+    monkeypatch.setattr(
         runtime_loader,
         "load_runtime_context_readonly",
         lambda _path: context,
@@ -545,6 +554,42 @@ def test_publication_cannot_accept_forged_structural_raw_with_current_labels(
 
     root = catalog.catalog_root(kwargs["operator_state"].path)
     assert not root.exists()
+
+
+def test_protected_genesis_parent_guards_root_and_private_evidence_parents(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Only parent directories are write-gated for 503-owned private files."""
+
+    kwargs, _inputs, _holder = _genesis_setup(monkeypatch, tmp_path)
+    protected = _protected_inputs(tmp_path)
+    captured: dict[str, object] = {}
+
+    def capture_context(**values):
+        captured.update(values)
+        raise RuntimeError("stop before fork")
+
+    monkeypatch.setattr(
+        catalog, "_prepare_protected_replay_identity_context", capture_context
+    )
+    with pytest.raises(RuntimeError, match="stop before fork"):
+        catalog._build_protected_genesis_as_service_locked(
+            operator_state=kwargs["operator_state"],
+            official_day=kwargs["official_day"],
+            inputs=protected,
+        )
+
+    paths = captured["write_protected_paths"]
+    assert protected.history_receipt_path.parent in paths
+    assert protected.signed_baseline_batch_path.parent in paths
+    assert protected.business_public_key_path.parent in paths
+    assert protected.contract_registry_path.parent in paths
+    assert protected.history_receipt_path not in paths
+    assert protected.signed_baseline_batch_path not in paths
+    assert catalog.DEFAULT_MANIFEST_PRIVATE_KEY.parent in paths
+    assert catalog.DEFAULT_BACKUP_PRIVATE_KEY.parent in paths
+    assert catalog.DEFAULT_CALENDAR_PRIVATE_KEY.parent in paths
 
 
 def test_catalog_load_rejects_receipt_artifact_hash_tamper(

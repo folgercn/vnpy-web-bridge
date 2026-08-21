@@ -22,14 +22,29 @@ from research_warehouse.canonical import canonical_json_line
 from research_warehouse.daily_roll_predecessor_catalog import (
     DailyRollPredecessorCatalogError,
     ProtectedGenesisReplayInputs,
+    _ProtectedReplayIdentityContext,
     _close_child_inherited_descriptors,
     _drop_to_protected_replay_identity,
+    _prepare_protected_replay_identity_context,
     _read_protected_replay_payload,
     _require_exact_service_identity,
     publish_predecessor_artifact,
 )
 from research_warehouse.errors import RegistryError
 from research_warehouse.m2_isolation_contracts import false_authority
+
+
+def _identity_context(
+    *,
+    platform: str = "linux",
+    memberships: frozenset[int] = frozenset({20}),
+    write_protected_paths: tuple[Path, ...] = (),
+) -> _ProtectedReplayIdentityContext:
+    return _ProtectedReplayIdentityContext(
+        platform=platform,
+        directory_memberships=memberships,
+        write_protected_paths=write_protected_paths,
+    )
 
 
 def _config_value(tmp_path: Path) -> dict:
@@ -143,6 +158,87 @@ def test_protected_replay_identity_is_fixed_to_research_service() -> None:
         _require_exact_service_identity(503, 20)
 
 
+def test_root_parent_resolves_macos_directory_memberships_without_primary_dup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from research_warehouse import daily_roll_predecessor_catalog as catalog
+
+    account = pwd.struct_passwd(
+        ("vnpyresearch", "*", 503, 20, "", "/var/empty", "/usr/bin/false")
+    )
+    group_names = {
+        12: "everyone",
+        20: "staff",
+        61: "localaccounts",
+        100: "lpoperator",
+        503: "vnpyresearch",
+    }
+    monkeypatch.setattr(catalog.pwd, "getpwuid", lambda _uid: account)
+    monkeypatch.setattr(
+        catalog.grp,
+        "getgrgid",
+        lambda gid: grp.struct_group((group_names[gid], "*", gid, [])),
+    )
+    monkeypatch.setattr(catalog.os, "getgrouplist", lambda _name, _gid: [20, 12, 61, 100])
+    context = _prepare_protected_replay_identity_context(
+        uid=503, gid=503, write_protected_paths=()
+    )
+    assert context.directory_memberships == frozenset({20, 12, 61, 100})
+
+
+def test_root_parent_rejects_privileged_directory_membership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from research_warehouse import daily_roll_predecessor_catalog as catalog
+
+    account = pwd.struct_passwd(
+        ("vnpyresearch", "*", 503, 20, "", "/var/empty", "/usr/bin/false")
+    )
+    monkeypatch.setattr(catalog.pwd, "getpwuid", lambda _uid: account)
+    monkeypatch.setattr(
+        catalog.grp,
+        "getgrgid",
+        lambda gid: grp.struct_group(("vnpyresearch" if gid == 503 else "admin", "*", gid, [])),
+    )
+    monkeypatch.setattr(catalog.os, "getgrouplist", lambda _name, _gid: [20, 80])
+    with pytest.raises(DailyRollPredecessorCatalogError, match="group is privileged"):
+        _prepare_protected_replay_identity_context(
+            uid=503, gid=503, write_protected_paths=()
+        )
+
+
+def test_projection_parent_guards_catalog_operator_runtime_and_secret_dirs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def capture_context(**values):
+        captured.update(values)
+        raise RuntimeError("stop before fork")
+
+    monkeypatch.setattr(genesis_cli, "_require_root", lambda: None)
+    monkeypatch.setattr(
+        genesis_cli, "_prepare_protected_replay_identity_context", capture_context
+    )
+    with pytest.raises(RuntimeError, match="stop before fork"):
+        genesis_cli._load_projection_as_service(
+            config_path=tmp_path / "continuous.json",
+            runtime_input_path=tmp_path / "runtime.json",
+            operator_state_path=tmp_path / "operator-state.json",
+            service_uid=503,
+            service_gid=503,
+        )
+
+    paths = captured["write_protected_paths"]
+    assert tmp_path / "operator-state.json" in paths
+    assert genesis_cli.catalog_root(tmp_path / "operator-state.json") in paths
+    assert tmp_path / "runtime.json" in paths
+    assert genesis_cli.DEFAULT_MANIFEST_PRIVATE_KEY.parent in paths
+    assert genesis_cli.DEFAULT_BACKUP_PRIVATE_KEY.parent in paths
+    assert genesis_cli.DEFAULT_CALENDAR_PRIVATE_KEY.parent in paths
+
+
 def test_protected_child_drop_binds_saved_identity_groups_and_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -188,7 +284,9 @@ def test_protected_child_drop_binds_saved_identity_groups_and_environment(
     monkeypatch.setattr(catalog.os, "umask", lambda _mode: 0o022)
     monkeypatch.setenv("HTTPS_PROXY", "forbidden")
 
-    _drop_to_protected_replay_identity(uid=503, gid=503)
+    _drop_to_protected_replay_identity(
+        uid=503, gid=503, identity_context=_identity_context()
+    )
 
     assert identity == {"uid": 503, "gid": 503, "groups": [503]}
     assert "HTTPS_PROXY" not in os.environ
@@ -246,9 +344,202 @@ def test_protected_child_drop_accepts_expected_account_with_independent_primary_
     monkeypatch.setattr(catalog.os, "chdir", lambda _path: None)
     monkeypatch.setattr(catalog.os, "umask", lambda _mode: 0o022)
 
-    _drop_to_protected_replay_identity(uid=503, gid=503)
+    _drop_to_protected_replay_identity(
+        uid=503, gid=503, identity_context=_identity_context()
+    )
 
     assert identity == {"uid": 503, "gid": 503, "groups": [503]}
+
+
+def test_protected_child_drop_accepts_macos_directory_memberships(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """macOS may restore account groups after setgroups without changing egid."""
+
+    from research_warehouse import daily_roll_predecessor_catalog as catalog
+
+    identity = {"uid": 0, "gid": 0, "groups": [20, 12, 61, 100]}
+    account = pwd.struct_passwd(
+        ("vnpyresearch", "*", 503, 20, "", "/var/empty", "/usr/bin/false")
+    )
+    groups = {
+        12: grp.struct_group(("everyone", "*", 12, [])),
+        20: grp.struct_group(("staff", "*", 20, [])),
+        61: grp.struct_group(("localaccounts", "*", 61, [])),
+        100: grp.struct_group(("lpoperator", "*", 100, [])),
+        503: grp.struct_group(("vnpyresearch", "*", 503, [])),
+    }
+    monkeypatch.setattr(catalog.pwd, "getpwuid", lambda _uid: account)
+    monkeypatch.setattr(catalog.grp, "getgrgid", lambda gid: groups[gid])
+    monkeypatch.setattr(catalog.os, "setgroups", lambda _groups: None)
+    monkeypatch.setattr(
+        catalog.os, "setresgid", lambda *_values: identity.update(gid=503), raising=False
+    )
+    monkeypatch.setattr(
+        catalog.os, "setresuid", lambda *_values: identity.update(uid=503), raising=False
+    )
+    monkeypatch.setattr(catalog.os, "getuid", lambda: identity["uid"])
+    monkeypatch.setattr(catalog.os, "geteuid", lambda: identity["uid"])
+    monkeypatch.setattr(catalog.os, "getgid", lambda: identity["gid"])
+    monkeypatch.setattr(catalog.os, "getegid", lambda: identity["gid"])
+    monkeypatch.setattr(catalog.os, "getgroups", lambda: identity["groups"])
+    monkeypatch.setattr(catalog.os, "getresuid", lambda: (503, 503, 503), raising=False)
+    monkeypatch.setattr(catalog.os, "getresgid", lambda: (503, 503, 503), raising=False)
+    monkeypatch.setattr(catalog.os, "chdir", lambda _path: None)
+    monkeypatch.setattr(catalog.os, "umask", lambda _mode: 0o022)
+
+    _drop_to_protected_replay_identity(
+        uid=503,
+        gid=503,
+        identity_context=_identity_context(
+            platform="darwin", memberships=frozenset({20, 12, 61, 100})
+        ),
+    )
+
+    assert identity == {"uid": 503, "gid": 503, "groups": [20, 12, 61, 100]}
+
+
+@pytest.mark.parametrize(
+    ("groups", "memberships", "message"),
+    [
+        ([20, 12, 61, 999], frozenset({20, 12, 61, 100}), "membership drifted"),
+        ([20, 0], frozenset({20, 0}), "group is privileged"),
+    ],
+)
+def test_protected_child_drop_rejects_macos_untrusted_or_privileged_groups(
+    groups: list[int],
+    memberships: frozenset[int],
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from research_warehouse import daily_roll_predecessor_catalog as catalog
+
+    identity = {"uid": 503, "gid": 503, "groups": groups}
+    account = pwd.struct_passwd(
+        ("vnpyresearch", "*", 503, 20, "", "/var/empty", "/usr/bin/false")
+    )
+    names = {0: "root", 12: "everyone", 20: "staff", 61: "localaccounts", 999: "other"}
+    monkeypatch.setattr(catalog.pwd, "getpwuid", lambda _uid: account)
+    monkeypatch.setattr(
+        catalog.grp,
+        "getgrgid",
+        lambda gid: grp.struct_group(
+            ("vnpyresearch" if gid == 503 else names[gid], "*", gid, [])
+        ),
+    )
+    monkeypatch.setattr(catalog.os, "setgroups", lambda _groups: None)
+    monkeypatch.setattr(catalog.os, "setresgid", lambda *_values: None, raising=False)
+    monkeypatch.setattr(catalog.os, "setresuid", lambda *_values: None, raising=False)
+    monkeypatch.setattr(catalog.os, "getuid", lambda: identity["uid"])
+    monkeypatch.setattr(catalog.os, "geteuid", lambda: identity["uid"])
+    monkeypatch.setattr(catalog.os, "getgid", lambda: identity["gid"])
+    monkeypatch.setattr(catalog.os, "getegid", lambda: identity["gid"])
+    monkeypatch.setattr(catalog.os, "getgroups", lambda: identity["groups"])
+    monkeypatch.setattr(catalog.os, "getresuid", lambda: (503, 503, 503), raising=False)
+    monkeypatch.setattr(catalog.os, "getresgid", lambda: (503, 503, 503), raising=False)
+    monkeypatch.setattr(catalog.os, "chdir", lambda _path: None)
+    monkeypatch.setattr(catalog.os, "umask", lambda _mode: 0o022)
+
+    with pytest.raises(DailyRollPredecessorCatalogError, match=message):
+        _drop_to_protected_replay_identity(
+            uid=503,
+            gid=503,
+            identity_context=_identity_context(
+                platform="darwin", memberships=memberships
+            ),
+        )
+
+
+def test_protected_child_drop_rejects_write_capability_without_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from research_warehouse import daily_roll_predecessor_catalog as catalog
+
+    identity = {"uid": 503, "gid": 503, "groups": [503]}
+    account = pwd.struct_passwd(
+        ("vnpyresearch", "*", 503, 20, "", "/var/empty", "/usr/bin/false")
+    )
+    group = grp.struct_group(("vnpyresearch", "*", 503, []))
+    monkeypatch.setattr(catalog.pwd, "getpwuid", lambda _uid: account)
+    monkeypatch.setattr(catalog.grp, "getgrgid", lambda _gid: group)
+    monkeypatch.setattr(catalog.os, "setgroups", lambda _groups: None)
+    monkeypatch.setattr(catalog.os, "setresgid", lambda *_values: None, raising=False)
+    monkeypatch.setattr(catalog.os, "setresuid", lambda *_values: None, raising=False)
+    monkeypatch.setattr(catalog.os, "getuid", lambda: identity["uid"])
+    monkeypatch.setattr(catalog.os, "geteuid", lambda: identity["uid"])
+    monkeypatch.setattr(catalog.os, "getgid", lambda: identity["gid"])
+    monkeypatch.setattr(catalog.os, "getegid", lambda: identity["gid"])
+    monkeypatch.setattr(catalog.os, "getgroups", lambda: identity["groups"])
+    monkeypatch.setattr(catalog.os, "getresuid", lambda: (503, 503, 503), raising=False)
+    monkeypatch.setattr(catalog.os, "getresgid", lambda: (503, 503, 503), raising=False)
+    monkeypatch.setattr(catalog.os, "access", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(catalog.os, "chdir", lambda _path: None)
+    monkeypatch.setattr(catalog.os, "umask", lambda _mode: 0o022)
+
+    with pytest.raises(DailyRollPredecessorCatalogError, match="retained write capability"):
+        _drop_to_protected_replay_identity(
+            uid=503,
+            gid=503,
+            identity_context=_identity_context(write_protected_paths=(tmp_path,)),
+        )
+
+
+def test_root_secret_directory_without_traverse_permission_is_not_a_blocker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No lstat/open probe is allowed after demotion into a root-only key dir."""
+
+    from research_warehouse import daily_roll_predecessor_catalog as catalog
+
+    calls: list[tuple[Path, int, bool]] = []
+
+    def access(path: Path, mode: int, *, effective_ids: bool) -> bool:
+        calls.append((path, mode, effective_ids))
+        return False
+
+    monkeypatch.setattr(
+        Path,
+        "lstat",
+        lambda _self: pytest.fail("root-only key directory must not be probed"),
+    )
+    monkeypatch.setattr(catalog.os, "access", access)
+
+    catalog._require_no_protected_replay_write_capability(
+        (catalog.DEFAULT_MANIFEST_PRIVATE_KEY.parent,)
+    )
+
+    assert calls == [
+        (catalog.DEFAULT_MANIFEST_PRIVATE_KEY.parent, os.W_OK, True)
+    ]
+
+
+def test_protected_child_drop_rejects_effective_gid_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from research_warehouse import daily_roll_predecessor_catalog as catalog
+
+    account = pwd.struct_passwd(
+        ("vnpyresearch", "*", 503, 20, "", "/var/empty", "/usr/bin/false")
+    )
+    group = grp.struct_group(("vnpyresearch", "*", 503, []))
+    monkeypatch.setattr(catalog.pwd, "getpwuid", lambda _uid: account)
+    monkeypatch.setattr(catalog.grp, "getgrgid", lambda _gid: group)
+    monkeypatch.setattr(catalog.os, "setgroups", lambda _groups: None)
+    monkeypatch.setattr(catalog.os, "setresgid", lambda *_values: None, raising=False)
+    monkeypatch.setattr(catalog.os, "setresuid", lambda *_values: None, raising=False)
+    monkeypatch.setattr(catalog.os, "getuid", lambda: 503)
+    monkeypatch.setattr(catalog.os, "geteuid", lambda: 503)
+    monkeypatch.setattr(catalog.os, "getgid", lambda: 20)
+    monkeypatch.setattr(catalog.os, "getegid", lambda: 20)
+    monkeypatch.setattr(catalog.os, "getgroups", lambda: [503])
+    monkeypatch.setattr(catalog.os, "getresuid", lambda: (503, 503, 503), raising=False)
+    monkeypatch.setattr(catalog.os, "getresgid", lambda: (20, 20, 20), raising=False)
+
+    with pytest.raises(DailyRollPredecessorCatalogError, match="exact identity"):
+        _drop_to_protected_replay_identity(
+            uid=503, gid=503, identity_context=_identity_context()
+        )
 
 
 def test_protected_child_drop_rejects_unexpected_account_or_group(
@@ -274,7 +565,9 @@ def test_protected_child_drop_rejects_unexpected_account_or_group(
         DailyRollPredecessorCatalogError,
         match="account identity mismatch",
     ):
-        _drop_to_protected_replay_identity(uid=503, gid=503)
+        _drop_to_protected_replay_identity(
+            uid=503, gid=503, identity_context=_identity_context()
+        )
     monkeypatch.setattr(
         catalog.pwd,
         "getpwuid",
@@ -286,7 +579,9 @@ def test_protected_child_drop_rejects_unexpected_account_or_group(
         DailyRollPredecessorCatalogError,
         match="account identity mismatch",
     ):
-        _drop_to_protected_replay_identity(uid=503, gid=503)
+        _drop_to_protected_replay_identity(
+            uid=503, gid=503, identity_context=_identity_context()
+        )
     monkeypatch.setattr(
         catalog.pwd,
         "getpwuid",
@@ -303,11 +598,17 @@ def test_protected_child_drop_rejects_unexpected_account_or_group(
         DailyRollPredecessorCatalogError,
         match="group identity mismatch",
     ):
-        _drop_to_protected_replay_identity(uid=503, gid=503)
+        _drop_to_protected_replay_identity(
+            uid=503, gid=503, identity_context=_identity_context()
+        )
     with pytest.raises(DailyRollPredecessorCatalogError, match="identity is invalid"):
-        _drop_to_protected_replay_identity(uid=502, gid=503)
+        _drop_to_protected_replay_identity(
+            uid=502, gid=503, identity_context=_identity_context()
+        )
     with pytest.raises(DailyRollPredecessorCatalogError, match="identity is invalid"):
-        _drop_to_protected_replay_identity(uid=503, gid=20)
+        _drop_to_protected_replay_identity(
+            uid=503, gid=20, identity_context=_identity_context()
+        )
 
 
 def test_protected_child_drop_rejects_missing_account_or_group(
@@ -326,7 +627,9 @@ def test_protected_child_drop_rejects_missing_account_or_group(
         lambda _uid: (_ for _ in ()).throw(KeyError("missing account")),
     )
     with pytest.raises(DailyRollPredecessorCatalogError, match="account is missing"):
-        _drop_to_protected_replay_identity(uid=503, gid=503)
+        _drop_to_protected_replay_identity(
+            uid=503, gid=503, identity_context=_identity_context()
+        )
     monkeypatch.setattr(
         catalog.pwd,
         "getpwuid",
@@ -340,7 +643,9 @@ def test_protected_child_drop_rejects_missing_account_or_group(
         lambda _gid: (_ for _ in ()).throw(KeyError("missing group")),
     )
     with pytest.raises(DailyRollPredecessorCatalogError, match="group is missing"):
-        _drop_to_protected_replay_identity(uid=503, gid=503)
+        _drop_to_protected_replay_identity(
+            uid=503, gid=503, identity_context=_identity_context()
+        )
 
 
 @pytest.mark.parametrize(
@@ -381,7 +686,9 @@ def test_protected_child_drop_rejects_nonexact_final_identity(
     monkeypatch.setattr(catalog.os, "umask", lambda _mode: 0o022)
 
     with pytest.raises(DailyRollPredecessorCatalogError):
-        _drop_to_protected_replay_identity(uid=503, gid=503)
+        _drop_to_protected_replay_identity(
+            uid=503, gid=503, identity_context=_identity_context()
+        )
 
 
 def test_protected_child_closes_inherited_descriptors(

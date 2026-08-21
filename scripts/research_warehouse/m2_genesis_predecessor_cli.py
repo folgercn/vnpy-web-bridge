@@ -22,15 +22,22 @@ from .daily_roll_predecessor_catalog import (
     ProtectedGenesisReplayInputs,
     _close_child_inherited_descriptors,
     _drop_to_protected_replay_identity,
+    _prepare_protected_replay_identity_context,
     _read_protected_replay_payload,
     _require_exact_service_identity,
+    catalog_root,
     load_current_catalog_head,
     publish_predecessor_artifact,
 )
 from .errors import RegistryError
 from .file_integrity import read_regular_strict
 from .m2_isolation_contracts import false_authority, load_isolation_policy
-from .m2_operator_defaults import DEFAULT_OPERATOR_STATE
+from .m2_operator_defaults import (
+    DEFAULT_BACKUP_PRIVATE_KEY,
+    DEFAULT_CALENDAR_PRIVATE_KEY,
+    DEFAULT_MANIFEST_PRIVATE_KEY,
+    DEFAULT_OPERATOR_STATE,
+)
 from .m2_operator_state import load_operator_state, operator_state_lock
 from .m2_runtime_input import DEFAULT_RUNTIME_INPUT, load_runtime_input, require_sha
 
@@ -285,11 +292,27 @@ def _projection_from_payload(raw: bytes) -> _GenesisConfigProjection:
 def _load_projection_as_service(
     *,
     config_path: Path,
+    runtime_input_path: Path,
+    operator_state_path: Path,
     service_uid: int,
     service_gid: int,
 ) -> _GenesisConfigProjection:
     _require_root()
     uid, gid = _require_exact_service_identity(service_uid, service_gid)
+    identity_context = _prepare_protected_replay_identity_context(
+        uid=uid,
+        gid=gid,
+        write_protected_paths=(
+            operator_state_path.parent,
+            operator_state_path,
+            catalog_root(operator_state_path),
+            runtime_input_path.parent,
+            runtime_input_path,
+            DEFAULT_MANIFEST_PRIVATE_KEY.parent,
+            DEFAULT_BACKUP_PRIVATE_KEY.parent,
+            DEFAULT_CALENDAR_PRIVATE_KEY.parent,
+        ),
+    )
     read_fd, write_fd = os.pipe()
     child = os.fork()
     if child == 0:
@@ -297,7 +320,11 @@ def _load_projection_as_service(
         try:
             os.close(read_fd)
             result_fd = _close_child_inherited_descriptors(result_fd=write_fd)
-            _drop_to_protected_replay_identity(uid=uid, gid=gid)
+            _drop_to_protected_replay_identity(
+                uid=uid,
+                gid=gid,
+                identity_context=identity_context,
+            )
             raw = _projection_payload(
                 _projection_from_config(_config_raw(config_path, uid=uid))
             )
@@ -341,6 +368,8 @@ def main(argv: list[str] | None = None) -> int:
             state = load_operator_state(args.operator_state)
         projection = _load_projection_as_service(
             config_path=args.continuous_config,
+            runtime_input_path=args.runtime_input,
+            operator_state_path=args.operator_state,
             service_uid=policy.uid,
             service_gid=policy.gid,
         )

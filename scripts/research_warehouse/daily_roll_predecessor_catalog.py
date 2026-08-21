@@ -16,6 +16,7 @@ import re
 import select
 import signal
 import stat
+import sys
 import time
 from dataclasses import dataclass
 from datetime import date
@@ -34,6 +35,11 @@ from .m2_operator_state import (
     _require_root_parent,
     load_operator_state,
     operator_state_lock,
+)
+from .m2_operator_defaults import (
+    DEFAULT_BACKUP_PRIVATE_KEY,
+    DEFAULT_CALENDAR_PRIVATE_KEY,
+    DEFAULT_MANIFEST_PRIVATE_KEY,
 )
 from .m2_runtime_input import (
     load_runtime_input,
@@ -61,6 +67,7 @@ _PROTECTED_REPLAY_MAX_BYTES = 8 * 1024 * 1024
 _PROTECTED_REPLAY_TIMEOUT_SECONDS = 120.0
 _PROTECTED_REPLAY_ACCOUNT_NAME = "vnpyresearch"
 _PROTECTED_REPLAY_GROUP_NAME = "vnpyresearch"
+_PROTECTED_REPLAY_PRIVILEGED_GROUP_NAMES = frozenset({"root", "wheel", "admin"})
 _ATOMIC_PARTIAL_RE = re.compile(
     r"^\.(?P<target>[^/]+\.json)-(?P<nonce>[a-z0-9_]{8})\.partial$"
 )
@@ -113,6 +120,20 @@ class ProtectedGenesisReplayInputs:
     contract_registry_path: Path
     contract_registry_raw_sha256: str
     source_month: str
+
+
+@dataclass(frozen=True)
+class _ProtectedReplayIdentityContext:
+    """Root-derived identity facts that cross exactly one protected fork.
+
+    Directory-service supplementary groups on macOS are an account property,
+    not an isolation-policy input.  The root parent records them before fork;
+    the child can only prove that the OS retained a subset of those facts.
+    """
+
+    platform: str
+    directory_memberships: frozenset[int]
+    write_protected_paths: tuple[Path, ...]
 
 
 @dataclass(frozen=True)
@@ -903,8 +924,8 @@ def _require_exact_service_identity(uid: object, gid: object) -> tuple[int, int]
     return uid, gid
 
 
-def _drop_to_protected_replay_identity(*, uid: int, gid: int) -> None:
-    """Irreversibly bind the forked replay child to vnpyresearch 503:503."""
+def _protected_replay_account(*, uid: int, gid: int) -> pwd.struct_passwd:
+    """Resolve the one permitted account and group without trusting callers."""
 
     _require_exact_service_identity(uid, gid)
     try:
@@ -927,6 +948,121 @@ def _drop_to_protected_replay_identity(*, uid: int, gid: int) -> None:
         raise DailyRollPredecessorCatalogError(
             "daily roll protected replay group identity mismatch"
         )
+    return account
+
+
+def _require_nonprivileged_supplementary_groups(groups: object) -> frozenset[int]:
+    """Reject root and administrative groups before they can add authority."""
+
+    if not isinstance(groups, (list, tuple, set, frozenset)):
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected replay supplementary groups are invalid"
+        )
+    result: set[int] = set()
+    for value in groups:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise DailyRollPredecessorCatalogError(
+                "daily roll protected replay supplementary groups are invalid"
+            )
+        try:
+            group = grp.getgrgid(value)
+        except KeyError as exc:
+            raise DailyRollPredecessorCatalogError(
+                "daily roll protected replay supplementary group is unknown"
+            ) from exc
+        if value == 0 or group.gr_name in _PROTECTED_REPLAY_PRIVILEGED_GROUP_NAMES:
+            raise DailyRollPredecessorCatalogError(
+                "daily roll protected replay supplementary group is privileged"
+            )
+        result.add(value)
+    if len(result) != len(groups):
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected replay supplementary groups are invalid"
+        )
+    return frozenset(result)
+
+
+def _prepare_protected_replay_identity_context(
+    *,
+    uid: int,
+    gid: int,
+    write_protected_paths: tuple[Path, ...],
+) -> _ProtectedReplayIdentityContext:
+    """Capture trusted OS membership facts in the root parent before fork."""
+
+    account = _protected_replay_account(uid=uid, gid=gid)
+    getgrouplist = getattr(os, "getgrouplist", None)
+    if not callable(getgrouplist):
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected replay group resolver is unavailable"
+        )
+    try:
+        memberships = getgrouplist(account.pw_name, account.pw_gid)
+    except OSError as exc:
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected replay group resolution failed"
+        ) from exc
+    # The passwd primary group is a directory-service membership even if a
+    # platform's resolver omits it from its returned list.
+    raw_memberships = [account.pw_gid, *memberships]
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in raw_memberships
+    ):
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected replay supplementary groups are invalid"
+        )
+    resolved = _require_nonprivileged_supplementary_groups(
+        frozenset(raw_memberships)
+    )
+    paths: list[Path] = []
+    for path in write_protected_paths:
+        if not isinstance(path, Path) or not path.is_absolute():
+            raise DailyRollPredecessorCatalogError(
+                "daily roll protected replay write-isolation path is invalid"
+            )
+        if path not in paths:
+            paths.append(path)
+    return _ProtectedReplayIdentityContext(
+        platform=sys.platform,
+        directory_memberships=resolved,
+        write_protected_paths=tuple(paths),
+    )
+
+
+def _require_no_protected_replay_write_capability(paths: tuple[Path, ...]) -> None:
+    """Read-only effective-ID check; inaccessible root paths are safe here."""
+
+    for path in paths:
+        try:
+            writable = os.access(path, os.W_OK, effective_ids=True)
+        except (NotImplementedError, OSError, TypeError) as exc:
+            raise DailyRollPredecessorCatalogError(
+                "daily roll protected replay write-isolation check failed"
+            ) from exc
+        if writable:
+            raise DailyRollPredecessorCatalogError(
+                "daily roll protected replay retained write capability"
+            )
+
+
+def _drop_to_protected_replay_identity(
+    *,
+    uid: int,
+    gid: int,
+    identity_context: _ProtectedReplayIdentityContext,
+) -> None:
+    """Irreversibly bind the forked replay child to vnpyresearch 503:503."""
+
+    _protected_replay_account(uid=uid, gid=gid)
+    if not isinstance(identity_context, _ProtectedReplayIdentityContext):
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected replay identity context is invalid"
+        )
+    if identity_context.platform not in {"linux", "darwin"}:
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected replay platform is unsupported"
+        )
     expected_groups = [gid]
     os.setgroups(expected_groups)
     if hasattr(os, "setresgid"):
@@ -942,11 +1078,22 @@ def _drop_to_protected_replay_identity(*, uid: int, gid: int) -> None:
         or os.geteuid() != uid
         or os.getgid() != gid
         or os.getegid() != gid
-        or os.getgroups() != expected_groups
     ):
         raise DailyRollPredecessorCatalogError(
             "daily roll protected replay privilege drop did not bind exact identity"
         )
+    observed_groups = os.getgroups()
+    if identity_context.platform == "linux":
+        if observed_groups != expected_groups:
+            raise DailyRollPredecessorCatalogError(
+                "daily roll protected replay privilege drop did not bind exact groups"
+            )
+    else:
+        observed = _require_nonprivileged_supplementary_groups(observed_groups)
+        if not observed <= identity_context.directory_memberships:
+            raise DailyRollPredecessorCatalogError(
+                "daily roll protected replay supplementary group membership drifted"
+            )
     if hasattr(os, "getresuid") and os.getresuid() != (uid, uid, uid):
         raise DailyRollPredecessorCatalogError(
             "daily roll protected replay retained a privileged saved UID"
@@ -955,6 +1102,9 @@ def _drop_to_protected_replay_identity(*, uid: int, gid: int) -> None:
         raise DailyRollPredecessorCatalogError(
             "daily roll protected replay retained a privileged saved GID"
         )
+    _require_no_protected_replay_write_capability(
+        identity_context.write_protected_paths
+    )
     os.umask(0o077)
     os.chdir("/")
     os.environ.clear()
@@ -1104,6 +1254,25 @@ def _build_protected_genesis_as_service_locked(
 
     _require_root()
     uid, gid = _require_exact_service_identity(inputs.service_uid, inputs.service_gid)
+    identity_context = _prepare_protected_replay_identity_context(
+        uid=uid,
+        gid=gid,
+        write_protected_paths=(
+            operator_state.path.parent,
+            operator_state.path,
+            catalog_root(operator_state.path),
+            inputs.runtime_input_path.parent,
+            inputs.runtime_input_path,
+            inputs.manifest_public_key_path.parent,
+            inputs.history_receipt_path.parent,
+            inputs.signed_baseline_batch_path.parent,
+            inputs.business_public_key_path.parent,
+            inputs.contract_registry_path.parent,
+            DEFAULT_MANIFEST_PRIVATE_KEY.parent,
+            DEFAULT_BACKUP_PRIVATE_KEY.parent,
+            DEFAULT_CALENDAR_PRIVATE_KEY.parent,
+        ),
+    )
     read_fd, write_fd = os.pipe()
     child = os.fork()
     if child == 0:
@@ -1111,7 +1280,11 @@ def _build_protected_genesis_as_service_locked(
         try:
             os.close(read_fd)
             result_fd = _close_child_inherited_descriptors(result_fd=write_fd)
-            _drop_to_protected_replay_identity(uid=uid, gid=gid)
+            _drop_to_protected_replay_identity(
+                uid=uid,
+                gid=gid,
+                identity_context=identity_context,
+            )
             context = load_runtime_context_readonly(inputs.runtime_input_path)
             if (
                 context.runtime_input.raw_sha256 != inputs.runtime_input_raw_sha256
