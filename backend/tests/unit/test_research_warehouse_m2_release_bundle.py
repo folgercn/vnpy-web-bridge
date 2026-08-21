@@ -20,8 +20,9 @@ from research_warehouse.m2_python_runtime import (
     create_python_runtime_manifest,
 )
 from research_warehouse.m2_python_runtime_archive import prepare_python_runtime
-from research_warehouse.m2_release_builder import build_release_bundle
+from research_warehouse.m2_release_builder import _copy_source_tree, build_release_bundle
 from research_warehouse.m2_release_contracts import (
+    GENESIS_RELEASE_APP_SOURCE_FILES,
     REQUIREMENTS_RAW_SHA256,
     verify_release_bundle,
 )
@@ -109,10 +110,21 @@ def fake_subprocess(monkeypatch: pytest.MonkeyPatch, *, pip_status: int = 0) -> 
         if args[0] == "git" and "status" in args:
             return subprocess.CompletedProcess(args, 0, "", "")
         if args[0] == "git" and "ls-tree" in args:
+            additional = b"".join(
+                (
+                    b"100644 blob "
+                    + str(index + 4).encode("ascii") * 40
+                    + b"\t"
+                    + source.encode("utf-8")
+                    + b"\0"
+                )
+                for index, source in enumerate(GENESIS_RELEASE_APP_SOURCE_FILES)
+            )
             return subprocess.CompletedProcess(
                 args,
                 0,
-                (
+                additional
+                + (
                     b"100644 blob "
                     + b"2" * 40
                     + b"\tscripts/research_warehouse/__init__.py\0"
@@ -255,6 +267,9 @@ def test_build_and_verify_bundle_is_exact(
     assert b"research_warehouse.m2_genesis_predecessor_cli" in (
         output / "app/research_warehouse_genesis_publisher.py"
     ).read_bytes()
+    for source in GENESIS_RELEASE_APP_SOURCE_FILES:
+        module = output / "app" / Path(source).name
+        assert module.read_bytes() == b"source = True\n"
     verify_release_bundle(output, manifest)
 
     target = output / "app/research_warehouse/errors.py"
@@ -263,6 +278,45 @@ def test_build_and_verify_bundle_is_exact(
     target.chmod(0o444)
     with pytest.raises(RegistryError, match="content mismatch"):
         verify_release_bundle(output, manifest)
+
+
+def test_genesis_publisher_release_app_import_closure_is_clean(
+    tmp_path: Path,
+) -> None:
+    """The released app, not this checkout, imports the Genesis dependency set."""
+    source_commit = subprocess.check_output(
+        ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    app = tmp_path / "release" / "app"
+    app.mkdir(parents=True)
+    _copy_source_tree(REPO_ROOT, app, source_commit)
+
+    for source in GENESIS_RELEASE_APP_SOURCE_FILES:
+        expected = subprocess.check_output(
+            ["git", "-C", str(REPO_ROOT), "show", f"{source_commit}:{source}"],
+        )
+        assert (app / Path(source).name).read_bytes() == expected
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-c",
+            (
+                "from research_warehouse import m2_genesis_predecessor_cli; "
+                "from research_warehouse import verified_daily_pit_main_roll_source; "
+                "assert m2_genesis_predecessor_cli.__name__; "
+                "assert verified_daily_pit_main_roll_source.SCHEMA_VERSION"
+            ),
+        ],
+        cwd=tmp_path,
+        env={"PATH": os.environ["PATH"], "PYTHONPATH": str(app)},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_failed_dependency_install_publishes_no_bundle(

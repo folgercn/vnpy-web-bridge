@@ -22,6 +22,18 @@ BUNDLE_SCHEMA = "vnpy_research_m2_release_bundle_manifest_v2"
 REQUIREMENTS_RAW_SHA256 = (
     "4a372ecbd149efbb19bb1fd251a13c1ca395cc8356a7a66e325ed65a8b4094bf"
 )
+
+# The root-managed Genesis publisher imports the verified daily PIT builder,
+# whose pure, no-authority producer dependencies live beside (rather than in)
+# ``research_warehouse``.  Keep this deliberately finite: it is the complete
+# app-root import closure required by that publisher, not a general scripts
+# release mechanism.
+GENESIS_RELEASE_APP_SOURCE_FILES = (
+    "scripts/commodity_c_fast_pure_producer_kernel.py",
+    "scripts/commodity_relative_vol_snapshot_producer.py",
+    "scripts/commodity_static_core_equal_formula_v1.py",
+    "scripts/commodity_static_core_equal_pure_producer.py",
+)
 LOGICAL_RELEASE_ROOT = "/usr/local/libexec/vnpyresearch/release"
 REQUIRED_ENTRYPOINTS = {
     "bin/research-warehouse-backup-signer",
