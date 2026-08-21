@@ -683,6 +683,7 @@ def test_simnow_runner_image_keeps_the_real_import_closure_and_no_direct_gateway
             "publication",
             "registry",
             "revisions",
+            "shfe_contract_parameters",
             "signing",
             "source_availability",
             "static_core_baseline",
