@@ -13,10 +13,12 @@ all authority remains false.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field as dataclass_field
+from collections.abc import Mapping
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import date
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import commodity_c_fast_pure_producer_kernel as frozen
 import commodity_relative_vol_snapshot_producer as thermostat_producer
@@ -656,13 +658,13 @@ def _replay_verified_monthly_evidence(
             signed_baseline_raw,
             "signed monthly baseline batch",
         )
-        if (
-            not isinstance(signed_baseline, dict)
-            or canonical_json(signed_baseline) != signed_baseline_raw
-        ):
+        if not isinstance(signed_baseline, dict):
             raise VerifiedMonthlyFinalTargetError(
-                "signed monthly baseline batch is not canonical"
+                "signed monthly baseline batch is not an object"
             )
+        signed_baseline_is_canonical = (
+            canonical_json(signed_baseline) == signed_baseline_raw
+        )
         business_key = validate_business_key(
             Path(business_public_key_path),
             expected_raw_sha256=expected_business_key,
@@ -695,6 +697,13 @@ def _replay_verified_monthly_evidence(
             ):
                 raise VerifiedMonthlyFinalTargetError(
                     "signed monthly baseline is not bound to the catalog trust anchor"
+                )
+            if (
+                not signed_baseline_is_canonical
+                and source_month != catalog_genesis_source_month
+            ):
+                raise VerifiedMonthlyFinalTargetError(
+                    "signed monthly baseline batch is not canonical"
                 )
             if date.fromisoformat(catalog.last_trade_day) < execution_day:
                 raise VerifiedMonthlyFinalTargetError(
@@ -733,7 +742,7 @@ def _replay_verified_monthly_evidence(
                 execution_lane=EXECUTION_LANE,
                 supplemental_daily_receipts=sources.supplemental_daily_receipts,
             )
-            _evidence, baseline_batch = _verify_baseline_bindings(
+            _evidence, _baseline_batch = _verify_baseline_bindings(
                 baseline,
                 context=context,
                 state=state,

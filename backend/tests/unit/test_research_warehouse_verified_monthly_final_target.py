@@ -1,17 +1,16 @@
-# ruff: noqa: E402
 
 from __future__ import annotations
 
+import base64
+import inspect
+import json
+import math
+import sys
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
-import base64
-import json
-import math
 from pathlib import Path
 from types import SimpleNamespace
-import inspect
-import sys
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -22,13 +21,15 @@ sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import commodity_c_fast_pure_producer_kernel as frozen
+import research_warehouse.continuous_event_selector as selector
+import research_warehouse.verified_monthly_final_target as monthly
 from app.execution.executable_target_adapter import (
     _position_manager_final_projection,
     _static_core_equal_outputs,
     build_full_portfolio_quote_requests,
     build_static_core_equal_full_portfolio_keyless_decision,
 )
-import commodity_c_fast_pure_producer_kernel as frozen
 from research_warehouse.calendar_models import CalendarDay, OfficialCalendar
 from research_warehouse.canonical import canonical_json, canonical_json_line, sha256
 from research_warehouse.daily_roll_predecessor_catalog import CurrentCatalogHeadProof
@@ -36,22 +37,21 @@ from research_warehouse.errors import RegistryError
 from research_warehouse.m2_isolation_contracts import false_authority
 from research_warehouse.m2_operator_state import OperatorState
 from research_warehouse.m2_runtime_paths import RuntimePaths
+from research_warehouse.pit_source_view import PitSourceViewError
 from research_warehouse.signing import public_key_sha256
 from research_warehouse.static_core_baseline import (
     VerifiedStaticBaselineDailySources,
     build_historical_baseline,
 )
-from research_warehouse.pit_source_view import PitSourceViewError
-import research_warehouse.verified_monthly_final_target as monthly
-import research_warehouse.continuous_event_selector as selector
 from research_warehouse.verified_daily_pit_main_roll_source import (
     BuiltVerifiedDailyPitMainRollSource,
 )
-from shared.commodity_execution import KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION
-from test_research_warehouse_pit_source_view import PRODUCT_BASE, _TestAnchor, _inputs
-from test_research_warehouse_static_core_baseline import _contract_registry
 from test_issue353_static_core_keyless import _snapshot
 from test_issue362_full_portfolio_planner import _formal_quote
+from test_research_warehouse_pit_source_view import PRODUCT_BASE, _inputs, _TestAnchor
+from test_research_warehouse_static_core_baseline import _contract_registry
+
+from shared.commodity_execution import KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION
 
 RUNTIME_SHA = "9" * 64
 OPERATOR_SHA = "4" * 64
@@ -148,6 +148,44 @@ def _catalog(state: OperatorState) -> CurrentCatalogHeadProof:
     )
 
 
+def _install_genesis_catalog_mock(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    state: OperatorState,
+    signed_baseline_path: Path,
+    source_month: str = "2026-06",
+    signer_key_id: str = BUSINESS_SIGNER_KEY_ID,
+) -> None:
+    proof = _catalog(state)
+    genesis_entry = SimpleNamespace(
+        receipt_raw=proof.receipt_raw,
+        artifact_raw=proof.artifact_raw,
+        artifact={
+            "verified_lineage": {
+                "continuity": {
+                    "mode": "GENESIS_STATIC_CORE_EQUAL",
+                    "baseline_public_key_sha256": public_key_sha256(
+                        Ed25519PrivateKey.from_private_bytes(bytes(range(32))).public_key()
+                    ),
+                    "baseline_signer_key_id": signer_key_id,
+                    "baseline_source_month": source_month,
+                    "baseline_batch_raw_sha256": sha256(
+                        signed_baseline_path.read_bytes()
+                    ),
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(
+        monthly,
+        "_load_catalog",
+        lambda _root: SimpleNamespace(
+            entries=(genesis_entry,),
+            head=genesis_entry,
+        ),
+    )
+
+
 def _install_root_mocks(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -226,31 +264,10 @@ def _install_root_mocks(
     business_key_path = tmp_path / "business-public.b64"
     business_key_path.write_bytes(base64.b64encode(public_key_raw) + b"\n")
     business_key_path.chmod(0o600)
-    proof = _catalog(state)
-    genesis_entry = SimpleNamespace(
-        receipt_raw=proof.receipt_raw,
-        artifact_raw=proof.artifact_raw,
-        artifact={
-            "verified_lineage": {
-                "continuity": {
-                    "mode": "GENESIS_STATIC_CORE_EQUAL",
-                    "baseline_public_key_sha256": public_key_sha256(public_key),
-                    "baseline_signer_key_id": BUSINESS_SIGNER_KEY_ID,
-                    "baseline_source_month": "2026-06",
-                    "baseline_batch_raw_sha256": sha256(
-                        signed_baseline_path.read_bytes()
-                    ),
-                }
-            }
-        },
-    )
-    monkeypatch.setattr(
-        monthly,
-        "_load_catalog",
-        lambda _root: SimpleNamespace(
-            entries=(genesis_entry,),
-            head=genesis_entry,
-        ),
+    _install_genesis_catalog_mock(
+        monkeypatch,
+        state=state,
+        signed_baseline_path=signed_baseline_path,
     )
     kwargs = {
         "runtime_input_path": tmp_path / "runtime-input.json",
@@ -308,6 +325,123 @@ def _rewrite_signed_baseline(
         ).decode("ascii")
     path.write_bytes(canonical_json(payload))
     path.chmod(0o600)
+
+
+def _pretty_signed_baseline(path: Path) -> bytes:
+    payload = json.loads(path.read_bytes())
+    raw = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+    assert raw != canonical_json(payload)
+    path.write_bytes(raw)
+    path.chmod(0o600)
+    return raw
+
+
+def test_catalog_anchored_genesis_pretty_baseline_replays_without_normalizing_raw(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    kwargs, state = _install_root_mocks(monkeypatch, tmp_path)
+    canonical = monthly.replay_verified_monthly_final_target(**kwargs)
+    signed_path = kwargs["signed_baseline_batch_path"]
+    pretty_raw = _pretty_signed_baseline(signed_path)
+    _install_genesis_catalog_mock(
+        monkeypatch,
+        state=state,
+        signed_baseline_path=signed_path,
+    )
+
+    pretty = monthly.replay_verified_monthly_final_target(**kwargs)
+
+    assert pretty.baseline_batch_raw_sha256 == sha256(pretty_raw)
+    assert pretty.baseline_batch_raw_sha256 != sha256(canonical_json(json.loads(pretty_raw)))
+    assert pretty.quantity_vector == canonical.quantity_vector
+    assert pretty.monthly_exact_contract_map == canonical.monthly_exact_contract_map
+    assert pretty.final_target_sha256 == canonical.final_target_sha256
+    assert pretty.authority == false_authority()
+
+
+def test_pretty_baseline_requires_exact_catalog_genesis_raw_sha(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    kwargs, _state = _install_root_mocks(monkeypatch, tmp_path)
+    _pretty_signed_baseline(kwargs["signed_baseline_batch_path"])
+
+    with pytest.raises(
+        monthly.VerifiedMonthlyFinalTargetError,
+        match="catalog trust anchor",
+    ):
+        monthly.replay_verified_monthly_final_target(**kwargs)
+
+
+def test_non_genesis_pretty_baseline_remains_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    kwargs, _state = _install_root_mocks(monkeypatch, tmp_path)
+    _pretty_signed_baseline(kwargs["signed_baseline_batch_path"])
+    kwargs["source_month"] = "2026-05"
+
+    with pytest.raises(
+        monthly.VerifiedMonthlyFinalTargetError,
+        match="not canonical",
+    ):
+        monthly.replay_verified_monthly_final_target(**kwargs)
+
+
+def test_duplicate_key_signed_baseline_remains_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    kwargs, _state = _install_root_mocks(monkeypatch, tmp_path)
+    signed_path = kwargs["signed_baseline_batch_path"]
+    signed_path.write_bytes(b'{"signature":"one","signature":"two"}')
+    signed_path.chmod(0o600)
+
+    with pytest.raises(monthly.VerifiedMonthlyFinalTargetError, match="failed closed"):
+        monthly.replay_verified_monthly_final_target(**kwargs)
+
+
+def test_catalog_anchored_genesis_still_requires_signature_and_root_replay(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    kwargs, state = _install_root_mocks(monkeypatch, tmp_path)
+    signed_path = kwargs["signed_baseline_batch_path"]
+    invalid_signature = json.loads(signed_path.read_bytes())
+    invalid_signature["signature"] = "not-a-valid-signature"
+    signed_path.write_bytes(canonical_json(invalid_signature))
+    signed_path.chmod(0o600)
+    _install_genesis_catalog_mock(
+        monkeypatch,
+        state=state,
+        signed_baseline_path=signed_path,
+    )
+
+    with pytest.raises(monthly.VerifiedMonthlyFinalTargetError, match="failed closed"):
+        monthly.replay_verified_monthly_final_target(**kwargs)
+
+    semantic = tmp_path / "semantic"
+    semantic.mkdir(mode=0o700)
+    kwargs, state = _install_root_mocks(monkeypatch, semantic)
+    signed_path = kwargs["signed_baseline_batch_path"]
+    _rewrite_signed_baseline(
+        signed_path,
+        lambda payload: payload["targets"][0].__setitem__(
+            "target_quantity", payload["targets"][0]["target_quantity"] + 1
+        ),
+    )
+    _install_genesis_catalog_mock(
+        monkeypatch,
+        state=state,
+        signed_baseline_path=signed_path,
+    )
+
+    with pytest.raises(
+        monthly.VerifiedMonthlyFinalTargetError,
+        match="does not match root replay",
+    ):
+        monthly.replay_verified_monthly_final_target(**kwargs)
 
 
 def test_root_replay_is_deterministic_zero_write_and_exact_adapter_parity(
