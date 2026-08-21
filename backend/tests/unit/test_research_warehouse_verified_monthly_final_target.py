@@ -204,7 +204,9 @@ def _install_root_mocks(
         assert exclusive is False
         yield
 
-    monkeypatch.setattr(monthly, "load_runtime_context_readonly", lambda _path: context)
+    monkeypatch.setattr(
+        monthly, "load_runtime_context_readonly", lambda _path, **_kwargs: context
+    )
     monkeypatch.setattr(
         monthly, "load_current_catalog_head", lambda _path: _catalog(state)
     )
@@ -771,6 +773,27 @@ def test_planner_bundle_uses_readonly_manifest_verifier(
 
     assert manifest_calls == [True]
     assert observation_calls == [True]
+
+
+def test_planner_projection_is_explicit_runner_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    kwargs, _state = _install_root_mocks(monkeypatch, tmp_path)
+    calls: list[bool] = []
+    context = monthly.load_runtime_context_readonly(Path("/ignored"))
+    monkeypatch.setattr(
+        monthly,
+        "load_runtime_context_readonly",
+        lambda _path, **fields: calls.append(
+            fields.get("allow_readonly_projected_root", False)
+        ) or context,
+    )
+    monthly.replay_verified_monthly_planner_bundle(**kwargs)
+    monthly.replay_verified_monthly_planner_bundle(
+        **kwargs, allow_readonly_projected_root=True
+    )
+    assert calls == [False, True]
 
 
 def test_root_replay_planner_bundle_builds_explicit_v3_plan_without_authority(

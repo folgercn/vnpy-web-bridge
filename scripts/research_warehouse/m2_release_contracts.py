@@ -47,6 +47,7 @@ REQUIRED_ENTRYPOINTS = {
     "bin/research-warehouse-manifest-signer",
     "bin/research-warehouse-monitor",
     "bin/research-warehouse-operator-state",
+    "bin/research-warehouse-readonly-projected-root-attestor",
     "bin/research-warehouse-rebuild",
 }
 BUNDLE_KEYS = {
@@ -144,6 +145,9 @@ def release_launcher(role: str) -> bytes:
         "manifest-signer": "research_warehouse_manifest_signer.py",
         "monitor": "research_warehouse_monitor.py",
         "operator-state": "research_warehouse_operator_state.py",
+        "readonly-projected-root-attestor": (
+            "research_warehouse_readonly_projected_root_attestor.py"
+        ),
         "rebuild": "research_warehouse_rebuild.py",
         "warehouse": "research_warehouse_job.py",
     }
@@ -203,6 +207,10 @@ def verify_release_bundle(root: Path, manifest: object) -> None:
         ("manifest-signer", "bin/research-warehouse-manifest-signer"),
         ("monitor", "bin/research-warehouse-monitor"),
         ("operator-state", "bin/research-warehouse-operator-state"),
+        (
+            "readonly-projected-root-attestor",
+            "bin/research-warehouse-readonly-projected-root-attestor",
+        ),
         ("rebuild", "bin/research-warehouse-rebuild"),
     ):
         if regular_bytes(root / relative, f"M2 {role} launcher") != release_launcher(

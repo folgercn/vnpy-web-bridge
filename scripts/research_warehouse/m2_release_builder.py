@@ -121,6 +121,7 @@ def _bootstrap(role: str) -> bytes:
         "manifest-signer": "research_warehouse.m2_manifest_signer_cli",
         "monitor": "research_warehouse.m2_monitor_cli",
         "operator-state": "research_warehouse.m2_operator_state_cli",
+        "readonly-projected-root-attestor": "research_warehouse.m2_readonly_projected_root_cli",
         "rebuild": "research_warehouse.m2_rebuild_cli",
         "warehouse": "research_warehouse.m2_scheduler_cli",
     }
@@ -277,6 +278,7 @@ def build_release_bundle(
             "manifest-signer": "research-warehouse-manifest-signer",
             "monitor": "research-warehouse-monitor",
             "operator-state": "research-warehouse-operator-state",
+            "readonly-projected-root-attestor": "research-warehouse-readonly-projected-root-attestor",
             "rebuild": "research-warehouse-rebuild",
             "warehouse": "research-warehouse-job",
         }

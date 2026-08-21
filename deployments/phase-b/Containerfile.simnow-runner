@@ -51,6 +51,7 @@ COPY scripts/research_warehouse/contracts.py /app/scripts/research_warehouse/con
 COPY scripts/research_warehouse/custody_locks.py /app/scripts/research_warehouse/custody_locks.py
 COPY scripts/research_warehouse/custody_paths.py /app/scripts/research_warehouse/custody_paths.py
 COPY scripts/research_warehouse/custody_transition.py /app/scripts/research_warehouse/custody_transition.py
+COPY scripts/research_warehouse/readonly_projected_root.py /app/scripts/research_warehouse/readonly_projected_root.py
 COPY scripts/research_warehouse/daily_roll_predecessor_catalog.py /app/scripts/research_warehouse/daily_roll_predecessor_catalog.py
 COPY scripts/research_warehouse/errors.py /app/scripts/research_warehouse/errors.py
 COPY scripts/research_warehouse/file_integrity.py /app/scripts/research_warehouse/file_integrity.py

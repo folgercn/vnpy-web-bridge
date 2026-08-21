@@ -1285,7 +1285,8 @@ class _ProductionBackend:
 
     def _planner(self, source_month: str, catalog: CurrentCatalogHeadProof):
         context = load_runtime_context_readonly(
-            self.config.path("warehouse_runtime_input_path")
+            self.config.path("warehouse_runtime_input_path"),
+            allow_readonly_projected_root=True,
         )
         if (
             context.runtime_input.raw_sha256
@@ -1335,6 +1336,7 @@ class _ProductionBackend:
                 "warehouse_contract_registry_raw_sha256"
             ],
             source_month=source_month,
+            allow_readonly_projected_root=True,
         )
 
     def warehouse(self, head: ContinuousEventHeadDTO) -> _WarehouseResolution:

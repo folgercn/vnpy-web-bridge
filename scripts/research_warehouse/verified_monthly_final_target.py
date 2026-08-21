@@ -603,6 +603,7 @@ def _replay_verified_monthly_evidence(
     source_month: str,
     readonly_manifest_verifier: bool,
     readonly_observation_loader: bool,
+    allow_readonly_projected_root: bool = False,
 ) -> _VerifiedMonthlyReplayEvidence:
     """Independently replay one monthly economic target from current custody.
 
@@ -633,7 +634,13 @@ def _replay_verified_monthly_evidence(
         expected_contract_registry = require_sha(
             expected_contract_registry_raw_sha256, "monthly contract registry"
         )
-        context = load_runtime_context_readonly(Path(runtime_input_path))
+        context = (
+            load_runtime_context_readonly(
+                Path(runtime_input_path), allow_readonly_projected_root=True
+            )
+            if allow_readonly_projected_root
+            else load_runtime_context_readonly(Path(runtime_input_path))
+        )
         if context.runtime_input.raw_sha256 != expected_runtime:
             raise VerifiedMonthlyFinalTargetError(
                 "monthly runtime input root pin changed"
@@ -928,6 +935,7 @@ def replay_verified_monthly_planner_bundle(
     contract_registry_path: Path,
     expected_contract_registry_raw_sha256: str,
     source_month: str,
+    allow_readonly_projected_root: bool = False,
 ) -> VerifiedMonthlyPlannerBundle:
     """Replay current Warehouse roots into the pure planner's exact inputs.
 
@@ -958,6 +966,7 @@ def replay_verified_monthly_planner_bundle(
         source_month=source_month,
         readonly_manifest_verifier=True,
         readonly_observation_loader=True,
+        allow_readonly_projected_root=allow_readonly_projected_root,
     )
     return VerifiedMonthlyPlannerBundle(
         final_target=replay.final_target,
