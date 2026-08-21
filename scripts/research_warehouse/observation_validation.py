@@ -117,11 +117,34 @@ def _validate_custody_identity(
     paths: WarehousePaths,
     payload: dict[str, Any],
     schema: str,
+    *,
+    readonly_projection: bool = False,
 ) -> None:
     claimed = payload["custody_identity_sha256"]
     if not isinstance(claimed, str) or SHA256_PATTERN.fullmatch(claimed) is None:
         raise RegistryError("observation custody_identity_sha256 is invalid")
     if schema == OBSERVATION_SCHEMA:
+        if readonly_projection:
+            trust = paths.readonly_projected_root
+            transition = paths.custody_transition
+            if trust is None or transition is None:
+                raise RegistryError("readonly projected root trust is unavailable")
+            from .readonly_projected_root import (
+                projected_root_authorized_legacy_identities,
+            )
+
+            authorized = projected_root_authorized_legacy_identities(
+                paths=paths,
+                attestation_path=trust.attestation_path,
+                transition_trust=transition,
+                public_key_path=trust.public_key_path,
+                expected_public_key_sha256=trust.expected_public_key_sha256,
+            )
+            # Projection is only an alternate *view* of the reviewed v1
+            # transition identities, never a new writer custody identity.
+            if claimed not in authorized:
+                raise RegistryError("observation projected custody identity mismatch")
+            return
         if not legacy_custody_identity_is_authorized(paths, claimed):
             raise RegistryError("observation custody identity binding mismatch")
         return
@@ -133,6 +156,8 @@ def validate_observation(
     paths: WarehousePaths,
     payload: object,
     registry: SourceRegistry,
+    *,
+    readonly_projection: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise RegistryError("observation payload must be an object")
@@ -204,7 +229,9 @@ def validate_observation(
         value = payload[field]
         if not isinstance(value, str) or SHA256_PATTERN.fullmatch(value) is None:
             raise RegistryError(f"observation {field} is invalid")
-    _validate_custody_identity(paths, payload, schema)
+    _validate_custody_identity(
+        paths, payload, schema, readonly_projection=readonly_projection
+    )
     _validate_http_metadata(payload, source)
     raw = read_regular_strict(raw_path, "observation raw object")
     if len(raw) != payload["raw_bytes"] or sha256(raw) != digest:

@@ -10,10 +10,14 @@ from .calendar_anchors import (
     load_calendar_availability_anchor,
 )
 from .calendar_models import OfficialCalendar
+from .custody_paths import ReadonlyProjectedRootTrust
 from .errors import RegistryError
 from .filesystem import CustodyTransitionTrust, WarehousePaths
 from .m2_isolation_contracts import IsolationPolicy, load_isolation_policy
-from .m2_operator_defaults import DEFAULT_CUSTODY_TRANSITION_RECEIPT
+from .m2_operator_defaults import (
+    DEFAULT_CUSTODY_TRANSITION_RECEIPT,
+    DEFAULT_READONLY_PROJECTED_ROOT_ATTESTATION,
+)
 from .m2_runtime_input import RuntimeInput, load_runtime_input
 from .m2_runtime_paths import RuntimePaths
 from .models import SourceRegistry
@@ -33,7 +37,12 @@ class RuntimeContext:
     availability: CalendarAvailabilityAnchor
 
 
-def _load_runtime_context(path: Path, *, create_runtime_paths: bool) -> RuntimeContext:
+def _load_runtime_context(
+    path: Path,
+    *,
+    create_runtime_paths: bool,
+    allow_readonly_projected_root: bool = False,
+) -> RuntimeContext:
     policy = load_isolation_policy(path.parent / "isolation-policy-v1.json")
     runtime_input = load_runtime_input(path, policy=policy)
     value = runtime_input.payload
@@ -60,12 +69,22 @@ def _load_runtime_context(path: Path, *, create_runtime_paths: bool) -> RuntimeC
             public_key_path=Path(value["backup_public_key_path"]),
             expected_public_key_sha256=value["expected_backup_public_key_sha256"],
         )
+    projected = None
+    # Only the public, read-only runtime loader may opt into a signed Docker
+    # projection.  Writer/admin callers retain physical-root semantics.
+    if allow_readonly_projected_root and DEFAULT_READONLY_PROJECTED_ROOT_ATTESTATION.exists():
+        projected = ReadonlyProjectedRootTrust(
+            attestation_path=DEFAULT_READONLY_PROJECTED_ROOT_ATTESTATION,
+            public_key_path=Path(value["backup_public_key_path"]),
+            expected_public_key_sha256=value["expected_backup_public_key_sha256"],
+        )
     return RuntimeContext(
         runtime_input=runtime_input,
         policy=policy,
         paths=WarehousePaths.open(
             Path(policy.payload["custody_root"]),
             custody_transition=transition,
+            readonly_projected_root=projected,
         ),
         runtime=(
             RuntimePaths.ensure(Path(policy.payload["runtime_root"]))
@@ -84,7 +103,19 @@ def load_runtime_context(path: Path) -> RuntimeContext:
     return _load_runtime_context(path, create_runtime_paths=True)
 
 
-def load_runtime_context_readonly(path: Path) -> RuntimeContext:
-    """Load only an already-complete runtime layout and perform zero writes."""
+def load_runtime_context_readonly(
+    path: Path,
+    *,
+    allow_readonly_projected_root: bool = False,
+) -> RuntimeContext:
+    """Load only an already-complete runtime layout and perform zero writes.
 
-    return _load_runtime_context(path, create_runtime_paths=False)
+    The physical custody contract remains the default.  Only the #362 runner
+    can explicitly request its separately signed Docker projection view.
+    """
+
+    return _load_runtime_context(
+        path,
+        create_runtime_paths=False,
+        allow_readonly_projected_root=allow_readonly_projected_root,
+    )

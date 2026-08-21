@@ -84,6 +84,7 @@ def _load_observations_unlocked(
     *,
     source_id: str | None = None,
     trade_day: str | None = None,
+    readonly_projection: bool = False,
 ) -> list[dict[str, Any]]:
     payloads: list[dict[str, Any]] = []
     if source_id is not None and trade_day is not None:
@@ -111,6 +112,7 @@ def _load_observations_unlocked(
             paths,
             parse_json_strict(raw, "observation receipt"),
             registry,
+            readonly_projection=readonly_projection,
         )
         if raw != canonical_json_line(payload):
             raise RegistryError("observation receipt is not exact canonical JSON")
@@ -176,6 +178,7 @@ def load_observations_readonly(
         registry,
         source_id=source_id,
         trade_day=trade_day,
+        readonly_projection=paths.readonly_projected_root is not None,
     )
 
 

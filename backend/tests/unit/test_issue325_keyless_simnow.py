@@ -632,7 +632,7 @@ def test_simnow_runner_image_keeps_the_real_import_closure_and_no_direct_gateway
     }
     continuous_warehouse_closure = {
         f"scripts/research_warehouse/{name}.py"
-        for name in {
+        for name in (
             "__init__",
             "absence_receipts",
             "acquisition",
@@ -650,6 +650,7 @@ def test_simnow_runner_image_keeps_the_real_import_closure_and_no_direct_gateway
             "custody_locks",
             "custody_paths",
             "custody_transition",
+            "readonly_projected_root",
             "daily_roll_predecessor_catalog",
             "errors",
             "file_integrity",
@@ -692,7 +693,7 @@ def test_simnow_runner_image_keeps_the_real_import_closure_and_no_direct_gateway
             "validation",
             "verified_daily_pit_main_roll_source",
             "verified_monthly_final_target",
-        }
+        )
     }
     continuous_source_path = root / "scripts" / "simnow_continuous_run_once.py"
     continuous_tree = ast.parse(

@@ -24,6 +24,15 @@ class CustodyTransitionTrust:
 
 
 @dataclass(frozen=True)
+class ReadonlyProjectedRootTrust:
+    """Root-published authorization for one read-only container projection."""
+
+    attestation_path: Path
+    public_key_path: Path
+    expected_public_key_sha256: str
+
+
+@dataclass(frozen=True)
 class WarehousePaths:
     root: Path
     raw: Path
@@ -32,6 +41,7 @@ class WarehousePaths:
     temporary: Path
     locks: Path
     custody_transition: CustodyTransitionTrust | None = None
+    readonly_projected_root: ReadonlyProjectedRootTrust | None = None
 
     @classmethod
     def initialize(cls, root: Path) -> WarehousePaths:
@@ -53,6 +63,7 @@ class WarehousePaths:
         root: Path,
         *,
         custody_transition: CustodyTransitionTrust | None = None,
+        readonly_projected_root: ReadonlyProjectedRootTrust | None = None,
     ) -> WarehousePaths:
         absolute = normalized_absolute(root)
         require_private_dir(absolute, "warehouse root")
@@ -71,6 +82,7 @@ class WarehousePaths:
             temporary=values["tmp"],
             locks=values["locks"],
             custody_transition=custody_transition,
+            readonly_projected_root=readonly_projected_root,
         )
 
     def private_subdir(self, base: Path, *components: str) -> Path:

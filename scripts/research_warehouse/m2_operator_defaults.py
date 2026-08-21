@@ -10,6 +10,9 @@ LIBEXEC = Path("/usr/local/libexec/vnpyresearch")
 RELEASE = LIBEXEC / "release"
 DEFAULT_OPERATOR_STATE = LIBEXEC / "operator-state-v1.json"
 DEFAULT_CUSTODY_TRANSITION_RECEIPT = LIBEXEC / "custody-transition-v1.json"
+DEFAULT_READONLY_PROJECTED_ROOT_ATTESTATION = (
+    LIBEXEC / "readonly-projected-root-attestation-v1.json"
+)
 DEFAULT_MANIFEST_PRIVATE_KEY = Path(
     "/private/var/root/vnpyresearch-keys/manifest-private.raw"
 )
