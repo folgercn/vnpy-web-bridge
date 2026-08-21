@@ -93,6 +93,7 @@ def verified_static_baseline_daily_sources(
     history: dict[str, Any],
     chain: list[dict[str, Any]],
     source_month: str,
+    readonly_observation_loader: bool = False,
 ) -> VerifiedStaticBaselineDailySources:
     """Load a baseline's exact bytes without applying the PIT month-end cutoff.
 
@@ -120,6 +121,7 @@ def verified_static_baseline_daily_sources(
         history=history,
         chain=chain,
         through_day=execution_day,
+        readonly_observation_loader=readonly_observation_loader,
     )
     if set(history_raw) != set(history_days):
         raise PitSourceViewError("static baseline history daily evidence is incomplete")
@@ -160,6 +162,7 @@ def verified_static_baseline_daily_sources(
             registry=context.registry,
             calendar=context.calendar,
             calendar_availability_raw_sha256=context.availability.raw_sha256,
+            readonly_observation_loader=readonly_observation_loader,
         )
         manifest = manifests.get(raw_day)
         if manifest is None or manifest["commit_receipt"] is None:

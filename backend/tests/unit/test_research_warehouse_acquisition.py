@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from research_warehouse import filesystem, publication
 from research_warehouse import manifests as manifests_module
+from research_warehouse import observations as observations_module
 from research_warehouse.acquisition import acquire_daily
 from research_warehouse.acquisition_models import HttpResponse
 from research_warehouse.canonical import canonical_json_line, sha256
@@ -48,6 +49,7 @@ from research_warehouse.manifests import (
 )
 from research_warehouse.observations import (
     load_observations,
+    load_observations_readonly,
     observation_id,
     raw_object_id,
     revision_occurrence_id,
@@ -509,6 +511,44 @@ def test_readonly_manifest_verifier_keeps_anchor_and_commit_gates(
             expected_head_commit_seal_sha256=commit_hash,
             offline=True,
         )
+
+
+def test_readonly_observation_loader_never_locks_recovers_or_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = warehouse(tmp_path)
+    acquired = acquire(paths, official_raw(), T1)
+    before = tuple(
+        sorted(
+            (str(path.relative_to(paths.root)), path.lstat().st_mode, path.lstat().st_size)
+            for path in paths.root.rglob("*")
+        )
+    )
+
+    def unexpected_write(*_args, **_kwargs):
+        raise AssertionError("read-only observation loader attempted writer path")
+
+    monkeypatch.setattr(observations_module, "custody_lock", unexpected_write)
+    monkeypatch.setattr(
+        observations_module, "recover_atomic_publishes", unexpected_write
+    )
+
+    loaded = load_observations_readonly(
+        paths,
+        registry(),
+        source_id=SOURCE_ID,
+        trade_day=TRADE_DAY,
+    )
+
+    after = tuple(
+        sorted(
+            (str(path.relative_to(paths.root)), path.lstat().st_mode, path.lstat().st_size)
+            for path in paths.root.rglob("*")
+        )
+    )
+    assert [item["observation_id"] for item in loaded] == [acquired.observation_id]
+    assert after == before
 
 
 def test_seal_is_idempotent_when_observations_are_unchanged(

@@ -715,6 +715,7 @@ def verified_daily_raw(
     history: dict[str, Any],
     chain: list[dict[str, Any]],
     through_day: date,
+    readonly_observation_loader: bool = False,
 ) -> dict[str, dict[str, bytes]]:
     """Verify receipt/raw/manifest bindings and return stable exact source bytes."""
 
@@ -736,6 +737,7 @@ def verified_daily_raw(
             registry=context.registry,
             calendar=context.calendar,
             calendar_availability_raw_sha256=context.availability.raw_sha256,
+            readonly_observation_loader=readonly_observation_loader,
         )
         manifest = manifests.get(raw_day)
         if manifest is None or manifest["commit_receipt"] is None:

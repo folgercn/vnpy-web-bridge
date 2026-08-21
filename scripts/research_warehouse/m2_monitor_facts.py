@@ -19,7 +19,7 @@ from .m2_daily_scheduler import AFTER_CLOSE
 from .m2_receipts import load_run_receipt
 from .m2_runtime_paths import RuntimePaths
 from .models import SourceRegistry
-from .observations import load_observations
+from .observations import load_observations, load_observations_readonly
 from .revisions import revision_state
 from .timeutil import format_utc, parse_utc
 from .validation import validate_source_bytes
@@ -57,6 +57,7 @@ def verify_daily_run_receipt(
     registry: SourceRegistry,
     calendar: OfficialCalendar,
     calendar_availability_raw_sha256: str,
+    readonly_observation_loader: bool = False,
 ) -> datetime:
     if (
         receipt["registry_raw_sha256"] != registry.raw_sha256
@@ -68,12 +69,15 @@ def verify_daily_run_receipt(
         ).is_official
     ):
         raise RegistryError("M2 run receipt authority binding mismatch")
+    observation_loader = (
+        load_observations_readonly if readonly_observation_loader else load_observations
+    )
     observed_completion = []
     for item in receipt["sources"]:
         source = registry.source(item["source_id"])
         if item["exchange"] != source.exchange:
             raise RegistryError("M2 run receipt exchange binding mismatch")
-        observations = load_observations(
+        observations = observation_loader(
             paths,
             registry,
             source_id=source.source_id,
