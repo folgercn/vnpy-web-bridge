@@ -4,7 +4,8 @@ This module is the verified wrapper around the frozen daily PIT-main rule.  It
 loads one completed normal Warehouse day through the existing root-pinned
 runtime, receipt, manifest-chain, calendar and registry verifiers.  This
 foundation permits only a signed delayed ``STATIC_CORE_EQUAL`` genesis batch:
-the artifact official day must be that monthly batch's execution day, after
+the baseline execution day and artifact official day must be in the same month,
+with the baseline execution day no later than the artifact official day, after
 the month-end research panel and execution-day official open are both sealed
 in the current Warehouse root.  Linked-day construction reads the immediately
 preceding artifact only from the root-managed immutable predecessor catalog;
@@ -794,6 +795,16 @@ def _genesis_map(
     )
     evidence_pins = evidence.get("pins")
     expected_operator_pins = _operator_root_pins(operator_state)
+    baseline_execution_day = _day(
+        evidence.get("execution_day"), "daily v2 Genesis baseline execution day"
+    )
+    if (
+        baseline_execution_day.strftime("%Y-%m") != official_day.strftime("%Y-%m")
+        or baseline_execution_day > official_day
+    ):
+        raise VerifiedDailyPitMainRollSourceError(
+            "daily v2 Genesis baseline must execute in the artifact month no later than the artifact official day"
+        )
     spec_bindings = [
         row
         for row in source_view.get("source_bindings", [])
@@ -818,7 +829,7 @@ def _genesis_map(
             row.get("raw_sha256") != contract_registry_sha256 for row in spec_bindings
         )
         or evidence.get("source_month") != genesis.source_month
-        or evidence.get("execution_day") != official_day.isoformat()
+        or evidence.get("execution_day") != baseline_execution_day.isoformat()
         or evidence.get("execution_lane") != EXECUTION_LANE
         or source_view.get("claimed_receipt_sha256") != pins.history_receipt_raw_sha256
         or any(
@@ -828,7 +839,7 @@ def _genesis_map(
         )
         or source_view.get("research_as_of_official_day")
         != evidence.get("research_as_of_official_day")
-        or source_view.get("execution_day") != official_day.isoformat()
+        or source_view.get("execution_day") != baseline_execution_day.isoformat()
     ):
         raise VerifiedDailyPitMainRollSourceError(
             "daily v2 baseline replay/contract-registry lineage mismatch"
@@ -842,7 +853,7 @@ def _genesis_map(
         raise VerifiedDailyPitMainRollSourceError(str(exc)) from exc
     if (
         validated["source_month"] != genesis.source_month
-        or validated["execution_day"] != official_day.isoformat()
+        or validated["execution_day"] != baseline_execution_day.isoformat()
         or validated["execution_lane"] != evidence["execution_lane"]
         or validated["signer_key_id"] != genesis.expected_business_signer_key_id
     ):
@@ -1111,9 +1122,13 @@ def build_verified_daily_pit_main_roll_source(
                     source_month=source_month,
                 )
             )
-            if baseline_execution_day != day:
+            if (
+                baseline_execution_day.strftime("%Y-%m")
+                != day.strftime("%Y-%m")
+                or baseline_execution_day > day
+            ):
                 raise VerifiedDailyPitMainRollSourceError(
-                    "daily v2 Genesis source month does not execute on artifact official day"
+                    "daily v2 Genesis baseline must execute in the artifact month no later than the artifact official day"
                 )
         execution_day, following_day = _following_days(context, day)
         verified = _verify_daily_input(
@@ -1426,10 +1441,16 @@ def _validate_structural_daily_pit_main_roll_source(raw: bytes) -> dict[str, Any
         )
         for field in continuity_hash_fields:
             require_sha(continuity[field], f"daily v2 continuity {field}")
-        if continuity.get("baseline_execution_day") != payload[
-            "official_day"
-        ] or continuity.get("predecessor_exact_contract_map_sha256") != _map_sha(
-            previous_map
+        baseline_execution_day = _day(
+            continuity.get("baseline_execution_day"),
+            "daily v2 Genesis baseline execution day",
+        )
+        if (
+            baseline_execution_day.strftime("%Y-%m")
+            != official.strftime("%Y-%m")
+            or baseline_execution_day > official
+            or continuity.get("predecessor_exact_contract_map_sha256")
+            != _map_sha(previous_map)
         ):
             raise VerifiedDailyPitMainRollSourceError(
                 "daily v2 Genesis continuity binding mismatch"

@@ -477,7 +477,7 @@ def test_genesis_is_deterministic_schema_valid_tie_broken_and_no_authority(
         ("2026-06", "2026-06-30"),
     ],
 )
-def test_delayed_genesis_requires_monthly_batch_execution_as_artifact_day(
+def test_delayed_genesis_rejects_baseline_outside_or_after_artifact_month(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     source_month: str,
@@ -489,9 +489,38 @@ def test_delayed_genesis_requires_monthly_batch_execution_as_artifact_day(
 
     with pytest.raises(
         verified_roll.VerifiedDailyPitMainRollSourceError,
-        match="source month does not execute on artifact official day",
+        match="baseline must execute in the artifact month no later",
     ):
         verified_roll.build_verified_daily_pit_main_roll_source(**kwargs)
+
+
+def test_delayed_genesis_accepts_same_month_baseline_before_current_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    kwargs, inputs, _private = _kwargs(monkeypatch, tmp_path)
+    head = "6" * 64
+    commit = "7" * 64
+    kwargs["operator_state"] = _state("2026-07-02", head, commit, sequence=1)
+    kwargs["official_day"] = "2026-07-02"
+    inputs["2026-07-02"] = _verified_input(
+        "2026-07-02",
+        head_seal=head,
+        head_commit=commit,
+        parent_seal=None,
+        parent_commit=None,
+        expected_genesis_baseline=kwargs["genesis"].built_baseline,
+    )
+
+    built = verified_roll.build_verified_daily_pit_main_roll_source(**kwargs)
+    payload = verified_roll.validate_structural_daily_pit_main_roll_source(
+        built.artifact_raw
+    )
+
+    assert payload["official_day"] == "2026-07-02"
+    continuity = payload["verified_lineage"]["continuity"]
+    assert continuity["mode"] == "GENESIS_STATIC_CORE_EQUAL"
+    assert continuity["baseline_execution_day"] == "2026-07-01"
 
 
 def test_delayed_genesis_source_month_must_be_canonical(
@@ -508,7 +537,7 @@ def test_delayed_genesis_source_month_must_be_canonical(
         verified_roll.build_verified_daily_pit_main_roll_source(**kwargs)
 
 
-def test_signed_monthly_batch_execution_day_must_equal_artifact_day(
+def test_signed_monthly_batch_execution_day_must_match_replayed_baseline_day(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
