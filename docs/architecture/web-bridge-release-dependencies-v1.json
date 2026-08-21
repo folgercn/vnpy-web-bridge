@@ -841,7 +841,7 @@
     },
     {
       "id": "root-readme",
-      "match": {"exact": ["README.md"]},
+      "match": {"exact": ["README.md", "AGENTS.md"]},
       "classification": "docs_none",
       "build_units": [],
       "verification_units": ["markdown_links"],

@@ -733,7 +733,7 @@ PHASE_A_RULES = (
     _phase_a_rule(
         "phase-a-unrelated-docs",
         verification=("markdown_links",),
-        exact=("README.md",),
+        exact=("README.md", "AGENTS.md", ".gitignore"),
         prefix=("docs/",),
         kind="contract",
     ),
