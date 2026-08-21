@@ -62,6 +62,9 @@ def _config_value(tmp_path: Path) -> dict:
         "warehouse_business_signer_key_id": "research-signer-test-0001",
         "warehouse_contract_registry_path": str(tmp_path / "contracts.json"),
         "warehouse_contract_registry_raw_sha256": "5" * 64,
+        "warehouse_shfe_contract_parameters_path": str(tmp_path / "shfe-contracts.dat"),
+        "warehouse_shfe_contract_parameters_raw_sha256": "9" * 64,
+        "warehouse_shfe_contract_parameters_observed_at": "2026-08-20T01:02:03.000000Z",
         "bootstrap_source_month": "2026-08",
         "bootstrap_execution_month": "2026-08",
         "bootstrap_static_core_equal_sha256": "6" * 64,
@@ -135,6 +138,9 @@ def test_protected_replay_rejects_mixed_caller_inputs_before_catalog_write(
         business_signer_key_id="research-signer-test-0001",
         contract_registry_path=tmp_path / "contracts.json",
         contract_registry_raw_sha256="4" * 64,
+        shfe_contract_parameters_path=tmp_path / "shfe-contracts.dat",
+        shfe_contract_parameters_raw_sha256="5" * 64,
+        shfe_contract_parameters_observed_at="2026-08-20T01:02:03.000000Z",
         source_month="2026-08",
     )
     with pytest.raises(DailyRollPredecessorCatalogError, match="mixed with caller"):

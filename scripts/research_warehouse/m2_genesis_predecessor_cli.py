@@ -40,6 +40,7 @@ from .m2_operator_defaults import (
 )
 from .m2_operator_state import load_operator_state, operator_state_lock
 from .m2_runtime_input import DEFAULT_RUNTIME_INPUT, load_runtime_input, require_sha
+from .timeutil import parse_utc
 
 _CONFIG_SCHEMA = "web-bridge-simnow-continuous-run-once-config-v1"
 _CONFIG_MAX_BYTES = 64 * 1024
@@ -64,6 +65,9 @@ class _GenesisConfigProjection:
     business_signer_key_id: str
     contract_registry_path: Path
     contract_registry_raw_sha256: str
+    shfe_contract_parameters_path: Path
+    shfe_contract_parameters_raw_sha256: str
+    shfe_contract_parameters_observed_at: str
     source_month: str
     execution_month: str
 
@@ -145,6 +149,9 @@ def _projection_from_config(raw: bytes) -> _GenesisConfigProjection:
         "warehouse_business_signer_key_id",
         "warehouse_contract_registry_path",
         "warehouse_contract_registry_raw_sha256",
+        "warehouse_shfe_contract_parameters_path",
+        "warehouse_shfe_contract_parameters_raw_sha256",
+        "warehouse_shfe_contract_parameters_observed_at",
         "bootstrap_source_month",
         "bootstrap_execution_month",
         "bootstrap_static_core_equal_sha256",
@@ -159,6 +166,7 @@ def _projection_from_config(raw: bytes) -> _GenesisConfigProjection:
         "warehouse_manifest_public_key_raw_sha256",
         "warehouse_business_public_key_raw_sha256",
         "warehouse_contract_registry_raw_sha256",
+        "warehouse_shfe_contract_parameters_raw_sha256",
         "bootstrap_static_core_equal_sha256",
         "bootstrap_position_manager_sha256",
         "bootstrap_final_target_sha256",
@@ -169,6 +177,10 @@ def _projection_from_config(raw: bytes) -> _GenesisConfigProjection:
         or not value["warehouse_business_signer_key_id"]
     ):
         raise GenesisPublisherCliError("continuous config signer identity is invalid")
+    parse_utc(
+        value["warehouse_shfe_contract_parameters_observed_at"],
+        "SHFE contract parameters observed_at",
+    )
     return _GenesisConfigProjection(
         runtime_input_raw_sha256=value["warehouse_runtime_input_raw_sha256"],
         history_receipt_path=_absolute(
@@ -195,6 +207,16 @@ def _projection_from_config(raw: bytes) -> _GenesisConfigProjection:
             value["warehouse_contract_registry_path"], "contract registry path"
         ),
         contract_registry_raw_sha256=value["warehouse_contract_registry_raw_sha256"],
+        shfe_contract_parameters_path=_absolute(
+            value["warehouse_shfe_contract_parameters_path"],
+            "SHFE contract parameters path",
+        ),
+        shfe_contract_parameters_raw_sha256=(
+            value["warehouse_shfe_contract_parameters_raw_sha256"]
+        ),
+        shfe_contract_parameters_observed_at=value[
+            "warehouse_shfe_contract_parameters_observed_at"
+        ],
         source_month=_month(value["bootstrap_source_month"], "bootstrap source month"),
         execution_month=_month(
             value["bootstrap_execution_month"], "bootstrap execution month"
@@ -217,6 +239,9 @@ def _projection_payload(value: _GenesisConfigProjection) -> bytes:
             "business_signer_key_id": value.business_signer_key_id,
             "contract_registry_path": str(value.contract_registry_path),
             "contract_registry_raw_sha256": value.contract_registry_raw_sha256,
+            "shfe_contract_parameters_path": str(value.shfe_contract_parameters_path),
+            "shfe_contract_parameters_raw_sha256": value.shfe_contract_parameters_raw_sha256,
+            "shfe_contract_parameters_observed_at": value.shfe_contract_parameters_observed_at,
             "source_month": value.source_month,
             "execution_month": value.execution_month,
             "authority": false_authority(),
@@ -239,6 +264,9 @@ def _projection_from_payload(raw: bytes) -> _GenesisConfigProjection:
         "business_signer_key_id",
         "contract_registry_path",
         "contract_registry_raw_sha256",
+        "shfe_contract_parameters_path",
+        "shfe_contract_parameters_raw_sha256",
+        "shfe_contract_parameters_observed_at",
         "source_month",
         "execution_month",
         "authority",
@@ -257,6 +285,7 @@ def _projection_from_payload(raw: bytes) -> _GenesisConfigProjection:
         "manifest_public_key_raw_sha256",
         "business_public_key_raw_sha256",
         "contract_registry_raw_sha256",
+        "shfe_contract_parameters_raw_sha256",
     ):
         require_sha(value[field], field)
     if (
@@ -264,6 +293,10 @@ def _projection_from_payload(raw: bytes) -> _GenesisConfigProjection:
         or not value["business_signer_key_id"]
     ):
         raise GenesisPublisherCliError("Genesis config signer identity is invalid")
+    parse_utc(
+        value["shfe_contract_parameters_observed_at"],
+        "SHFE contract parameters observed_at",
+    )
     return _GenesisConfigProjection(
         runtime_input_raw_sha256=value["runtime_input_raw_sha256"],
         history_receipt_path=_absolute(value["history_receipt_path"], "history receipt"),
@@ -284,6 +317,15 @@ def _projection_from_payload(raw: bytes) -> _GenesisConfigProjection:
             value["contract_registry_path"], "contract registry"
         ),
         contract_registry_raw_sha256=value["contract_registry_raw_sha256"],
+        shfe_contract_parameters_path=_absolute(
+            value["shfe_contract_parameters_path"], "SHFE contract parameters"
+        ),
+        shfe_contract_parameters_raw_sha256=value[
+            "shfe_contract_parameters_raw_sha256"
+        ],
+        shfe_contract_parameters_observed_at=value[
+            "shfe_contract_parameters_observed_at"
+        ],
         source_month=_month(value["source_month"], "Genesis source month"),
         execution_month=_month(value["execution_month"], "Genesis execution month"),
     )
@@ -407,6 +449,15 @@ def main(argv: list[str] | None = None) -> int:
                 contract_registry_path=projection.contract_registry_path,
                 contract_registry_raw_sha256=(
                     projection.contract_registry_raw_sha256
+                ),
+                shfe_contract_parameters_path=(
+                    projection.shfe_contract_parameters_path
+                ),
+                shfe_contract_parameters_raw_sha256=(
+                    projection.shfe_contract_parameters_raw_sha256
+                ),
+                shfe_contract_parameters_observed_at=(
+                    projection.shfe_contract_parameters_observed_at
                 ),
                 source_month=projection.source_month,
             ),

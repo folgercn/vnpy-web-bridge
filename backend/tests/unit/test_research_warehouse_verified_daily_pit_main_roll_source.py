@@ -33,6 +33,7 @@ from research_warehouse.m2_isolation_contracts import false_authority
 from research_warehouse.m2_operator_state import OperatorState
 from research_warehouse.m2_receipts import RUN_RECEIPT_SCHEMA, run_receipt_id
 from research_warehouse.pit_source_view import SourcePins
+from research_warehouse.shfe_contract_parameters import evidence_from_raw
 from research_warehouse.signing import public_key_sha256
 import research_warehouse.static_core_baseline as static_baseline
 from test_research_warehouse_static_core_baseline import _build, _contract_registry
@@ -178,6 +179,158 @@ def _context() -> SimpleNamespace:
         calendar=_calendar(),
         availability=_Anchor(),
     )
+
+
+def test_partial_delivery_month_uses_exact_shfe_expiry_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    kwargs, _inputs, _private = _kwargs(monkeypatch, tmp_path)
+    context = _context()
+    context.calendar = replace(context.calendar, valid_to=date(2027, 1, 10))
+    registry, _registry_sha = static_baseline._registry(_contract_registry())
+    parameter_raw = canonical_json(
+        {
+            "ContractBaseInfo": [
+                {
+                    "INSTRUMENTID": f"{product}{delivery}",
+                    "EXCHANGEID": "SHFE",
+                    "COMMODITYID": product,
+                    "TRADINGDAY": "20260701",
+                    "EXPIREDATE": (
+                        "20261116" if product == "ag" and delivery == "2611" else "20270115"
+                    ),
+                }
+                for product in frozen.PRODUCTS
+                if frozen.PRODUCT_SPECS[product]["exchange"] == "SHFE"
+                for delivery in ("2611", "2701", "2702", "2703")
+            ],
+            "report_date": "20260701",
+            "update_date": "20260701 16:20:09",
+        }
+    )
+    evidence = evidence_from_raw(
+        query_day=date(2026, 7, 1),
+        observed_at="2026-07-02T01:00:00.000000Z",
+        raw=parameter_raw,
+        expected_raw_sha256=sha256(parameter_raw),
+    )
+    predecessor = {
+        product: f"{frozen.PRODUCT_SPECS[product]['exchange']}.{product}2610"
+        for product in frozen.PRODUCTS
+    }
+    mains, expiry = verified_roll._mains(
+        context=context,
+        official_day=date(2026, 7, 1),
+        execution_day=date(2026, 7, 2),
+        following_day=date(2026, 7, 3),
+        daily_source_raw={
+            "SHFE": _raw("2026-07-01", "SHFE", main_delivery="2701"),
+            "INE": _raw("2026-07-01", "INE", main_delivery="2701"),
+        },
+        contract_registry=registry,
+        predecessor=predecessor,
+        shfe_contract_parameters=evidence,
+    )
+    assert next(row for row in mains if row["product"] == "ru")[
+        "official_last_trading_day"
+    ] == "2027-01-15"
+    assert next(row for row in expiry if row["exact_contract"] == "SHFE.ru2701")[
+        "expire_date"
+    ] == "2027-01-15"
+
+
+def _shfe_parameter_evidence(
+    *, query_day: date, expiry_by_instrument: dict[str, str]
+):
+    raw = canonical_json(
+        {
+            "ContractBaseInfo": [
+                {
+                    "INSTRUMENTID": instrument,
+                    "EXCHANGEID": "SHFE",
+                    "COMMODITYID": instrument[:-4],
+                    "TRADINGDAY": query_day.strftime("%Y%m%d"),
+                    "EXPIREDATE": expiry,
+                }
+                for instrument, expiry in sorted(expiry_by_instrument.items())
+            ],
+            "report_date": query_day.strftime("%Y%m%d"),
+            "update_date": f"{query_day:%Y%m%d} 16:20:09",
+        }
+    )
+    return evidence_from_raw(
+        query_day=query_day,
+        observed_at=(query_day + timedelta(days=1)).strftime(
+            "%Y-%m-%dT01:00:00.000000Z"
+        ),
+        raw=raw,
+        expected_raw_sha256=sha256(raw),
+    )
+
+
+def _mains_inputs(*, main_delivery: str, query_day: date):
+    registry, _registry_sha = static_baseline._registry(_contract_registry())
+    predecessor = {
+        product: f"{frozen.PRODUCT_SPECS[product]['exchange']}.{product}2610"
+        for product in frozen.PRODUCTS
+    }
+    return registry, predecessor, {
+        "SHFE": _raw(query_day.isoformat(), "SHFE", main_delivery=main_delivery),
+        "INE": _raw(query_day.isoformat(), "INE", main_delivery=main_delivery),
+    }
+
+
+def test_calendar_covered_expiry_agrees_and_disagreement_fails_closed() -> None:
+    context = _context()
+    query_day = date(2026, 7, 1)
+    registry, predecessor, sources = _mains_inputs(main_delivery="2610", query_day=query_day)
+    evidence = _shfe_parameter_evidence(
+        query_day=query_day,
+        expiry_by_instrument={
+            **{f"{product}2610": "20261015" for product in frozen.PRODUCTS if frozen.PRODUCT_SPECS[product]["exchange"] == "SHFE"},
+        },
+    )
+    mains, _expiry = verified_roll._mains(
+        context=context,
+        official_day=query_day,
+        execution_day=date(2026, 7, 2),
+        following_day=date(2026, 7, 3),
+        daily_source_raw=sources,
+        contract_registry=registry,
+        predecessor=predecessor,
+        shfe_contract_parameters=evidence,
+    )
+    assert next(row for row in mains if row["product"] == "ru")[
+        "official_last_trading_day"
+    ] == "2026-10-15"
+    bad = _shfe_parameter_evidence(
+        query_day=query_day,
+        expiry_by_instrument={
+            **{f"{product}2610": "20261016" for product in frozen.PRODUCTS if frozen.PRODUCT_SPECS[product]["exchange"] == "SHFE"},
+        },
+    )
+    with pytest.raises(verified_roll.VerifiedDailyPitMainRollSourceError, match="disagreement"):
+        verified_roll._mains(
+            context=context, official_day=query_day, execution_day=date(2026, 7, 2), following_day=date(2026, 7, 3), daily_source_raw=sources, contract_registry=registry, predecessor=predecessor, shfe_contract_parameters=bad
+        )
+
+
+def test_december_horizon_ru2701_fallback_keeps_routing_and_dte_gate() -> None:
+    context = _context()
+    context.calendar = replace(context.calendar, valid_to=date(2026, 12, 31))
+    query_day = date(2026, 8, 19)
+    registry, predecessor, sources = _mains_inputs(main_delivery="2701", query_day=query_day)
+    expiry_values = {f"{product}2701": "20270115" for product in frozen.PRODUCTS if frozen.PRODUCT_SPECS[product]["exchange"] == "SHFE"}
+    expiry_values["ag2611"] = "20261116"
+    evidence = _shfe_parameter_evidence(query_day=query_day, expiry_by_instrument=expiry_values)
+    mains, _expiry = verified_roll._mains(context=context, official_day=query_day, execution_day=date(2026, 8, 20), following_day=date(2026, 8, 21), daily_source_raw=sources, contract_registry=registry, predecessor=predecessor, shfe_contract_parameters=evidence)
+    ru = next(row for row in mains if row["product"] == "ru")
+    assert (ru["exact_contract"], ru["official_last_trading_day"]) == ("SHFE.ru2701", "2027-01-15")
+    no_evidence, _ = verified_roll._mains(context=_context(), official_day=query_day, execution_day=date(2026, 8, 20), following_day=date(2026, 8, 21), daily_source_raw=sources, contract_registry=registry, predecessor=predecessor, shfe_contract_parameters=None)
+    assert [(row["exact_contract"], row["settlement"], row["open_interest"], row["ranked_contracts_sha256"]) for row in mains] == [(row["exact_contract"], row["settlement"], row["open_interest"], row["ranked_contracts_sha256"]) for row in no_evidence]
+    with pytest.raises(verified_roll.VerifiedDailyPitMainRollSourceError, match="DTE safety"):
+        verified_roll._mains(context=context, official_day=query_day, execution_day=date(2027, 1, 6), following_day=date(2027, 1, 7), daily_source_raw=sources, contract_registry=registry, predecessor=predecessor, shfe_contract_parameters=evidence)
 
 
 def _signed_genesis(
@@ -457,12 +610,7 @@ def test_genesis_is_deterministic_schema_valid_tie_broken_and_no_authority(
     ):
         assert payload[field] is False
     assert payload["authority"] == false_authority()
-    schema = json.loads(
-        (
-            ROOT
-            / "deployments/research-warehouse/verified-daily-pit-main-roll-source-v2.schema.json"
-        ).read_text(encoding="utf-8")
-    )
+    schema = json.loads(verified_roll.SCHEMA_PATH.read_text(encoding="utf-8"))
     validate_json_schema(
         payload,
         schema,

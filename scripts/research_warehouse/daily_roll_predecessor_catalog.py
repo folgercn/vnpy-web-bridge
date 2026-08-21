@@ -120,6 +120,9 @@ class ProtectedGenesisReplayInputs:
     business_signer_key_id: str
     contract_registry_path: Path
     contract_registry_raw_sha256: str
+    shfe_contract_parameters_path: Path
+    shfe_contract_parameters_raw_sha256: str
+    shfe_contract_parameters_observed_at: str
     source_month: str
 
 
@@ -1320,6 +1323,7 @@ def _build_protected_genesis_as_service_locked(
         _root_replayed_genesis_baseline,
         build_verified_daily_pit_main_roll_source,
     )
+    from .shfe_contract_parameters import evidence_from_raw
 
     _require_root()
     uid, gid = _require_exact_service_identity(inputs.service_uid, inputs.service_gid)
@@ -1371,6 +1375,18 @@ def _build_protected_genesis_as_service_locked(
                 uid=uid,
                 limit=1024 * 1024,
             )
+            shfe_contract_parameters_raw = _read_private_protected_evidence(
+                inputs.shfe_contract_parameters_path,
+                "daily roll protected Genesis SHFE contract parameters",
+                uid=uid,
+                limit=4 * 1024 * 1024,
+            )
+            shfe_contract_parameters = evidence_from_raw(
+                query_day=date.fromisoformat(official_day),
+                observed_at=inputs.shfe_contract_parameters_observed_at,
+                raw=shfe_contract_parameters_raw,
+                expected_raw_sha256=inputs.shfe_contract_parameters_raw_sha256,
+            )
             signed_baseline_raw = _read_private_protected_evidence(
                 inputs.signed_baseline_batch_path,
                 "daily roll protected Genesis signed baseline",
@@ -1421,6 +1437,7 @@ def _build_protected_genesis_as_service_locked(
                 expected_contract_registry_raw_sha256=(
                     inputs.contract_registry_raw_sha256
                 ),
+                shfe_contract_parameters=shfe_contract_parameters,
                 genesis=GenesisContinuity(
                     source_month=inputs.source_month,
                     built_baseline=baseline,

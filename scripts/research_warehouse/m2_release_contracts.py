@@ -34,6 +34,10 @@ GENESIS_RELEASE_APP_SOURCE_FILES = (
     "scripts/commodity_static_core_equal_formula_v1.py",
     "scripts/commodity_static_core_equal_pure_producer.py",
 )
+GENESIS_RELEASE_SCHEMA_FILES = (
+    "deployments/research-warehouse/verified-daily-pit-main-roll-source-v2.schema.json",
+    "deployments/research-warehouse/verified-daily-pit-main-roll-source-v3.schema.json",
+)
 LOGICAL_RELEASE_ROOT = "/usr/local/libexec/vnpyresearch/release"
 REQUIRED_ENTRYPOINTS = {
     "bin/research-warehouse-backup-signer",
