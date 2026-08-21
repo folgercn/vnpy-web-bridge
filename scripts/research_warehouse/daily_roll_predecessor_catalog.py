@@ -25,7 +25,8 @@ from typing import TYPE_CHECKING, Any
 
 from .canonical import canonical_json, canonical_json_line, parse_json_strict, sha256
 from .errors import RegistryError
-from .file_integrity import fsync_dir, read_regular_strict
+from .file_integrity import MAX_RAW_BYTES, fsync_dir, read_regular_strict
+from .m2_acl_custody import require_acl_free_path
 from .m2_isolation_contracts import false_authority, load_isolation_policy
 from .m2_operator_state import (
     OperatorState,
@@ -233,6 +234,74 @@ def _read_root_file(path: Path, label: str, *, limit: int) -> bytes:
         private=False,
         descriptor_validator=_validate_root_file_fd,
     )
+
+
+def _private_evidence_parent(path: Path, label: str, *, uid: int) -> None:
+    """Bind one service-owned evidence parent to its private directory contract.
+
+    The protected child is intentionally the owner of its replay evidence, so
+    ``W_OK`` is expected to be true for that owner.  Isolation instead comes
+    from exact private mode/owner, no ACL grant, stable reads and root pins.
+    Root-managed custody is checked separately with the child-write gate.
+    """
+
+    if not isinstance(path, Path) or not path.is_absolute():
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected private evidence path is invalid"
+        )
+    try:
+        parent = path.parent.lstat()
+    except OSError as exc:
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected private evidence parent is unavailable"
+        ) from exc
+    if (
+        stat.S_ISLNK(parent.st_mode)
+        or not stat.S_ISDIR(parent.st_mode)
+        or parent.st_uid != uid
+        or stat.S_IMODE(parent.st_mode) != 0o700
+    ):
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected private evidence parent custody is invalid"
+        )
+    require_acl_free_path(path.parent, label)
+
+
+def _read_private_protected_evidence(
+    path: Path,
+    label: str,
+    *,
+    uid: int,
+    limit: int,
+) -> bytes:
+    """Strictly read one UID503-owned private Genesis replay input."""
+
+    _private_evidence_parent(path, label, uid=uid)
+
+    def validate_descriptor(descriptor: int) -> None:
+        info = os.fstat(descriptor)
+        if (
+            info.st_uid != uid
+            or not stat.S_ISREG(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_nlink != 1
+        ):
+            raise DailyRollPredecessorCatalogError(
+                "daily roll protected private evidence custody is invalid"
+            )
+
+    raw = read_regular_strict(
+        path,
+        label,
+        limit=limit,
+        private=True,
+        descriptor_validator=validate_descriptor,
+    )
+    # Do not turn the owner-writable evidence contract into a write-isolation
+    # check.  Re-check the parent instead so a symlink/ACL/mode swap cannot
+    # occur around the strict file read.
+    _private_evidence_parent(path, label, uid=uid)
+    return raw
 
 
 def _artifact_relative_path(artifact_id: str) -> str:
@@ -1264,10 +1333,6 @@ def _build_protected_genesis_as_service_locked(
             inputs.runtime_input_path.parent,
             inputs.runtime_input_path,
             inputs.manifest_public_key_path.parent,
-            inputs.history_receipt_path.parent,
-            inputs.signed_baseline_batch_path.parent,
-            inputs.business_public_key_path.parent,
-            inputs.contract_registry_path.parent,
             DEFAULT_MANIFEST_PRIVATE_KEY.parent,
             DEFAULT_BACKUP_PRIVATE_KEY.parent,
             DEFAULT_CALENDAR_PRIVATE_KEY.parent,
@@ -1294,15 +1359,29 @@ def _build_protected_genesis_as_service_locked(
                 raise DailyRollPredecessorCatalogError(
                     "daily roll protected replay runtime identity drifted"
                 )
-            registry_raw = read_regular_strict(
+            _read_private_protected_evidence(
+                inputs.history_receipt_path,
+                "daily roll protected Genesis history receipt",
+                uid=uid,
+                limit=MAX_RAW_BYTES,
+            )
+            registry_raw = _read_private_protected_evidence(
                 inputs.contract_registry_path,
                 "daily roll protected Genesis contract registry",
+                uid=uid,
                 limit=1024 * 1024,
             )
-            signed_baseline_raw = read_regular_strict(
+            signed_baseline_raw = _read_private_protected_evidence(
                 inputs.signed_baseline_batch_path,
                 "daily roll protected Genesis signed baseline",
+                uid=uid,
                 limit=MAX_ARTIFACT_RAW_BYTES,
+            )
+            _read_private_protected_evidence(
+                inputs.business_public_key_path,
+                "daily roll protected Genesis business public key",
+                uid=uid,
+                limit=128,
             )
             pins = SourcePins(
                 history_receipt_raw_sha256=inputs.history_receipt_raw_sha256,
