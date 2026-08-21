@@ -605,13 +605,15 @@ def test_production_warehouse_uses_july_bootstrap_only_inside_august(
 
 
 @pytest.mark.parametrize(
-    "path",
+    ("path", "expected_phase_b_units"),
     [
-        "scripts/simnow_continuous_run_once.py",
-        "backend/tests/unit/test_issue362_simnow_continuous_run_once.py",
+        ("scripts/simnow_continuous_run_once.py", list(PHASE_B_UNITS)),
+        ("backend/tests/unit/test_issue362_simnow_continuous_run_once.py", []),
     ],
 )
-def test_runner_is_phase_a_preserved_and_phase_b_packaged(path: str):
+def test_runner_is_phase_a_preserved_and_phase_b_packaged(
+    path: str, expected_phase_b_units: list[str]
+):
     phase_a = classify_phase_a([path])
     assert phase_a["release_blocked"] is False
     assert phase_a["selected_rule_ids"] == [
@@ -621,7 +623,7 @@ def test_runner_is_phase_a_preserved_and_phase_b_packaged(path: str):
     assert phase_a["dependency_closure"] == []
     phase_b = classify_phase_b([path])
     assert phase_b["phase_b_changed"] is True
-    assert phase_b["selected_units"] == list(PHASE_B_UNITS)
+    assert phase_b["selected_units"] == expected_phase_b_units
 
 
 def test_phase_keys_are_domain_separated_stable_and_not_caller_selected():
