@@ -602,6 +602,7 @@ def _replay_verified_monthly_evidence(
     expected_contract_registry_raw_sha256: str,
     source_month: str,
     readonly_manifest_verifier: bool,
+    readonly_observation_loader: bool,
 ) -> _VerifiedMonthlyReplayEvidence:
     """Independently replay one monthly economic target from current custody.
 
@@ -729,6 +730,7 @@ def _replay_verified_monthly_evidence(
                 history=history,
                 chain=chain,
                 source_month=source_month,
+                readonly_observation_loader=readonly_observation_loader,
             )
             baseline = build_historical_baseline(
                 calendar=context.calendar,
@@ -904,6 +906,7 @@ def replay_verified_monthly_final_target(
         expected_contract_registry_raw_sha256=expected_contract_registry_raw_sha256,
         source_month=source_month,
         readonly_manifest_verifier=False,
+        readonly_observation_loader=False,
     )
     return replay.final_target
 
@@ -954,6 +957,7 @@ def replay_verified_monthly_planner_bundle(
         expected_contract_registry_raw_sha256=expected_contract_registry_raw_sha256,
         source_month=source_month,
         readonly_manifest_verifier=True,
+        readonly_observation_loader=True,
     )
     return VerifiedMonthlyPlannerBundle(
         final_target=replay.final_target,

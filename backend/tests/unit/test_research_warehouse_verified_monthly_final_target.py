@@ -752,16 +752,25 @@ def test_planner_bundle_uses_readonly_manifest_verifier(
 ) -> None:
     kwargs, _state = _install_root_mocks(monkeypatch, tmp_path)
     original = monthly.verify_root_pins
-    calls: list[bool] = []
+    manifest_calls: list[bool] = []
+    observation_calls: list[bool] = []
 
     def record_verifier(**fields):
-        calls.append(fields["readonly_manifest_verifier"])
+        manifest_calls.append(fields["readonly_manifest_verifier"])
         return original(**fields)
 
+    original_sources = monthly.verified_static_baseline_daily_sources
+
+    def record_sources(**fields):
+        observation_calls.append(fields["readonly_observation_loader"])
+        return original_sources(**fields)
+
     monkeypatch.setattr(monthly, "verify_root_pins", record_verifier)
+    monkeypatch.setattr(monthly, "verified_static_baseline_daily_sources", record_sources)
     monthly.replay_verified_monthly_planner_bundle(**kwargs)
 
-    assert calls == [True]
+    assert manifest_calls == [True]
+    assert observation_calls == [True]
 
 
 def test_root_replay_planner_bundle_builds_explicit_v3_plan_without_authority(

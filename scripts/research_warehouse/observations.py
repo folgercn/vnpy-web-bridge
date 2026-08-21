@@ -33,6 +33,7 @@ from .timeutil import format_utc, parse_utc
 __all__ = [
     "latest_acquired_observation",
     "load_observations",
+    "load_observations_readonly",
     "observation_id",
     "raw_object_id",
     "revision_occurrence_id",
@@ -160,6 +161,22 @@ def load_observations(
             source_id=source_id,
             trade_day=trade_day,
         )
+
+
+def load_observations_readonly(
+    paths: WarehousePaths,
+    registry: SourceRegistry,
+    *,
+    source_id: str | None = None,
+    trade_day: str | None = None,
+) -> list[dict[str, Any]]:
+    """Load fully validated observations without writer recovery or locks."""
+    return _load_observations_unlocked(
+        paths,
+        registry,
+        source_id=source_id,
+        trade_day=trade_day,
+    )
 
 
 def _create_observation_unlocked(
