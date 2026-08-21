@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from scripts.ci.classify_changes import classify, classify_phase_b
+from scripts.ci.classify_changes import PHASE_B_UNITS, classify, classify_phase_b
 from scripts.ci.validate_json_schemas import SCHEMA_DIRECTORIES
 
 
@@ -109,7 +109,8 @@ def test_simnow_runner_logic_and_shared_execution_still_take_heavy_paths() -> No
     ):
         phase_b = classify_phase_b([path])
         assert phase_b["phase_b_changed"] is True
-        assert phase_b["selected_units"] == []
+        assert phase_b["phase_b_shared_contract_changed"] is True
+        assert phase_b["selected_units"] == list(PHASE_B_UNITS)
         assert phase_b["phase_b_gate_blocked"] is False
 
 
