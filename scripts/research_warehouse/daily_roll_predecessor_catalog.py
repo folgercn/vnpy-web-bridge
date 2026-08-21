@@ -9,6 +9,7 @@ authority.
 from __future__ import annotations
 
 import base64
+import grp
 import os
 import pwd
 import re
@@ -58,6 +59,8 @@ MAX_ARTIFACT_RAW_BYTES = 4 * 1024 * 1024
 _PROTECTED_REPLAY_SCHEMA = "vnpy_research_daily_roll_protected_replay_v1"
 _PROTECTED_REPLAY_MAX_BYTES = 8 * 1024 * 1024
 _PROTECTED_REPLAY_TIMEOUT_SECONDS = 120.0
+_PROTECTED_REPLAY_ACCOUNT_NAME = "vnpyresearch"
+_PROTECTED_REPLAY_GROUP_NAME = "vnpyresearch"
 _ATOMIC_PARTIAL_RE = re.compile(
     r"^\.(?P<target>[^/]+\.json)-(?P<nonce>[a-z0-9_]{8})\.partial$"
 )
@@ -903,13 +906,29 @@ def _require_exact_service_identity(uid: object, gid: object) -> tuple[int, int]
 def _drop_to_protected_replay_identity(*, uid: int, gid: int) -> None:
     """Irreversibly bind the forked replay child to vnpyresearch 503:503."""
 
-    account = pwd.getpwuid(uid)
-    if account.pw_uid != uid or account.pw_gid != gid:
+    _require_exact_service_identity(uid, gid)
+    try:
+        account = pwd.getpwuid(uid)
+    except KeyError as exc:
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected replay account is missing"
+        ) from exc
+    if account.pw_uid != uid or account.pw_name != _PROTECTED_REPLAY_ACCOUNT_NAME:
         raise DailyRollPredecessorCatalogError(
             "daily roll protected replay account identity mismatch"
         )
-    expected_groups = {gid}
-    os.setgroups(sorted(expected_groups))
+    try:
+        group = grp.getgrgid(gid)
+    except KeyError as exc:
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected replay group is missing"
+        ) from exc
+    if group.gr_gid != gid or group.gr_name != _PROTECTED_REPLAY_GROUP_NAME:
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected replay group identity mismatch"
+        )
+    expected_groups = [gid]
+    os.setgroups(expected_groups)
     if hasattr(os, "setresgid"):
         os.setresgid(gid, gid, gid)
     else:
@@ -923,16 +942,16 @@ def _drop_to_protected_replay_identity(*, uid: int, gid: int) -> None:
         or os.geteuid() != uid
         or os.getgid() != gid
         or os.getegid() != gid
-        or set(os.getgroups()) != expected_groups
+        or os.getgroups() != expected_groups
     ):
         raise DailyRollPredecessorCatalogError(
             "daily roll protected replay privilege drop did not bind exact identity"
         )
-    if hasattr(os, "getresuid") and set(os.getresuid()) != {uid}:
+    if hasattr(os, "getresuid") and os.getresuid() != (uid, uid, uid):
         raise DailyRollPredecessorCatalogError(
             "daily roll protected replay retained a privileged saved UID"
         )
-    if hasattr(os, "getresgid") and set(os.getresgid()) != {gid}:
+    if hasattr(os, "getresgid") and os.getresgid() != (gid, gid, gid):
         raise DailyRollPredecessorCatalogError(
             "daily roll protected replay retained a privileged saved GID"
         )
