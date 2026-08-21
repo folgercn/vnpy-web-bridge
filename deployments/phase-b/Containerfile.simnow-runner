@@ -91,6 +91,7 @@ COPY scripts/research_warehouse/timeutil.py /app/scripts/research_warehouse/time
 COPY scripts/research_warehouse/transport.py /app/scripts/research_warehouse/transport.py
 COPY scripts/research_warehouse/validation.py /app/scripts/research_warehouse/validation.py
 COPY scripts/research_warehouse/verified_daily_pit_main_roll_source.py /app/scripts/research_warehouse/verified_daily_pit_main_roll_source.py
+COPY scripts/research_warehouse/shfe_contract_parameters.py /app/scripts/research_warehouse/shfe_contract_parameters.py
 COPY scripts/research_warehouse/verified_monthly_final_target.py /app/scripts/research_warehouse/verified_monthly_final_target.py
 COPY scripts/phase_b_workers/__init__.py /app/phase_b_workers/__init__.py
 COPY scripts/phase_b_workers/contracts.py /app/phase_b_workers/contracts.py
