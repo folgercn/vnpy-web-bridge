@@ -31,7 +31,7 @@ from .m2_operator_state import OperatorState
 from .m2_receipts import load_run_receipt
 from .m2_runtime_input import require_sha
 from .m2_runtime_loader import RuntimeContext
-from .manifests import verify_manifest_chain
+from .manifests import verify_manifest_chain, verify_manifest_chain_readonly
 from .signing import load_public_key, public_key_sha256
 from .timeutil import parse_utc
 
@@ -863,6 +863,7 @@ def verify_root_pins(
     history_receipt_path: Path,
     pins: SourcePins,
     manifest_public_key_path: Path,
+    readonly_manifest_verifier: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     if operator_state.raw_sha256 != require_sha(
         pins.operator_state_raw_sha256,
@@ -887,7 +888,12 @@ def verify_root_pins(
     ):
         raise PitSourceViewError("history receipt authority pins diverged")
     state = operator_state.payload
-    chain = verify_manifest_chain(
+    verifier = (
+        verify_manifest_chain_readonly
+        if readonly_manifest_verifier
+        else verify_manifest_chain
+    )
+    chain = verifier(
         paths=context.paths,
         public_key_path=manifest_public_key_path,
         registry=context.registry,

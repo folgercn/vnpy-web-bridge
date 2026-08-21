@@ -746,6 +746,24 @@ def test_public_replay_accepts_no_caller_built_proof_or_claimed_hash() -> None:
         assert caller_built not in planner_parameters
 
 
+def test_planner_bundle_uses_readonly_manifest_verifier(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    kwargs, _state = _install_root_mocks(monkeypatch, tmp_path)
+    original = monthly.verify_root_pins
+    calls: list[bool] = []
+
+    def record_verifier(**fields):
+        calls.append(fields["readonly_manifest_verifier"])
+        return original(**fields)
+
+    monkeypatch.setattr(monthly, "verify_root_pins", record_verifier)
+    monthly.replay_verified_monthly_planner_bundle(**kwargs)
+
+    assert calls == [True]
+
+
 def test_root_replay_planner_bundle_builds_explicit_v3_plan_without_authority(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

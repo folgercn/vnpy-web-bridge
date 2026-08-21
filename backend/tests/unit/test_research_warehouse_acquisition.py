@@ -44,6 +44,7 @@ from research_warehouse.manifests import (
     seal_daily_batch_incremental_with_private_key,
     seal_daily_batch_with_private_key,
     verify_manifest_chain,
+    verify_manifest_chain_readonly,
 )
 from research_warehouse.observations import (
     load_observations,
@@ -430,6 +431,84 @@ def test_revision_is_append_only_and_pit_cutoff_never_uses_future_revision(
     assert before_revision.batch_id in first_manifest.name
     assert after_revision.object_id == second.object_id
     assert after_revision.batch_id in second_manifest.name
+
+
+def test_readonly_manifest_verifier_never_locks_recovers_or_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = warehouse(tmp_path)
+    private_key, public_key = signing_keys(tmp_path)
+    acquire(paths, official_raw(), T1)
+    manifest_path, manifest = seal(paths, private_key, T2, None)
+    seal_hash = manifest["batch_seal_sha256"]
+    before = tuple(
+        sorted(
+            (str(path.relative_to(paths.root)), path.lstat().st_mode, path.lstat().st_size)
+            for path in paths.root.rglob("*")
+        )
+    )
+
+    def unexpected_write(*_args, **_kwargs):
+        raise AssertionError("read-only manifest verifier attempted writer path")
+
+    monkeypatch.setattr(manifests_module, "custody_lock", unexpected_write)
+    monkeypatch.setattr(
+        manifests_module, "_recover_manifest_publications", unexpected_write
+    )
+
+    chain = verify_manifest_chain_readonly(
+        paths=paths,
+        public_key_path=public_key,
+        registry=registry(),
+        expected_genesis_seal_sha256=seal_hash,
+        expected_head_seal_sha256=seal_hash,
+        expected_head_commit_seal_sha256=commit_seal(paths, seal_hash),
+        offline=True,
+    )
+
+    after = tuple(
+        sorted(
+            (str(path.relative_to(paths.root)), path.lstat().st_mode, path.lstat().st_size)
+            for path in paths.root.rglob("*")
+        )
+    )
+    assert chain[0]["batch_id"] in manifest_path.name
+    assert after == before
+
+
+def test_readonly_manifest_verifier_keeps_anchor_and_commit_gates(
+    tmp_path: Path,
+) -> None:
+    paths = warehouse(tmp_path)
+    private_key, public_key = signing_keys(tmp_path)
+    acquire(paths, official_raw(), T1)
+    manifest_path, manifest = seal(paths, private_key, T2, None)
+    seal_hash = manifest["batch_seal_sha256"]
+    commit_hash = commit_seal(paths, seal_hash)
+
+    with pytest.raises(RegistryError, match="head does not match"):
+        verify_manifest_chain_readonly(
+            paths=paths,
+            public_key_path=public_key,
+            registry=registry(),
+            expected_genesis_seal_sha256=seal_hash,
+            expected_head_seal_sha256="0" * 64,
+            expected_head_commit_seal_sha256=commit_hash,
+            offline=True,
+        )
+
+    (manifest_path.parent / f"commit-{manifest['batch_id']}.json").unlink()
+    with pytest.raises(RegistryError, match="uncommitted"):
+        verify_manifest_chain_readonly(
+            paths=paths,
+            public_key_path=public_key,
+            registry=registry(),
+            expected_genesis_seal_sha256=seal_hash,
+            expected_head_seal_sha256=seal_hash,
+            expected_head_commit_seal_sha256=commit_hash,
+            offline=True,
+        )
 
 
 def test_seal_is_idempotent_when_observations_are_unchanged(
