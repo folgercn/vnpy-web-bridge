@@ -735,6 +735,7 @@ def test_simnow_runner_image_keeps_the_real_import_closure_and_no_direct_gateway
     }
     assert copied_sources == continuous_warehouse_closure | {
         "deployments/phase-b/requirements-simnow-runner.txt",
+        "deployments/research-warehouse/verified-daily-pit-main-roll-source-v3.schema.json",
         "backend/app/__init__.py",
         "backend/app/control_execution_client.py",
         "backend/app/control_execution_projection.py",
