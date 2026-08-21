@@ -8,18 +8,23 @@ authority.
 
 from __future__ import annotations
 
+import base64
+import os
+import pwd
+import re
+import select
+import signal
+import stat
+import time
 from dataclasses import dataclass
 from datetime import date
-import os
 from pathlib import Path, PurePosixPath
-import re
-import stat
 from typing import TYPE_CHECKING, Any
 
 from .canonical import canonical_json, canonical_json_line, parse_json_strict, sha256
 from .errors import RegistryError
 from .file_integrity import fsync_dir, read_regular_strict
-from .m2_isolation_contracts import false_authority
+from .m2_isolation_contracts import false_authority, load_isolation_policy
 from .m2_operator_state import (
     OperatorState,
     _atomic_root_write,
@@ -29,7 +34,12 @@ from .m2_operator_state import (
     load_operator_state,
     operator_state_lock,
 )
-from .m2_runtime_input import require_day, require_root_managed, require_sha
+from .m2_runtime_input import (
+    load_runtime_input,
+    require_day,
+    require_root_managed,
+    require_sha,
+)
 from .timeutil import format_utc
 
 if TYPE_CHECKING:
@@ -45,6 +55,9 @@ CATALOG_SCHEMA = "vnpy_research_daily_roll_predecessor_catalog_receipt_v1"
 RECEIPT_ID_PREFIX = "daily-roll-catalog-receipt-"
 MAX_RECEIPT_RAW_BYTES = 64 * 1024
 MAX_ARTIFACT_RAW_BYTES = 4 * 1024 * 1024
+_PROTECTED_REPLAY_SCHEMA = "vnpy_research_daily_roll_protected_replay_v1"
+_PROTECTED_REPLAY_MAX_BYTES = 8 * 1024 * 1024
+_PROTECTED_REPLAY_TIMEOUT_SECONDS = 120.0
 _ATOMIC_PARTIAL_RE = re.compile(
     r"^\.(?P<target>[^/]+\.json)-(?P<nonce>[a-z0-9_]{8})\.partial$"
 )
@@ -71,6 +84,32 @@ RECEIPT_KEYS = {
 
 class DailyRollPredecessorCatalogError(RegistryError):
     """Fail-closed predecessor catalog custody error."""
+
+
+@dataclass(frozen=True)
+class ProtectedGenesisReplayInputs:
+    """Private, config-derived inputs for the root-only Genesis bridge.
+
+    This type is deliberately an implementation input, not a caller-built
+    artifact.  The service child rereads every private path and rebuilds the
+    artifact before the root parent sees any proof bytes.
+    """
+
+    history_receipt_path: Path
+    runtime_input_path: Path
+    runtime_input_raw_sha256: str
+    service_uid: int
+    service_gid: int
+    history_receipt_raw_sha256: str
+    manifest_public_key_path: Path
+    manifest_public_key_raw_sha256: str
+    signed_baseline_batch_path: Path
+    business_public_key_path: Path
+    business_public_key_raw_sha256: str
+    business_signer_key_id: str
+    contract_registry_path: Path
+    contract_registry_raw_sha256: str
+    source_month: str
 
 
 @dataclass(frozen=True)
@@ -694,10 +733,14 @@ def _verify_idempotent_retry_inputs(
     """Prove a same-day request is exactly equivalent before skipping rebuild."""
 
     from .verified_daily_pit_main_roll_source import (
-        GenesisContinuity as GenesisContinuityType,
         MAX_CONTRACT_REGISTRY_RAW_BYTES,
-        PredecessorContinuity as PredecessorContinuityType,
         _genesis_map,
+    )
+    from .verified_daily_pit_main_roll_source import (
+        GenesisContinuity as GenesisContinuityType,
+    )
+    from .verified_daily_pit_main_roll_source import (
+        PredecessorContinuity as PredecessorContinuityType,
     )
 
     try:
@@ -843,18 +886,378 @@ def _verify_idempotent_retry_inputs(
         ) from exc
 
 
+def _require_exact_service_identity(uid: object, gid: object) -> tuple[int, int]:
+    if (
+        isinstance(uid, bool)
+        or isinstance(gid, bool)
+        or not isinstance(uid, int)
+        or not isinstance(gid, int)
+        or (uid, gid) != (503, 503)
+    ):
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected replay service identity is invalid"
+        )
+    return uid, gid
+
+
+def _drop_to_protected_replay_identity(*, uid: int, gid: int) -> None:
+    """Irreversibly bind the forked replay child to vnpyresearch 503:503."""
+
+    account = pwd.getpwuid(uid)
+    if account.pw_uid != uid or account.pw_gid != gid:
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected replay account identity mismatch"
+        )
+    expected_groups = {gid}
+    os.setgroups(sorted(expected_groups))
+    if hasattr(os, "setresgid"):
+        os.setresgid(gid, gid, gid)
+    else:
+        os.setgid(gid)
+    if hasattr(os, "setresuid"):
+        os.setresuid(uid, uid, uid)
+    else:
+        os.setuid(uid)
+    if (
+        os.getuid() != uid
+        or os.geteuid() != uid
+        or os.getgid() != gid
+        or os.getegid() != gid
+        or set(os.getgroups()) != expected_groups
+    ):
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected replay privilege drop did not bind exact identity"
+        )
+    if hasattr(os, "getresuid") and set(os.getresuid()) != {uid}:
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected replay retained a privileged saved UID"
+        )
+    if hasattr(os, "getresgid") and set(os.getresgid()) != {gid}:
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected replay retained a privileged saved GID"
+        )
+    os.umask(0o077)
+    os.chdir("/")
+    os.environ.clear()
+    os.environ.update(
+        {
+            "HOME": "/Users/Shared/vnpy-research/home",
+            "LANG": "C.UTF-8",
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "PYTHONNOUSERSITE": "1",
+            "TMPDIR": "/Users/Shared/vnpy-research/runtime/tmp",
+        }
+    )
+
+
+def _close_child_inherited_descriptors(*, result_fd: int) -> int:
+    """Keep only one pipe after fork; a replay child has no write authority."""
+
+    if result_fd < 3:
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected replay pipe descriptor is invalid"
+        )
+    null = os.open(os.devnull, os.O_RDWR | getattr(os, "O_CLOEXEC", 0))
+    try:
+        for descriptor in (0, 1, 2):
+            os.dup2(null, descriptor, inheritable=False)
+        if result_fd != 3:
+            os.dup2(result_fd, 3, inheritable=False)
+            os.close(result_fd)
+    finally:
+        if null > 3:
+            os.close(null)
+    os.closerange(4, 1 << 20)
+    return 3
+
+
+def _protected_replay_payload(
+    built: Any,
+) -> bytes:
+    from .verified_daily_pit_main_roll_source import BuiltVerifiedDailyPitMainRollSource
+
+    if (
+        not isinstance(built, BuiltVerifiedDailyPitMainRollSource)
+        or not isinstance(built.artifact_raw, bytes)
+        or not isinstance(built.artifact_id, str)
+        or built.artifact_raw_sha256 != sha256(built.artifact_raw)
+        or not 1 <= len(built.artifact_raw) <= MAX_ARTIFACT_RAW_BYTES
+    ):
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected replay construction proof is invalid"
+        )
+    return canonical_json_line(
+        {
+            "schema_version": _PROTECTED_REPLAY_SCHEMA,
+            "artifact_id": built.artifact_id,
+            "artifact_raw_base64": base64.b64encode(built.artifact_raw).decode("ascii"),
+            "artifact_raw_sha256": built.artifact_raw_sha256,
+            "authority": false_authority(),
+        }
+    )
+
+
+def _read_protected_replay_payload(
+    *,
+    descriptor: int,
+    child: int,
+) -> bytes:
+    chunks: list[bytes] = []
+    remaining = _PROTECTED_REPLAY_MAX_BYTES + 1
+    deadline = time.monotonic() + _PROTECTED_REPLAY_TIMEOUT_SECONDS
+    try:
+        while True:
+            wait = deadline - time.monotonic()
+            if wait <= 0:
+                raise DailyRollPredecessorCatalogError(
+                    "daily roll protected replay timed out"
+                )
+            ready, _write, _error = select.select([descriptor], [], [], wait)
+            if not ready:
+                raise DailyRollPredecessorCatalogError(
+                    "daily roll protected replay timed out"
+                )
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+            if remaining <= 0:
+                raise DailyRollPredecessorCatalogError(
+                    "daily roll protected replay proof exceeds safety limit"
+                )
+    except BaseException:
+        try:
+            os.kill(child, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        os.waitpid(child, 0)
+        raise
+    raw = b"".join(chunks)
+    _pid, status = os.waitpid(child, 0)
+    if (
+        not raw
+        or not os.WIFEXITED(status)
+        or os.WEXITSTATUS(status) != 0
+    ):
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected replay child failed"
+        )
+    return raw
+
+
+def _build_protected_genesis_as_service(
+    *,
+    operator_state: OperatorState,
+    official_day: str,
+    inputs: ProtectedGenesisReplayInputs,
+) -> Any:
+    """Keep the parent shared root lock across the unprivileged replay."""
+
+    with operator_state_lock(operator_state.path, exclusive=False):
+        current = load_operator_state(operator_state.path)
+        if current != operator_state:
+            raise DailyRollPredecessorCatalogError(
+                "daily roll protected replay root changed before fork"
+            )
+        return _build_protected_genesis_as_service_locked(
+            operator_state=current,
+            official_day=official_day,
+            inputs=inputs,
+        )
+
+
+def _build_protected_genesis_as_service_locked(
+    *,
+    operator_state: OperatorState,
+    official_day: str,
+    inputs: ProtectedGenesisReplayInputs,
+) -> Any:
+    """Replay private Genesis facts as 503:503, returning one bounded proof."""
+
+    from .m2_runtime_loader import load_runtime_context_readonly
+    from .pit_source_view import SourcePins, verify_root_pins
+    from .verified_daily_pit_main_roll_source import (
+        GenesisContinuity,
+        _root_replayed_genesis_baseline,
+        build_verified_daily_pit_main_roll_source,
+    )
+
+    _require_root()
+    uid, gid = _require_exact_service_identity(inputs.service_uid, inputs.service_gid)
+    read_fd, write_fd = os.pipe()
+    child = os.fork()
+    if child == 0:
+        status = 70
+        try:
+            os.close(read_fd)
+            result_fd = _close_child_inherited_descriptors(result_fd=write_fd)
+            _drop_to_protected_replay_identity(uid=uid, gid=gid)
+            context = load_runtime_context_readonly(inputs.runtime_input_path)
+            if (
+                context.runtime_input.raw_sha256 != inputs.runtime_input_raw_sha256
+                or context.policy.uid != uid
+                or context.policy.gid != gid
+            ):
+                raise DailyRollPredecessorCatalogError(
+                    "daily roll protected replay runtime identity drifted"
+                )
+            registry_raw = read_regular_strict(
+                inputs.contract_registry_path,
+                "daily roll protected Genesis contract registry",
+                limit=1024 * 1024,
+            )
+            signed_baseline_raw = read_regular_strict(
+                inputs.signed_baseline_batch_path,
+                "daily roll protected Genesis signed baseline",
+                limit=MAX_ARTIFACT_RAW_BYTES,
+            )
+            pins = SourcePins(
+                history_receipt_raw_sha256=inputs.history_receipt_raw_sha256,
+                operator_state_raw_sha256=operator_state.raw_sha256,
+                manifest_public_key_raw_sha256=(
+                    inputs.manifest_public_key_raw_sha256
+                ),
+                baseline_public_key_raw_sha256=(
+                    inputs.business_public_key_raw_sha256
+                ),
+            )
+            history, chain = verify_root_pins(
+                context=context,
+                operator_state=operator_state,
+                history_receipt_path=inputs.history_receipt_path,
+                pins=pins,
+                manifest_public_key_path=inputs.manifest_public_key_path,
+            )
+            baseline = _root_replayed_genesis_baseline(
+                context=context,
+                operator_state=operator_state,
+                history=history,
+                chain=chain,
+                pins=pins,
+                contract_registry_raw=registry_raw,
+                source_month=inputs.source_month,
+                signer_key_id=inputs.business_signer_key_id,
+            )
+            built = build_verified_daily_pit_main_roll_source(
+                context=context,
+                operator_state=operator_state,
+                history_receipt_path=inputs.history_receipt_path,
+                pins=pins,
+                manifest_public_key_path=inputs.manifest_public_key_path,
+                official_day=official_day,
+                contract_registry_raw=registry_raw,
+                expected_contract_registry_raw_sha256=(
+                    inputs.contract_registry_raw_sha256
+                ),
+                genesis=GenesisContinuity(
+                    source_month=inputs.source_month,
+                    built_baseline=baseline,
+                    signed_baseline_batch_raw=signed_baseline_raw,
+                    business_public_key_path=inputs.business_public_key_path,
+                    expected_business_signer_key_id=inputs.business_signer_key_id,
+                ),
+            )
+            raw = _protected_replay_payload(built)
+            offset = 0
+            while offset < len(raw):
+                offset += os.write(result_fd, raw[offset:])
+            status = 0
+        except (OSError, RegistryError, ValueError):
+            pass
+        finally:
+            try:
+                os.close(3)
+            except OSError:
+                pass
+        os._exit(status)
+    os.close(write_fd)
+    try:
+        raw = _read_protected_replay_payload(descriptor=read_fd, child=child)
+    finally:
+        os.close(read_fd)
+    try:
+        payload = parse_json_strict(raw, "daily roll protected replay proof")
+    except RegistryError as exc:
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected replay proof is invalid"
+        ) from exc
+    expected_keys = {
+        "schema_version",
+        "artifact_id",
+        "artifact_raw_base64",
+        "artifact_raw_sha256",
+        "authority",
+    }
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != expected_keys
+        or payload["schema_version"] != _PROTECTED_REPLAY_SCHEMA
+        or payload["authority"] != false_authority()
+        or canonical_json_line(payload) != raw
+        or not isinstance(payload["artifact_id"], str)
+        or not isinstance(payload["artifact_raw_base64"], str)
+    ):
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected replay proof contract mismatch"
+        )
+    try:
+        artifact_raw = base64.b64decode(
+            payload["artifact_raw_base64"].encode("ascii"), validate=True
+        )
+    except (UnicodeEncodeError, ValueError) as exc:
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected replay proof encoding is invalid"
+        ) from exc
+    if (
+        not 1 <= len(artifact_raw) <= MAX_ARTIFACT_RAW_BYTES
+        or payload["artifact_raw_sha256"] != sha256(artifact_raw)
+    ):
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected replay proof hash is invalid"
+        )
+    artifact = _validated_artifact(artifact_raw)
+    if (
+        artifact["artifact_id"] != payload["artifact_id"]
+        or artifact["verified_lineage"]["continuity"]["mode"]
+        != "GENESIS_STATIC_CORE_EQUAL"
+        or artifact["official_day"] != official_day
+        or artifact["verified_lineage"]["runtime"]["runtime_input_raw_sha256"]
+        != inputs.runtime_input_raw_sha256
+        or artifact["verified_lineage"]["operator_state"]["raw_sha256"]
+        != operator_state.raw_sha256
+        or artifact["verified_lineage"]["operator_state"]["manifest_sequence"]
+        != operator_state.payload["manifest_sequence"]
+        or artifact["verified_lineage"]["operator_state"]["manifest_head_seal_sha256"]
+        != operator_state.payload["manifest_head_seal_sha256"]
+        or artifact["verified_lineage"]["operator_state"]["manifest_head_commit_seal_sha256"]
+        != operator_state.payload["manifest_head_commit_seal_sha256"]
+    ):
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected replay proof root binding is invalid"
+        )
+    from .verified_daily_pit_main_roll_source import BuiltVerifiedDailyPitMainRollSource
+
+    return BuiltVerifiedDailyPitMainRollSource(
+        artifact_raw=artifact_raw,
+        artifact_id=payload["artifact_id"],
+        artifact_raw_sha256=payload["artifact_raw_sha256"],
+    )
+
+
 def publish_predecessor_artifact(
     *,
-    context: RuntimeContext,
+    context: RuntimeContext | None,
     operator_state: OperatorState,
-    history_receipt_path: Path,
-    pins: SourcePins,
-    manifest_public_key_path: Path,
+    history_receipt_path: Path | None,
+    pins: SourcePins | None,
+    manifest_public_key_path: Path | None,
     official_day: str,
-    contract_registry_raw: bytes,
-    expected_contract_registry_raw_sha256: str,
+    contract_registry_raw: bytes | None,
+    expected_contract_registry_raw_sha256: str | None,
     genesis: GenesisContinuity | None = None,
     predecessor: PredecessorContinuity | None = None,
+    protected_genesis_inputs: ProtectedGenesisReplayInputs | None = None,
 ) -> CatalogEntry:
     """Root-replay, then publish one exact verified no-authority artifact.
 
@@ -871,6 +1274,41 @@ def publish_predecessor_artifact(
         build_verified_daily_pit_main_roll_source,
     )
 
+    if protected_genesis_inputs is not None:
+        if (
+            genesis is not None
+            or predecessor is not None
+            or any(
+                value is not None
+                for value in (
+                    history_receipt_path,
+                    pins,
+                    manifest_public_key_path,
+                    contract_registry_raw,
+                    expected_contract_registry_raw_sha256,
+                )
+            )
+        ):
+            raise DailyRollPredecessorCatalogError(
+                "daily roll protected Genesis invocation is mixed with caller inputs"
+            )
+        is_genesis = True
+    else:
+        if context is None:
+            raise DailyRollPredecessorCatalogError(
+                "daily roll catalog normal replay requires a runtime context"
+            )
+        if (
+            history_receipt_path is None
+            or pins is None
+            or manifest_public_key_path is None
+            or contract_registry_raw is None
+            or expected_contract_registry_raw_sha256 is None
+        ):
+            raise DailyRollPredecessorCatalogError(
+                "daily roll catalog replay inputs are incomplete"
+            )
+        is_genesis = genesis is not None
     root = catalog_root(operator_state.path)
     requested_day = require_day(official_day, "daily roll catalog official day")
     # A linked replay reads the catalog while holding a shared operator lock,
@@ -884,7 +1322,7 @@ def publish_predecessor_artifact(
         _prepare_catalog(root)
         _recover_catalog_partial(root)
         receipt_path = root / "receipts" / f"{requested_day.isoformat()}.json"
-        if os.path.lexists(receipt_path):
+        if os.path.lexists(receipt_path) and protected_genesis_inputs is None:
             loaded = _load_catalog(root)
             if (
                 loaded.head is None
@@ -909,23 +1347,43 @@ def publish_predecessor_artifact(
                 predecessor=predecessor,
             )
             return loaded.head
-        if genesis is not None and any((root / "receipts").iterdir()):
+        if (
+            is_genesis
+            and protected_genesis_inputs is None
+            and any((root / "receipts").iterdir())
+        ):
+            raise DailyRollPredecessorCatalogError(
+                "daily roll catalog cannot append Genesis to a non-empty catalog"
+            )
+        if (
+            is_genesis
+            and protected_genesis_inputs is not None
+            and not os.path.lexists(receipt_path)
+            and any((root / "receipts").iterdir())
+        ):
             raise DailyRollPredecessorCatalogError(
                 "daily roll catalog cannot append Genesis to a non-empty catalog"
             )
 
-    built = build_verified_daily_pit_main_roll_source(
-        context=context,
-        operator_state=operator_state,
-        history_receipt_path=history_receipt_path,
-        pins=pins,
-        manifest_public_key_path=manifest_public_key_path,
-        official_day=official_day,
-        contract_registry_raw=contract_registry_raw,
-        expected_contract_registry_raw_sha256=expected_contract_registry_raw_sha256,
-        genesis=genesis,
-        predecessor=predecessor,
-    )
+    if protected_genesis_inputs is not None:
+        built = _build_protected_genesis_as_service(
+            operator_state=operator_state,
+            official_day=official_day,
+            inputs=protected_genesis_inputs,
+        )
+    else:
+        built = build_verified_daily_pit_main_roll_source(
+            context=context,
+            operator_state=operator_state,
+            history_receipt_path=history_receipt_path,
+            pins=pins,
+            manifest_public_key_path=manifest_public_key_path,
+            official_day=official_day,
+            contract_registry_raw=contract_registry_raw,
+            expected_contract_registry_raw_sha256=expected_contract_registry_raw_sha256,
+            genesis=genesis,
+            predecessor=predecessor,
+        )
     if (
         not isinstance(built, BuiltVerifiedDailyPitMainRollSource)
         or not isinstance(built.artifact_raw, bytes)
@@ -956,6 +1414,24 @@ def publish_predecessor_artifact(
             raise DailyRollPredecessorCatalogError(
                 "daily roll catalog operator state changed before publication"
             )
+        if protected_genesis_inputs is not None:
+            policy = load_isolation_policy(
+                protected_genesis_inputs.runtime_input_path.parent
+                / "isolation-policy-v1.json"
+            )
+            runtime_input = load_runtime_input(
+                protected_genesis_inputs.runtime_input_path,
+                policy=policy,
+            )
+            if (
+                runtime_input.raw_sha256
+                != protected_genesis_inputs.runtime_input_raw_sha256
+                or policy.uid != protected_genesis_inputs.service_uid
+                or policy.gid != protected_genesis_inputs.service_gid
+            ):
+                raise DailyRollPredecessorCatalogError(
+                    "daily roll protected publication runtime root drifted"
+                )
         lineage_state = artifact["verified_lineage"]["operator_state"]
         if (
             artifact["official_day"] != current.payload["last_trade_day"]

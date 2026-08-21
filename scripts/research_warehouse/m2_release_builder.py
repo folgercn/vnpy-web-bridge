@@ -94,6 +94,7 @@ def _bootstrap(role: str) -> bytes:
     modules = {
         "backup-signer": "research_warehouse.m2_backup_signer_cli",
         "evidence-capture": "research_warehouse.m2_evidence_capture_cli",
+        "genesis-publisher": "research_warehouse.m2_genesis_predecessor_cli",
         "manifest-signer": "research_warehouse.m2_manifest_signer_cli",
         "monitor": "research_warehouse.m2_monitor_cli",
         "operator-state": "research_warehouse.m2_operator_state_cli",
@@ -249,6 +250,7 @@ def build_release_bundle(
         roles = {
             "backup-signer": "research-warehouse-backup-signer",
             "evidence-capture": "research-warehouse-evidence-capture",
+            "genesis-publisher": "research-warehouse-genesis-publisher",
             "manifest-signer": "research-warehouse-manifest-signer",
             "monitor": "research-warehouse-monitor",
             "operator-state": "research-warehouse-operator-state",

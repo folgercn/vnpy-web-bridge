@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-from dataclasses import replace
 import json
 import os
-from pathlib import Path
 import stat
 import sys
+from contextlib import contextmanager
+from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
-from jsonschema import Draft202012Validator, FormatChecker
 import pytest
+from jsonschema import Draft202012Validator, FormatChecker
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "backend"))
@@ -20,8 +20,10 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import research_warehouse.daily_roll_predecessor_catalog as catalog
-from research_warehouse.canonical import canonical_json_line, sha256
+import research_warehouse.m2_runtime_loader as runtime_loader
 import research_warehouse.verified_daily_pit_main_roll_source as verified_roll
+from research_warehouse import pit_source_view
+from research_warehouse.canonical import canonical_json_line, sha256
 from test_research_warehouse_verified_daily_pit_main_roll_source import (
     _kwargs,
     _state,
@@ -101,6 +103,333 @@ def _genesis_setup(
     _root_harness(monkeypatch, tmp_path, holder)
     return kwargs, inputs, holder
 
+
+def _protected_inputs(tmp_path: Path, *, runtime_sha: str = "0" * 64) -> catalog.ProtectedGenesisReplayInputs:
+    """Only root-held identities cross into the protected child replay."""
+
+    return catalog.ProtectedGenesisReplayInputs(
+        history_receipt_path=tmp_path / "history.json",
+        runtime_input_path=tmp_path / "runtime.json",
+        runtime_input_raw_sha256=runtime_sha,
+        service_uid=503,
+        service_gid=503,
+        history_receipt_raw_sha256="1" * 64,
+        manifest_public_key_path=tmp_path / "manifest.pub",
+        manifest_public_key_raw_sha256="2" * 64,
+        signed_baseline_batch_path=tmp_path / "baseline.json",
+        business_public_key_path=tmp_path / "business.pub",
+        business_public_key_raw_sha256="3" * 64,
+        business_signer_key_id="research-signer-test-0001",
+        contract_registry_path=tmp_path / "contracts.json",
+        contract_registry_raw_sha256="4" * 64,
+        source_month="2026-06",
+    )
+
+
+def test_protected_genesis_retry_reuses_exact_existing_catalog_entry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    kwargs, _inputs, _holder = _genesis_setup(monkeypatch, tmp_path)
+    built = verified_roll.build_verified_daily_pit_main_roll_source(**kwargs)
+    monkeypatch.setattr(
+        catalog,
+        "_build_protected_genesis_as_service",
+        lambda **_values: built,
+    )
+    monkeypatch.setattr(
+        catalog,
+        "load_isolation_policy",
+        lambda _path: SimpleNamespace(uid=503, gid=503),
+    )
+    monkeypatch.setattr(
+        catalog,
+        "load_runtime_input",
+        lambda _path, **_kwargs: SimpleNamespace(raw_sha256="0" * 64),
+    )
+    protected = _protected_inputs(tmp_path)
+    request = {
+        "context": kwargs["context"],
+        "operator_state": kwargs["operator_state"],
+        "history_receipt_path": None,
+        "pins": None,
+        "manifest_public_key_path": None,
+        "official_day": kwargs["official_day"],
+        "contract_registry_raw": None,
+        "expected_contract_registry_raw_sha256": None,
+        "protected_genesis_inputs": protected,
+    }
+    first = catalog.publish_predecessor_artifact(**request)
+    second = catalog.publish_predecessor_artifact(**request)
+    assert second == first
+
+
+def test_protected_genesis_rejects_root_drift_after_shared_replay(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    kwargs, _inputs, holder = _genesis_setup(monkeypatch, tmp_path)
+    built = verified_roll.build_verified_daily_pit_main_roll_source(**kwargs)
+
+    def replay_then_drift(**_values):
+        holder["state"] = replace(
+            kwargs["operator_state"],
+            raw_sha256="f" * 64,
+        )
+        return built
+
+    monkeypatch.setattr(catalog, "_build_protected_genesis_as_service", replay_then_drift)
+    monkeypatch.setattr(
+        catalog,
+        "load_isolation_policy",
+        lambda _path: SimpleNamespace(uid=503, gid=503),
+    )
+    monkeypatch.setattr(
+        catalog,
+        "load_runtime_input",
+        lambda _path, **_kwargs: SimpleNamespace(raw_sha256="0" * 64),
+    )
+    with pytest.raises(
+        catalog.DailyRollPredecessorCatalogError,
+        match="changed before publication",
+    ):
+        catalog.publish_predecessor_artifact(
+            context=None,
+            operator_state=kwargs["operator_state"],
+            history_receipt_path=None,
+            pins=None,
+            manifest_public_key_path=None,
+            official_day=kwargs["official_day"],
+            contract_registry_raw=None,
+            expected_contract_registry_raw_sha256=None,
+            protected_genesis_inputs=_protected_inputs(tmp_path),
+        )
+
+
+def test_protected_genesis_final_publication_rechecks_runtime_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The parent rejects input drift while holding its final exclusive lock."""
+
+    kwargs, _inputs, _holder = _genesis_setup(monkeypatch, tmp_path)
+    built = verified_roll.build_verified_daily_pit_main_roll_source(**kwargs)
+    monkeypatch.setattr(
+        catalog,
+        "_build_protected_genesis_as_service",
+        lambda **_values: built,
+    )
+    monkeypatch.setattr(
+        catalog,
+        "load_isolation_policy",
+        lambda _path: SimpleNamespace(uid=503, gid=503),
+    )
+    monkeypatch.setattr(
+        catalog,
+        "load_runtime_input",
+        lambda _path, **_kwargs: SimpleNamespace(raw_sha256="f" * 64),
+    )
+    with pytest.raises(
+        catalog.DailyRollPredecessorCatalogError,
+        match="protected publication runtime root drifted",
+    ):
+        catalog.publish_predecessor_artifact(
+            context=None,
+            operator_state=kwargs["operator_state"],
+            history_receipt_path=None,
+            pins=None,
+            manifest_public_key_path=None,
+            official_day=kwargs["official_day"],
+            contract_registry_raw=None,
+            expected_contract_registry_raw_sha256=None,
+            protected_genesis_inputs=_protected_inputs(tmp_path),
+        )
+
+
+def test_protected_genesis_rejects_nonempty_catalog_before_child_replay(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A fresh Genesis may not be created beside a prior catalog entry."""
+
+    kwargs, _inputs, _holder = _genesis_setup(monkeypatch, tmp_path)
+    root = catalog.catalog_root(kwargs["operator_state"].path)
+    receipts = root / "receipts"
+    receipts.mkdir(parents=True)
+    (receipts / "2026-06-30.json").write_bytes(b"prior")
+    monkeypatch.setattr(
+        catalog,
+        "_build_protected_genesis_as_service",
+        lambda **_values: pytest.fail("non-empty Genesis reached protected replay"),
+    )
+    with pytest.raises(
+        catalog.DailyRollPredecessorCatalogError,
+        match="cannot append Genesis to a non-empty catalog",
+    ):
+        catalog.publish_predecessor_artifact(
+            context=None,
+            operator_state=kwargs["operator_state"],
+            history_receipt_path=None,
+            pins=None,
+            manifest_public_key_path=None,
+            official_day=kwargs["official_day"],
+            contract_registry_raw=None,
+            expected_contract_registry_raw_sha256=None,
+            protected_genesis_inputs=_protected_inputs(tmp_path),
+        )
+
+
+def test_protected_genesis_replays_in_child_then_publishes_sequence_one(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Exercise the real forked protected replay and the real v3 builder.
+
+    The test identity harness deliberately leaves the test process unprivileged;
+    the production drop primitive is covered separately.  It lets the forked
+    child traverse the same bounded proof pipe, strict proof validation, and
+    create-only root publication without a caller-supplied built artifact.
+    """
+
+    kwargs, _inputs, holder = _genesis_setup(monkeypatch, tmp_path)
+    context = kwargs["context"]
+    context.policy.uid = 503
+    context.policy.gid = 503
+    genesis = kwargs["genesis"]
+    registry_raw = kwargs["contract_registry_raw"]
+    protected = replace(
+        _protected_inputs(
+            tmp_path,
+            runtime_sha=context.runtime_input.raw_sha256,
+        ),
+        history_receipt_raw_sha256=kwargs["pins"].history_receipt_raw_sha256,
+        manifest_public_key_raw_sha256=(
+            kwargs["pins"].manifest_public_key_raw_sha256
+        ),
+        contract_registry_raw_sha256=sha256(registry_raw),
+        signed_baseline_batch_path=tmp_path / "signed-baseline.json",
+        business_public_key_path=genesis.business_public_key_path,
+        business_public_key_raw_sha256=kwargs["pins"].baseline_public_key_raw_sha256,
+        business_signer_key_id=genesis.expected_business_signer_key_id,
+    )
+    strict_raws = {
+        protected.contract_registry_path: registry_raw,
+        protected.signed_baseline_batch_path: genesis.signed_baseline_batch_raw,
+    }
+    original_strict_read = catalog.read_regular_strict
+
+    monkeypatch.setattr(catalog, "_drop_to_protected_replay_identity", lambda **_v: None)
+    monkeypatch.setattr(
+        runtime_loader,
+        "load_runtime_context_readonly",
+        lambda _path: context,
+    )
+    def strict_read(path, *args, **read_kwargs):
+        protected_raw = strict_raws.get(Path(path))
+        if protected_raw is not None:
+            return protected_raw
+        return original_strict_read(path, *args, **read_kwargs)
+
+    monkeypatch.setattr(catalog, "read_regular_strict", strict_read)
+    monkeypatch.setattr(
+        pit_source_view,
+        "verify_root_pins",
+        lambda **_values: ({"history": "root-verified"}, [{"chain": "root-verified"}]),
+    )
+    monkeypatch.setattr(
+        verified_roll,
+        "_root_replayed_genesis_baseline",
+        lambda **_values: genesis.built_baseline,
+    )
+    monkeypatch.setattr(
+        catalog,
+        "load_isolation_policy",
+        lambda _path: SimpleNamespace(uid=503, gid=503),
+    )
+    monkeypatch.setattr(
+        catalog,
+        "load_runtime_input",
+        lambda _path, **_kwargs: SimpleNamespace(
+            raw_sha256=context.runtime_input.raw_sha256
+        ),
+    )
+    # Exercise the protected builder inputs once in-process too, so a failure
+    # remains diagnostic on platforms where child stdio is intentionally closed.
+    in_process = verified_roll.build_verified_daily_pit_main_roll_source(
+        context=context,
+        operator_state=kwargs["operator_state"],
+        history_receipt_path=protected.history_receipt_path,
+        pins=pit_source_view.SourcePins(
+            history_receipt_raw_sha256=protected.history_receipt_raw_sha256,
+            operator_state_raw_sha256=kwargs["operator_state"].raw_sha256,
+            manifest_public_key_raw_sha256=(
+                protected.manifest_public_key_raw_sha256
+            ),
+            baseline_public_key_raw_sha256=(
+                protected.business_public_key_raw_sha256
+            ),
+        ),
+        manifest_public_key_path=protected.manifest_public_key_path,
+        official_day=kwargs["official_day"],
+        contract_registry_raw=registry_raw,
+        expected_contract_registry_raw_sha256=sha256(registry_raw),
+        genesis=verified_roll.GenesisContinuity(
+            source_month=protected.source_month,
+            built_baseline=genesis.built_baseline,
+            signed_baseline_batch_raw=genesis.signed_baseline_batch_raw,
+            business_public_key_path=protected.business_public_key_path,
+            expected_business_signer_key_id=protected.business_signer_key_id,
+        ),
+    )
+    assert in_process.artifact_raw
+    request = {
+        "context": None,
+        "operator_state": kwargs["operator_state"],
+        "history_receipt_path": None,
+        "pins": None,
+        "manifest_public_key_path": None,
+        "official_day": kwargs["official_day"],
+        "contract_registry_raw": None,
+        "expected_contract_registry_raw_sha256": None,
+        "protected_genesis_inputs": protected,
+    }
+    read_proof = catalog._read_protected_replay_payload
+
+    def proof_then_manifest_drift(**values):
+        raw = read_proof(**values)
+        holder["state"] = replace(
+            kwargs["operator_state"],
+            payload={
+                **kwargs["operator_state"].payload,
+                "manifest_head_seal_sha256": "f" * 64,
+            },
+        )
+        return raw
+
+    monkeypatch.setattr(catalog, "_read_protected_replay_payload", proof_then_manifest_drift)
+    with pytest.raises(
+        catalog.DailyRollPredecessorCatalogError,
+        match="changed before publication",
+    ):
+        catalog.publish_predecessor_artifact(**request)
+    root = catalog.catalog_root(kwargs["operator_state"].path)
+    assert not list((root / "artifacts").iterdir())
+    assert not list((root / "receipts").iterdir())
+
+    holder["state"] = kwargs["operator_state"]
+    monkeypatch.setattr(catalog, "_read_protected_replay_payload", read_proof)
+    first = catalog.publish_predecessor_artifact(**request)
+    head = catalog.load_current_catalog_head(kwargs["operator_state"].path)
+    assert first.receipt["sequence"] == 1
+    assert first.receipt["previous_receipt_raw_sha256"] is None
+    assert first.receipt["previous_artifact_id"] is None
+    assert head.artifact_raw == first.artifact_raw
+    assert head.receipt_raw == first.receipt_raw
+    assert first.artifact["verified_lineage"]["continuity"]["mode"] == (
+        "GENESIS_STATIC_CORE_EQUAL"
+    )
+    assert first.artifact["mains"] == json.loads(in_process.artifact_raw)["mains"]
+    assert catalog.publish_predecessor_artifact(**request) == first
 
 def _linked_setup(
     monkeypatch: pytest.MonkeyPatch,

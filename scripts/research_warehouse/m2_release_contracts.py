@@ -26,6 +26,7 @@ LOGICAL_RELEASE_ROOT = "/usr/local/libexec/vnpyresearch/release"
 REQUIRED_ENTRYPOINTS = {
     "bin/research-warehouse-backup-signer",
     "bin/research-warehouse-evidence-capture",
+    "bin/research-warehouse-genesis-publisher",
     "bin/research-warehouse-job",
     "bin/research-warehouse-manifest-signer",
     "bin/research-warehouse-monitor",
@@ -123,6 +124,7 @@ def release_launcher(role: str) -> bytes:
     bootstraps = {
         "backup-signer": "research_warehouse_backup_signer.py",
         "evidence-capture": "research_warehouse_evidence_capture.py",
+        "genesis-publisher": "research_warehouse_genesis_publisher.py",
         "manifest-signer": "research_warehouse_manifest_signer.py",
         "monitor": "research_warehouse_monitor.py",
         "operator-state": "research_warehouse_operator_state.py",
@@ -180,6 +182,7 @@ def verify_release_bundle(root: Path, manifest: object) -> None:
     for role, relative in (
         ("backup-signer", "bin/research-warehouse-backup-signer"),
         ("evidence-capture", "bin/research-warehouse-evidence-capture"),
+        ("genesis-publisher", "bin/research-warehouse-genesis-publisher"),
         ("warehouse", "bin/research-warehouse-job"),
         ("manifest-signer", "bin/research-warehouse-manifest-signer"),
         ("monitor", "bin/research-warehouse-monitor"),
