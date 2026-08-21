@@ -18,6 +18,7 @@ from .m2_python_runtime import (
 from .m2_release_contracts import (
     BUNDLE_SCHEMA,
     COMMIT_PATTERN,
+    GENESIS_RELEASE_APP_SOURCE_FILES,
     REQUIRED_ENTRYPOINTS,
     REQUIREMENTS_RAW_SHA256,
     regular_bytes,
@@ -44,6 +45,7 @@ def _copy_source_tree(
             source_commit_sha,
             "--",
             "scripts/research_warehouse",
+            *GENESIS_RELEASE_APP_SOURCE_FILES,
         ],
         check=False,
         capture_output=True,
@@ -51,6 +53,7 @@ def _copy_source_tree(
     if listed.returncode != 0 or not listed.stdout:
         raise RegistryError("cannot enumerate Research source commit")
     paths = []
+    copied_genesis_modules: set[str] = set()
     for record in listed.stdout.split(b"\0"):
         if not record:
             continue
@@ -65,10 +68,15 @@ def _copy_source_tree(
             kind != "blob"
             or mode not in {"100644", "100755"}
             or COMMIT_PATTERN.fullmatch(object_id) is None
-            or not path.startswith(prefix)
         ):
             raise RegistryError("Research source Git entry type is forbidden")
-        relative = PurePosixPath(path.removeprefix("scripts/"))
+        if path.startswith(prefix):
+            relative = PurePosixPath(path.removeprefix("scripts/"))
+        elif path in GENESIS_RELEASE_APP_SOURCE_FILES:
+            relative = PurePosixPath(path.removeprefix("scripts/"))
+            copied_genesis_modules.add(path)
+        else:
+            raise RegistryError("Research source Git path is outside release closure")
         if relative.is_absolute() or ".." in relative.parts:
             raise RegistryError("Research source Git path is unsafe")
         paths.append((relative, object_id, mode))
@@ -76,6 +84,8 @@ def _copy_source_tree(
         item[0].as_posix() for item in paths
     ):
         raise RegistryError("Research source Git tree is empty or unsorted")
+    if copied_genesis_modules != set(GENESIS_RELEASE_APP_SOURCE_FILES):
+        raise RegistryError("Genesis publisher release closure is incomplete")
     for relative, object_id, mode in paths:
         blob = subprocess.run(
             ["git", "-C", str(source_root), "cat-file", "blob", object_id],
