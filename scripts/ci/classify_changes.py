@@ -113,6 +113,16 @@ QUERY_SCHEMA_NAMES = {
     "commodity-c-fast-t1-query-v5-build-registry-provenance-v1.schema.json",
 }
 
+# Small runner-only packaging/test edits already receive an exact post-merge M2
+# OCI build/smoke.  They must not also fan out into the legacy four backend
+# shards, generic production image, or the unrelated seven-image Phase B set.
+SIMNOW_RUNNER_PACKAGING_FASTLANE_FILES = {
+    "deployments/phase-b/Containerfile.simnow-runner",
+    "deployments/phase-b/requirements-simnow-runner.txt",
+    "backend/tests/unit/test_issue325_keyless_simnow.py",
+    "backend/tests/unit/test_issue362_simnow_continuous_run_once.py",
+}
+
 # Issue #291 Phase A is deliberately classified independently from the legacy
 # ``backend_changed``/``image_changed`` flags below.  Those flags pre-date the
 # runtime split and intentionally remain broad for the existing backend
@@ -206,10 +216,9 @@ def _phase_b_rule(
     }
 
 
-# Every shared contract selects its full Phase B consumer closure.  The CI job
-# builds all seven images rather than attempting an unreviewed per-image
-# optimisation, so the classifier's unit list is an auditable dependency
-# declaration rather than a release selector.
+# Shared contracts select their real Phase B consumers.  Runner package-only
+# edits are contract-only; runner/runtime or shared Execution changes retain the
+# existing conservative Phase B coverage until a dedicated runner CI unit exists.
 PHASE_B_RULES = (
     _phase_b_rule(
         "phase-b-ci-contract",
@@ -241,13 +250,18 @@ PHASE_B_RULES = (
     ),
     _phase_b_rule(
         "phase-b-simnow-runner-packaging",
-        units=PHASE_B_UNITS,
         exact=(
             "deployments/phase-b/Containerfile.simnow-runner",
             "deployments/phase-b/requirements-simnow-runner.txt",
+            "backend/tests/unit/test_issue362_simnow_continuous_run_once.py",
+        ),
+    ),
+    _phase_b_rule(
+        "phase-b-simnow-runner-runtime",
+        units=PHASE_B_UNITS,
+        exact=(
             "backend/app/execution/formal_tick_reader.py",
             "backend/tests/unit/test_issue362_formal_tick_reader.py",
-            "backend/tests/unit/test_issue362_simnow_continuous_run_once.py",
             "scripts/simnow_keyless_pilot.py",
             "scripts/simnow_continuous_run_once.py",
         ),
@@ -1052,6 +1066,10 @@ def classify(paths: list[str], *, force_all: bool = False) -> dict[str, bool]:
             continue
         if path.startswith(WORKFLOW_PREFIX):
             return {key: True for key in result}
+        if path in SIMNOW_RUNNER_PACKAGING_FASTLANE_FILES:
+            # Focused tests + exact post-merge runner OCI smoke cover these
+            # package-only changes.  Do not rebuild unrelated backend/prod/B.
+            continue
         if _is_windows_fence_path(path):
             result["backend_changed"] = True
             result["windows_fence_changed"] = True

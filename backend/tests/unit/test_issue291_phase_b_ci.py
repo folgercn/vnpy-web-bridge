@@ -70,12 +70,24 @@ def test_issue362_execution_control_test_selects_custody_contract_owner() -> Non
     assert result["selected_units"] == ["artifact-custody"]
 
 
-def test_phase_b_simnow_runner_package_rebuilds_the_reviewed_dependency_group() -> None:
+def test_phase_b_simnow_runner_package_does_not_rebuild_unrelated_services() -> None:
     for path in (
         "deployments/phase-b/Containerfile.simnow-runner",
         "deployments/phase-b/requirements-simnow-runner.txt",
-        "scripts/simnow_continuous_run_once.py",
         "backend/tests/unit/test_issue362_simnow_continuous_run_once.py",
+    ):
+        result = classify_phase_b([path])
+        assert result["phase_b_changed"] is True
+        assert result["phase_b_shared_contract_changed"] is False
+        assert result["selected_units"] == []
+        assert result["phase_b_gate_blocked"] is False
+
+
+def test_phase_b_simnow_runner_logic_keeps_conservative_coverage() -> None:
+    for path in (
+        "scripts/simnow_continuous_run_once.py",
+        "backend/app/execution/formal_tick_reader.py",
+        "backend/tests/unit/test_issue362_formal_tick_reader.py",
     ):
         result = classify_phase_b([path])
         assert result["phase_b_changed"] is True
