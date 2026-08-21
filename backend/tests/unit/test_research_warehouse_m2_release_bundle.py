@@ -243,11 +243,17 @@ def test_build_and_verify_bundle_is_exact(
     assert (
         output / "bin/research-warehouse-monitor"
     ).stat().st_mode & 0o777 == 0o555
+    assert (
+        output / "bin/research-warehouse-genesis-publisher"
+    ).stat().st_mode & 0o777 == 0o555
     assert b"research_warehouse.m2_scheduler_cli" in (
         output / "app/research_warehouse_job.py"
     ).read_bytes()
     assert b"research_warehouse.m2_monitor_cli" in (
         output / "app/research_warehouse_monitor.py"
+    ).read_bytes()
+    assert b"research_warehouse.m2_genesis_predecessor_cli" in (
+        output / "app/research_warehouse_genesis_publisher.py"
     ).read_bytes()
     verify_release_bundle(output, manifest)
 
