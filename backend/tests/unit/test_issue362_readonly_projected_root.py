@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from research_warehouse import custody_transition as transition_module
+from research_warehouse import m2_readonly_projected_root_cli as projected_cli
 from research_warehouse import m2_runtime_loader
 from research_warehouse import readonly_projected_root as projected
 from research_warehouse.acquisition import acquire_daily
@@ -123,6 +124,41 @@ def test_readonly_runtime_projection_requires_explicit_runner_opt_in(
         Path("/runtime"), allow_readonly_projected_root=True
     )
     assert calls == [False, True]
+
+
+def test_projection_probe_overrides_runner_business_entrypoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        return type(
+            "Result",
+            (),
+            {
+                "returncode": 0,
+                "stdout": (
+                    b'{"dev":1,"ino":2,"uid":503,"gid":503,'
+                    b'"mode":448,"dir":true}'
+                ),
+            },
+        )()
+
+    monkeypatch.setattr(projected_cli.subprocess, "run", fake_run)
+    observed = projected_cli._probe_projection(
+        image="runner-with-business-entrypoint:exact",
+        volume="issue362_warehouse",
+        root=Path("/Users/Shared/vnpy-research/custody"),
+    )
+    command = commands[0]
+    entrypoint = command.index("--entrypoint")
+    assert command[entrypoint + 1] == "python"
+    assert command[entrypoint + 3] == "-c"
+    assert "--network" in command and command[command.index("--network") + 1] == "none"
+    assert "--read-only" in command
+    assert "--cap-drop" in command and command[command.index("--cap-drop") + 1] == "ALL"
+    assert observed.st_ino == 2
 
 
 def test_physical_transition_remains_physical_and_projection_is_exact_readonly(
