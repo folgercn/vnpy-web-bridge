@@ -216,10 +216,9 @@ def _phase_b_rule(
     }
 
 
-# Shared contracts select their real Phase B consumers.  The SIMNOW runner is
-# not one of those seven services; its package is validated by its own focused
-# closure tests and exact post-merge OCI smoke rather than rebuilding unrelated
-# Phase B images.
+# Shared contracts select their real Phase B consumers.  Runner package-only
+# edits are contract-only; runner/runtime or shared Execution changes retain the
+# existing conservative Phase B coverage until a dedicated runner CI unit exists.
 PHASE_B_RULES = (
     _phase_b_rule(
         "phase-b-ci-contract",
@@ -254,12 +253,19 @@ PHASE_B_RULES = (
         exact=(
             "deployments/phase-b/Containerfile.simnow-runner",
             "deployments/phase-b/requirements-simnow-runner.txt",
+            "backend/tests/unit/test_issue362_simnow_continuous_run_once.py",
+        ),
+    ),
+    _phase_b_rule(
+        "phase-b-simnow-runner-runtime",
+        units=PHASE_B_UNITS,
+        exact=(
             "backend/app/execution/formal_tick_reader.py",
             "backend/tests/unit/test_issue362_formal_tick_reader.py",
-            "backend/tests/unit/test_issue362_simnow_continuous_run_once.py",
             "scripts/simnow_keyless_pilot.py",
             "scripts/simnow_continuous_run_once.py",
         ),
+        shared=True,
     ),
     _phase_b_rule(
         "phase-b-execution-quality-image",
