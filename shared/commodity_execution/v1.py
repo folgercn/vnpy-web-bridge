@@ -23,6 +23,9 @@ KEYLESS_TARGET_PLAN_SCHEMA_VERSION = "web-bridge-simnow-keyless-target-plan-v1"
 KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION = "web-bridge-simnow-keyless-target-plan-v2"
 KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION = "web-bridge-simnow-keyless-target-plan-v3"
 FORMAL_QUOTE_PROOF_SCHEMA_VERSION = "web-bridge-formal-quote-proof-v1"
+# The continuous TargetPlan v3 quote window is one public, fixed policy shared
+# by creation, formal-tick ingestion, and Execution start admission.
+V3_FORMAL_QUOTE_MAX_AGE_SECONDS = 5.0
 _KEYLESS_TARGET_PLAN_SCHEMA_VERSIONS = frozenset(
     {
         KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
@@ -50,7 +53,6 @@ _GATEWAY_NAME_RE = re.compile(r"^(?:CTP|[A-Za-z0-9][A-Za-z0-9._:-]{7,127})$")
 _EXCHANGES = frozenset({"CFFEX", "CZCE", "DCE", "GFEX", "INE", "SHFE"})
 _CLOSE_ORDER_OFFSETS = frozenset({"CLOSE", "CLOSETODAY", "CLOSEYESTERDAY"})
 _YD_AWARE_EXCHANGES = frozenset({"INE", "SHFE"})
-_FORMAL_QUOTE_MAX_AGE_SECONDS = 2
 _FORMAL_QUOTE_FUTURE_SKEW_SECONDS = 2
 
 
@@ -723,8 +725,8 @@ def _creation_quote_proof(
         )
     if (
         proof["schema_version"] != FORMAL_QUOTE_PROOF_SCHEMA_VERSION
-        or type(proof["max_age_seconds"]) is not int
-        or proof["max_age_seconds"] != _FORMAL_QUOTE_MAX_AGE_SECONDS
+        or type(proof["max_age_seconds"]) is not float
+        or proof["max_age_seconds"] != V3_FORMAL_QUOTE_MAX_AGE_SECONDS
         or type(proof["future_skew_seconds"]) is not int
         or proof["future_skew_seconds"] != _FORMAL_QUOTE_FUTURE_SKEW_SECONDS
         or proof["journal_authenticated"] is not False
@@ -806,7 +808,7 @@ def _creation_quote_proof(
         received_at = datetime.fromisoformat(received_at_raw[:-1] + "+00:00")
         age = (validated_at - received_at).total_seconds()
         if (
-            age > _FORMAL_QUOTE_MAX_AGE_SECONDS
+            age > V3_FORMAL_QUOTE_MAX_AGE_SECONDS
             or age < -_FORMAL_QUOTE_FUTURE_SKEW_SECONDS
         ):
             raise CommodityExecutionContractError(

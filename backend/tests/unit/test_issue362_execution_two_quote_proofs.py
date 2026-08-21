@@ -34,6 +34,7 @@ from shared.commodity_execution import (
     KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
     TRUSTED_KEYLESS_SIMNOW_SCOPE,
     TargetPlan,
+    V3_FORMAL_QUOTE_MAX_AGE_SECONDS,
     before_position_projection_hash,
 )
 from shared.trust_contracts.v1 import canonical_json_line, sha256_bytes
@@ -279,6 +280,7 @@ def test_v3_start_persists_full_proof_and_exact_retry_does_not_reread() -> None:
     assert proof["creation_quote_proof_sha256"] == sha256_json(
         plan["creation_quote_proof"]
     )
+    assert proof["max_age_seconds"] == V3_FORMAL_QUOTE_MAX_AGE_SECONDS == 5.0
     assert proof["bindings"][plan["orders"][0]["reference"]]["phase"] == "OPEN"
     assert (
         intent["execution_start_quote_proof_sha256"]
@@ -579,7 +581,7 @@ def test_close_start_proof_cannot_be_spliced_into_open_plan() -> None:
     "mutate",
     [
         lambda binding: binding.update({"price_tick": 2.0, "reference_price": 4999.0}),
-        lambda binding: binding.update({"received_at_utc": "2029-12-31T23:59:58Z"}),
+        lambda binding: binding.update({"received_at_utc": "2029-12-31T23:59:55Z"}),
     ],
 )
 def test_fully_rehashed_tick_or_freshness_splice_is_stop(mutate) -> None:
@@ -592,4 +594,19 @@ def test_fully_rehashed_tick_or_freshness_splice_is_stop(mutate) -> None:
         {key: value for key, value in proof.items() if key != "proof_sha256"}
     )
     with pytest.raises(ValueError):
+        validate_execution_start_quote_proof(proof, plan=plan)
+
+
+def test_v3_start_quote_age_policy_is_exact_and_hash_bound() -> None:
+    plan = TargetPlan.from_mapping(_plan())
+    proof = build_execution_start_quote_proof(
+        plan, reader=_Reader(), clock=lambda: QUOTE_TIME
+    )
+    assert proof["max_age_seconds"] == V3_FORMAL_QUOTE_MAX_AGE_SECONDS == 5.0
+
+    proof["max_age_seconds"] = 2.0
+    proof["proof_sha256"] = sha256_json(
+        {key: value for key, value in proof.items() if key != "proof_sha256"}
+    )
+    with pytest.raises(ValueError, match="policy is invalid"):
         validate_execution_start_quote_proof(proof, plan=plan)

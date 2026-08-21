@@ -29,10 +29,16 @@ create an order. An order can be admitted only when the selector emits a real
 MONTHLY or ROLL event, full-account ownership returns `NEW_TARGET` or
 `RESUME_AFTER_CLOSE`, exact formal quotes are fresh, and Execution is ready.
 
+Continuous TargetPlan v3 uses one fixed 5.0-second formal-quote age policy at
+creation, formal read, and Execution start. It is bound into the canonical plan
+and start-proof hashes; the operator and caller cannot tune it. The legacy
+2.0-second reader policy is not changed.
+
 ## Prepare the root-managed config
 
 1. As root, copy the adjacent template into a private directory owned by the
-   locked host `vnpyresearch` UID/GID used by the container.
+   locked host `vnpyresearch` UID/GID used by the container. This applies to
+   the config directory, config, and lock only.
 2. Replace all Warehouse paths and SHA-256 pins from the current M2 root.
 3. Inject the three shared secrets from the root secret store. Never commit the
    materialized file.
@@ -69,8 +75,13 @@ docker compose -f deployments/docker-compose.final.yml \
 Do not enable the run unless all of these are independently observed:
 
 - installed images are the reviewed exact digests;
-- `SIMNOW_CONTINUOUS_UID/GID` exactly match the owner of every private M2
-  evidence file; do not run the continuous container as root;
+- every private Research evidence file is owned by the runner's current UID,
+  is private `0600`, ACL-free, and passes the stable repeated-read identity and
+  byte check. Its GID need not equal the runner effective GID. Its configured
+  SHA-256 and applicable root pin must match exactly;
+- the config directory, config file, and lock file exactly match the runner
+  UID/GID and required private modes. Do not run the continuous container as
+  root;
 - M2 runtime input, catalog head, history receipt, public keys, signed baseline,
   and contract registry match the root-managed config pins;
 - account scope and environment are the intended SimNow account;

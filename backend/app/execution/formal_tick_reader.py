@@ -23,6 +23,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Literal
 
+from shared.commodity_execution import V3_FORMAL_QUOTE_MAX_AGE_SECONDS
+
 FORMAL_TICK_SOURCE = "windows-tick-wire-v1"
 _PHASE_B_CONTRACT_VERSION = "phase_b_worker_contract_v1"
 _PROJECTION_SCHEMA_VERSION = "phase-b-worker-projection-v1"
@@ -1137,6 +1139,52 @@ def read_formal_tick_bindings(
         projection_dir=projection_dir,
         clock=clock,
         requests=tuple((item.vt_symbol, item.price_side) for item in requests),
+        strict_snapshot=True,
+    )
+    try:
+        return tuple(
+            FormalTickBinding(
+                source=item.source,
+                vt_symbol=item.vt_symbol,
+                price_side=item.price_side,
+                price_tick=request.price_tick,
+                stream_generation=item.stream_generation,
+                ingest_id=item.ingest_id,
+                ingest_seq=item.ingest_seq,
+                event_hash=item.event_hash,
+                received_at_utc=item.received_at_utc,
+                reference_price=item.reference_price,
+            )
+            for request, item in zip(requests, observed, strict=True)
+        )
+    except ValueError as exc:
+        raise FormalTickEvidenceInvalid(str(exc)) from exc
+
+
+def read_simnow_continuous_v3_formal_tick_bindings(
+    requests: tuple[FormalTickRequest, ...],
+    *,
+    state_dir: Path = Path("/run/market-data"),
+    projection_dir: Path = Path("/run/market-projection"),
+    clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+) -> tuple[FormalTickBinding, ...]:
+    """Read the fixed 5.0-second formal-quote policy for continuous v3 only."""
+
+    if (
+        not isinstance(requests, tuple)
+        or not requests
+        or any(not isinstance(item, FormalTickRequest) for item in requests)
+    ):
+        raise TypeError("formal CTP tick request set is invalid")
+    symbols = tuple(item.vt_symbol for item in requests)
+    if len(set(symbols)) != len(symbols):
+        raise ValueError("formal CTP tick request set has duplicate contracts")
+    observed = _read_observed_formal_ticks(
+        state_dir=state_dir,
+        projection_dir=projection_dir,
+        clock=clock,
+        requests=tuple((item.vt_symbol, item.price_side) for item in requests),
+        max_age_seconds=V3_FORMAL_QUOTE_MAX_AGE_SECONDS,
         strict_snapshot=True,
     )
     try:

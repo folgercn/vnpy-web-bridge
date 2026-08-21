@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from app.phase_c.adapters import UnknownOutcomeError
 from app.phase_c.models import TrustedKeylessContinuousEventUploadDTO
 from app.execution.models import CommandEnvelope
+from research_warehouse.file_integrity import read_regular_strict
 from research_warehouse.continuous_event_selector import BuiltContinuousEventSelection
 from scripts.ci.classify_changes import (
     PHASE_B_UNITS,
@@ -60,6 +61,7 @@ def _metadata(
     kind: int,
     mode: int,
     uid: int | None = None,
+    gid: int | None = None,
     nlink: int | None = None,
     size: int | None = None,
     inode_delta: int = 0,
@@ -69,7 +71,7 @@ def _metadata(
         st_dev=actual.st_dev,
         st_ino=actual.st_ino + inode_delta,
         st_uid=os.geteuid() if uid is None else uid,
-        st_gid=actual.st_gid,
+        st_gid=os.getegid() if gid is None else gid,
         st_mode=kind | mode,
         st_nlink=actual.st_nlink if nlink is None else nlink,
         st_size=actual.st_size if size is None else size,
@@ -81,6 +83,7 @@ def _install_root_private_metadata(
     path: Path,
     *,
     uid: int | None = None,
+    gid: int | None = None,
     file_kind: int = stat.S_IFREG,
     file_mode: int = 0o600,
     parent_mode: int = 0o700,
@@ -96,10 +99,13 @@ def _install_root_private_metadata(
         kind=file_kind,
         mode=file_mode,
         uid=uid,
+        gid=gid,
         nlink=nlink,
         size=size,
     )
-    parent_info = _metadata(path.parent, kind=stat.S_IFDIR, mode=parent_mode)
+    parent_info = _metadata(
+        path.parent, kind=stat.S_IFDIR, mode=parent_mode, gid=gid
+    )
     path_reads = 0
     fstat_reads = 0
 
@@ -693,6 +699,61 @@ def test_config_rejects_foreign_owner_before_read(
         runner.ContinuousRunError, match="service-owned private 0700/0600"
     ):
         runner._load_config(config)
+
+
+def test_config_rejects_foreign_group_before_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    config = tmp_path / "continuous-runner.json"
+    config.write_bytes(runner._canonical_line(_config_value(tmp_path)))
+    _install_root_private_metadata(
+        monkeypatch,
+        config,
+        gid=os.getegid() + 1,
+    )
+
+    with pytest.raises(
+        runner.ContinuousRunError, match="service-owned private 0700/0600"
+    ):
+        runner._load_config(config)
+
+
+def test_private_research_evidence_allows_foreign_group_for_current_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    evidence = tmp_path / "research-evidence.json"
+    evidence.write_bytes(b'{"evidence":"ok"}\n')
+    evidence.chmod(0o600)
+    foreign_gid = os.getegid() + 1
+    original_lstat = Path.lstat
+    original_fstat = os.fstat
+
+    def with_foreign_group(value: os.stat_result) -> SimpleNamespace:
+        return SimpleNamespace(
+            st_dev=value.st_dev,
+            st_ino=value.st_ino,
+            st_size=value.st_size,
+            st_mtime_ns=value.st_mtime_ns,
+            st_ctime_ns=value.st_ctime_ns,
+            st_uid=value.st_uid,
+            st_gid=foreign_gid,
+            st_mode=value.st_mode,
+            st_nlink=value.st_nlink,
+        )
+
+    def lstat(candidate: Path):
+        value = original_lstat(candidate)
+        return with_foreign_group(value) if Path(candidate) == evidence else value
+
+    def fstat(descriptor: int):
+        return with_foreign_group(original_fstat(descriptor))
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    monkeypatch.setattr(os, "fstat", fstat)
+
+    assert read_regular_strict(evidence, "Research private evidence") == (
+        b'{"evidence":"ok"}\n'
+    )
 
 
 @pytest.mark.parametrize("invalid_kind", ["unknown-field", "noncanonical"])

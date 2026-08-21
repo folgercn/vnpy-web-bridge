@@ -55,7 +55,9 @@ from app.execution.executable_target_adapter import (  # noqa: E402
     build_full_portfolio_quote_requests,
     build_static_core_equal_full_portfolio_keyless_decision,
 )
-from app.execution.formal_tick_reader import read_formal_tick_bindings  # noqa: E402
+from app.execution.formal_tick_reader import (  # noqa: E402
+    read_simnow_continuous_v3_formal_tick_bindings,
+)
 from app.phase_c.adapters import UnknownOutcomeError  # noqa: E402
 from app.phase_c.client import (  # noqa: E402
     PhaseCRemoteSettings,
@@ -1588,7 +1590,7 @@ class _ProductionBackend:
         )
         formal_quotes: dict[str, Any] = {}
         if requirements.requirements:
-            bindings = read_formal_tick_bindings(
+            bindings = read_simnow_continuous_v3_formal_tick_bindings(
                 tuple(row.request for row in requirements.requirements),
                 clock=lambda: datetime.now(timezone.utc),
             )

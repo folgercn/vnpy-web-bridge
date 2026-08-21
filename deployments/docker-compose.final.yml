@@ -298,8 +298,8 @@ services:
     image: ${SIMNOW_RUNNER_IMAGE:-vnpy-web-bridge-simnow-runner:final}
     build: { context: .., dockerfile: deployments/phase-b/Containerfile.simnow-runner }
     restart: "no"
-    # Match the locked host vnpyresearch UID/GID. The strict Warehouse readers
-    # reject both root and foreign owners for private evidence.
+    # Match the locked host vnpyresearch UID/GID for its private config and
+    # lock. Strict Warehouse readers require the same non-root evidence UID.
     user: "${SIMNOW_CONTINUOUS_UID:?required}:${SIMNOW_CONTINUOUS_GID:?required}"
     entrypoint:
       - python
