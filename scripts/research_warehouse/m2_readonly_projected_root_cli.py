@@ -53,7 +53,8 @@ def _probe_projection(*, image: str, volume: str, root: Path) -> os.stat_result:
     completed = subprocess.run(
         ["docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
          "--security-opt", "no-new-privileges:true", "--mount",
-         f"type=volume,src={volume},dst={root},readonly", image, "python", "-c", code],
+         f"type=volume,src={volume},dst={root},readonly", "--entrypoint", "python",
+         image, "-c", code],
         check=False, capture_output=True, timeout=20,
     )
     if completed.returncode != 0 or len(completed.stdout) > _MAX_PROBE_BYTES:
