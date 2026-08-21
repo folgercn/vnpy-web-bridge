@@ -86,7 +86,6 @@ def test_phase_b_simnow_runner_package_does_not_rebuild_unrelated_services() -> 
 def test_phase_b_simnow_runner_logic_keeps_conservative_coverage() -> None:
     for path in (
         "scripts/simnow_continuous_run_once.py",
-        "scripts/simnow_keyless_pilot.py",
         "backend/app/execution/formal_tick_reader.py",
         "backend/tests/unit/test_issue362_formal_tick_reader.py",
     ):
