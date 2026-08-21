@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import grp
 import json
 import os
 import pwd
@@ -149,9 +150,11 @@ def test_protected_child_drop_binds_saved_identity_groups_and_environment(
 
     identity = {"uid": 0, "gid": 0, "groups": [0, 80]}
     account = pwd.struct_passwd(
-        ("vnpyresearch", "*", 503, 503, "", "/var/empty", "/usr/bin/false")
+        ("vnpyresearch", "*", 503, 20, "", "/var/empty", "/usr/bin/false")
     )
+    group = grp.struct_group(("vnpyresearch", "*", 503, []))
     monkeypatch.setattr(catalog.pwd, "getpwuid", lambda _uid: account)
+    monkeypatch.setattr(catalog.grp, "getgrgid", lambda _gid: group)
     monkeypatch.setattr(
         catalog.os,
         "setgroups",
@@ -190,6 +193,195 @@ def test_protected_child_drop_binds_saved_identity_groups_and_environment(
     assert identity == {"uid": 503, "gid": 503, "groups": [503]}
     assert "HTTPS_PROXY" not in os.environ
     assert os.environ["HOME"] == "/Users/Shared/vnpy-research/home"
+
+
+@pytest.mark.parametrize("primary_gid", [20, 503])
+def test_protected_child_drop_accepts_expected_account_with_independent_primary_gid(
+    primary_gid: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from research_warehouse import daily_roll_predecessor_catalog as catalog
+
+    identity = {"uid": 0, "gid": 0, "groups": [0]}
+    account = pwd.struct_passwd(
+        ("vnpyresearch", "*", 503, primary_gid, "", "/var/empty", "/usr/bin/false")
+    )
+    group = grp.struct_group(("vnpyresearch", "*", 503, []))
+    monkeypatch.setattr(catalog.pwd, "getpwuid", lambda _uid: account)
+    monkeypatch.setattr(catalog.grp, "getgrgid", lambda _gid: group)
+    monkeypatch.setattr(
+        catalog.os,
+        "setgroups",
+        lambda groups: identity.update(groups=groups),
+    )
+    monkeypatch.setattr(
+        catalog.os,
+        "setresgid",
+        lambda *_values: identity.update(gid=503),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        catalog.os,
+        "setresuid",
+        lambda *_values: identity.update(uid=503),
+        raising=False,
+    )
+    monkeypatch.setattr(catalog.os, "getuid", lambda: identity["uid"])
+    monkeypatch.setattr(catalog.os, "geteuid", lambda: identity["uid"])
+    monkeypatch.setattr(catalog.os, "getgid", lambda: identity["gid"])
+    monkeypatch.setattr(catalog.os, "getegid", lambda: identity["gid"])
+    monkeypatch.setattr(catalog.os, "getgroups", lambda: identity["groups"])
+    monkeypatch.setattr(
+        catalog.os,
+        "getresuid",
+        lambda: (503, 503, 503),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        catalog.os,
+        "getresgid",
+        lambda: (503, 503, 503),
+        raising=False,
+    )
+    monkeypatch.setattr(catalog.os, "chdir", lambda _path: None)
+    monkeypatch.setattr(catalog.os, "umask", lambda _mode: 0o022)
+
+    _drop_to_protected_replay_identity(uid=503, gid=503)
+
+    assert identity == {"uid": 503, "gid": 503, "groups": [503]}
+
+
+def test_protected_child_drop_rejects_unexpected_account_or_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from research_warehouse import daily_roll_predecessor_catalog as catalog
+
+    group = grp.struct_group(("vnpyresearch", "*", 503, []))
+    monkeypatch.setattr(catalog.grp, "getgrgid", lambda _gid: group)
+    monkeypatch.setattr(
+        catalog.os,
+        "setgroups",
+        lambda _groups: pytest.fail("zero drop"),
+    )
+    monkeypatch.setattr(
+        catalog.pwd,
+        "getpwuid",
+        lambda _uid: pwd.struct_passwd(
+            ("vnpyresearch", "*", 502, 20, "", "/var/empty", "/usr/bin/false")
+        ),
+    )
+    with pytest.raises(
+        DailyRollPredecessorCatalogError,
+        match="account identity mismatch",
+    ):
+        _drop_to_protected_replay_identity(uid=503, gid=503)
+    monkeypatch.setattr(
+        catalog.pwd,
+        "getpwuid",
+        lambda _uid: pwd.struct_passwd(
+            ("wrong-research", "*", 503, 20, "", "/var/empty", "/usr/bin/false")
+        ),
+    )
+    with pytest.raises(
+        DailyRollPredecessorCatalogError,
+        match="account identity mismatch",
+    ):
+        _drop_to_protected_replay_identity(uid=503, gid=503)
+    monkeypatch.setattr(
+        catalog.pwd,
+        "getpwuid",
+        lambda _uid: pwd.struct_passwd(
+            ("vnpyresearch", "*", 503, 20, "", "/var/empty", "/usr/bin/false")
+        ),
+    )
+    monkeypatch.setattr(
+        catalog.grp,
+        "getgrgid",
+        lambda _gid: grp.struct_group(("wrong-research", "*", 503, [])),
+    )
+    with pytest.raises(
+        DailyRollPredecessorCatalogError,
+        match="group identity mismatch",
+    ):
+        _drop_to_protected_replay_identity(uid=503, gid=503)
+    with pytest.raises(DailyRollPredecessorCatalogError, match="identity is invalid"):
+        _drop_to_protected_replay_identity(uid=502, gid=503)
+    with pytest.raises(DailyRollPredecessorCatalogError, match="identity is invalid"):
+        _drop_to_protected_replay_identity(uid=503, gid=20)
+
+
+def test_protected_child_drop_rejects_missing_account_or_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from research_warehouse import daily_roll_predecessor_catalog as catalog
+
+    monkeypatch.setattr(
+        catalog.os,
+        "setgroups",
+        lambda _groups: pytest.fail("zero drop"),
+    )
+    monkeypatch.setattr(
+        catalog.pwd,
+        "getpwuid",
+        lambda _uid: (_ for _ in ()).throw(KeyError("missing account")),
+    )
+    with pytest.raises(DailyRollPredecessorCatalogError, match="account is missing"):
+        _drop_to_protected_replay_identity(uid=503, gid=503)
+    monkeypatch.setattr(
+        catalog.pwd,
+        "getpwuid",
+        lambda _uid: pwd.struct_passwd(
+            ("vnpyresearch", "*", 503, 20, "", "/var/empty", "/usr/bin/false")
+        ),
+    )
+    monkeypatch.setattr(
+        catalog.grp,
+        "getgrgid",
+        lambda _gid: (_ for _ in ()).throw(KeyError("missing group")),
+    )
+    with pytest.raises(DailyRollPredecessorCatalogError, match="group is missing"):
+        _drop_to_protected_replay_identity(uid=503, gid=503)
+
+
+@pytest.mark.parametrize(
+    ("groups", "resuid", "resgid"),
+    [
+        ([503, 20], (503, 503, 503), (503, 503, 503)),
+        ([503, 503], (503, 503, 503), (503, 503, 503)),
+        ([503], (503, 503, 0), (503, 503, 503)),
+        ([503], (503, 503, 503), (503, 503, 0)),
+    ],
+)
+def test_protected_child_drop_rejects_nonexact_final_identity(
+    groups: list[int],
+    resuid: tuple[int, int, int],
+    resgid: tuple[int, int, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from research_warehouse import daily_roll_predecessor_catalog as catalog
+
+    identity = {"uid": 503, "gid": 503, "groups": groups}
+    account = pwd.struct_passwd(
+        ("vnpyresearch", "*", 503, 20, "", "/var/empty", "/usr/bin/false")
+    )
+    group = grp.struct_group(("vnpyresearch", "*", 503, []))
+    monkeypatch.setattr(catalog.pwd, "getpwuid", lambda _uid: account)
+    monkeypatch.setattr(catalog.grp, "getgrgid", lambda _gid: group)
+    monkeypatch.setattr(catalog.os, "setgroups", lambda _groups: None)
+    monkeypatch.setattr(catalog.os, "setresgid", lambda *_values: None, raising=False)
+    monkeypatch.setattr(catalog.os, "setresuid", lambda *_values: None, raising=False)
+    monkeypatch.setattr(catalog.os, "getuid", lambda: identity["uid"])
+    monkeypatch.setattr(catalog.os, "geteuid", lambda: identity["uid"])
+    monkeypatch.setattr(catalog.os, "getgid", lambda: identity["gid"])
+    monkeypatch.setattr(catalog.os, "getegid", lambda: identity["gid"])
+    monkeypatch.setattr(catalog.os, "getgroups", lambda: identity["groups"])
+    monkeypatch.setattr(catalog.os, "getresuid", lambda: resuid, raising=False)
+    monkeypatch.setattr(catalog.os, "getresgid", lambda: resgid, raising=False)
+    monkeypatch.setattr(catalog.os, "chdir", lambda _path: None)
+    monkeypatch.setattr(catalog.os, "umask", lambda _mode: 0o022)
+
+    with pytest.raises(DailyRollPredecessorCatalogError):
+        _drop_to_protected_replay_identity(uid=503, gid=503)
 
 
 def test_protected_child_closes_inherited_descriptors(
