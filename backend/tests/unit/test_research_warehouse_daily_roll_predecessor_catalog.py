@@ -312,11 +312,24 @@ def test_protected_genesis_replays_in_child_then_publishes_sequence_one(
         business_public_key_raw_sha256=kwargs["pins"].baseline_public_key_raw_sha256,
         business_signer_key_id=genesis.expected_business_signer_key_id,
     )
-    strict_raws = {
+    private_evidence_raws = {
+        protected.history_receipt_path: b"history-private-proof",
         protected.contract_registry_path: registry_raw,
         protected.signed_baseline_batch_path: genesis.signed_baseline_batch_raw,
+        protected.business_public_key_path: b"business-key-private-proof",
     }
     original_strict_read = catalog.read_regular_strict
+    original_lstat = Path.lstat
+    original_fstat = catalog.os.fstat
+    private_parent = SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=503)
+    private_file = SimpleNamespace(
+        st_mode=stat.S_IFREG | 0o600,
+        st_uid=503,
+        st_nlink=1,
+    )
+    private_parents = {path.parent for path in private_evidence_raws}
+    private_trace = tmp_path / "protected-private-evidence-trace.txt"
+    private_acl_trace = tmp_path / "protected-private-evidence-acl-trace.txt"
 
     monkeypatch.setattr(catalog, "_drop_to_protected_replay_identity", lambda **_v: None)
     monkeypatch.setattr(
@@ -334,12 +347,44 @@ def test_protected_genesis_replays_in_child_then_publishes_sequence_one(
         lambda _path: context,
     )
     def strict_read(path, *args, **read_kwargs):
-        protected_raw = strict_raws.get(Path(path))
+        protected_raw = private_evidence_raws.get(Path(path))
         if protected_raw is not None:
+            assert read_kwargs["private"] is True
+            read_kwargs["descriptor_validator"](991)
             return protected_raw
         return original_strict_read(path, *args, **read_kwargs)
 
+    def lstat(path: Path):
+        if path in private_parents:
+            return private_parent
+        return original_lstat(path)
+
+    def fstat(descriptor: int):
+        if descriptor == 991:
+            return private_file
+        return original_fstat(descriptor)
+
+    real_private_read = catalog._read_private_protected_evidence
+
+    def traced_private_read(path, *args, **read_kwargs):
+        raw = real_private_read(path, *args, **read_kwargs)
+        with private_trace.open("a", encoding="utf-8") as handle:
+            handle.write(f"{path}\n")
+        return raw
+
+    def require_acl_free(path: Path, _label: str) -> None:
+        with private_acl_trace.open("a", encoding="utf-8") as handle:
+            handle.write(f"{path}\n")
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    monkeypatch.setattr(catalog.os, "fstat", fstat)
+    monkeypatch.setattr(
+        catalog,
+        "require_acl_free_path",
+        require_acl_free,
+    )
     monkeypatch.setattr(catalog, "read_regular_strict", strict_read)
+    monkeypatch.setattr(catalog, "_read_private_protected_evidence", traced_private_read)
     monkeypatch.setattr(
         pit_source_view,
         "verify_root_pins",
@@ -439,6 +484,20 @@ def test_protected_genesis_replays_in_child_then_publishes_sequence_one(
     )
     assert first.artifact["mains"] == json.loads(in_process.artifact_raw)["mains"]
     assert catalog.publish_predecessor_artifact(**request) == first
+    traced_paths = {
+        Path(value)
+        for value in private_trace.read_text(encoding="utf-8").splitlines()
+        if value
+    }
+    assert traced_paths == set(private_evidence_raws)
+    # Each strict helper call checks the private parent both before and after
+    # its stable file read.  The trace is child-written because the bounded
+    # proof pipe intentionally carries only canonical Genesis proof bytes.
+    assert {
+        Path(value)
+        for value in private_acl_trace.read_text(encoding="utf-8").splitlines()
+        if value
+    } == private_parents
 
 def _linked_setup(
     monkeypatch: pytest.MonkeyPatch,
@@ -556,14 +615,20 @@ def test_publication_cannot_accept_forged_structural_raw_with_current_labels(
     assert not root.exists()
 
 
-def test_protected_genesis_parent_guards_root_and_private_evidence_parents(
+def test_protected_genesis_parent_guards_root_managed_paths_only(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Only parent directories are write-gated for 503-owned private files."""
+    """Child write isolation covers root custody, not its own private evidence."""
 
     kwargs, _inputs, _holder = _genesis_setup(monkeypatch, tmp_path)
-    protected = _protected_inputs(tmp_path)
+    protected = replace(
+        _protected_inputs(tmp_path),
+        history_receipt_path=tmp_path / "history" / "history.json",
+        signed_baseline_batch_path=tmp_path / "baseline" / "baseline.json",
+        business_public_key_path=tmp_path / "business" / "business.pub",
+        contract_registry_path=tmp_path / "registry" / "contracts.json",
+    )
     captured: dict[str, object] = {}
 
     def capture_context(**values):
@@ -581,15 +646,115 @@ def test_protected_genesis_parent_guards_root_and_private_evidence_parents(
         )
 
     paths = captured["write_protected_paths"]
-    assert protected.history_receipt_path.parent in paths
-    assert protected.signed_baseline_batch_path.parent in paths
-    assert protected.business_public_key_path.parent in paths
-    assert protected.contract_registry_path.parent in paths
+    assert protected.history_receipt_path.parent not in paths
+    assert protected.signed_baseline_batch_path.parent not in paths
+    assert protected.business_public_key_path.parent not in paths
+    assert protected.contract_registry_path.parent not in paths
     assert protected.history_receipt_path not in paths
     assert protected.signed_baseline_batch_path not in paths
     assert catalog.DEFAULT_MANIFEST_PRIVATE_KEY.parent in paths
     assert catalog.DEFAULT_BACKUP_PRIVATE_KEY.parent in paths
     assert catalog.DEFAULT_CALENDAR_PRIVATE_KEY.parent in paths
+
+
+def _private_evidence_stat(*, mode: int, uid: int = 503) -> SimpleNamespace:
+    return SimpleNamespace(st_mode=mode, st_uid=uid, st_nlink=1)
+
+
+def test_private_evidence_admission_allows_owner_write_but_enforces_private_custody(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """0600/0700 owner evidence is intentionally writable by UID503."""
+
+    path = Path("/protected/evidence/baseline.json")
+    parent = _private_evidence_stat(mode=stat.S_IFDIR | 0o700)
+    descriptor = _private_evidence_stat(mode=stat.S_IFREG | 0o600)
+    acl_paths: list[Path] = []
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(Path, "lstat", lambda _self: parent)
+    monkeypatch.setattr(
+        catalog,
+        "require_acl_free_path",
+        lambda candidate, _label: acl_paths.append(candidate),
+    )
+    monkeypatch.setattr(catalog.os, "access", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(catalog.os, "fstat", lambda _descriptor: descriptor)
+
+    def strict_read(_path, _label, **kwargs):
+        captured.update(kwargs)
+        kwargs["descriptor_validator"](7)
+        return b"evidence"
+
+    monkeypatch.setattr(catalog, "read_regular_strict", strict_read)
+    assert catalog._read_private_protected_evidence(
+        path,
+        "private evidence",
+        uid=503,
+        limit=1024,
+    ) == b"evidence"
+    assert captured["private"] is True
+    assert acl_paths == [path.parent, path.parent]
+
+
+@pytest.mark.parametrize(
+    ("parent_mode", "file_mode", "file_uid"),
+    [
+        (0o700, 0o600, 502),
+        (0o700, 0o620, 503),
+        (0o770, 0o600, 503),
+    ],
+)
+def test_private_evidence_rejects_nonowner_or_group_write_custody(
+    parent_mode: int,
+    file_mode: int,
+    file_uid: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = Path("/protected/evidence/baseline.json")
+    parent = _private_evidence_stat(mode=stat.S_IFDIR | parent_mode)
+    descriptor = _private_evidence_stat(
+        mode=stat.S_IFREG | file_mode,
+        uid=file_uid,
+    )
+    monkeypatch.setattr(Path, "lstat", lambda _self: parent)
+    monkeypatch.setattr(catalog, "require_acl_free_path", lambda *_args: None)
+    monkeypatch.setattr(catalog.os, "fstat", lambda _descriptor: descriptor)
+
+    def strict_read(_path, _label, **kwargs):
+        kwargs["descriptor_validator"](7)
+        return b"evidence"
+
+    monkeypatch.setattr(catalog, "read_regular_strict", strict_read)
+    with pytest.raises(catalog.DailyRollPredecessorCatalogError):
+        catalog._read_private_protected_evidence(
+            path,
+            "private evidence",
+            uid=503,
+            limit=1024,
+        )
+
+
+def test_private_evidence_rejects_acl_granted_write_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = Path("/protected/evidence/baseline.json")
+    parent = _private_evidence_stat(mode=stat.S_IFDIR | 0o700)
+    monkeypatch.setattr(Path, "lstat", lambda _self: parent)
+    monkeypatch.setattr(
+        catalog,
+        "require_acl_free_path",
+        lambda *_args: (_ for _ in ()).throw(
+            catalog.RegistryError("extended ACL grants write")
+        ),
+    )
+    with pytest.raises(catalog.RegistryError, match="extended ACL grants write"):
+        catalog._read_private_protected_evidence(
+            path,
+            "private evidence",
+            uid=503,
+            limit=1024,
+        )
 
 
 def test_catalog_load_rejects_receipt_artifact_hash_tamper(
