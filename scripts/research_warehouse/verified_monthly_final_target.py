@@ -601,6 +601,7 @@ def _replay_verified_monthly_evidence(
     contract_registry_path: Path,
     expected_contract_registry_raw_sha256: str,
     source_month: str,
+    readonly_manifest_verifier: bool,
 ) -> _VerifiedMonthlyReplayEvidence:
     """Independently replay one monthly economic target from current custody.
 
@@ -721,6 +722,7 @@ def _replay_verified_monthly_evidence(
                 history_receipt_path=Path(history_receipt_path),
                 pins=pins,
                 manifest_public_key_path=Path(manifest_public_key_path),
+                readonly_manifest_verifier=readonly_manifest_verifier,
             )
             sources = verified_static_baseline_daily_sources(
                 context=context,
@@ -901,6 +903,7 @@ def replay_verified_monthly_final_target(
         contract_registry_path=contract_registry_path,
         expected_contract_registry_raw_sha256=expected_contract_registry_raw_sha256,
         source_month=source_month,
+        readonly_manifest_verifier=False,
     )
     return replay.final_target
 
@@ -950,6 +953,7 @@ def replay_verified_monthly_planner_bundle(
         contract_registry_path=contract_registry_path,
         expected_contract_registry_raw_sha256=expected_contract_registry_raw_sha256,
         source_month=source_month,
+        readonly_manifest_verifier=True,
     )
     return VerifiedMonthlyPlannerBundle(
         final_target=replay.final_target,

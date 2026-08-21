@@ -56,6 +56,7 @@ __all__ = [
     "seal_daily_batch_with_private_key",
     "validate_manifest",
     "verify_manifest_chain",
+    "verify_manifest_chain_readonly",
 ]
 
 
@@ -557,3 +558,33 @@ def verify_manifest_chain(
             expected_head_commit_seal_sha256=(expected_head_commit_seal_sha256),
         )
         return chain
+
+
+def verify_manifest_chain_readonly(
+    *,
+    paths: WarehousePaths,
+    public_key_path: Path,
+    registry: SourceRegistry,
+    expected_genesis_seal_sha256: str | None,
+    expected_head_seal_sha256: str | None,
+    expected_head_commit_seal_sha256: str | None,
+    offline: bool = False,
+) -> list[dict[str, Any]]:
+    """Verify a pinned manifest chain without locks or publication recovery.
+
+    This is for consumers whose Warehouse mount is deliberately read-only.
+    Writer/admin verification retains recovery through ``verify_manifest_chain``.
+    """
+    chain = load_manifest_chain(
+        paths,
+        load_public_key(public_key_path),
+        registry,
+        offline=offline,
+    )
+    require_chain_anchors(
+        chain,
+        expected_genesis_seal_sha256=expected_genesis_seal_sha256,
+        expected_head_seal_sha256=expected_head_seal_sha256,
+        expected_head_commit_seal_sha256=expected_head_commit_seal_sha256,
+    )
+    return chain
