@@ -6,6 +6,7 @@ from scripts.ci.classify_changes import classify
 def test_registered_experimental_glue_isolated_from_heavy_ci() -> None:
     for path in (
         "scripts/simnow_experimental_materialize_target.py",
+        "scripts/simnow_experimental_monthly_once.py",
         "scripts/simnow_experimental_run_once.py",
         "backend/tests/unit/test_simnow_experimental_ci_contract.py",
     ):

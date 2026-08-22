@@ -138,6 +138,7 @@ SIMNOW_EXPERIMENTAL_FASTLANE_FILES = {
     "deployments/phase-b/Containerfile.simnow-experimental-runner",
     "deployments/phase-b/requirements-simnow-experimental-runner.txt",
     "scripts/simnow_experimental_materialize_target.py",
+    "scripts/simnow_experimental_monthly_once.py",
     "scripts/simnow_experimental_run_once.py",
 }
 
