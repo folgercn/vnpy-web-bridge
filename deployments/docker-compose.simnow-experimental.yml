@@ -1,0 +1,43 @@
+# Add this only alongside docker-compose.final.yml.  It reuses that graph's
+# already-running Execution, Phase-C and market-data boundaries; it is not a
+# second runtime stack or a standalone deployment.
+services:
+  simnow-experimental-runner:
+    profiles: [simnow-experimental]
+    image: ${SIMNOW_EXPERIMENTAL_RUNNER_IMAGE:-vnpy-web-bridge-simnow-experimental-runner:final}
+    build: { context: .., dockerfile: deployments/phase-b/Containerfile.simnow-experimental-runner }
+    restart: "no"
+    user: "${SIMNOW_EXPERIMENTAL_UID:?required}:${SIMNOW_EXPERIMENTAL_GID:?required}"
+    entrypoint: ["python", "/app/scripts/simnow_experimental_run_once.py"]
+    environment:
+      PRODUCTION: "false"
+      LIVE_TRADING_AUTHORIZED: "false"
+      COUNTABLE_FORWARD: "false"
+      OFFICIAL_FORWARD_CLAIMED: "false"
+      CONTROL_EXECUTION_BASE_URL: http://execution-orchestrator:8090
+      CONTROL_EXECUTION_SHARED_SECRET: ${CONTROL_EXECUTION_SHARED_SECRET:?required}
+      PHASE_C_CUSTODY_URL: http://artifact-custody:8091
+      PHASE_C_CUSTODY_SHARED_SECRET: ${PHASE_C_CUSTODY_SHARED_SECRET:?required}
+      PHASE_C_EXECUTION_URL: http://execution-orchestrator:8090
+      PHASE_C_EXECUTION_SHARED_SECRET: ${PHASE_C_EXECUTION_SHARED_SECRET:?required}
+    networks: [private-control, control-custody]
+    depends_on:
+      artifact-custody: { condition: service_healthy }
+      execution-orchestrator: { condition: service_started }
+    volumes:
+      - type: bind
+        source: ${SIMNOW_EXPERIMENTAL_TARGET_PATH:?required}
+        target: /run/simnow-experimental/target.json
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${SIMNOW_EXPERIMENTAL_MONTHLY_BUNDLE_DIR:?required}
+        target: /run/simnow-experimental/monthly
+        read_only: true
+        bind: { create_host_path: false }
+      - market_data_state:/run/market-data:ro
+      - market_projection:/run/market-projection:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: [/tmp]
