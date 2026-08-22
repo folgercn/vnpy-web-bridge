@@ -4,6 +4,7 @@ import json
 import os
 import plistlib
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -19,7 +20,7 @@ def test_experimental_launchd_only_wakes_one_shot_runner() -> None:
 
     assert payload["Label"] == "com.vnpy-web-bridge.simnow-experimental"
     assert payload["ProgramArguments"] == [
-        "/bin/zsh",
+        "/bin/bash",
         "/Users/fujun/services/vnpy-web-bridge/deployments/simnow-experimental-run-once.sh",
     ]
     assert payload["WatchPaths"] == [
@@ -77,7 +78,7 @@ def test_experimental_launcher_exits_before_docker_without_target(tmp_path: Path
     assert "flock" not in launcher
 
     result = subprocess.run(
-        ["/bin/zsh", str(ROOT / "deployments/simnow-experimental-run-once.sh")],
+        ["/bin/bash", str(ROOT / "deployments/simnow-experimental-run-once.sh")],
         env=_launcher_environment(
             tmp_path,
             target_path=tmp_path / "absent-target.json",
@@ -102,14 +103,14 @@ def test_experimental_launcher_invokes_one_existing_runner_with_selected_bundle(
     arguments = tmp_path / "docker-arguments.json"
     fake_docker = tmp_path / "fake-docker"
     fake_docker.write_text(
-        "#!/bin/zsh\nprint -r -- \"$@\" | /usr/bin/python3 -c "
+        "#!/bin/bash\nprintf '%s\\n' \"$@\" | /usr/bin/python3 -c "
         "'import json,sys; print(json.dumps(sys.stdin.read().split()))' "
         f"> {arguments}\n",
         encoding="utf-8",
     )
     fake_docker.chmod(0o755)
     result = subprocess.run(
-        ["/bin/zsh", str(ROOT / "deployments/simnow-experimental-run-once.sh")],
+        ["/bin/bash", str(ROOT / "deployments/simnow-experimental-run-once.sh")],
         env=_launcher_environment(
             tmp_path, target_path=target, docker_bin=fake_docker
         ),
@@ -129,6 +130,11 @@ def test_experimental_launcher_invokes_one_existing_runner_with_selected_bundle(
     assert "/run/simnow-experimental/target.json" in invoked
     assert f"/run/simnow-experimental/monthly/{source_month}.json" in invoked
     assert "--expires-at" in invoked
+    expires_at = datetime.fromisoformat(
+        invoked[invoked.index("--expires-at") + 1].replace("Z", "+00:00")
+    )
+    remaining = (expires_at - datetime.now(timezone.utc)).total_seconds()
+    assert 240 <= remaining <= 300
     assert "--execute" in invoked
 
 

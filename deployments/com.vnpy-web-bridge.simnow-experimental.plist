@@ -6,7 +6,7 @@
   <string>com.vnpy-web-bridge.simnow-experimental</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/zsh</string>
+    <string>/bin/bash</string>
     <string>/Users/fujun/services/vnpy-web-bridge/deployments/simnow-experimental-run-once.sh</string>
   </array>
   <key>WorkingDirectory</key>

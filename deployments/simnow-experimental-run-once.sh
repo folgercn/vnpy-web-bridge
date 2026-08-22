@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/bin/bash
 # Wake-only host adapter for one SIMNOW_EXPERIMENTAL runner invocation.
 # It owns no target state or retry loop: the target/materializer and existing
 # Execution lifecycle remain the sole sources of state and mutation authority.
@@ -38,10 +38,13 @@ PY
 bundle_path="$bundle_directory/$source_month.json"
 [[ -f "$bundle_path" ]] || exit 1
 
-# BSD date is intentional: this launcher runs on the M2 launchd host.  Each
-# one-shot gets a short new planner expiry rather than retaining a schedule
-# cursor or retry state.
-expires_at="$(/bin/date -u -v+300S '+%Y-%m-%dT%H:%M:%SZ')"
+# Python's timezone-aware standard library is shared by the M2 host and CI.
+# Each one-shot gets a short new planner expiry rather than retaining a
+# schedule cursor or retry state.
+expires_at="$(/usr/bin/python3 -c '
+from datetime import datetime, timedelta, timezone
+print((datetime.now(timezone.utc) + timedelta(seconds=300)).replace(microsecond=0).isoformat().replace("+00:00", "Z"))
+')"
 
 export SIMNOW_EXPERIMENTAL_TARGET_PATH
 export SIMNOW_EXPERIMENTAL_MONTHLY_BUNDLE_DIR
