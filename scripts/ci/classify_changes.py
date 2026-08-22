@@ -123,6 +123,28 @@ SIMNOW_RUNNER_PACKAGING_FASTLANE_FILES = {
     "backend/tests/unit/test_issue362_simnow_continuous_run_once.py",
 }
 
+# Issue #412 owns a deliberately narrow experimental bridge surface. These
+# paths may change the target materializer or its isolated runner packaging,
+# but do not change the existing Execution, TargetPlan, quote, fencing, or
+# reconciliation contracts. Keep the ownership explicit: adjacent paths still
+# follow the normal conservative CI classification.
+SIMNOW_EXPERIMENTAL_FASTLANE_GLOBS = (
+    "scripts/simnow_experimental_*.py",
+    "backend/tests/unit/test_issue412_simnow_experimental*.py",
+)
+SIMNOW_EXPERIMENTAL_FASTLANE_FILES = {
+    "docs/schemas/simnow-experimental-target-v1.schema.json",
+    "deployments/phase-b/Containerfile.simnow-experimental-runner",
+    "deployments/phase-b/requirements-simnow-experimental-runner.txt",
+}
+
+
+def _is_simnow_experimental_fastlane_path(path: str) -> bool:
+    return path in SIMNOW_EXPERIMENTAL_FASTLANE_FILES or any(
+        fnmatch.fnmatchcase(path, pattern)
+        for pattern in SIMNOW_EXPERIMENTAL_FASTLANE_GLOBS
+    )
+
 # Issue #291 Phase A is deliberately classified independently from the legacy
 # ``backend_changed``/``image_changed`` flags below.  Those flags pre-date the
 # runtime split and intentionally remain broad for the existing backend
@@ -255,6 +277,10 @@ PHASE_B_RULES = (
             "deployments/phase-b/requirements-simnow-runner.txt",
             "backend/tests/unit/test_issue362_simnow_continuous_run_once.py",
         ),
+    ),
+    _phase_b_rule(
+        "phase-b-issue412-simnow-experimental-packaging",
+        exact=tuple(sorted(SIMNOW_EXPERIMENTAL_FASTLANE_FILES)),
     ),
     _phase_b_rule(
         "phase-b-simnow-runner-runtime",
@@ -473,6 +499,14 @@ PHASE_A_ISSUE362_RESEARCH_FOUNDATION_EXACT = (
 PHASE_A_ISSUE362_CONTINUOUS_RUNNER_FOUNDATION_EXACT = (
     "scripts/simnow_continuous_run_once.py",
     "backend/tests/unit/test_issue362_simnow_continuous_run_once.py",
+)
+
+# Issue #412 has no Phase A service owner. Its materializer and runner glue
+# remain contract-only so a glue-only PR cannot select an execution image or
+# cause the Phase C offline E2E matrix to fan out. Core trading paths retain
+# their existing Phase A ownership rules.
+PHASE_A_ISSUE412_SIMNOW_EXPERIMENTAL_EXACT = tuple(
+    sorted(SIMNOW_EXPERIMENTAL_FASTLANE_FILES)
 )
 
 
@@ -735,6 +769,12 @@ PHASE_A_RULES = (
     _phase_a_rule(
         "phase-a-preserved-issue362-continuous-runner-foundation",
         exact=PHASE_A_ISSUE362_CONTINUOUS_RUNNER_FOUNDATION_EXACT,
+        kind="preserved",
+    ),
+    _phase_a_rule(
+        "phase-a-preserved-issue412-simnow-experimental",
+        exact=PHASE_A_ISSUE412_SIMNOW_EXPERIMENTAL_EXACT,
+        glob=SIMNOW_EXPERIMENTAL_FASTLANE_GLOBS,
         kind="preserved",
     ),
     _phase_a_rule(
@@ -1059,6 +1099,7 @@ def classify(paths: list[str], *, force_all: bool = False) -> dict[str, bool]:
         "image_changed": force_all,
         "query_v5_changed": force_all,
         "windows_fence_changed": force_all,
+        "simnow_experimental_changed": force_all,
     }
     for raw_path in paths:
         path = PurePosixPath(raw_path.strip()).as_posix()
@@ -1066,6 +1107,9 @@ def classify(paths: list[str], *, force_all: bool = False) -> dict[str, bool]:
             continue
         if path.startswith(WORKFLOW_PREFIX):
             return {key: True for key in result}
+        if _is_simnow_experimental_fastlane_path(path):
+            result["simnow_experimental_changed"] = True
+            continue
         if path in SIMNOW_RUNNER_PACKAGING_FASTLANE_FILES:
             # Focused tests + exact post-merge runner OCI smoke cover these
             # package-only changes.  Do not rebuild unrelated backend/prod/B.

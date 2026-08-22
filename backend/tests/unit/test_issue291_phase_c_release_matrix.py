@@ -92,6 +92,34 @@ def test_phase_b_batch_only_change_does_not_run_projection_dependency_group() ->
     assert plan["phase_b_projection_required"] is False
 
 
+def test_issue412_experimental_glue_skips_phase_c_build_and_offline_e2e() -> None:
+    for path in (
+        "scripts/simnow_experimental_run_once.py",
+        "backend/tests/unit/test_issue412_simnow_experimental_target.py",
+        "docs/schemas/simnow-experimental-target-v1.schema.json",
+        "deployments/phase-b/Containerfile.simnow-experimental-runner",
+    ):
+        plan = create_plan([path], source_commit_sha=SHA)
+        assert plan["decision"] == "CONTRACT_ONLY", path
+        assert plan["build_units"] == [], path
+        assert plan["phase_b"]["selected_units"] == [], path
+        assert plan["phase_b_projection_required"] is False, path
+        assert plan["offline_e2e_required"] is False, path
+
+
+def test_issue412_glue_mixed_with_execution_core_restores_full_matrix() -> None:
+    plan = create_plan(
+        [
+            "scripts/simnow_experimental_run_once.py",
+            "shared/commodity_execution/target_plan.py",
+        ],
+        source_commit_sha=SHA,
+    )
+    assert plan["decision"] == "BUILD_ONLY"
+    assert _units(plan) == set(UNIT_METADATA)
+    assert plan["offline_e2e_required"] is True
+
+
 def test_unknown_or_ambiguous_phase_inputs_block_whole_matrix(monkeypatch) -> None:
     unknown = create_plan(["deployments/phase-b/unreviewed.sh"], source_commit_sha=SHA)
     assert unknown["decision"] == "BLOCKED"

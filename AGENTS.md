@@ -39,6 +39,48 @@
 
 ---
 
+## 1.1 SIMNOW_EXPERIMENTAL（#412）lane override
+
+当前优先目标是让 `STATIC_CORE_EQUAL` 在 **SimNow** 持续运行；在 #412
+实验 lane 内，这优先于继续 #362 的 signer / custody / inode / ACL /
+catalog / provenance hardening。
+
+已授权的最小实现范围：
+
+- `simnow-experimental-target-v1` schema；
+- 当前月度 `STATIC_CORE_EQUAL` quantity vector 与最新 DAILY PIT exact-contract
+  route 的 materialization；
+- experimental runner、现有 runner 的最小 packaging，以及调度 glue。
+
+这不是新策略或第二个 dispatcher。experimental runtime 不以 manifest
+signature、catalog continuity、physical custody identity、signer handoff、Docker
+projection attestation 或历史 provenance replay 作为前置 gate；audited lane
+保留且不得删除或削弱。
+
+以下边界仍不可改变：
+
+- `production=false`、`live_trading_authorized=false`、`countable_forward=false`、
+  `official_forward_claimed=false`；
+- Execution 仍是唯一 send/cancel owner，runner/Research 不得直连 Windows 或 CTP
+  下单；
+- 每次 invocation 先读 fresh broker facts；active/pending/UNKNOWN 时只
+  query/reconcile，绝不 blind resend；
+- formal bid/ask、5 秒 freshness、SHFE/INE close semantics、TargetPlan 和
+  Execution durable recovery 继续生效；
+- 月度 quantity vector 不手工修改，exact contract 只取当前 DAILY PIT route。
+
+#412 下仅在需要改变 frozen strategy / quantity vector / C-D-thermostat-allocator /
+DAILY PIT 路由算法 / TargetPlan 或 Execution 核心交易语义 / UNKNOWN recovery /
+broker reconciliation / SimNow-only 与 production-live-countable 边界 / 新交易
+authority 时 STOP 并重新向付哥确认。上述最小 schema、materialization、runner 或
+调度 glue 不因“新增 schema/scheduler”自动 STOP；但不得借此新建独立 authority
+service、dispatcher、ledger、trust layer 或 production 通道。
+
+修复 experimental bridge blocker 后，直接回到原有 SimNow 运行阶段，不继续堆叠
+signer、custody 或 provenance 安全层。
+
+---
+
 ## 2. 当前成功标准
 
 当前成功标准不是继续完善架构，而是让下面这条链稳定运行：

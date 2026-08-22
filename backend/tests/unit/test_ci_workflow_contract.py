@@ -20,6 +20,7 @@ def test_ci_gate_is_stable_and_always_created() -> None:
     assert "if: always()" in gate
     assert 'not in {"success", "skipped"}' in gate
     assert "- phase-b-projection-smoke" in gate
+    assert "- simnow-experimental" in gate
 
 
 def test_fork_pull_requests_cannot_write_build_caches() -> None:
@@ -39,6 +40,21 @@ def test_quick_checks_only_run_dependency_free_ci_contract_tests() -> None:
     assert "backend/tests/unit/test_ci_backend_test_shards.py" in quick_checks
     assert "backend/tests/unit/test_ci_change_classifier.py" in quick_checks
     assert "backend/tests/unit/test_ci_workflow_contract.py" in quick_checks
+
+
+def test_issue412_experimental_glue_has_a_focused_job_without_heavy_ci() -> None:
+    assert (
+        "simnow_experimental_changed: "
+        "${{ steps.filter.outputs.simnow_experimental_changed }}" in WORKFLOW
+    )
+    job = WORKFLOW.split("  simnow-experimental:\n", maxsplit=1)[1].split(
+        "  backend:\n", maxsplit=1
+    )[0]
+    assert "if: needs.changes.outputs.simnow_experimental_changed == 'true'" in job
+    assert "test_issue412_simnow_experimental*.py" in job
+    assert "backend/tests/unit/test_ci_change_classifier.py" in job
+    assert "docker build" not in job
+    assert "scripts/ci/phase_c_offline_e2e.sh" not in job
 
 
 def test_pull_request_changed_files_use_event_commit_pair() -> None:

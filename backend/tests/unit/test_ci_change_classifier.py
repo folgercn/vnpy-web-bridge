@@ -1,6 +1,11 @@
 from pathlib import Path
 
-from scripts.ci.classify_changes import PHASE_B_UNITS, classify, classify_phase_b
+from scripts.ci.classify_changes import (
+    PHASE_B_UNITS,
+    classify,
+    classify_phase_a,
+    classify_phase_b,
+)
 from scripts.ci.validate_json_schemas import SCHEMA_DIRECTORIES
 
 
@@ -112,6 +117,55 @@ def test_simnow_runner_logic_and_shared_execution_still_take_heavy_paths() -> No
         assert phase_b["phase_b_shared_contract_changed"] is True
         assert phase_b["selected_units"] == list(PHASE_B_UNITS)
         assert phase_b["phase_b_gate_blocked"] is False
+
+
+def test_issue412_experimental_glue_stays_on_the_contract_only_fast_lane() -> None:
+    glue_only = [
+        "scripts/simnow_experimental_materialize_target.py",
+        "scripts/simnow_experimental_run_once.py",
+        "backend/tests/unit/test_issue412_simnow_experimental_target.py",
+        "docs/schemas/simnow-experimental-target-v1.schema.json",
+        "deployments/phase-b/Containerfile.simnow-experimental-runner",
+        "deployments/phase-b/requirements-simnow-experimental-runner.txt",
+    ]
+
+    for path in glue_only:
+        result = classify([path])
+        assert result["simnow_experimental_changed"] is True, path
+        assert not any(
+            value
+            for key, value in result.items()
+            if key != "simnow_experimental_changed"
+        ), path
+
+        phase_a = classify_phase_a([path])
+        assert phase_a["release_blocked"] is False, path
+        assert phase_a["selected_rule_ids"] == [
+            "phase-a-preserved-issue412-simnow-experimental"
+        ], path
+        assert phase_a["selected_units"] == [], path
+
+        phase_b = classify_phase_b([path])
+        assert phase_b["phase_b_gate_blocked"] is False, path
+        assert phase_b["selected_units"] == [], path
+
+
+def test_issue412_fast_lane_does_not_cover_execution_or_quote_core() -> None:
+    core_paths = (
+        "backend/app/execution/formal_tick_reader.py",
+        "backend/app/execution/final_runtime.py",
+        "shared/commodity_execution/target_plan.py",
+    )
+
+    for path in core_paths:
+        result = classify([path])
+        assert result["backend_changed"] is True, path
+        assert result["image_changed"] is True, path
+        assert result["simnow_experimental_changed"] is False, path
+
+    formal_tick = classify_phase_b([core_paths[0]])
+    assert formal_tick["phase_b_shared_contract_changed"] is True
+    assert formal_tick["selected_units"] == list(PHASE_B_UNITS)
 
 
 def test_global_schema_gate_includes_research_warehouse_contracts() -> None:
