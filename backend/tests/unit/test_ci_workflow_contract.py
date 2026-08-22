@@ -42,7 +42,7 @@ def test_quick_checks_only_run_dependency_free_ci_contract_tests() -> None:
     assert "backend/tests/unit/test_ci_workflow_contract.py" in quick_checks
 
 
-def test_issue412_experimental_glue_has_a_focused_job_without_heavy_ci() -> None:
+def test_experimental_glue_has_a_focused_job_without_heavy_ci() -> None:
     assert (
         "simnow_experimental_changed: "
         "${{ steps.filter.outputs.simnow_experimental_changed }}" in WORKFLOW
@@ -51,7 +51,8 @@ def test_issue412_experimental_glue_has_a_focused_job_without_heavy_ci() -> None
         "  backend:\n", maxsplit=1
     )[0]
     assert "if: needs.changes.outputs.simnow_experimental_changed == 'true'" in job
-    assert "test_issue412_simnow_experimental*.py" in job
+    assert "test_simnow_experimental*.py" in job
+    assert "no experimental contract tests found" in job
     assert "backend/tests/unit/test_ci_change_classifier.py" in job
     assert "docker build" not in job
     assert "scripts/ci/phase_c_offline_e2e.sh" not in job

@@ -128,14 +128,17 @@ SIMNOW_RUNNER_PACKAGING_FASTLANE_FILES = {
 # but do not change the existing Execution, TargetPlan, quote, fencing, or
 # reconciliation contracts. Keep the ownership explicit: adjacent paths still
 # follow the normal conservative CI classification.
+# Keep the runtime entrypoints explicit. A new experimental script must opt in
+# here instead of automatically escaping the normal CI lanes.
 SIMNOW_EXPERIMENTAL_FASTLANE_GLOBS = (
-    "scripts/simnow_experimental_*.py",
-    "backend/tests/unit/test_issue412_simnow_experimental*.py",
+    "backend/tests/unit/test_simnow_experimental*.py",
 )
 SIMNOW_EXPERIMENTAL_FASTLANE_FILES = {
     "docs/schemas/simnow-experimental-target-v1.schema.json",
     "deployments/phase-b/Containerfile.simnow-experimental-runner",
     "deployments/phase-b/requirements-simnow-experimental-runner.txt",
+    "scripts/simnow_experimental_materialize_target.py",
+    "scripts/simnow_experimental_run_once.py",
 }
 
 

@@ -123,7 +123,7 @@ def test_issue412_experimental_glue_stays_on_the_contract_only_fast_lane() -> No
     glue_only = [
         "scripts/simnow_experimental_materialize_target.py",
         "scripts/simnow_experimental_run_once.py",
-        "backend/tests/unit/test_issue412_simnow_experimental_target.py",
+        "backend/tests/unit/test_simnow_experimental_target.py",
         "docs/schemas/simnow-experimental-target-v1.schema.json",
         "deployments/phase-b/Containerfile.simnow-experimental-runner",
         "deployments/phase-b/requirements-simnow-experimental-runner.txt",
@@ -166,6 +166,21 @@ def test_issue412_fast_lane_does_not_cover_execution_or_quote_core() -> None:
     formal_tick = classify_phase_b([core_paths[0]])
     assert formal_tick["phase_b_shared_contract_changed"] is True
     assert formal_tick["selected_units"] == list(PHASE_B_UNITS)
+
+
+def test_experimental_fast_lane_requires_explicit_glue_registration() -> None:
+    for path in (
+        "scripts/simnow_experimental_materialize_target.py",
+        "scripts/simnow_experimental_run_once.py",
+    ):
+        assert classify([path])["simnow_experimental_changed"] is True
+
+    unregistered = classify(["scripts/simnow_experimental_future_helper.py"])
+    assert unregistered["backend_changed"] is True
+    assert unregistered["simnow_experimental_changed"] is False
+    assert classify(["backend/tests/unit/test_simnow_experimental_target.py"])[
+        "simnow_experimental_changed"
+    ] is True
 
 
 def test_global_schema_gate_includes_research_warehouse_contracts() -> None:
