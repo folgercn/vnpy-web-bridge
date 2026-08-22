@@ -45,6 +45,9 @@ from app.phase_c.client import RemotePhaseCWorkflowClient  # noqa: E402
 from simnow_continuous_run_once import (  # noqa: E402
     ContinuousRunError,
     _ProductionBackend,
+    _completed,
+    _completion_state,
+    _submit_reconcile_with_ready_snapshot,
 )
 from simnow_experimental_materialize_target import (  # noqa: E402
     ExperimentalTargetError,
@@ -239,37 +242,73 @@ async def _advance_current_execution_identity(
     on their original plan identity and never derives a replacement plan.
     """
 
+    async def terminal_completion_matches(
+        current_status: Mapping[str, Any],
+        *,
+        plan_id: str,
+        plan_hash: str,
+    ) -> bool:
+        if not _completed(dict(current_status), plan_id=plan_id, plan_hash=plan_hash):
+            return False
+        completion = await backend.execution.completion(plan_id)
+        if completion is None:
+            return False
+        completed = completion.as_dict()
+        return (
+            completed.get("plan_id") == plan_id
+            and completed.get("plan_hash") == plan_hash
+        )
+
+    def blocked(
+        *, plan_id: str, plan_hash: str, plan_state: Any,
+        new_intents: int = 0, execution_mutated: bool = False,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        result = {
+            "status": "CURRENT_IDENTITY_RECOVERY",
+            "plan_id": plan_id,
+            "plan_hash": plan_hash,
+            "plan_state": plan_state,
+            "new_intents": new_intents,
+            "execution_mutated": execution_mutated,
+            "gateway_mutated": new_intents > 0,
+        }
+        if reason is not None:
+            result["reason"] = reason
+        return result
+
     status = (await backend.execution.status()).as_dict()
     plan = status.get("plan")
     if not isinstance(plan, Mapping):
         raise ExperimentalRunError("Execution current plan projection is invalid")
     state = plan.get("state")
-    if state in {"IDLE", "TERMINAL"}:
+    if state == "IDLE":
         return None
     plan_id = plan.get("plan_id")
     plan_hash = plan.get("plan_hash")
     if not isinstance(plan_id, str) or not isinstance(plan_hash, str):
         raise ExperimentalRunError("Execution current plan identity is invalid")
+    if state == "TERMINAL":
+        if await terminal_completion_matches(
+            status, plan_id=plan_id, plan_hash=plan_hash
+        ):
+            return None
+        return blocked(
+            plan_id=plan_id,
+            plan_hash=plan_hash,
+            plan_state=state,
+            reason="terminal_completion_unavailable",
+        )
     if state != "ACTIVE":
-        return {
-            "status": "CURRENT_IDENTITY_RECOVERY",
-            "plan_id": plan_id,
-            "plan_hash": plan_hash,
-            "plan_state": state,
-            "execution_mutated": False,
-            "gateway_mutated": False,
-        }
+        return blocked(plan_id=plan_id, plan_hash=plan_hash, plan_state=state)
     leader = status.get("leader")
     if not isinstance(leader, Mapping) or leader.get("held") is True:
-        return {
-            "status": "CURRENT_IDENTITY_RECOVERY",
-            "plan_id": plan_id,
-            "plan_hash": plan_hash,
-            "plan_state": "ACTIVE",
-            "reason": "existing_execution_leader",
-            "execution_mutated": False,
-            "gateway_mutated": False,
-        }
+        return blocked(
+            plan_id=plan_id,
+            plan_hash=plan_hash,
+            plan_state="ACTIVE",
+            reason="existing_execution_leader",
+        )
 
     token = None
     try:
@@ -284,34 +323,86 @@ async def _advance_current_execution_identity(
             leader_token=token,
             reconciliation_snapshot=snapshot,
         )
+        resume = resumed.as_dict()
+        new_intents = int(resume["new_intent_count"])
+        after = (await backend.execution.status()).as_dict()
+        after_plan = after.get("plan")
+        if not isinstance(after_plan, Mapping):
+            raise ExperimentalRunError("Execution current plan projection is invalid")
+        if (
+            after_plan.get("state") == "TERMINAL"
+            and after_plan.get("plan_id") == plan_id
+            and after_plan.get("plan_hash") == plan_hash
+        ):
+            if await terminal_completion_matches(
+                after, plan_id=plan_id, plan_hash=plan_hash
+            ):
+                return None
+            return blocked(
+                plan_id=plan_id,
+                plan_hash=plan_hash,
+                plan_state="TERMINAL",
+                new_intents=new_intents,
+                execution_mutated=True,
+                reason="terminal_completion_unavailable",
+            )
+        completion_state = _completion_state(
+            after, plan_id=plan_id, plan_hash=plan_hash
+        )
+        if completion_state != "ready_for_final_reconcile":
+            return blocked(
+                plan_id=plan_id,
+                plan_hash=plan_hash,
+                plan_state=after_plan.get("state", "UNKNOWN"),
+                new_intents=new_intents,
+                execution_mutated=True,
+                reason=completion_state,
+            )
+        token = await backend.execution.renew_leader(token)
+        try:
+            await _submit_reconcile_with_ready_snapshot(
+                backend.execution,
+                suffix=f"experimental-current-final-{plan_hash[:24]}-{after['state_version']}",
+                version=after["state_version"],
+                actor=backend._actor(),
+                now=datetime.now(timezone.utc)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                reconciliation_run_id=(
+                    f"simnow-experimental-current-final-{plan_hash[:32]}"
+                ),
+                reason="final reconcile exact existing SIMNOW TargetPlan",
+            )
+        except (ExecutionClientError, ValueError):
+            return blocked(
+                plan_id=plan_id,
+                plan_hash=plan_hash,
+                plan_state="ACTIVE",
+                new_intents=new_intents,
+                execution_mutated=True,
+                reason="final_reconcile_outcome_unknown",
+            )
+        final_status = (await backend.execution.status()).as_dict()
+        if await terminal_completion_matches(
+            final_status, plan_id=plan_id, plan_hash=plan_hash
+        ):
+            return None
+        return blocked(
+            plan_id=plan_id,
+            plan_hash=plan_hash,
+            plan_state=(
+                final_status.get("plan", {}).get("state")
+                if isinstance(final_status.get("plan"), Mapping)
+                else "UNKNOWN"
+            ),
+            new_intents=new_intents,
+            execution_mutated=True,
+            reason="final_reconcile_did_not_archive",
+        )
     finally:
         if token is not None:
             await backend._release_leader(token)
-
-    after = (await backend.execution.status()).as_dict()
-    after_plan = after.get("plan")
-    if (
-        isinstance(after_plan, Mapping)
-        and after_plan.get("state") == "TERMINAL"
-        and after_plan.get("plan_id") == plan_id
-        and after_plan.get("plan_hash") == plan_hash
-    ):
-        return None
-    resume = resumed.as_dict()
-    new_intents = int(resume["new_intent_count"])
-    return {
-        "status": "CURRENT_IDENTITY_RECOVERY",
-        "plan_id": plan_id,
-        "plan_hash": plan_hash,
-        "plan_state": (
-            after_plan.get("state")
-            if isinstance(after_plan, Mapping)
-            else "UNKNOWN"
-        ),
-        "new_intents": new_intents,
-        "execution_mutated": True,
-        "gateway_mutated": new_intents > 0,
-    }
 
 
 async def execute_once(

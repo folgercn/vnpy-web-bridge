@@ -185,6 +185,8 @@ def test_execute_once_recovers_existing_identity_before_new_target_planning(
             "plan": {"state": state, "plan_id": old_plan_id, "plan_hash": old_plan_hash},
             "leader": {"held": False},
             "reconciliation": {"state": reconciliation_state, "unknown_outcomes": 1 if reconciliation_state == "UNKNOWN" else 0},
+            "broker": {"active_order_count": 0},
+            "send_intents": [{"plan_id": old_plan_id, "plan_hash": old_plan_hash, "state": "PERSISTED"}],
         }
 
     class Execution:
@@ -208,7 +210,9 @@ def test_execute_once_recovers_existing_identity_before_new_target_planning(
             assert kwargs["plan_id"] == old_plan_id
             assert kwargs["plan_hash"] == old_plan_hash
             events.append("resume-old-identity")
-            return SimpleNamespace(as_dict=lambda: {"new_intent_count": 0})
+            return SimpleNamespace(
+                as_dict=lambda: {"state": "TERMINAL", "new_intent_count": 0}
+            )
 
         async def release_leader(self, _token):
             events.append("release")
@@ -238,16 +242,17 @@ def test_execute_once_recovers_existing_identity_before_new_target_planning(
         )
     )
 
-    assert result == {
-        "status": "CURRENT_IDENTITY_RECOVERY",
-        "plan_id": old_plan_id,
-        "plan_hash": old_plan_hash,
-        "plan_state": "ACTIVE",
-        "new_intents": 0,
-        "execution_mutated": True,
-        "gateway_mutated": False,
-    }
-    assert events == ["status", "acquire", "renew", "snapshot", "resume-old-identity", "release", "status"]
+    assert result["status"] == "CURRENT_IDENTITY_RECOVERY"
+    assert result["plan_id"] == old_plan_id
+    assert result["plan_hash"] == old_plan_hash
+    assert result["plan_state"] == "ACTIVE"
+    assert result["new_intents"] == 0
+    assert result["execution_mutated"] is True
+    assert result["gateway_mutated"] is False
+    assert result["reason"] == (
+        "unknown_outcome" if reconciliation_state == "UNKNOWN" else "pending_intents"
+    )
+    assert events == ["status", "acquire", "renew", "snapshot", "resume-old-identity", "status", "release"]
 
 
 def test_execute_once_allows_new_target_only_after_old_identity_is_terminal(
@@ -267,16 +272,35 @@ def test_execute_once_allows_new_target_only_after_old_identity_is_terminal(
     old_plan_hash = "b" * 64
     events: list[str] = []
 
-    def status(state: str) -> dict:
+    def active_status() -> dict:
         return {
-            "plan": {"state": state, "plan_id": old_plan_id, "plan_hash": old_plan_hash},
+            "state_version": 9,
+            "lifecycle": "READY",
+            "plan": {"state": "ACTIVE", "plan_id": old_plan_id, "plan_hash": old_plan_hash},
             "leader": {"held": False},
+            "authority": {"state": "ENABLED"},
             "reconciliation": {"state": "RECONCILED", "unknown_outcomes": 0},
+            "broker": {"active_order_count": 0},
+            "send_intents": [{"plan_id": old_plan_id, "plan_hash": old_plan_hash, "state": "TERMINAL"}],
+            "safe_to_restart": False,
+        }
+
+    def terminal_status() -> dict:
+        return {
+            "state_version": 10,
+            "lifecycle": "READY",
+            "plan": {"state": "TERMINAL", "plan_id": old_plan_id, "plan_hash": old_plan_hash},
+            "leader": {"held": False},
+            "authority": {"state": "REVOKED"},
+            "reconciliation": {"state": "RECONCILED", "unknown_outcomes": 0},
+            "broker": {"active_order_count": 0},
+            "send_intents": [{"plan_id": old_plan_id, "plan_hash": old_plan_hash, "state": "TERMINAL"}],
+            "safe_to_restart": True,
         }
 
     class Execution:
         def __init__(self) -> None:
-            self.statuses = iter((status("ACTIVE"), status("TERMINAL")))
+            self.statuses = iter((active_status(), active_status(), terminal_status()))
 
         async def status(self):
             events.append("status")
@@ -298,10 +322,29 @@ def test_execute_once_allows_new_target_only_after_old_identity_is_terminal(
             assert kwargs["plan_id"] == old_plan_id
             assert kwargs["plan_hash"] == old_plan_hash
             events.append("resume-old-identity")
-            return SimpleNamespace(as_dict=lambda: {"new_intent_count": 0})
+            return SimpleNamespace(
+                as_dict=lambda: {"state": "TERMINAL", "new_intent_count": 0}
+            )
 
         async def release_leader(self, _token):
             events.append("release")
+
+        async def ready(self):
+            events.append("ready")
+            return {"gateway_snapshot_id": "old-identity-snapshot"}
+
+        async def submit(self, command):
+            assert command["command"] == "reconcile"
+            assert command["expected"]["state_version"] == 9
+            events.append("final-reconcile-old-identity")
+            return {"accepted": True}
+
+        async def completion(self, plan_id: str):
+            assert plan_id == old_plan_id
+            events.append("old-identity-completion")
+            return SimpleNamespace(
+                as_dict=lambda: {"plan_id": old_plan_id, "plan_hash": old_plan_hash}
+            )
 
         async def target_plan_recovery(self, _key: str):
             events.append("new-target-recovery")
@@ -318,6 +361,9 @@ def test_execute_once_allows_new_target_only_after_old_identity_is_terminal(
 
         async def _release_leader(self, token):
             await self.execution.release_leader(token)
+
+        def _actor(self):
+            return {"service": "control-api", "principal": "test", "operator": "test", "role": "admin"}
 
         async def _install_or_recover_plan(self, *, phase_key: str, handoff):
             assert handoff is not None
@@ -346,8 +392,108 @@ def test_execute_once_allows_new_target_only_after_old_identity_is_terminal(
 
     assert result["status"] == "TARGET_PLAN_V3_DRY_RUN"
     assert events.index("resume-old-identity") < events.index("new-target-recovery")
+    assert events.index("final-reconcile-old-identity") < events.index("new-target-recovery")
+    assert events.index("old-identity-completion") < events.index("new-target-recovery")
     assert events.index("new-target-recovery") < events.index("new-target-facts")
     assert events[-2:] == ["install-new-target", "drive-new-target"]
+
+
+def test_execute_once_blocks_new_target_when_old_final_reconcile_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _bundle()
+    old_target = _target(bundle)
+    new_route = _route(bundle, ag="SHFE.ag3012")
+    new_target = materializer.materialize_target(
+        planner_bundle=bundle,
+        planner_bundle_raw=_raw(bundle),
+        daily_route=new_route,
+        daily_route_raw=_raw(new_route),
+        generated_at=old_target["generated_at"],
+    )
+    old_plan_id = f"simnow-experimental-{old_target['target_id'][:32]}"
+    old_plan_hash = "c" * 64
+    events: list[str] = []
+    active = {
+        "state_version": 11,
+        "lifecycle": "READY",
+        "plan": {"state": "ACTIVE", "plan_id": old_plan_id, "plan_hash": old_plan_hash},
+        "leader": {"held": False},
+        "authority": {"state": "ENABLED"},
+        "reconciliation": {"state": "RECONCILED", "unknown_outcomes": 0},
+        "broker": {"active_order_count": 0},
+        "send_intents": [{"plan_id": old_plan_id, "plan_hash": old_plan_hash, "state": "TERMINAL"}],
+        "safe_to_restart": False,
+    }
+
+    class Execution:
+        def __init__(self) -> None:
+            self.statuses = iter((active, active))
+
+        async def status(self):
+            events.append("status")
+            return SimpleNamespace(as_dict=lambda: next(self.statuses))
+
+        async def acquire_leader(self, _owner_id: str):
+            events.append("acquire")
+            return SimpleNamespace(epoch=1, fencing_token=1)
+
+        async def renew_leader(self, token):
+            events.append("renew")
+            return token
+
+        async def reconciliation_snapshot(self):
+            events.append("snapshot")
+            return SimpleNamespace()
+
+        async def resume_active_plan(self, **kwargs):
+            assert kwargs["plan_id"] == old_plan_id
+            assert kwargs["plan_hash"] == old_plan_hash
+            events.append("resume-old-identity")
+            return SimpleNamespace(
+                as_dict=lambda: {"state": "TERMINAL", "new_intent_count": 0}
+            )
+
+        async def release_leader(self, _token):
+            events.append("release")
+
+        async def target_plan_recovery(self, _key: str):
+            pytest.fail("unknown final reconcile must not derive a new target")
+
+    class Backend:
+        def __init__(self) -> None:
+            self.config = SimpleNamespace(raw={"leader_owner_id": "experimental-test"})
+            self.execution = Execution()
+
+        def _actor(self):
+            return {"service": "control-api", "principal": "test", "operator": "test", "role": "admin"}
+
+        async def _release_leader(self, token):
+            await self.execution.release_leader(token)
+
+    async def unknown_final_reconcile(*_args, **_kwargs):
+        events.append("final-reconcile-old-identity")
+        raise runner.ExecutionClientError("unknown final reconcile")
+
+    monkeypatch.setattr(
+        runner, "_submit_reconcile_with_ready_snapshot", unknown_final_reconcile
+    )
+    result = asyncio.run(
+        runner.execute_once(
+            new_target,
+            bundle,
+            backend=Backend(),
+            formal_state_dir=Path("/unused"),
+            formal_projection_dir=Path("/unused"),
+            expires_at="2099-01-01T00:00:00Z",
+        )
+    )
+
+    assert result["status"] == "CURRENT_IDENTITY_RECOVERY"
+    assert result["plan_id"] == old_plan_id
+    assert result["plan_hash"] == old_plan_hash
+    assert result["reason"] == "final_reconcile_outcome_unknown"
+    assert events == ["status", "acquire", "renew", "snapshot", "resume-old-identity", "status", "renew", "final-reconcile-old-identity", "release"]
 
 
 def test_runner_formal_quote_failure_is_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
