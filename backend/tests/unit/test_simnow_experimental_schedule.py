@@ -30,11 +30,11 @@ def test_experimental_launchd_only_wakes_one_shot_runner() -> None:
     assert "KeepAlive" not in payload
     assert len(payload["StartCalendarInterval"]) == 10
     assert {entry["Weekday"] for entry in payload["StartCalendarInterval"]} == {
+        1,
         2,
         3,
         4,
         5,
-        6,
     }
     assert {entry["Hour"] for entry in payload["StartCalendarInterval"]} == {9, 13}
 
