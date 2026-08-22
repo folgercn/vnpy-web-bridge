@@ -21,6 +21,7 @@ jobs:
       image_changed: ${{ steps.filter.outputs.image_changed }}
       query_v5_changed: ${{ steps.filter.outputs.query_v5_changed }}
       windows_fence_changed: ${{ steps.filter.outputs.windows_fence_changed }}
+      simnow_experimental_changed: ${{ steps.filter.outputs.simnow_experimental_changed }}
       phase_a_changed: ${{ steps.phase_a_filter.outputs.phase_a_changed }}
       frontend_edge_changed: ${{ steps.phase_a_filter.outputs.frontend_edge_changed }}
       control_api_changed: ${{ steps.phase_a_filter.outputs.control_api_changed }}
@@ -851,6 +852,36 @@ jobs:
           grep -F -- '--static-core-source' /tmp/simnow-runner-help.txt
           grep -F -- '--position-manager-source' /tmp/simnow-runner-help.txt
 
+  simnow-experimental:
+    name: Issue #412 SIMNOW experimental bridge tests
+    needs: changes
+    if: needs.changes.outputs.simnow_experimental_changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install focused test dependencies
+        run: pip install -r backend/requirements.txt
+      - name: Run Issue #412 focused bridge and classifier tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t experimental_tests < <(
+            find backend/tests/unit -maxdepth 1 -type f \
+              -name 'test_issue412_simnow_experimental*.py' -print | sort
+          )
+          PYTHONPATH=backend:scripts:. pytest -q \
+            backend/tests/unit/test_ci_change_classifier.py \
+            "${experimental_tests[@]}"
+
   backend:
     name: Backend tests (shard ${{ matrix.shard }})
     needs: changes
@@ -1123,6 +1154,7 @@ jobs:
       - windows-fence-core
       - docker
       - query-v5-real-oci
+      - simnow-experimental
       - phase-a-release-plan
       - phase-a-build-check
       - phase-b-ci

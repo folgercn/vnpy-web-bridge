@@ -83,6 +83,21 @@ def test_phase_b_simnow_runner_package_does_not_rebuild_unrelated_services() -> 
         assert result["phase_b_gate_blocked"] is False
 
 
+def test_issue412_simnow_experimental_packaging_is_contract_only() -> None:
+    for path in (
+        "deployments/phase-b/Containerfile.simnow-experimental-runner",
+        "deployments/phase-b/requirements-simnow-experimental-runner.txt",
+    ):
+        result = classify_phase_b([path])
+        assert result["phase_b_changed"] is True
+        assert result["phase_b_shared_contract_changed"] is False
+        assert result["selected_rule_ids"] == [
+            "phase-b-issue412-simnow-experimental-packaging"
+        ]
+        assert result["selected_units"] == []
+        assert result["phase_b_gate_blocked"] is False
+
+
 def test_phase_b_simnow_runner_logic_keeps_conservative_coverage() -> None:
     for path in (
         "scripts/simnow_continuous_run_once.py",
