@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SIMNOW experimental target v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "strategy_id", "source_month", "generated_at", "targets", "target_id", "monthly_quantity_sha256", "daily_route_sha256", "production", "live_trading_authorized", "countable_forward", "official_forward_claimed"],
+  "properties": {
+    "schema_version": {"const": "simnow-experimental-target-v1"},
+    "strategy_id": {"const": "STATIC_CORE_EQUAL"},
+    "source_month": {"type": "string", "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])$"},
+    "generated_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "target_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "monthly_quantity_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "daily_route_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "production": {"const": false},
+    "live_trading_authorized": {"const": false},
+    "countable_forward": {"const": false},
+    "official_forward_claimed": {"const": false},
+    "targets": {
+      "type": "array", "minItems": 10, "maxItems": 10,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["product", "exact_contract", "quantity"],
+        "properties": {
+          "product": {"enum": ["ag", "al", "au", "bu", "cu", "rb", "ru", "sc", "sp", "zn"]},
+          "exact_contract": {"type": "string", "pattern": "^(SHFE|INE)\\.[a-z]{2}[0-9]{4}$"},
+          "quantity": {"type": "integer", "minimum": -500, "maximum": 500}
+        }
+      }
+    }
+  }
+}
