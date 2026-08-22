@@ -47,6 +47,7 @@ def test_experimental_glue_has_a_focused_job_without_heavy_ci() -> None:
         "simnow_experimental_changed: "
         "${{ steps.filter.outputs.simnow_experimental_changed }}" in WORKFLOW
     )
+    assert WORKFLOW.count("  simnow-experimental:\n") == 1
     job = WORKFLOW.split("  simnow-experimental:\n", maxsplit=1)[1].split(
         "  backend:\n", maxsplit=1
     )[0]
@@ -64,6 +65,10 @@ def test_experimental_glue_has_a_focused_job_without_heavy_ci() -> None:
         "--cap-drop ALL",
         "--security-opt no-new-privileges",
         '"$image" --help',
+        '--entrypoint python "$image" /app/scripts/simnow_experimental_monthly_once.py --help',
+        "grep -F -- '--source-month' /tmp/simnow-experimental-monthly-help.txt",
+        "grep -F -- '--daily-pit-route' /tmp/simnow-experimental-monthly-help.txt",
+        "grep -F -- '--target-output' /tmp/simnow-experimental-monthly-help.txt",
     ):
         assert required in job
     for forbidden in (
@@ -76,6 +81,7 @@ def test_experimental_glue_has_a_focused_job_without_heavy_ci() -> None:
         "Containerfile.monitor-worker",
         "Containerfile.signing-authority",
         "Production image",
+        "production",
     ):
         assert forbidden not in job
     assert "scripts/ci/phase_c_offline_e2e.sh" not in job

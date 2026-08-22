@@ -94,6 +94,7 @@ def test_phase_b_batch_only_change_does_not_run_projection_dependency_group() ->
 
 def test_issue412_experimental_glue_skips_phase_c_build_and_offline_e2e() -> None:
     for path in (
+        "scripts/simnow_experimental_monthly_once.py",
         "scripts/simnow_experimental_run_once.py",
         "backend/tests/unit/test_simnow_experimental_target.py",
         "docs/schemas/simnow-experimental-target-v1.schema.json",

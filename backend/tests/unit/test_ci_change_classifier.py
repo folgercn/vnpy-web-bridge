@@ -122,6 +122,7 @@ def test_simnow_runner_logic_and_shared_execution_still_take_heavy_paths() -> No
 def test_issue412_experimental_glue_stays_on_the_contract_only_fast_lane() -> None:
     glue_only = [
         "scripts/simnow_experimental_materialize_target.py",
+        "scripts/simnow_experimental_monthly_once.py",
         "scripts/simnow_experimental_run_once.py",
         "backend/tests/unit/test_simnow_experimental_target.py",
         "docs/schemas/simnow-experimental-target-v1.schema.json",
@@ -171,6 +172,7 @@ def test_issue412_fast_lane_does_not_cover_execution_or_quote_core() -> None:
 def test_experimental_fast_lane_requires_explicit_glue_registration() -> None:
     for path in (
         "scripts/simnow_experimental_materialize_target.py",
+        "scripts/simnow_experimental_monthly_once.py",
         "scripts/simnow_experimental_run_once.py",
     ):
         assert classify([path])["simnow_experimental_changed"] is True
