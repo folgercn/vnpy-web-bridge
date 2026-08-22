@@ -886,6 +886,16 @@ jobs:
             backend/tests/unit/test_ci_change_classifier.py \
             "${experimental_tests[@]}"
 
+      - name: Build dedicated experimental runner and smoke help
+        run: |
+          set -euo pipefail
+          image="vnpy-web-bridge-simnow-experimental-runner:ci-${GITHUB_SHA}"
+          docker build --file deployments/phase-b/Containerfile.simnow-experimental-runner --tag "$image" .
+          docker image inspect "$image" | python -c "import json,sys; config=json.load(sys.stdin)[0]['Config']; assert config['Entrypoint'] == ['python', '/app/scripts/simnow_experimental_run_once.py']; assert config['User'] == '65532:65532'"
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=16m,uid=65532,gid=65532,mode=0700 "$image" --help | tee /tmp/simnow-experimental-runner-help.txt
+          grep -F -- '--target' /tmp/simnow-experimental-runner-help.txt
+          grep -F -- '--monthly-planner-bundle' /tmp/simnow-experimental-runner-help.txt
+
   backend:
     name: Backend tests (shard ${{ matrix.shard }})
     needs: changes
