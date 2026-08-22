@@ -54,7 +54,30 @@ def test_experimental_glue_has_a_focused_job_without_heavy_ci() -> None:
     assert "test_simnow_experimental*.py" in job
     assert "no experimental contract tests found" in job
     assert "backend/tests/unit/test_ci_change_classifier.py" in job
-    assert "docker build" not in job
+    assert (
+        "docker build --file deployments/phase-b/Containerfile.simnow-experimental-runner"
+        in job
+    )
+    for required in (
+        "--network none",
+        "--read-only",
+        "--cap-drop ALL",
+        "--security-opt no-new-privileges",
+        '"$image" --help',
+    ):
+        assert required in job
+    for forbidden in (
+        "Containerfile.simnow-runner",
+        "Containerfile.artifact-custody",
+        "Containerfile.c-fast-producer",
+        "Containerfile.execution-quality-worker",
+        "Containerfile.map-producer",
+        "Containerfile.market-data-worker",
+        "Containerfile.monitor-worker",
+        "Containerfile.signing-authority",
+        "Production image",
+    ):
+        assert forbidden not in job
     assert "scripts/ci/phase_c_offline_e2e.sh" not in job
 
 
