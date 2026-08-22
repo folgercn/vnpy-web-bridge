@@ -853,7 +853,7 @@ jobs:
           grep -F -- '--position-manager-source' /tmp/simnow-runner-help.txt
 
   simnow-experimental:
-    name: Issue #412 SIMNOW experimental bridge tests
+    name: SIMNOW experimental bridge tests
     needs: changes
     if: needs.changes.outputs.simnow_experimental_changed == 'true'
     runs-on: ubuntu-latest
@@ -870,14 +870,18 @@ jobs:
           cache-dependency-path: backend/requirements.txt
       - name: Install focused test dependencies
         run: pip install -r backend/requirements.txt
-      - name: Run Issue #412 focused bridge and classifier tests
+      - name: Run focused experimental bridge and classifier tests
         shell: bash
         run: |
           set -euo pipefail
           mapfile -t experimental_tests < <(
             find backend/tests/unit -maxdepth 1 -type f \
-              -name 'test_issue412_simnow_experimental*.py' -print | sort
+              -name 'test_simnow_experimental*.py' -print | sort
           )
+          if (( ${#experimental_tests[@]} == 0 )); then
+            echo 'no experimental contract tests found' >&2
+            exit 1
+          fi
           PYTHONPATH=backend:scripts:. pytest -q \
             backend/tests/unit/test_ci_change_classifier.py \
             "${experimental_tests[@]}"
