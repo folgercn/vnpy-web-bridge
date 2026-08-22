@@ -16,9 +16,9 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import simnow_experimental_materialize_target as materializer
-import simnow_experimental_run_once as runner
-from test_issue353_static_core_keyless import (
+import simnow_experimental_materialize_target as materializer  # noqa: E402
+import simnow_experimental_run_once as runner  # noqa: E402
+from test_issue353_static_core_keyless import (  # noqa: E402
     _position_manager_snapshot,
     _static_outputs,
 )
@@ -160,6 +160,196 @@ def test_runner_active_pending_or_unknown_is_zero_mutation(facts: dict) -> None:
         asyncio.run(runner.preview_once(_target(bundle), bundle, execution=_Execution(facts), formal_state_dir=Path("/unused"), formal_projection_dir=Path("/unused"), expires_at="2099-01-01T00:00:00Z"))
 
 
+@pytest.mark.parametrize("reconciliation_state", ["RECONCILED", "UNKNOWN"])
+def test_execute_once_recovers_existing_identity_before_new_target_planning(
+    reconciliation_state: str,
+) -> None:
+    """A new target never replaces an ACTIVE/pending/UNKNOWN old identity."""
+
+    bundle = _bundle()
+    old_target = _target(bundle)
+    new_route = _route(bundle, ag="SHFE.ag3012")
+    new_target = materializer.materialize_target(
+        planner_bundle=bundle,
+        planner_bundle_raw=_raw(bundle),
+        daily_route=new_route,
+        daily_route_raw=_raw(new_route),
+        generated_at=old_target["generated_at"],
+    )
+    old_plan_id = f"simnow-experimental-{old_target['target_id'][:32]}"
+    old_plan_hash = "a" * 64
+    events: list[str] = []
+
+    def status(state: str) -> dict:
+        return {
+            "plan": {"state": state, "plan_id": old_plan_id, "plan_hash": old_plan_hash},
+            "leader": {"held": False},
+            "reconciliation": {"state": reconciliation_state, "unknown_outcomes": 1 if reconciliation_state == "UNKNOWN" else 0},
+        }
+
+    class Execution:
+        async def status(self):
+            events.append("status")
+            return SimpleNamespace(as_dict=lambda: status("ACTIVE"))
+
+        async def acquire_leader(self, _owner_id: str):
+            events.append("acquire")
+            return SimpleNamespace(epoch=1, fencing_token=1)
+
+        async def renew_leader(self, token):
+            events.append("renew")
+            return token
+
+        async def reconciliation_snapshot(self):
+            events.append("snapshot")
+            return SimpleNamespace()
+
+        async def resume_active_plan(self, **kwargs):
+            assert kwargs["plan_id"] == old_plan_id
+            assert kwargs["plan_hash"] == old_plan_hash
+            events.append("resume-old-identity")
+            return SimpleNamespace(as_dict=lambda: {"new_intent_count": 0})
+
+        async def release_leader(self, _token):
+            events.append("release")
+
+        async def target_plan_recovery(self, _key: str):
+            pytest.fail("new target recovery lookup must wait for old identity terminal")
+
+        async def account_facts(self):
+            pytest.fail("new target planner must wait for old identity terminal")
+
+    class Backend:
+        def __init__(self) -> None:
+            self.config = SimpleNamespace(raw={"leader_owner_id": "experimental-test"})
+            self.execution = Execution()
+
+        async def _release_leader(self, token):
+            await self.execution.release_leader(token)
+
+    result = asyncio.run(
+        runner.execute_once(
+            new_target,
+            bundle,
+            backend=Backend(),
+            formal_state_dir=Path("/unused"),
+            formal_projection_dir=Path("/unused"),
+            expires_at="2099-01-01T00:00:00Z",
+        )
+    )
+
+    assert result == {
+        "status": "CURRENT_IDENTITY_RECOVERY",
+        "plan_id": old_plan_id,
+        "plan_hash": old_plan_hash,
+        "plan_state": "ACTIVE",
+        "new_intents": 0,
+        "execution_mutated": True,
+        "gateway_mutated": False,
+    }
+    assert events == ["status", "acquire", "renew", "snapshot", "resume-old-identity", "release", "status"]
+
+
+def test_execute_once_allows_new_target_only_after_old_identity_is_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _bundle()
+    old_target = _target(bundle)
+    new_route = _route(bundle, ag="SHFE.ag3012")
+    new_target = materializer.materialize_target(
+        planner_bundle=bundle,
+        planner_bundle_raw=_raw(bundle),
+        daily_route=new_route,
+        daily_route_raw=_raw(new_route),
+        generated_at=old_target["generated_at"],
+    )
+    old_plan_id = f"simnow-experimental-{old_target['target_id'][:32]}"
+    old_plan_hash = "b" * 64
+    events: list[str] = []
+
+    def status(state: str) -> dict:
+        return {
+            "plan": {"state": state, "plan_id": old_plan_id, "plan_hash": old_plan_hash},
+            "leader": {"held": False},
+            "reconciliation": {"state": "RECONCILED", "unknown_outcomes": 0},
+        }
+
+    class Execution:
+        def __init__(self) -> None:
+            self.statuses = iter((status("ACTIVE"), status("TERMINAL")))
+
+        async def status(self):
+            events.append("status")
+            return SimpleNamespace(as_dict=lambda: next(self.statuses))
+
+        async def acquire_leader(self, _owner_id: str):
+            events.append("acquire")
+            return SimpleNamespace(epoch=1, fencing_token=1)
+
+        async def renew_leader(self, token):
+            events.append("renew")
+            return token
+
+        async def reconciliation_snapshot(self):
+            events.append("snapshot")
+            return SimpleNamespace()
+
+        async def resume_active_plan(self, **kwargs):
+            assert kwargs["plan_id"] == old_plan_id
+            assert kwargs["plan_hash"] == old_plan_hash
+            events.append("resume-old-identity")
+            return SimpleNamespace(as_dict=lambda: {"new_intent_count": 0})
+
+        async def release_leader(self, _token):
+            events.append("release")
+
+        async def target_plan_recovery(self, _key: str):
+            events.append("new-target-recovery")
+            return SimpleNamespace(as_dict=lambda: {"state": "BEFORE_CUSTODY"})
+
+        async def account_facts(self):
+            events.append("new-target-facts")
+            return SimpleNamespace(as_dict=lambda: _facts())
+
+    class Backend:
+        def __init__(self) -> None:
+            self.config = SimpleNamespace(raw={"leader_owner_id": "experimental-test"})
+            self.execution = Execution()
+
+        async def _release_leader(self, token):
+            await self.execution.release_leader(token)
+
+        async def _install_or_recover_plan(self, *, phase_key: str, handoff):
+            assert handoff is not None
+            events.append("install-new-target")
+            return {"phase": handoff.target_plan["phase"], "phase_key": phase_key}
+
+        async def _drive_installed_plan(self, recovery):
+            events.append("drive-new-target")
+            return {"state": "COMPLETED", "phase": recovery["phase"]}
+
+    monkeypatch.setattr(
+        runner,
+        "read_simnow_continuous_v3_formal_tick_bindings",
+        lambda requests, **_kwargs: _formal_bindings(requests),
+    )
+    result = asyncio.run(
+        runner.execute_once(
+            new_target,
+            bundle,
+            backend=Backend(),
+            formal_state_dir=Path("/unused"),
+            formal_projection_dir=Path("/unused"),
+            expires_at="2099-01-01T00:00:00Z",
+        )
+    )
+
+    assert result["status"] == "TARGET_PLAN_V3_DRY_RUN"
+    assert events.index("resume-old-identity") < events.index("new-target-recovery")
+    assert events.index("new-target-recovery") < events.index("new-target-facts")
+    assert events[-2:] == ["install-new-target", "drive-new-target"]
+
+
 def test_runner_formal_quote_failure_is_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     bundle = _bundle()
     monkeypatch.setattr(runner, "read_simnow_continuous_v3_formal_tick_bindings", lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("stale")))
@@ -197,6 +387,14 @@ def test_completed_open_recovery_returns_fresh_planner_noop(monkeypatch: pytest.
     }
 
     class RecoveryExecution(_Execution):
+        async def status(self):
+            return SimpleNamespace(
+                as_dict=lambda: {
+                    "plan": {"state": "IDLE"},
+                    "leader": {"held": False},
+                }
+            )
+
         async def target_plan_recovery(self, key: str):
             return SimpleNamespace(as_dict=lambda: open_recovery if key == phase_key("OPEN") else {"state": "BEFORE_CUSTODY"})
 
@@ -247,6 +445,14 @@ def test_execute_once_drives_close_then_fresh_open_without_deferred_reuse(
 
         async def target_plan_recovery(self, _key: str):
             return SimpleNamespace(as_dict=lambda: {"state": "BEFORE_CUSTODY"})
+
+        async def status(self):
+            return SimpleNamespace(
+                as_dict=lambda: {
+                    "plan": {"state": "IDLE"},
+                    "leader": {"held": False},
+                }
+            )
 
         async def account_facts(self):
             events.append("facts")

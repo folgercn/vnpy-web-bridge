@@ -26,31 +26,34 @@ for candidate in (ROOT, ROOT / "backend", ROOT / "scripts"):
     if str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))
 
-from app.control_execution_client import (
+from app.control_execution_client import (  # noqa: E402
     ExecutionClient,
     ExecutionClientError,
 )
-from app.execution.executable_target_adapter import (
+from app.execution.executable_target_adapter import (  # noqa: E402
     _position_manager_final_projection,
     _static_core_equal_outputs,
     build_full_portfolio_quote_requests,
     build_static_core_equal_full_portfolio_keyless_decision,
 )
-from app.execution.formal_tick_reader import (
+from app.execution.formal_tick_reader import (  # noqa: E402
     read_simnow_continuous_v3_formal_tick_bindings,
 )
-from app.execution.gateway_contracts import GatewaySnapshot
-from app.phase_c.adapters import WorkflowAdapterError
-from app.phase_c.client import RemotePhaseCWorkflowClient
-from simnow_continuous_run_once import ContinuousRunError, _ProductionBackend
-from simnow_experimental_materialize_target import (
+from app.execution.gateway_contracts import GatewaySnapshot  # noqa: E402
+from app.phase_c.adapters import WorkflowAdapterError  # noqa: E402
+from app.phase_c.client import RemotePhaseCWorkflowClient  # noqa: E402
+from simnow_continuous_run_once import (  # noqa: E402
+    ContinuousRunError,
+    _ProductionBackend,
+)
+from simnow_experimental_materialize_target import (  # noqa: E402
     ExperimentalTargetError,
     read_json_stable,
     validate_planner_bundle,
     validate_target,
 )
 
-from shared.commodity_execution import (
+from shared.commodity_execution import (  # noqa: E402
     KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
     sha256_json,
 )
@@ -224,6 +227,93 @@ async def preview_once(
     return (result, decision) if _return_decision else result
 
 
+async def _advance_current_execution_identity(
+    backend: _ExperimentalBackend,
+) -> dict[str, Any] | None:
+    """Advance Execution's current identity before deriving a new target key.
+
+    ``target_plan_recovery`` is intentionally keyed by a custody idempotency
+    key.  A newly materialized target cannot know the previous target's key,
+    so a nonterminal plan must first be recovered through Execution's existing
+    current-plan status/resume API.  This keeps pending and UNKNOWN outcomes
+    on their original plan identity and never derives a replacement plan.
+    """
+
+    status = (await backend.execution.status()).as_dict()
+    plan = status.get("plan")
+    if not isinstance(plan, Mapping):
+        raise ExperimentalRunError("Execution current plan projection is invalid")
+    state = plan.get("state")
+    if state in {"IDLE", "TERMINAL"}:
+        return None
+    plan_id = plan.get("plan_id")
+    plan_hash = plan.get("plan_hash")
+    if not isinstance(plan_id, str) or not isinstance(plan_hash, str):
+        raise ExperimentalRunError("Execution current plan identity is invalid")
+    if state != "ACTIVE":
+        return {
+            "status": "CURRENT_IDENTITY_RECOVERY",
+            "plan_id": plan_id,
+            "plan_hash": plan_hash,
+            "plan_state": state,
+            "execution_mutated": False,
+            "gateway_mutated": False,
+        }
+    leader = status.get("leader")
+    if not isinstance(leader, Mapping) or leader.get("held") is True:
+        return {
+            "status": "CURRENT_IDENTITY_RECOVERY",
+            "plan_id": plan_id,
+            "plan_hash": plan_hash,
+            "plan_state": "ACTIVE",
+            "reason": "existing_execution_leader",
+            "execution_mutated": False,
+            "gateway_mutated": False,
+        }
+
+    token = None
+    try:
+        token = await backend.execution.acquire_leader(
+            backend.config.raw["leader_owner_id"]
+        )
+        token = await backend.execution.renew_leader(token)
+        snapshot = await backend.execution.reconciliation_snapshot()
+        resumed = await backend.execution.resume_active_plan(
+            plan_id=plan_id,
+            plan_hash=plan_hash,
+            leader_token=token,
+            reconciliation_snapshot=snapshot,
+        )
+    finally:
+        if token is not None:
+            await backend._release_leader(token)
+
+    after = (await backend.execution.status()).as_dict()
+    after_plan = after.get("plan")
+    if (
+        isinstance(after_plan, Mapping)
+        and after_plan.get("state") == "TERMINAL"
+        and after_plan.get("plan_id") == plan_id
+        and after_plan.get("plan_hash") == plan_hash
+    ):
+        return None
+    resume = resumed.as_dict()
+    new_intents = int(resume["new_intent_count"])
+    return {
+        "status": "CURRENT_IDENTITY_RECOVERY",
+        "plan_id": plan_id,
+        "plan_hash": plan_hash,
+        "plan_state": (
+            after_plan.get("state")
+            if isinstance(after_plan, Mapping)
+            else "UNKNOWN"
+        ),
+        "new_intents": new_intents,
+        "execution_mutated": True,
+        "gateway_mutated": new_intents > 0,
+    }
+
+
 async def execute_once(
     target: Mapping[str, Any], planner_bundle: Mapping[str, Any], *, backend: _ExperimentalBackend,
     formal_state_dir: Path, formal_projection_dir: Path, expires_at: str,
@@ -274,9 +364,15 @@ async def execute_once(
         ):
             raise ExperimentalRunError("existing recovery does not bind experimental target")
 
-    # Recovery always wins over fresh planning.  An existing same-identity
-    # TargetPlan may be ACTIVE/pending/UNKNOWN and must be queried/driven by
-    # Execution rather than rejected by the new-plan admission gate.
+    # Recovery of Execution's current identity always wins over fresh planning.
+    # This covers a previous experimental target whose phase key is not
+    # derivable from the newly materialized target.
+    current_recovery = await _advance_current_execution_identity(backend)
+    if current_recovery is not None:
+        return current_recovery
+
+    # A recovered same-target TargetPlan may still have an installed custody
+    # identity even when it is no longer the active Execution plan.
     for existing_phase in ("CLOSE", "OPEN"):
         recovery = (await backend.execution.target_plan_recovery(phase_key(existing_phase))).as_dict()
         if recovery.get("state") == "BEFORE_CUSTODY":
