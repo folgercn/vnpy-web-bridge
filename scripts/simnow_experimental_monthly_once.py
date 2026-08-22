@@ -227,6 +227,12 @@ def _require_target_month_advances(current: Mapping[str, Any] | None, source_mon
         )
 
 
+def _target_rows_by_product(target: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    """Return the already-validated target rows keyed by product."""
+
+    return {str(row["product"]): row for row in target["targets"]}
+
+
 @contextmanager
 def _target_lock(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -297,14 +303,7 @@ def materialize_monthly_once(
             raise ExperimentalMonthlyError(
                 "existing experimental target monthly bundle differs"
             )
-        if (
-            current is not None
-            and current_value["source_month"] == source_month
-            and current_value["monthly_quantity_sha256"]
-            == hashlib.sha256(bundle_raw).hexdigest()
-            and current_value["daily_route_sha256"]
-            == hashlib.sha256(daily_route_raw).hexdigest()
-        ):
+        if current_value is not None and current_value["source_month"] == source_month:
             try:
                 expected = materialize_target(
                     planner_bundle=bundle,
@@ -315,15 +314,26 @@ def materialize_monthly_once(
                 )
             except ExperimentalTargetError as exc:
                 raise ExperimentalMonthlyError(str(exc)) from exc
-            if current[1] != canonical_json_line(expected):
+
+            current_rows = _target_rows_by_product(current_value)
+            expected_rows = _target_rows_by_product(expected)
+            if any(
+                current_rows[product]["quantity"] != expected_rows[product]["quantity"]
+                for product in expected_rows
+            ):
                 raise ExperimentalMonthlyError(
-                    "existing experimental target is not bound to current inputs"
+                    "existing experimental target quantity vector differs"
                 )
-            return {
-                "status": "NO_NEW_TARGET",
-                "target_id": current_value["target_id"],
-                "monthly_bundle_created": created_bundle,
-            }
+            if all(
+                current_rows[product]["exact_contract"]
+                == expected_rows[product]["exact_contract"]
+                for product in expected_rows
+            ):
+                return {
+                    "status": "NO_NEW_TARGET",
+                    "target_id": current_value["target_id"],
+                    "monthly_bundle_created": created_bundle,
+                }
 
         try:
             target = materialize_target(

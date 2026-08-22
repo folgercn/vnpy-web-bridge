@@ -27,11 +27,16 @@ def _raw(value: dict) -> bytes:
     return materializer.canonical_json_line(value)
 
 
-def _route(snapshot: dict, *, ag: str | None = None) -> dict:
+def _route(
+    snapshot: dict,
+    *,
+    ag: str | None = None,
+    metadata: dict[str, str] | None = None,
+) -> dict:
     routes = {row["product"]: row["exact_contract"] for row in snapshot["targets"]}
     if ag is not None:
         routes["ag"] = ag
-    return {
+    route = {
         "schema_version": "daily-pit-route-v1",
         "mains": [
             {
@@ -42,6 +47,9 @@ def _route(snapshot: dict, *, ag: str | None = None) -> dict:
             for product in materializer.PRODUCTS
         ],
     }
+    if metadata is not None:
+        route["metadata"] = metadata
+    return route
 
 
 def _install_producers(monkeypatch: pytest.MonkeyPatch, *, snapshot: dict) -> dict[str, int]:
@@ -115,6 +123,30 @@ def test_same_month_restart_reuses_bundle_and_preserves_target_bytes_and_mtime(
     assert (paths["monthly_bundle_directory"] / "2030-01.json").read_bytes() == bundle_before
 
 
+def test_same_route_with_changed_daily_metadata_preserves_target_bytes_and_mtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _projection, _freeze, evidence = _static_outputs()
+    snapshot = _position_manager_snapshot(evidence)
+    paths = _paths(tmp_path, snapshot)
+    _install_producers(monkeypatch, snapshot=snapshot)
+    first = _run(paths)
+    target_before = paths["target_path"].read_bytes()
+    target_mtime_before = paths["target_path"].stat().st_mtime_ns
+
+    paths["daily_pit_route_path"].write_bytes(
+        _raw(_route(snapshot, metadata={"research_artifact_id": "daily-next"}))
+    )
+
+    assert _run(paths) == {
+        "status": "NO_NEW_TARGET",
+        "target_id": first["target_id"],
+        "monthly_bundle_created": False,
+    }
+    assert paths["target_path"].read_bytes() == target_before
+    assert paths["target_path"].stat().st_mtime_ns == target_mtime_before
+
+
 def test_route_change_reuses_monthly_bytes_and_updates_only_exact_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -133,7 +165,23 @@ def test_route_change_reuses_monthly_bytes_and_updates_only_exact_contract(
     assert after_result["status"] == "MATERIALIZED"
     assert calls == {"static": 1, "thermostat": 1}
     assert (paths["monthly_bundle_directory"] / "2030-01.json").read_bytes() == bundle_before
-    assert [row["quantity"] for row in after["targets"]] == [row["quantity"] for row in before["targets"]]
+    assert after["monthly_quantity_sha256"] == before["monthly_quantity_sha256"]
+    after_quantities = {row["product"]: row["quantity"] for row in after["targets"]}
+    before_quantities = {
+        row["product"]: row["quantity"] for row in before["targets"]
+    }
+    assert after_quantities == before_quantities
+    after_contracts = {
+        row["product"]: row["exact_contract"] for row in after["targets"]
+    }
+    before_contracts = {
+        row["product"]: row["exact_contract"] for row in before["targets"]
+    }
+    assert {
+        row["product"]
+        for row in after["targets"]
+        if after_contracts[row["product"]] != before_contracts[row["product"]]
+    } == {"ag"}
     assert after["targets"][0]["exact_contract"] == "SHFE.ag3012"
     assert after["target_id"] != before["target_id"]
 
@@ -357,6 +405,26 @@ def test_same_month_target_with_different_monthly_bundle_fails_closed(
     target_before = paths["target_path"].read_bytes()
 
     with pytest.raises(monthly_once.ExperimentalMonthlyError, match="monthly bundle differs"):
+        _run(paths)
+    assert paths["target_path"].read_bytes() == target_before
+
+
+def test_same_month_tampered_valid_quantity_vector_stops_before_route_update(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _projection, _freeze, evidence = _static_outputs()
+    snapshot = _position_manager_snapshot(evidence)
+    paths = _paths(tmp_path, snapshot)
+    _install_producers(monkeypatch, snapshot=snapshot)
+    _run(paths)
+    tampered = json.loads(paths["target_path"].read_bytes())
+    tampered["targets"][0]["quantity"] += 1
+    tampered["target_id"] = materializer._target_id(tampered)
+    paths["target_path"].write_bytes(_raw(tampered))
+    target_before = paths["target_path"].read_bytes()
+    paths["daily_pit_route_path"].write_bytes(_raw(_route(snapshot, ag="SHFE.ag3012")))
+
+    with pytest.raises(monthly_once.ExperimentalMonthlyError, match="quantity vector differs"):
         _run(paths)
     assert paths["target_path"].read_bytes() == target_before
 
