@@ -12,23 +12,17 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import simnow_experimental_offline_harness as harness
-from test_simnow_experimental_target import _bundle, _raw, _target
+import simnow_experimental_offline_harness as harness  # noqa: E402
+from test_simnow_experimental_target import _bundle, _raw, _target  # noqa: E402
 
 
-def test_offline_harness_exercises_all_planner_paths_without_real_clients() -> None:
-    result = asyncio.run(
-        harness.run_offline_harness(
-            _target(_bundle()), _bundle(), expires_at="2099-01-01T00:00:00Z"
-        )
-    )
-
+def _assert_offline_envelope(result: dict, *, status: str) -> None:
     assert result["marker"] == "SIMNOW_EXPERIMENTAL_OFFLINE_TEST"
     assert result["disclaimers"] == [
         "OFFLINE TEST ONLY",
         "NOT REAL SIMNOW ACCEPTANCE",
     ]
-    assert result["status"] == "PASS"
+    assert result["status"] == status
     assert {
         field: result[field]
         for field in (
@@ -47,6 +41,16 @@ def test_offline_harness_exercises_all_planner_paths_without_real_clients() -> N
         "execution_mutated": False,
         "gateway_mutated": False,
     }
+
+
+def test_offline_harness_exercises_all_planner_paths_without_real_clients() -> None:
+    result = asyncio.run(
+        harness.run_offline_harness(
+            _target(_bundle()), _bundle(), expires_at="2099-01-01T00:00:00Z"
+        )
+    )
+
+    _assert_offline_envelope(result, status="PASS")
     scenarios = {item["scenario"]: item for item in result["scenarios"]}
     assert scenarios["flat_to_open"]["result"]["phase"] == "OPEN"
     assert scenarios["same_target_noop"]["result"]["new_intents"] == 0
@@ -90,11 +94,9 @@ def test_offline_harness_cli_rejects_execute_and_emits_explicit_marker(
     )
 
     assert harness.main() == 2
-    assert json.loads(capsys.readouterr().out) == {
-        "error": "--execute is forbidden",
-        "marker": "SIMNOW_EXPERIMENTAL_OFFLINE_TEST",
-        "status": "STOP",
-    }
+    result = json.loads(capsys.readouterr().out)
+    _assert_offline_envelope(result, status="STOP")
+    assert result["error"] == "--execute is forbidden"
 
 
 def test_offline_harness_cli_runs_one_shot_with_only_local_inputs(
@@ -122,9 +124,53 @@ def test_offline_harness_cli_runs_one_shot_with_only_local_inputs(
 
     assert harness.main() == 0
     result = json.loads(capsys.readouterr().out)
-    assert result["marker"] == "SIMNOW_EXPERIMENTAL_OFFLINE_TEST"
-    assert result["status"] == "PASS"
-    assert result["execution_mutated"] is False
+    _assert_offline_envelope(result, status="PASS")
+
+
+def test_offline_harness_cli_read_validation_and_preview_stops_keep_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle = _bundle()
+    target = _target(bundle)
+    target_path = tmp_path / "target.json"
+    bundle_path = tmp_path / "bundle.json"
+    target_path.write_bytes(_raw(target))
+    bundle_path.write_bytes(_raw(bundle))
+
+    def run(*, target_argument: Path, bundle_argument: Path) -> dict:
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "offline-harness",
+                "--target",
+                str(target_argument),
+                "--monthly-planner-bundle",
+                str(bundle_argument),
+                "--expires-at",
+                "2099-01-01T00:00:00Z",
+            ],
+        )
+        assert harness.main() == 1
+        return json.loads(capsys.readouterr().out)
+
+    _assert_offline_envelope(
+        run(target_argument=tmp_path / "missing.json", bundle_argument=bundle_path),
+        status="STOP",
+    )
+    target_path.write_bytes(b"{}\n")
+    _assert_offline_envelope(
+        run(target_argument=target_path, bundle_argument=bundle_path), status="STOP"
+    )
+    target_path.write_bytes(_raw(target))
+
+    async def preview_error(*_args, **_kwargs) -> dict:
+        raise harness.ExperimentalRunError("synthetic preview unavailable")
+
+    monkeypatch.setattr(harness, "_preview", preview_error)
+    _assert_offline_envelope(
+        run(target_argument=target_path, bundle_argument=bundle_path), status="STOP"
+    )
 
 
 def test_offline_harness_does_not_construct_the_real_execution_client() -> None:

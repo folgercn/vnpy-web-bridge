@@ -24,25 +24,42 @@ for candidate in (ROOT, ROOT / "backend", ROOT / "scripts"):
     if str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))
 
-from app.execution.formal_tick_reader import FormalTickBinding
-from simnow_experimental_materialize_target import (
+from app.execution.formal_tick_reader import FormalTickBinding  # noqa: E402
+from simnow_experimental_materialize_target import (  # noqa: E402
     ExperimentalTargetError,
     read_json_stable,
     validate_planner_bundle,
     validate_target,
 )
-from simnow_experimental_run_once import (
+from simnow_experimental_run_once import (  # noqa: E402
     ExperimentalRunError,
     preview_once,
 )
 
-from shared.commodity_execution import sha256_json
+from shared.commodity_execution import sha256_json  # noqa: E402
 
 OFFLINE_TEST_MARKER = "SIMNOW_EXPERIMENTAL_OFFLINE_TEST"
 _DISCLAIMERS = (
     "OFFLINE TEST ONLY",
     "NOT REAL SIMNOW ACCEPTANCE",
 )
+
+
+def _envelope(*, status: str, **payload: Any) -> dict[str, Any]:
+    """Make every CLI result unambiguously offline and zero-mutation."""
+
+    return {
+        **payload,
+        "marker": OFFLINE_TEST_MARKER,
+        "disclaimers": list(_DISCLAIMERS),
+        "status": status,
+        "production": False,
+        "live_trading_authorized": False,
+        "countable_forward": False,
+        "official_forward_claimed": False,
+        "execution_mutated": False,
+        "gateway_mutated": False,
+    }
 
 
 class _SyntheticExecution:
@@ -215,18 +232,7 @@ async def run_offline_harness(
         else:  # pragma: no cover - safety boundary, exercised by test
             raise ExperimentalRunError(f"synthetic {blocked_by} state was admitted")
 
-    return {
-        "marker": OFFLINE_TEST_MARKER,
-        "disclaimers": list(_DISCLAIMERS),
-        "status": "PASS",
-        "production": False,
-        "live_trading_authorized": False,
-        "countable_forward": False,
-        "official_forward_claimed": False,
-        "execution_mutated": False,
-        "gateway_mutated": False,
-        "scenarios": scenarios,
-    }
+    return _envelope(status="PASS", scenarios=scenarios)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -241,7 +247,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     if args.execute:
-        print(json.dumps({"marker": OFFLINE_TEST_MARKER, "status": "STOP", "error": "--execute is forbidden"}, sort_keys=True))
+        print(json.dumps(_envelope(status="STOP", error="--execute is forbidden"), sort_keys=True))
         return 2
     try:
         target, target_raw = read_json_stable(args.target, label="experimental target")
@@ -253,7 +259,7 @@ def main() -> int:
             raise ExperimentalRunError("monthly planner bundle hash does not bind target")
         result = asyncio.run(run_offline_harness(target, bundle, expires_at=args.expires_at))
     except (ExperimentalTargetError, ExperimentalRunError) as exc:
-        result = {"marker": OFFLINE_TEST_MARKER, "status": "STOP", "error": str(exc)}
+        result = _envelope(status="STOP", error=str(exc))
     print(json.dumps(result, sort_keys=True))
     return 0 if result["status"] == "PASS" else 1
 
