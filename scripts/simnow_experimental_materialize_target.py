@@ -24,6 +24,8 @@ SCHEMA_VERSION = "simnow-experimental-target-v1"
 STRATEGY_ID = "STATIC_CORE_EQUAL"
 PLANNER_BUNDLE_SCHEMA_VERSION = "simnow-experimental-monthly-planner-bundle-v1"
 STATIC_CORE_EQUAL_MONTHLY = "STATIC_CORE_EQUAL_MONTHLY"
+SIMNOW_EXPERIMENTAL_TEST = "SIMNOW_EXPERIMENTAL_TEST"
+NOT_OFFICIAL_STRATEGY_OUTPUT = "NOT OFFICIAL STRATEGY OUTPUT"
 PRODUCT_EXCHANGES = {
     "ag": "SHFE", "al": "SHFE", "au": "SHFE", "bu": "SHFE",
     "cu": "SHFE", "rb": "SHFE", "ru": "SHFE", "sc": "INE",
@@ -166,7 +168,10 @@ def validate_target(value: Any, *, raw: bytes | None = None) -> dict[str, Any]:
         "monthly_quantity_sha256", "daily_route_sha256", "production", "live_trading_authorized",
         "countable_forward", "official_forward_claimed",
     }
-    if not isinstance(value, dict) or set(value) != fields:
+    test_fields = {
+        "target_mode", "strategy_output_claim", "test_quantity_overrides",
+    }
+    if not isinstance(value, dict) or set(value) not in (fields, fields | test_fields):
         raise ExperimentalTargetError("experimental target fields are invalid")
     if raw is not None and raw != canonical_json_line(value):
         raise ExperimentalTargetError("experimental target must be canonical JSON")
@@ -190,6 +195,24 @@ def validate_target(value: Any, *, raw: bytes | None = None) -> dict[str, Any]:
             raise ExperimentalTargetError("experimental target exact contract is invalid")
         if isinstance(row["quantity"], bool) or not isinstance(row["quantity"], int) or abs(row["quantity"]) > 500:
             raise ExperimentalTargetError("experimental target quantity is invalid")
+    if test_fields & set(value):
+        if (
+            value.get("target_mode") != SIMNOW_EXPERIMENTAL_TEST
+            or value.get("strategy_output_claim") != NOT_OFFICIAL_STRATEGY_OUTPUT
+        ):
+            raise ExperimentalTargetError("experimental test target marker is invalid")
+        overrides = value.get("test_quantity_overrides")
+        if not isinstance(overrides, dict) or not overrides:
+            raise ExperimentalTargetError("experimental test target overrides are invalid")
+        for product, quantity in overrides.items():
+            if (
+                not isinstance(product, str)
+                or product not in PRODUCT_EXCHANGES
+                or isinstance(quantity, bool)
+                or not isinstance(quantity, int)
+                or abs(quantity) > 500
+            ):
+                raise ExperimentalTargetError("experimental test target overrides are invalid")
     if value["target_id"] != _target_id(value):
         raise ExperimentalTargetError("experimental target_id is invalid")
     return value
@@ -212,6 +235,74 @@ def materialize_target(*, planner_bundle: Mapping[str, Any], planner_bundle_raw:
     }
     target["target_id"] = _target_id(target)
     return validate_target(target)
+
+
+def materialize_test_target(
+    *,
+    planner_bundle: Mapping[str, Any],
+    planner_bundle_raw: bytes,
+    daily_route: Mapping[str, Any],
+    daily_route_raw: bytes,
+    generated_at: str,
+    quantity_overrides: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Derive an explicitly non-official test vector from one valid bundle."""
+
+    base = materialize_target(
+        planner_bundle=planner_bundle,
+        planner_bundle_raw=planner_bundle_raw,
+        daily_route=daily_route,
+        daily_route_raw=daily_route_raw,
+        generated_at=generated_at,
+    )
+    if not isinstance(quantity_overrides, Mapping) or not quantity_overrides:
+        raise ExperimentalTargetError("experimental test target overrides are invalid")
+    overrides = dict(quantity_overrides)
+    base_quantities = {row["product"]: row["quantity"] for row in base["targets"]}
+    if any(
+        not isinstance(product, str)
+        or product not in PRODUCT_EXCHANGES
+        or isinstance(quantity, bool)
+        or not isinstance(quantity, int)
+        or abs(quantity) > 500
+        or quantity == base_quantities[product]
+        for product, quantity in overrides.items()
+    ):
+        raise ExperimentalTargetError("experimental test target overrides are invalid")
+    target = {
+        **base,
+        "target_mode": SIMNOW_EXPERIMENTAL_TEST,
+        "strategy_output_claim": NOT_OFFICIAL_STRATEGY_OUTPUT,
+        "test_quantity_overrides": overrides,
+    }
+    for row in target["targets"]:
+        if row["product"] in overrides:
+            row["quantity"] = overrides[row["product"]]
+    target["target_id"] = _target_id(target)
+    return validate_target(target)
+
+
+def validate_test_target_bundle_binding(
+    target: Mapping[str, Any], planner_bundle: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Require every TEST quantity to be the declared overlay of this bundle."""
+
+    value = validate_target(dict(target))
+    bundle = validate_planner_bundle(dict(planner_bundle))
+    if value.get("target_mode") != SIMNOW_EXPERIMENTAL_TEST:
+        return value
+    base_rows = _rows_by_product(bundle["position_manager_snapshot"]["targets"])
+    target_rows = _rows_by_product(value["targets"], quantity_fields=("quantity",))
+    overrides = value["test_quantity_overrides"]
+    for product in PRODUCTS:
+        base_quantity = base_rows[product].get("shadow_target_quantity")
+        expected = overrides.get(product, base_quantity)
+        if (
+            (product in overrides and expected == base_quantity)
+            or target_rows[product]["quantity"] != expected
+        ):
+            raise ExperimentalTargetError("experimental test target does not bind monthly bundle")
+    return value
 
 
 def write_target_atomic(path: Path, value: Mapping[str, Any]) -> None:
@@ -239,7 +330,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--daily-pit-route", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--generated-at", default=None)
+    parser.add_argument(
+        "--test-quantity",
+        action="append",
+        default=[],
+        metavar="PRODUCT=QUANTITY",
+        help="derive an explicit SIMNOW_EXPERIMENTAL_TEST quantity override",
+    )
     return parser
+
+
+def _parse_test_quantities(values: list[str]) -> dict[str, int]:
+    overrides: dict[str, int] = {}
+    for value in values:
+        product, separator, raw_quantity = value.partition("=")
+        if not separator or product in overrides:
+            raise ExperimentalTargetError("experimental test target overrides are invalid")
+        try:
+            quantity = int(raw_quantity)
+        except ValueError as exc:
+            raise ExperimentalTargetError("experimental test target overrides are invalid") from exc
+        overrides[product] = quantity
+    return overrides
 
 
 def main() -> int:
@@ -248,12 +360,25 @@ def main() -> int:
         bundle, bundle_raw = read_json_stable(args.monthly_planner_bundle, label="monthly planner bundle")
         route, route_raw = read_json_stable(args.daily_pit_route, label="daily PIT route")
         generated_at = args.generated_at or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-        target = materialize_target(planner_bundle=bundle, planner_bundle_raw=bundle_raw, daily_route=route, daily_route_raw=route_raw, generated_at=generated_at)
+        if args.test_quantity:
+            target = materialize_test_target(
+                planner_bundle=bundle,
+                planner_bundle_raw=bundle_raw,
+                daily_route=route,
+                daily_route_raw=route_raw,
+                generated_at=generated_at,
+                quantity_overrides=_parse_test_quantities(args.test_quantity),
+            )
+        else:
+            target = materialize_target(planner_bundle=bundle, planner_bundle_raw=bundle_raw, daily_route=route, daily_route_raw=route_raw, generated_at=generated_at)
         write_target_atomic(args.output, target)
     except ExperimentalTargetError as exc:
         print(json.dumps({"status": "STOP", "error": str(exc)}, sort_keys=True))
         return 1
-    print(json.dumps({"status": "MATERIALIZED", "target_id": target["target_id"]}, sort_keys=True))
+    result = {"status": "MATERIALIZED", "target_id": target["target_id"]}
+    if target.get("target_mode") == SIMNOW_EXPERIMENTAL_TEST:
+        result.update({"target_mode": SIMNOW_EXPERIMENTAL_TEST, "strategy_output_claim": NOT_OFFICIAL_STRATEGY_OUTPUT})
+    print(json.dumps(result, sort_keys=True))
     return 0
 
 

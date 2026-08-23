@@ -16,6 +16,23 @@
     "live_trading_authorized": {"const": false},
     "countable_forward": {"const": false},
     "official_forward_claimed": {"const": false},
+    "target_mode": {"const": "SIMNOW_EXPERIMENTAL_TEST"},
+    "strategy_output_claim": {"const": "NOT OFFICIAL STRATEGY OUTPUT"},
+    "test_quantity_overrides": {
+      "type": "object", "minProperties": 1, "additionalProperties": false,
+      "properties": {
+        "ag": {"type": "integer", "minimum": -500, "maximum": 500},
+        "al": {"type": "integer", "minimum": -500, "maximum": 500},
+        "au": {"type": "integer", "minimum": -500, "maximum": 500},
+        "bu": {"type": "integer", "minimum": -500, "maximum": 500},
+        "cu": {"type": "integer", "minimum": -500, "maximum": 500},
+        "rb": {"type": "integer", "minimum": -500, "maximum": 500},
+        "ru": {"type": "integer", "minimum": -500, "maximum": 500},
+        "sc": {"type": "integer", "minimum": -500, "maximum": 500},
+        "sp": {"type": "integer", "minimum": -500, "maximum": 500},
+        "zn": {"type": "integer", "minimum": -500, "maximum": 500}
+      }
+    },
     "targets": {
       "type": "array", "minItems": 10, "maxItems": 10,
       "items": {
@@ -28,5 +45,9 @@
         }
       }
     }
-  }
+  },
+  "allOf": [{
+    "if": {"required": ["target_mode"]},
+    "then": {"required": ["target_mode", "strategy_output_claim", "test_quantity_overrides"]}
+  }]
 }
