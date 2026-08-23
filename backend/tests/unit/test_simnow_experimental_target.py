@@ -85,6 +85,74 @@ def test_materializer_rejects_unmarked_manual_vector() -> None:
         materializer.validate_planner_bundle({"strategy_id": "STATIC_CORE_EQUAL", "targets": []})
 
 
+def test_test_target_is_explicit_overlay_of_validated_monthly_bundle() -> None:
+    bundle = _bundle()
+    route = _route(bundle)
+    target = materializer.materialize_test_target(
+        planner_bundle=bundle,
+        planner_bundle_raw=_raw(bundle),
+        daily_route=route,
+        daily_route_raw=_raw(route),
+        generated_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        quantity_overrides={"ag": 2},
+    )
+    base = _target(bundle)
+    quantities = {row["product"]: row["quantity"] for row in target["targets"]}
+    base_quantities = {row["product"]: row["quantity"] for row in base["targets"]}
+
+    assert target["target_mode"] == materializer.SIMNOW_EXPERIMENTAL_TEST
+    assert target["strategy_output_claim"] == materializer.NOT_OFFICIAL_STRATEGY_OUTPUT
+    assert target["test_quantity_overrides"] == {"ag": 2}
+    assert quantities == {**base_quantities, "ag": 2}
+    assert target["target_id"] != base["target_id"]
+    assert materializer.validate_test_target_bundle_binding(target, bundle) == target
+
+
+@pytest.mark.parametrize("overrides", [{"bad": 1}, {"ag": True}, {"ag": 501}, {"ag": 1}])
+def test_test_target_rejects_invalid_or_noop_override(overrides: dict) -> None:
+    bundle = _bundle()
+    route = _route(bundle)
+    with pytest.raises(materializer.ExperimentalTargetError, match="overrides"):
+        materializer.materialize_test_target(
+            planner_bundle=bundle,
+            planner_bundle_raw=_raw(bundle),
+            daily_route=route,
+            daily_route_raw=_raw(route),
+            generated_at="2030-01-02T03:04:05Z",
+            quantity_overrides=overrides,
+        )
+
+
+def test_test_target_rejects_manual_vector_not_matching_declared_overlay() -> None:
+    bundle = _bundle()
+    route = _route(bundle)
+    target = materializer.materialize_test_target(
+        planner_bundle=bundle,
+        planner_bundle_raw=_raw(bundle),
+        daily_route=route,
+        daily_route_raw=_raw(route),
+        generated_at="2030-01-02T03:04:05Z",
+        quantity_overrides={"ag": 2},
+    )
+    target["targets"][1]["quantity"] = 3
+    target["target_id"] = materializer._target_id(target)
+    with pytest.raises(materializer.ExperimentalTargetError, match="does not bind"):
+        materializer.validate_test_target_bundle_binding(target, bundle)
+
+
+def test_test_target_rejects_manual_noop_override() -> None:
+    bundle = _bundle()
+    target = _target(bundle)
+    target.update({
+        "target_mode": materializer.SIMNOW_EXPERIMENTAL_TEST,
+        "strategy_output_claim": materializer.NOT_OFFICIAL_STRATEGY_OUTPUT,
+        "test_quantity_overrides": {"ag": 1},
+    })
+    target["target_id"] = materializer._target_id(target)
+    with pytest.raises(materializer.ExperimentalTargetError, match="does not bind"):
+        materializer.validate_test_target_bundle_binding(target, bundle)
+
+
 class _Execution:
     def __init__(self, facts: dict) -> None:
         self.facts = facts
@@ -139,6 +207,26 @@ def test_runner_builds_real_target_plan_v3_dry_run(monkeypatch: pytest.MonkeyPat
     assert result["phase"] == "OPEN"
     assert result["new_intents"] > 0
     assert len(result["plan_id"]) > 8 and len(result["plan_hash"]) == 64
+
+
+def test_runner_plans_explicit_test_target_with_existing_targetplan_v3(monkeypatch: pytest.MonkeyPatch) -> None:
+    bundle = _bundle()
+    route = _route(bundle)
+    target = materializer.materialize_test_target(
+        planner_bundle=bundle,
+        planner_bundle_raw=_raw(bundle),
+        daily_route=route,
+        daily_route_raw=_raw(route),
+        generated_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        quantity_overrides={"ag": 2},
+    )
+    monkeypatch.setattr(runner, "read_simnow_continuous_v3_formal_tick_bindings", lambda requests, **_kwargs: _formal_bindings(requests))
+
+    result = asyncio.run(runner.preview_once(target, bundle, execution=_Execution(_facts()), formal_state_dir=Path("/unused"), formal_projection_dir=Path("/unused"), expires_at="2099-01-01T00:00:00Z"))
+
+    assert result["status"] == "TARGET_PLAN_V3_DRY_RUN"
+    assert result["target_mode"] == materializer.SIMNOW_EXPERIMENTAL_TEST
+    assert result["strategy_output_claim"] == materializer.NOT_OFFICIAL_STRATEGY_OUTPUT
 
 
 def test_runner_rebinds_latest_daily_route_then_plans_close_and_fresh_open(monkeypatch: pytest.MonkeyPatch) -> None:

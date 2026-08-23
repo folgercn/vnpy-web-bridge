@@ -51,8 +51,11 @@ from simnow_continuous_run_once import (  # noqa: E402
 )
 from simnow_experimental_materialize_target import (  # noqa: E402
     ExperimentalTargetError,
+    NOT_OFFICIAL_STRATEGY_OUTPUT,
+    SIMNOW_EXPERIMENTAL_TEST,
     read_json_stable,
     validate_planner_bundle,
+    validate_test_target_bundle_binding,
     validate_target,
 )
 
@@ -142,7 +145,12 @@ def _planner_inputs(target: Mapping[str, Any], bundle: Mapping[str, Any]) -> dic
         expected = target_rows.get(product)
         if evidence_row.get("product") != product or expected is None:
             raise ExperimentalRunError("monthly planner bundle products are invalid")
-        if snapshot_row.get("shadow_target_quantity") != expected["quantity"]:
+        if target.get("target_mode") == SIMNOW_EXPERIMENTAL_TEST:
+            # The original monthly row remains the immutable baseline.  This
+            # declared overlay is intentionally visible only in the shadow
+            # quantity consumed by the existing TargetPlan-v3 planner.
+            snapshot_row["shadow_target_quantity"] = expected["quantity"]
+        elif snapshot_row.get("shadow_target_quantity") != expected["quantity"]:
             raise ExperimentalRunError("target quantity does not bind monthly planner bundle")
         # DAILY PIT is the only source of the current exact contract.  Preserve
         # all monthly quantities, prices, weights and product specifications.
@@ -167,14 +175,26 @@ def _planner_inputs(target: Mapping[str, Any], bundle: Mapping[str, Any]) -> dic
     }
 
 
+def _checkpoint(target: Mapping[str, Any], result: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep TEST semantics explicit in every runner checkpoint."""
+
+    checkpoint = dict(result)
+    if target.get("target_mode") == SIMNOW_EXPERIMENTAL_TEST:
+        checkpoint.update({
+            "target_mode": SIMNOW_EXPERIMENTAL_TEST,
+            "strategy_output_claim": NOT_OFFICIAL_STRATEGY_OUTPUT,
+        })
+    return checkpoint
+
+
 async def preview_once(
     target: Mapping[str, Any], planner_bundle: Mapping[str, Any], *, execution: ExecutionClient,
     formal_state_dir: Path, formal_projection_dir: Path, expires_at: str, _return_decision: bool = False,
 ) -> Any:
     """Build one existing TargetPlan-v3 decision without mutating Execution."""
 
-    target = validate_target(dict(target))
     bundle = validate_planner_bundle(dict(planner_bundle))
+    target = validate_test_target_bundle_binding(dict(target), bundle)
     planner_inputs = _planner_inputs(target, bundle)
     try:
         facts = (await execution.account_facts()).as_dict()
@@ -216,17 +236,17 @@ async def preview_once(
     except Exception as exc:
         raise ExperimentalRunError("existing TargetPlan v3 planner rejected experimental bundle") from exc
     if decision.noop:
-        result = {"status": "NOOP", "target_id": target["target_id"], "new_intents": 0, "execution_mutated": False, "gateway_mutated": False}
+        result = _checkpoint(target, {"status": "NOOP", "target_id": target["target_id"], "new_intents": 0, "execution_mutated": False, "gateway_mutated": False})
         return (result, decision) if _return_decision else result
     handoff = decision.close_handoff or decision.open_handoff
     if handoff is None:
         raise ExperimentalRunError("existing TargetPlan v3 planner lacks immediate handoff")
-    result = {
+    result = _checkpoint(target, {
         "status": "TARGET_PLAN_V3_DRY_RUN", "target_id": target["target_id"],
         "phase": handoff.target_plan["phase"], "plan_id": handoff.target_plan["plan_id"],
         "plan_hash": handoff.target_plan["plan_hash"], "formal_quote_count": len(bindings),
         "new_intents": len(handoff.target_plan["orders"]), "execution_mutated": False, "gateway_mutated": False,
-    }
+    })
     return (result, decision) if _return_decision else result
 
 
@@ -411,8 +431,8 @@ async def execute_once(
 ) -> dict[str, Any]:
     """Install and drive one existing lifecycle phase; no second dispatcher."""
 
-    target = validate_target(dict(target))
     bundle = validate_planner_bundle(dict(planner_bundle))
+    target = validate_test_target_bundle_binding(dict(target), bundle)
     planner_inputs = _planner_inputs(target, bundle)
     run_id = f"simnow-experimental-{target['target_id'][:48]}"
     position_manager_sha256 = sha256_json(planner_inputs["position_manager_snapshot"])
@@ -460,7 +480,7 @@ async def execute_once(
     # derivable from the newly materialized target.
     current_recovery = await _advance_current_execution_identity(backend)
     if current_recovery is not None:
-        return current_recovery
+        return _checkpoint(target, current_recovery)
 
     # A recovered same-target TargetPlan may still have an installed custody
     # identity even when it is no longer the active Execution plan.
@@ -475,7 +495,7 @@ async def execute_once(
         require_binding(installed, existing_phase)
         lifecycle = await backend._drive_installed_plan(installed)
         if lifecycle.get("state") != "COMPLETED":
-            return {"status": "RECOVERY", "target_id": target["target_id"], "phase": existing_phase, "lifecycle": lifecycle}
+            return _checkpoint(target, {"status": "RECOVERY", "target_id": target["target_id"], "phase": existing_phase, "lifecycle": lifecycle})
 
     for _phase_attempt in range(2):
         preview, decision = await preview_once(
@@ -491,7 +511,7 @@ async def execute_once(
         recovery = await backend._install_or_recover_plan(phase_key=phase_key(phase), handoff=handoff)
         lifecycle = await backend._drive_installed_plan(recovery)
         if lifecycle.get("state") != "COMPLETED" or phase != "CLOSE":
-            return {**preview, "lifecycle": lifecycle}
+            return _checkpoint(target, {**preview, "lifecycle": lifecycle})
         # A completed CLOSE must re-enter via fresh Execution facts, formal
         # quotes and a newly produced OPEN TargetPlan, never a deferred plan.
     raise ExperimentalRunError("CLOSE completed but fresh OPEN was not produced")
