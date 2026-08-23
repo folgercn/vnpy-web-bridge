@@ -15,7 +15,7 @@ import hashlib
 import json
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -189,7 +189,9 @@ def _checkpoint(target: Mapping[str, Any], result: Mapping[str, Any]) -> dict[st
 
 async def preview_once(
     target: Mapping[str, Any], planner_bundle: Mapping[str, Any], *, execution: ExecutionClient,
-    formal_state_dir: Path, formal_projection_dir: Path, expires_at: str, _return_decision: bool = False,
+    formal_state_dir: Path, formal_projection_dir: Path, expires_at: str,
+    formal_binding_reader: Callable[..., tuple[Any, ...]] | None = None,
+    _return_decision: bool = False,
 ) -> Any:
     """Build one existing TargetPlan-v3 decision without mutating Execution."""
 
@@ -215,7 +217,7 @@ async def preview_once(
     bindings: tuple[Any, ...] = ()
     if requirements.requests:
         try:
-            bindings = read_simnow_continuous_v3_formal_tick_bindings(
+            bindings = (formal_binding_reader or read_simnow_continuous_v3_formal_tick_bindings)(
                 requirements.requests, state_dir=formal_state_dir, projection_dir=formal_projection_dir
             )
         except Exception as exc:  # formal reader's typed errors all fail closed here
