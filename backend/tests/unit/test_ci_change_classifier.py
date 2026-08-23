@@ -121,6 +121,9 @@ def test_simnow_runner_logic_and_shared_execution_still_take_heavy_paths() -> No
 
 def test_issue412_experimental_glue_stays_on_the_contract_only_fast_lane() -> None:
     glue_only = [
+        "deployments/com.vnpy-web-bridge.simnow-experimental.plist",
+        "deployments/docker-compose.simnow-experimental.yml",
+        "deployments/simnow-experimental-run-once.sh",
         "scripts/simnow_experimental_materialize_target.py",
         "scripts/simnow_experimental_monthly_once.py",
         "scripts/simnow_experimental_run_once.py",
@@ -171,6 +174,9 @@ def test_issue412_fast_lane_does_not_cover_execution_or_quote_core() -> None:
 
 def test_experimental_fast_lane_requires_explicit_glue_registration() -> None:
     for path in (
+        "deployments/com.vnpy-web-bridge.simnow-experimental.plist",
+        "deployments/docker-compose.simnow-experimental.yml",
+        "deployments/simnow-experimental-run-once.sh",
         "scripts/simnow_experimental_materialize_target.py",
         "scripts/simnow_experimental_monthly_once.py",
         "scripts/simnow_experimental_run_once.py",

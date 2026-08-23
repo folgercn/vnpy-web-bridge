@@ -134,9 +134,12 @@ SIMNOW_EXPERIMENTAL_FASTLANE_GLOBS = (
     "backend/tests/unit/test_simnow_experimental*.py",
 )
 SIMNOW_EXPERIMENTAL_FASTLANE_FILES = {
+    "deployments/com.vnpy-web-bridge.simnow-experimental.plist",
+    "deployments/docker-compose.simnow-experimental.yml",
     "docs/schemas/simnow-experimental-target-v1.schema.json",
     "deployments/phase-b/Containerfile.simnow-experimental-runner",
     "deployments/phase-b/requirements-simnow-experimental-runner.txt",
+    "deployments/simnow-experimental-run-once.sh",
     "scripts/simnow_experimental_materialize_target.py",
     "scripts/simnow_experimental_monthly_once.py",
     "scripts/simnow_experimental_run_once.py",
