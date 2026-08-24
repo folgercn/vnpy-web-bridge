@@ -127,6 +127,28 @@ class ProtectedGenesisReplayInputs:
 
 
 @dataclass(frozen=True)
+class ProtectedLinkedReplayInputs:
+    """Private, config-derived inputs for one linked catalog append.
+
+    The root parent retains only the create-only catalog write.  The service
+    child loads the service-owned calendar/runtime evidence and rebuilds the
+    linked artifact before the parent receives its bounded proof bytes.
+    """
+
+    history_receipt_path: Path
+    runtime_input_path: Path
+    runtime_input_raw_sha256: str
+    service_uid: int
+    service_gid: int
+    history_receipt_raw_sha256: str
+    manifest_public_key_path: Path
+    manifest_public_key_raw_sha256: str
+    business_public_key_raw_sha256: str
+    contract_registry_path: Path
+    contract_registry_raw_sha256: str
+
+
+@dataclass(frozen=True)
 class _ProtectedReplayIdentityContext:
     """Root-derived identity facts that cross exactly one protected fork.
 
@@ -1533,6 +1555,234 @@ def _build_protected_genesis_as_service_locked(
     )
 
 
+def _build_protected_linked_as_service(
+    *,
+    operator_state: OperatorState,
+    official_day: str,
+    inputs: ProtectedLinkedReplayInputs,
+    retry_entry: CatalogEntry | None = None,
+) -> Any:
+    """Replay the next linked artifact as the service identity.
+
+    A root caller cannot read the service-owned official calendar or contract
+    registry.  As with the Genesis bridge, root therefore retains only the
+    immutable catalog publication while a permanently demoted child returns a
+    bounded, root-bound construction proof.
+    """
+
+    from .m2_runtime_loader import load_runtime_context_readonly
+    from .pit_source_view import SourcePins, verify_root_pins
+    from .verified_daily_pit_main_roll_source import (
+        BuiltVerifiedDailyPitMainRollSource,
+        PredecessorContinuity,
+        build_verified_daily_pit_main_roll_source,
+    )
+
+    _require_root()
+    uid, gid = _require_exact_service_identity(inputs.service_uid, inputs.service_gid)
+    identity_context = _prepare_protected_replay_identity_context(
+        uid=uid,
+        gid=gid,
+        write_protected_paths=(
+            operator_state.path.parent,
+            operator_state.path,
+            catalog_root(operator_state.path),
+            inputs.runtime_input_path.parent,
+            inputs.runtime_input_path,
+            inputs.manifest_public_key_path.parent,
+            DEFAULT_MANIFEST_PRIVATE_KEY.parent,
+            DEFAULT_BACKUP_PRIVATE_KEY.parent,
+            DEFAULT_CALENDAR_PRIVATE_KEY.parent,
+        ),
+    )
+    with operator_state_lock(operator_state.path, exclusive=False):
+        current = load_operator_state(operator_state.path)
+        if current != operator_state:
+            raise DailyRollPredecessorCatalogError(
+                "daily roll protected linked replay root changed before fork"
+            )
+        read_fd, write_fd = os.pipe()
+        child = os.fork()
+        if child == 0:
+            status = 70
+            try:
+                os.close(read_fd)
+                result_fd = _close_child_inherited_descriptors(result_fd=write_fd)
+                _drop_to_protected_replay_identity(
+                    uid=uid,
+                    gid=gid,
+                    identity_context=identity_context,
+                )
+                context = load_runtime_context_readonly(inputs.runtime_input_path)
+                if (
+                    context.runtime_input.raw_sha256 != inputs.runtime_input_raw_sha256
+                    or context.policy.uid != uid
+                    or context.policy.gid != gid
+                ):
+                    raise DailyRollPredecessorCatalogError(
+                        "daily roll protected linked replay runtime identity drifted"
+                    )
+                registry_raw = _read_private_protected_evidence(
+                    inputs.contract_registry_path,
+                    "daily roll protected linked contract registry",
+                    uid=uid,
+                    limit=1024 * 1024,
+                )
+                pins = SourcePins(
+                    history_receipt_raw_sha256=inputs.history_receipt_raw_sha256,
+                    operator_state_raw_sha256=operator_state.raw_sha256,
+                    manifest_public_key_raw_sha256=(
+                        inputs.manifest_public_key_raw_sha256
+                    ),
+                    baseline_public_key_raw_sha256=(
+                        inputs.business_public_key_raw_sha256
+                    ),
+                )
+                if retry_entry is None:
+                    built = build_verified_daily_pit_main_roll_source(
+                        context=context,
+                        operator_state=operator_state,
+                        history_receipt_path=inputs.history_receipt_path,
+                        pins=pins,
+                        manifest_public_key_path=inputs.manifest_public_key_path,
+                        official_day=official_day,
+                        contract_registry_raw=registry_raw,
+                        expected_contract_registry_raw_sha256=(
+                            inputs.contract_registry_raw_sha256
+                        ),
+                        predecessor=PredecessorContinuity(),
+                    )
+                else:
+                    head = load_current_catalog_head(operator_state.path)
+                    if (
+                        head.receipt_raw != retry_entry.receipt_raw
+                        or head.artifact_raw != retry_entry.artifact_raw
+                    ):
+                        raise DailyRollPredecessorCatalogError(
+                            "daily roll protected linked retry head drifted"
+                        )
+                    verify_root_pins(
+                        context=context,
+                        operator_state=operator_state,
+                        history_receipt_path=inputs.history_receipt_path,
+                        pins=pins,
+                        manifest_public_key_path=inputs.manifest_public_key_path,
+                    )
+                    artifact = _validated_artifact(retry_entry.artifact_raw)
+                    lineage = artifact["verified_lineage"]
+                    if (
+                        artifact["official_day"] != official_day
+                        or lineage["continuity"]["mode"] != "LINKED_ROOT_CATALOG"
+                        or lineage["runtime"]["runtime_input_raw_sha256"]
+                        != inputs.runtime_input_raw_sha256
+                        or lineage["runtime"]["isolation_policy_raw_sha256"]
+                        != context.policy.raw_sha256
+                        or lineage["runtime"]["warehouse_registry_raw_sha256"]
+                        != context.registry.raw_sha256
+                        or lineage["calendar"]["calendar_raw_sha256"]
+                        != context.calendar.raw_sha256
+                        or lineage["calendar"]["calendar_availability_anchor_raw_sha256"]
+                        != context.availability.raw_sha256
+                        or lineage["contract_registry"]["raw_sha256"]
+                        != sha256(registry_raw)
+                        or sha256(registry_raw)
+                        != inputs.contract_registry_raw_sha256
+                    ):
+                        raise DailyRollPredecessorCatalogError(
+                            "daily roll protected linked retry evidence drifted"
+                        )
+                    built = BuiltVerifiedDailyPitMainRollSource(
+                        artifact_raw=retry_entry.artifact_raw,
+                        artifact_id=artifact["artifact_id"],
+                        artifact_raw_sha256=sha256(retry_entry.artifact_raw),
+                    )
+                raw = _protected_replay_payload(built)
+                offset = 0
+                while offset < len(raw):
+                    offset += os.write(result_fd, raw[offset:])
+                status = 0
+            except (OSError, RegistryError, ValueError):
+                pass
+            finally:
+                try:
+                    os.close(3)
+                except OSError:
+                    pass
+            os._exit(status)
+        os.close(write_fd)
+        try:
+            raw = _read_protected_replay_payload(descriptor=read_fd, child=child)
+        finally:
+            os.close(read_fd)
+    try:
+        payload = parse_json_strict(raw, "daily roll protected linked replay proof")
+    except RegistryError as exc:
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected linked replay proof is invalid"
+        ) from exc
+    expected_keys = {
+        "schema_version",
+        "artifact_id",
+        "artifact_raw_base64",
+        "artifact_raw_sha256",
+        "authority",
+    }
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != expected_keys
+        or payload["schema_version"] != _PROTECTED_REPLAY_SCHEMA
+        or payload["authority"] != false_authority()
+        or canonical_json_line(payload) != raw
+        or not isinstance(payload["artifact_id"], str)
+        or not isinstance(payload["artifact_raw_base64"], str)
+    ):
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected linked replay proof contract mismatch"
+        )
+    try:
+        artifact_raw = base64.b64decode(
+            payload["artifact_raw_base64"].encode("ascii"), validate=True
+        )
+    except (UnicodeEncodeError, ValueError) as exc:
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected linked replay proof encoding is invalid"
+        ) from exc
+    if (
+        not 1 <= len(artifact_raw) <= MAX_ARTIFACT_RAW_BYTES
+        or payload["artifact_raw_sha256"] != sha256(artifact_raw)
+    ):
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected linked replay proof hash is invalid"
+        )
+    artifact = _validated_artifact(artifact_raw)
+    if (
+        artifact["artifact_id"] != payload["artifact_id"]
+        or artifact["verified_lineage"]["continuity"]["mode"]
+        != "LINKED_ROOT_CATALOG"
+        or artifact["official_day"] != official_day
+        or artifact["verified_lineage"]["runtime"]["runtime_input_raw_sha256"]
+        != inputs.runtime_input_raw_sha256
+        or artifact["verified_lineage"]["operator_state"]["raw_sha256"]
+        != operator_state.raw_sha256
+        or artifact["verified_lineage"]["operator_state"]["manifest_sequence"]
+        != operator_state.payload["manifest_sequence"]
+        or artifact["verified_lineage"]["operator_state"]["manifest_head_seal_sha256"]
+        != operator_state.payload["manifest_head_seal_sha256"]
+        or artifact["verified_lineage"]["operator_state"]["manifest_head_commit_seal_sha256"]
+        != operator_state.payload["manifest_head_commit_seal_sha256"]
+    ):
+        raise DailyRollPredecessorCatalogError(
+            "daily roll protected linked replay proof root binding is invalid"
+        )
+    from .verified_daily_pit_main_roll_source import BuiltVerifiedDailyPitMainRollSource
+
+    return BuiltVerifiedDailyPitMainRollSource(
+        artifact_raw=artifact_raw,
+        artifact_id=payload["artifact_id"],
+        artifact_raw_sha256=payload["artifact_raw_sha256"],
+    )
+
+
 def publish_predecessor_artifact(
     *,
     context: RuntimeContext | None,
@@ -1546,6 +1796,7 @@ def publish_predecessor_artifact(
     genesis: GenesisContinuity | None = None,
     predecessor: PredecessorContinuity | None = None,
     protected_genesis_inputs: ProtectedGenesisReplayInputs | None = None,
+    protected_linked_inputs: ProtectedLinkedReplayInputs | None = None,
 ) -> CatalogEntry:
     """Root-replay, then publish one exact verified no-authority artifact.
 
@@ -1564,7 +1815,8 @@ def publish_predecessor_artifact(
 
     if protected_genesis_inputs is not None:
         if (
-            genesis is not None
+            protected_linked_inputs is not None
+            or genesis is not None
             or predecessor is not None
             or any(
                 value is not None
@@ -1581,6 +1833,25 @@ def publish_predecessor_artifact(
                 "daily roll protected Genesis invocation is mixed with caller inputs"
             )
         is_genesis = True
+    elif protected_linked_inputs is not None:
+        if (
+            genesis is not None
+            or predecessor is not None
+            or any(
+                value is not None
+                for value in (
+                    history_receipt_path,
+                    pins,
+                    manifest_public_key_path,
+                    contract_registry_raw,
+                    expected_contract_registry_raw_sha256,
+                )
+            )
+        ):
+            raise DailyRollPredecessorCatalogError(
+                "daily roll protected linked invocation is mixed with caller inputs"
+            )
+        is_genesis = False
     else:
         if context is None:
             raise DailyRollPredecessorCatalogError(
@@ -1599,6 +1870,7 @@ def publish_predecessor_artifact(
         is_genesis = genesis is not None
     root = catalog_root(operator_state.path)
     requested_day = require_day(official_day, "daily roll catalog official day")
+    protected_linked_retry: CatalogEntry | None = None
     # A linked replay reads the catalog while holding a shared operator lock,
     # so clean any prior atomic-write crash under an exclusive lock first.
     with operator_state_lock(operator_state.path, exclusive=True):
@@ -1610,7 +1882,11 @@ def publish_predecessor_artifact(
         _prepare_catalog(root)
         _recover_catalog_partial(root)
         receipt_path = root / "receipts" / f"{requested_day.isoformat()}.json"
-        if os.path.lexists(receipt_path) and protected_genesis_inputs is None:
+        if (
+            os.path.lexists(receipt_path)
+            and protected_genesis_inputs is None
+            and protected_linked_inputs is None
+        ):
             loaded = _load_catalog(root)
             if (
                 loaded.head is None
@@ -1635,6 +1911,16 @@ def publish_predecessor_artifact(
                 predecessor=predecessor,
             )
             return loaded.head
+        if os.path.lexists(receipt_path) and protected_linked_inputs is not None:
+            loaded = _load_catalog(root)
+            if (
+                loaded.head is None
+                or loaded.head.receipt["official_day"] != requested_day.isoformat()
+            ):
+                raise DailyRollPredecessorCatalogError(
+                    "daily roll protected linked retry day is not the catalog head"
+                )
+            protected_linked_retry = loaded.head
         if (
             is_genesis
             and protected_genesis_inputs is None
@@ -1658,6 +1944,13 @@ def publish_predecessor_artifact(
             operator_state=operator_state,
             official_day=official_day,
             inputs=protected_genesis_inputs,
+        )
+    elif protected_linked_inputs is not None:
+        built = _build_protected_linked_as_service(
+            operator_state=operator_state,
+            official_day=official_day,
+            inputs=protected_linked_inputs,
+            retry_entry=protected_linked_retry,
         )
     else:
         built = build_verified_daily_pit_main_roll_source(
@@ -1702,20 +1995,25 @@ def publish_predecessor_artifact(
             raise DailyRollPredecessorCatalogError(
                 "daily roll catalog operator state changed before publication"
             )
-        if protected_genesis_inputs is not None:
+        if protected_genesis_inputs is not None or protected_linked_inputs is not None:
+            protected_inputs = (
+                protected_genesis_inputs
+                if protected_genesis_inputs is not None
+                else protected_linked_inputs
+            )
+            assert protected_inputs is not None
             policy = load_isolation_policy(
-                protected_genesis_inputs.runtime_input_path.parent
-                / "isolation-policy-v1.json"
+                protected_inputs.runtime_input_path.parent / "isolation-policy-v1.json"
             )
             runtime_input = load_runtime_input(
-                protected_genesis_inputs.runtime_input_path,
+                protected_inputs.runtime_input_path,
                 policy=policy,
             )
             if (
                 runtime_input.raw_sha256
-                != protected_genesis_inputs.runtime_input_raw_sha256
-                or policy.uid != protected_genesis_inputs.service_uid
-                or policy.gid != protected_genesis_inputs.service_gid
+                != protected_inputs.runtime_input_raw_sha256
+                or policy.uid != protected_inputs.service_uid
+                or policy.gid != protected_inputs.service_gid
             ):
                 raise DailyRollPredecessorCatalogError(
                     "daily roll protected publication runtime root drifted"

@@ -129,6 +129,128 @@ def _protected_inputs(tmp_path: Path, *, runtime_sha: str = "0" * 64) -> catalog
     )
 
 
+def _protected_linked_inputs(
+    tmp_path: Path,
+    *,
+    runtime_sha: str = "0" * 64,
+) -> catalog.ProtectedLinkedReplayInputs:
+    return catalog.ProtectedLinkedReplayInputs(
+        history_receipt_path=tmp_path / "history.json",
+        runtime_input_path=tmp_path / "runtime.json",
+        runtime_input_raw_sha256=runtime_sha,
+        service_uid=503,
+        service_gid=503,
+        history_receipt_raw_sha256="1" * 64,
+        manifest_public_key_path=tmp_path / "manifest.pub",
+        manifest_public_key_raw_sha256="2" * 64,
+        business_public_key_raw_sha256="3" * 64,
+        contract_registry_path=tmp_path / "contracts.json",
+        contract_registry_raw_sha256="4" * 64,
+    )
+
+
+def test_protected_linked_replay_returns_only_service_rebuilt_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    kwargs, inputs, holder = _genesis_setup(monkeypatch, tmp_path)
+    genesis_entry = catalog.publish_predecessor_artifact(**kwargs)
+    head = "9" * 64
+    commit = "a" * 64
+    state = replace(
+        _state("2026-07-02", head, commit, sequence=2),
+        path=kwargs["operator_state"].path,
+    )
+    holder["state"] = state
+    current = _verified_input(
+        "2026-07-02",
+        head_seal=head,
+        head_commit=commit,
+        parent_seal=genesis_entry.artifact["verified_lineage"]["manifest"][
+            "batch_seal_sha256"
+        ],
+        parent_commit=genesis_entry.artifact["verified_lineage"]["manifest"][
+            "commit_seal_sha256"
+        ],
+        expected_genesis_baseline=None,
+    )
+    inputs["2026-07-02"] = replace(current, predecessor_entry=genesis_entry)
+    linked_kwargs = {
+        **kwargs,
+        "operator_state": state,
+        "official_day": "2026-07-02",
+        "genesis": None,
+        "predecessor": verified_roll.PredecessorContinuity(),
+    }
+    rebuilt = verified_roll.build_verified_daily_pit_main_roll_source(**linked_kwargs)
+    calls: list[dict] = []
+
+    def protected_replay(**values):
+        calls.append(values)
+        assert values["operator_state"] == state
+        assert values["official_day"] == "2026-07-02"
+        return rebuilt
+
+    monkeypatch.setattr(catalog, "_build_protected_linked_as_service", protected_replay)
+    monkeypatch.setattr(
+        catalog,
+        "load_isolation_policy",
+        lambda _path: SimpleNamespace(uid=503, gid=503),
+    )
+    monkeypatch.setattr(
+        catalog,
+        "load_runtime_input",
+        lambda _path, **_kwargs: SimpleNamespace(raw_sha256="0" * 64),
+    )
+    request = {
+        "context": None,
+        "operator_state": state,
+        "history_receipt_path": None,
+        "pins": None,
+        "manifest_public_key_path": None,
+        "official_day": "2026-07-02",
+        "contract_registry_raw": None,
+        "expected_contract_registry_raw_sha256": None,
+        "protected_linked_inputs": _protected_linked_inputs(tmp_path),
+    }
+    entry = catalog.publish_predecessor_artifact(**request)
+    retry = catalog.publish_predecessor_artifact(**request)
+    assert retry == entry
+    assert len(calls) == 2
+    assert calls[0]["retry_entry"] is None
+    assert calls[1]["retry_entry"] == entry
+    assert entry.artifact["verified_lineage"]["continuity"]["mode"] == (
+        "LINKED_ROOT_CATALOG"
+    )
+
+    monkeypatch.setattr(
+        catalog,
+        "_build_protected_linked_as_service",
+        lambda **_values: (_ for _ in ()).throw(
+            catalog.DailyRollPredecessorCatalogError("protected child failed")
+        ),
+    )
+    with pytest.raises(
+        catalog.DailyRollPredecessorCatalogError,
+        match="protected child failed",
+    ):
+        catalog.publish_predecessor_artifact(**request)
+
+    monkeypatch.setattr(catalog, "_build_protected_linked_as_service", protected_replay)
+    drifted = {
+        **request,
+        "protected_linked_inputs": _protected_linked_inputs(
+            tmp_path,
+            runtime_sha="f" * 64,
+        ),
+    }
+    with pytest.raises(
+        catalog.DailyRollPredecessorCatalogError,
+        match="runtime root drifted",
+    ):
+        catalog.publish_predecessor_artifact(**drifted)
+
+
 def test_protected_genesis_retry_reuses_exact_existing_catalog_entry(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
