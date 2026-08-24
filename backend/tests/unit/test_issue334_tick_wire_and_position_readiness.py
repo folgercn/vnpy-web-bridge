@@ -217,6 +217,47 @@ def test_position_query_accepted_handoff_replaces_stale_identity_and_failure_can
     }
 
 
+def test_position_query_disconnect_reconnect_hands_readiness_to_new_query() -> None:
+    class TdApi:
+        def __init__(self) -> None:
+            self.gateway = object()
+
+        def reqQryInvestorPosition(self, request: object, request_id: int) -> int:
+            _ = (request, request_id)
+            return 0
+
+        def onRspQryInvestorPosition(
+            self,
+            data: object,
+            error: object,
+            request_id: int,
+            b_is_last: bool,
+        ) -> None:
+            _ = (data, error, request_id, b_is_last)
+
+        def onFrontDisconnected(self, reason: int) -> None:
+            _ = reason
+
+    api = TdApi()
+    tracker = attach_ctp_position_readiness_v1(api)
+
+    assert api.reqQryInvestorPosition({}, 6585) == 0
+    api.onFrontDisconnected(8193)
+    assert tracker.observability_state_v1() == {
+        "generation": 2,
+        "active_request_id": None,
+        "failed_request_id": None,
+        "ready": False,
+        "callback_count": 0,
+    }
+
+    assert api.reqQryInvestorPosition({}, 6590) == 0
+    api.onRspQryInvestorPosition(None, {"ErrorID": 0}, 6585, True)
+    assert not tracker.is_ready()
+    api.onRspQryInvestorPosition(None, {"ErrorID": 0}, 6590, True)
+    assert tracker.is_ready()
+
+
 def test_position_query_exception_resets_ready_state_and_reraises() -> None:
     class TdApi:
         def __init__(self) -> None:
