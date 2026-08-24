@@ -169,6 +169,52 @@ def test_position_query_rejection_preserves_accepted_query_readiness() -> None:
     }
 
 
+def test_position_query_inflight_identity_is_not_replaced_and_failure_can_retry() -> None:
+    class TdApi:
+        def __init__(self) -> None:
+            self.gateway = object()
+
+        def reqQryInvestorPosition(self, request: object, request_id: int) -> int:
+            _ = request
+            return 0
+
+        def onRspQryInvestorPosition(
+            self,
+            data: object,
+            error: object,
+            request_id: int,
+            b_is_last: bool,
+        ) -> None:
+            _ = (data, error, request_id, b_is_last)
+
+    api = TdApi()
+    tracker = attach_ctp_position_readiness_v1(api)
+
+    assert api.reqQryInvestorPosition({}, 28) == 0
+    assert api.reqQryInvestorPosition({}, 50) == 0
+    assert tracker.observability_state_v1() == {
+        "generation": 1,
+        "active_request_id": 28,
+        "failed_request_id": None,
+        "ready": False,
+        "callback_count": 0,
+    }
+    api.onRspQryInvestorPosition(None, {"ErrorID": 0}, 28, True)
+    assert tracker.is_ready()
+
+    assert api.reqQryInvestorPosition({}, 28) == 0
+    api.onRspQryInvestorPosition(None, {"ErrorID": 1}, 28, True)
+    assert not tracker.is_ready()
+    assert api.reqQryInvestorPosition({}, 50) == 0
+    assert tracker.observability_state_v1() == {
+        "generation": 3,
+        "active_request_id": 50,
+        "failed_request_id": None,
+        "ready": False,
+        "callback_count": 0,
+    }
+
+
 def test_position_query_exception_resets_ready_state_and_reraises() -> None:
     class TdApi:
         def __init__(self) -> None:

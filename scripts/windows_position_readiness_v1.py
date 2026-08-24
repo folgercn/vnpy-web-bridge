@@ -34,6 +34,15 @@ class PositionQueryReadinessTrackerV1:
             self.reset()
             return None
         with self._lock:
+            if (
+                self._active_request_id is not None
+                and not self._ready
+                and self._failed_request_id != self._active_request_id
+            ):
+                # A previous accepted query remains the only completion
+                # identity until it finishes or fails. Native CTP may accept
+                # another request, but it cannot replace this readiness gate.
+                return None
             attempt = (
                 self._generation + 1,
                 self._generation,
