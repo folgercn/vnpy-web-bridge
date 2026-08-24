@@ -8,10 +8,12 @@ def test_registered_experimental_glue_isolated_from_heavy_ci() -> None:
         "deployments/com.vnpy-web-bridge.simnow-experimental.plist",
         "deployments/docker-compose.simnow-experimental.yml",
         "deployments/simnow-experimental-run-once.sh",
+        "deployments/simnow-experimental-preflight.sh",
         "scripts/simnow_experimental_materialize_target.py",
         "scripts/simnow_experimental_monthly_once.py",
         "scripts/simnow_experimental_timely_daily_route.py",
         "scripts/simnow_experimental_offline_harness.py",
+        "scripts/simnow_experimental_preflight.py",
         "scripts/simnow_experimental_run_once.py",
         "backend/tests/unit/test_simnow_experimental_ci_contract.py",
     ):

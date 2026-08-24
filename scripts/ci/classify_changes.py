@@ -140,10 +140,12 @@ SIMNOW_EXPERIMENTAL_FASTLANE_FILES = {
     "deployments/phase-b/Containerfile.simnow-experimental-runner",
     "deployments/phase-b/requirements-simnow-experimental-runner.txt",
     "deployments/simnow-experimental-run-once.sh",
+    "deployments/simnow-experimental-preflight.sh",
     "scripts/simnow_experimental_materialize_target.py",
     "scripts/simnow_experimental_monthly_once.py",
     "scripts/simnow_experimental_timely_daily_route.py",
     "scripts/simnow_experimental_offline_harness.py",
+    "scripts/simnow_experimental_preflight.py",
     "scripts/simnow_experimental_run_once.py",
 }
 

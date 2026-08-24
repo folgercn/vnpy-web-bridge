@@ -157,6 +157,9 @@ def test_experimental_compose_reuses_final_boundaries_without_a_new_stack() -> N
     assert service["environment"]["LIVE_TRADING_AUTHORIZED"] == "false"
     assert service["environment"]["COUNTABLE_FORWARD"] == "false"
     assert service["environment"]["OFFICIAL_FORWARD_CLAIMED"] == "false"
+    assert service["environment"]["SIMNOW_TRUSTED_KEYLESS_CUSTODY_ENABLED"] == (
+        "${SIMNOW_TRUSTED_KEYLESS_CUSTODY_ENABLED:?required}"
+    )
     assert service["read_only"] is True
     assert service["cap_drop"] == ["ALL"]
     assert "network_mode" not in service
@@ -205,6 +208,7 @@ def test_experimental_schedule_glue_stays_on_the_contract_only_lane() -> None:
         "deployments/com.vnpy-web-bridge.simnow-experimental.plist",
         "deployments/docker-compose.simnow-experimental.yml",
         "deployments/simnow-experimental-run-once.sh",
+        "deployments/simnow-experimental-preflight.sh",
         "backend/tests/unit/test_simnow_experimental_schedule.py",
     ):
         result = classify([path])
