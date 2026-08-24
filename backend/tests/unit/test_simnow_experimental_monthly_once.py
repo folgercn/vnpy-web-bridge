@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import importlib
 import json
+import stat
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -309,11 +310,37 @@ def test_concurrent_create_only_bundle_safely_reuses_identical_bytes(
         )
 
     assert sorted(result[2] for result in results) == [False, True]
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o755
     loaded, raw = materializer.read_json_stable(path, label="monthly planner bundle")
     assert raw == materializer.canonical_json_line(loaded)
     assert monthly_once.validate_monthly_bundle(
         loaded, expected_source_month="2030-01"
     ) == bundle
+
+
+def test_existing_monthly_bundle_is_normalized_to_read_only_input_mode(
+    tmp_path: Path,
+) -> None:
+    projection, freeze, evidence = _static_outputs()
+    snapshot = _position_manager_snapshot(evidence)
+    bundle = {
+        "schema_version": materializer.PLANNER_BUNDLE_SCHEMA_VERSION,
+        "strategy_id": "STATIC_CORE_EQUAL",
+        "source_mode": materializer.STATIC_CORE_EQUAL_MONTHLY,
+        "source_month": snapshot["source_month"],
+        "static_core_equal_projection": projection,
+        "static_core_equal_freeze_contract": freeze,
+        "static_core_equal_target_evidence": evidence,
+        "position_manager_snapshot": snapshot,
+    }
+    path = tmp_path / "monthly" / f"{snapshot['source_month']}.json"
+
+    monthly_once._create_only_bundle(path, bundle, source_month=snapshot["source_month"])
+    path.chmod(0o600)
+    monthly_once._create_only_bundle(path, bundle, source_month=snapshot["source_month"])
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644
 
 
 def test_corrupt_existing_bundle_fails_closed_before_producer_replay(

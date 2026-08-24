@@ -128,9 +128,10 @@ def _create_only_bundle(path: Path, value: Mapping[str, Any], *, source_month: s
     bundle = validate_monthly_bundle(dict(value), expected_source_month=source_month)
     raw = canonical_json_line(bundle)
     path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o755)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
-        os.fchmod(descriptor, 0o600)
+        os.fchmod(descriptor, 0o644)
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(raw)
             handle.flush()
@@ -142,6 +143,7 @@ def _create_only_bundle(path: Path, value: Mapping[str, Any], *, source_month: s
         existing = _read_existing_bundle(path, source_month=source_month)
         if existing is None or existing[1] != raw:
             raise ExperimentalMonthlyError("monthly planner bundle already exists with different bytes")
+        os.chmod(path, 0o644)
         return existing[0], existing[1], False
     finally:
         try:

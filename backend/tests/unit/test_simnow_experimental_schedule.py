@@ -48,8 +48,6 @@ def _launcher_environment(tmp_path: Path, *, target_path: Path, docker_bin: Path
             "SIMNOW_EXPERIMENTAL_COMPOSE_FILE": str(
                 ROOT / "deployments/docker-compose.simnow-experimental.yml"
             ),
-            "SIMNOW_EXPERIMENTAL_UID": "501",
-            "SIMNOW_EXPERIMENTAL_GID": "20",
             "SIMNOW_EXPERIMENTAL_PROJECT_DIRECTORY": str(ROOT),
             "SIMNOW_EXPERIMENTAL_DOCKER_BIN": str(docker_bin),
             "COMPOSE_PROJECT_NAME": "issue362-test",
@@ -151,6 +149,7 @@ def test_experimental_compose_reuses_final_boundaries_without_a_new_stack() -> N
 
     assert set(compose) == {"services", "networks", "volumes"}
     assert service["restart"] == "no"
+    assert "user" not in service
     assert service["networks"] == ["private-control", "control-custody"]
     assert "depends_on" not in service
     assert "build" not in service
@@ -181,6 +180,24 @@ def test_experimental_compose_reuses_final_boundaries_without_a_new_stack() -> N
             "name": "${SIMNOW_EXPERIMENTAL_ACTIVE_PROJECT:?required}_market_projection",
         },
     }
+
+
+def test_experimental_launcher_and_launchd_do_not_override_image_runtime_identity() -> None:
+    launcher = (ROOT / "deployments/simnow-experimental-run-once.sh").read_text(
+        encoding="utf-8"
+    )
+    plist = (ROOT / "deployments/com.vnpy-web-bridge.simnow-experimental.plist").read_text(
+        encoding="utf-8"
+    )
+
+    assert "SIMNOW_EXPERIMENTAL_UID" not in launcher
+    assert "SIMNOW_EXPERIMENTAL_GID" not in launcher
+    assert "SIMNOW_EXPERIMENTAL_UID" not in plist
+    assert "SIMNOW_EXPERIMENTAL_GID" not in plist
+    containerfile = (
+        ROOT / "deployments/phase-b/Containerfile.simnow-experimental-runner"
+    ).read_text(encoding="utf-8")
+    assert "USER 65532:65532" in containerfile
 
 
 def test_experimental_schedule_glue_stays_on_the_contract_only_lane() -> None:

@@ -367,9 +367,10 @@ def validate_test_target_bundle_binding(
 def write_target_atomic(path: Path, value: Mapping[str, Any]) -> None:
     raw = canonical_json_line(validate_target(dict(value)))
     path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o755)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
-        os.fchmod(descriptor, 0o600)
+        os.fchmod(descriptor, 0o644)
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(raw)
             handle.flush()

@@ -42,10 +42,6 @@
     <string>/Users/fujun/services/vnpy-web-bridge/deployments/docker-compose.simnow-experimental.yml</string>
     <key>SIMNOW_EXPERIMENTAL_PROJECT_DIRECTORY</key>
     <string>/Users/fujun/services/vnpy-web-bridge</string>
-    <key>SIMNOW_EXPERIMENTAL_UID</key>
-    <string>501</string>
-    <key>SIMNOW_EXPERIMENTAL_GID</key>
-    <string>20</string>
     <key>SIMNOW_EXPERIMENTAL_DOCKER_CONTEXT</key>
     <string>desktop-linux</string>
   </dict>
