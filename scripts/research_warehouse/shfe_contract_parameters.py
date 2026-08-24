@@ -92,6 +92,27 @@ def evidence_from_raw(
     )
 
 
+def evidence_from_pinned_raw(
+    *,
+    observed_at: str,
+    raw: bytes,
+    expected_raw_sha256: str,
+) -> ShfeContractParameterEvidence:
+    """Bind a pinned response using its own strict exchange report date."""
+
+    if not isinstance(raw, bytes) or not raw or len(raw) > MAX_RAW_BYTES:
+        raise ShfeContractParameterError("SHFE contract parameter raw is invalid")
+    payload = parse_json_strict(raw, "SHFE contract parameter raw")
+    if not isinstance(payload, dict):
+        raise ShfeContractParameterError("SHFE contract parameter response shape mismatch")
+    return evidence_from_raw(
+        query_day=_day(payload.get("report_date"), "SHFE contract parameter report date"),
+        observed_at=observed_at,
+        raw=raw,
+        expected_raw_sha256=expected_raw_sha256,
+    )
+
+
 def _rows(
     raw: bytes,
     *,

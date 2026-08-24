@@ -491,6 +491,7 @@ PHASE_A_ISSUE362_RESEARCH_FOUNDATION_EXACT = (
     "backend/tests/unit/test_research_warehouse_m2_linked_predecessor_cli.py",
     "backend/tests/unit/test_research_warehouse_m2_release_bundle.py",
     "backend/tests/unit/test_research_warehouse_m2_signer_handoff.py",
+    "backend/tests/unit/test_research_warehouse_shfe_contract_parameters.py",
     "backend/tests/unit/test_research_warehouse_verified_daily_pit_main_roll_source.py",
     "backend/tests/unit/test_research_warehouse_verified_monthly_final_target.py",
     "deployments/research-warehouse/daily-pit-main-roll-source-v1.schema.json",
@@ -506,6 +507,7 @@ PHASE_A_ISSUE362_RESEARCH_FOUNDATION_EXACT = (
     "scripts/research_warehouse/m2_release_contracts.py",
     "scripts/research_warehouse/m2_signer_handoff.py",
     "scripts/research_warehouse/monthly_due_source.py",
+    "scripts/research_warehouse/shfe_contract_parameters.py",
     "scripts/research_warehouse/verified_daily_pit_main_roll_source.py",
     "scripts/research_warehouse/verified_monthly_final_target.py",
 )

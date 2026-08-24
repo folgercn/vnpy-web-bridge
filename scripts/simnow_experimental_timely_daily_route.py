@@ -19,7 +19,7 @@ import json
 import os
 import sys
 import tempfile
-from datetime import datetime, time, timezone
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -31,7 +31,6 @@ from research_warehouse.daily_roll_predecessor_catalog import (
 from research_warehouse.errors import RegistryError
 from research_warehouse.file_integrity import read_regular_strict
 from research_warehouse.daily_pit_main_roll_source import (
-    MIN_DTE_CALENDAR_DAYS,
     _following_official_days,
 )
 from research_warehouse.m2_genesis_predecessor_cli import (
@@ -42,12 +41,12 @@ from research_warehouse.m2_monitor_facts import verify_daily_run_receipt
 from research_warehouse.m2_receipts import load_run_receipt
 from research_warehouse.m2_runtime_input import DEFAULT_RUNTIME_INPUT
 from research_warehouse.m2_runtime_loader import RuntimeContext, load_runtime_context_readonly
-from research_warehouse.pit_source_view import _pit_main, contract_rows_from_daily_raw
-from research_warehouse.static_core_baseline import _last_trading_day, _registry
+from research_warehouse.shfe_contract_parameters import evidence_from_pinned_raw
+from research_warehouse.static_core_baseline import _registry
 from research_warehouse.timeutil import format_utc
+from research_warehouse.verified_daily_pit_main_roll_source import _mains as verified_mains
 from simnow_experimental_materialize_target import (
     NOT_OFFICIAL_STRATEGY_OUTPUT,
-    PRODUCT_EXCHANGES,
     PRODUCTS,
     ExperimentalTargetError,
 )
@@ -114,10 +113,14 @@ def build_timely_experimental_route(
     official_day: str,
     contract_registry_path: Path,
     expected_contract_registry_raw_sha256: str,
+    shfe_contract_parameters_path: Path,
+    expected_shfe_contract_parameters_raw_sha256: str,
+    shfe_contract_parameters_observed_at: str,
 ) -> dict[str, Any]:
     """Use the frozen exact-contract kernel with one verified timely receipt."""
 
     try:
+        official_date = date.fromisoformat(official_day)
         execution_day, following_day = _execution_days(context, official_day)
         receipt_path = context.runtime.run_receipts / f"{official_day}.json"
         receipt_raw = read_regular_strict(
@@ -152,6 +155,17 @@ def build_timely_experimental_route(
         if registry_raw_sha256 != expected_contract_registry_raw_sha256:
             raise ExperimentalTimelyRouteError("experimental contract registry pin drifted")
         contract_registry, _ = _registry(registry_raw)
+        shfe_contract_parameters_raw = _read_private_protected_evidence(
+            shfe_contract_parameters_path,
+            "experimental timely SHFE contract parameters",
+            uid=context.policy.uid,
+            limit=4 * 1024 * 1024,
+        )
+        shfe_contract_parameters = evidence_from_pinned_raw(
+            observed_at=shfe_contract_parameters_observed_at,
+            raw=shfe_contract_parameters_raw,
+            expected_raw_sha256=expected_shfe_contract_parameters_raw_sha256,
+        )
         raws: dict[str, bytes] = {}
         for source in receipt["sources"]:
             exchange = source["exchange"]
@@ -167,45 +181,26 @@ def build_timely_experimental_route(
             raws[exchange] = raw
         if set(raws) != {"SHFE", "INE"}:
             raise ExperimentalTimelyRouteError("timely DAILY PIT source set is incomplete")
-        extracted = {
-            exchange: contract_rows_from_daily_raw(
-                raw=raw,
-                exchange=exchange,
-                official_day=official_day,
-            )
-            for exchange, raw in raws.items()
-        }
-        mains: list[dict[str, str]] = []
-        for product in PRODUCTS:
-            exchange = PRODUCT_EXCHANGES[product]
-            main, _ranked = _pit_main(
-                product,
-                datetime.fromisoformat(official_day).date(),
-                extracted[exchange][product],
-            )
-            delivery = int(main["delivery_yyyymm"])
-            last_day = _last_trading_day(
-                context.calendar,
-                delivery_yyyymm=delivery,
-                rule=str(contract_registry[product]["last_trading_day_rule"]),
-            )
-            if min(
-                (last_day - datetime.fromisoformat(execution_day).date()).days,
-                (last_day - datetime.fromisoformat(following_day).date()).days,
-            ) < MIN_DTE_CALENDAR_DAYS:
-                raise ExperimentalTimelyRouteError(
-                    f"{product} PIT main is inside the DTE safety boundary"
-                )
-            mains.append(
-                {
-                    "product": product,
-                    "exchange": exchange,
-                    "exact_contract": str(main["exact_contract"]),
-                }
-            )
+        mains, _expiry_lineage = verified_mains(
+            context=context,
+            official_day=official_date,
+            execution_day=date.fromisoformat(execution_day),
+            following_day=date.fromisoformat(following_day),
+            daily_source_raw=raws,
+            contract_registry=contract_registry,
+            predecessor={product: "" for product in PRODUCTS},
+            shfe_contract_parameters=shfe_contract_parameters,
+        )
         return {
             "schema_version": "daily-pit-route-v1",
-            "mains": mains,
+            "mains": [
+                {
+                    "product": row["product"],
+                    "exchange": row["exchange"],
+                    "exact_contract": row["exact_contract"],
+                }
+                for row in mains
+            ],
             "metadata": {
                 "route_mode": ROUTE_MODE,
                 "strategy_output_claim": NOT_OFFICIAL_STRATEGY_OUTPUT,
@@ -215,6 +210,11 @@ def build_timely_experimental_route(
                 "run_receipt_id": receipt["receipt_id"],
                 "run_receipt_raw_sha256": sha256(receipt_raw),
                 "contract_registry_raw_sha256": registry_raw_sha256,
+                "shfe_contract_parameters_raw_sha256": shfe_contract_parameters.raw_sha256,
+                "shfe_contract_parameters_observed_at": format_utc(
+                    shfe_contract_parameters.observed_at,
+                    "experimental timely SHFE contract parameters observed_at",
+                ),
                 "production": False,
                 "live_trading_authorized": False,
                 "countable_forward": False,
@@ -253,6 +253,13 @@ def main() -> int:
             contract_registry_path=projection.contract_registry_path,
             expected_contract_registry_raw_sha256=(
                 projection.contract_registry_raw_sha256
+            ),
+            shfe_contract_parameters_path=projection.shfe_contract_parameters_path,
+            expected_shfe_contract_parameters_raw_sha256=(
+                projection.shfe_contract_parameters_raw_sha256
+            ),
+            shfe_contract_parameters_observed_at=(
+                projection.shfe_contract_parameters_observed_at
             ),
         )
         if args.output == "-":

@@ -157,6 +157,8 @@ def _daily_routes(value: Mapping[str, Any]) -> dict[str, str]:
             "run_receipt_id",
             "run_receipt_raw_sha256",
             "contract_registry_raw_sha256",
+            "shfe_contract_parameters_raw_sha256",
+            "shfe_contract_parameters_observed_at",
             "production",
             "live_trading_authorized",
             "countable_forward",
@@ -186,6 +188,8 @@ def _daily_routes(value: Mapping[str, Any]) -> dict[str, str]:
                     "run_receipt_id",
                     "run_receipt_raw_sha256",
                     "contract_registry_raw_sha256",
+                    "shfe_contract_parameters_raw_sha256",
+                    "shfe_contract_parameters_observed_at",
                 )
             )
             or any(
@@ -193,6 +197,7 @@ def _daily_routes(value: Mapping[str, Any]) -> dict[str, str]:
                 for field in (
                     "run_receipt_raw_sha256",
                     "contract_registry_raw_sha256",
+                    "shfe_contract_parameters_raw_sha256",
                 )
             )
         ):
