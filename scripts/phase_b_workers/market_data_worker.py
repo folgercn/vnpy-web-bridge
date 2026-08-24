@@ -605,6 +605,7 @@ class ZmqTickWireSourceV1:
     """
 
     DEFAULT_DRAIN_LIMIT = 256
+    SEQUENCE_RESERVATION_SIZE = 64
 
     def __init__(
         self,
@@ -636,15 +637,23 @@ class ZmqTickWireSourceV1:
         )
         self._process_lock = _SingleProcessFileLock(Path(state_dir) / "tick_wire_v1_source.lock")
         self._sequence_lock = threading.RLock()
+        # The durable high-water reservation lets restart skip unused ids
+        # while never reusing a source identity.
+        self._next_source_seq_value: int | None = None
+        self._reserved_through_source_seq: int | None = None
         self._socket: Any | None = None
         self._callback: Callable[[Mapping[str, object]], None] | None = None
 
     def subscribe(self, callback: Callable[[Mapping[str, object]], None]) -> None:
         self._process_lock.acquire()
         try:
+            self._next_source_seq_value = None
+            self._reserved_through_source_seq = None
             self._callback = callback
             self._connect()
         except Exception:
+            self._next_source_seq_value = None
+            self._reserved_through_source_seq = None
             self._callback = None
             self._process_lock.release()
             raise
@@ -663,11 +672,25 @@ class ZmqTickWireSourceV1:
 
     def _next_source_seq(self) -> int:
         with self._sequence_lock:
-            prior = self._cursor.read()
-            if str(prior.get("source_generation") or self.source_generation) != self.source_generation:
-                raise GenerationMismatch("tick wire source generation changed")
-            sequence = int(prior.get("last_source_seq") or 0) + 1
-            self._cursor.write({"source_generation": self.source_generation, "last_source_seq": sequence})
+            if self._next_source_seq_value is None:
+                prior = self._cursor.read()
+                if str(prior.get("source_generation") or self.source_generation) != self.source_generation:
+                    raise GenerationMismatch("tick wire source generation changed")
+                last_reserved = int(prior.get("last_source_seq") or 0)
+                self._next_source_seq_value = last_reserved + 1
+                self._reserved_through_source_seq = last_reserved
+            assert self._reserved_through_source_seq is not None
+            sequence = self._next_source_seq_value
+            if sequence > self._reserved_through_source_seq:
+                reserved_through = sequence + self.SEQUENCE_RESERVATION_SIZE - 1
+                self._cursor.write(
+                    {
+                        "source_generation": self.source_generation,
+                        "last_source_seq": reserved_through,
+                    }
+                )
+                self._reserved_through_source_seq = reserved_through
+            self._next_source_seq_value = sequence + 1
             return sequence
 
     def _decode_frames(self, frames: Any) -> GatewayTickEnvelope:
@@ -724,6 +747,8 @@ class ZmqTickWireSourceV1:
         try:
             self._reset()
         finally:
+            self._next_source_seq_value = None
+            self._reserved_through_source_seq = None
             self._process_lock.release()
 
 
