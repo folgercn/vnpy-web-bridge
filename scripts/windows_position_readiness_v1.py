@@ -7,6 +7,8 @@ from threading import RLock
 from types import MethodType
 from typing import Any
 
+_QueryAttemptV1 = tuple[int, int, bool, int | None, int | None, int]
+
 
 class PositionQueryReadinessTrackerV1:
     """A position snapshot is usable only after a successful final CTP row."""
@@ -27,14 +29,60 @@ class PositionQueryReadinessTrackerV1:
             self._failed_request_id = None
             self._callback_count = 0
 
-    def begin_query(self, request_id: Any) -> None:
+    def begin_query(self, request_id: Any) -> _QueryAttemptV1 | None:
         if type(request_id) is not int or request_id < 0:
             self.reset()
-            return
+            return None
         with self._lock:
+            attempt = (
+                self._generation + 1,
+                self._generation,
+                self._ready,
+                self._active_request_id,
+                self._failed_request_id,
+                self._callback_count,
+            )
             self._generation += 1
             self._ready = False
             self._active_request_id = request_id
+            self._failed_request_id = None
+            self._callback_count = 0
+            return attempt
+
+    def rollback_unaccepted_query(self, attempt: _QueryAttemptV1 | None) -> None:
+        """Restore the exact prior state only while this request still owns it."""
+
+        if attempt is None:
+            return
+        (
+            attempt_generation,
+            previous_generation,
+            previous_ready,
+            previous_active_request_id,
+            previous_failed_request_id,
+            previous_callback_count,
+        ) = attempt
+        with self._lock:
+            if self._generation != attempt_generation:
+                return
+            self._generation = previous_generation
+            self._ready = previous_ready
+            self._active_request_id = previous_active_request_id
+            self._failed_request_id = previous_failed_request_id
+            self._callback_count = previous_callback_count
+
+    def reset_query_if_current(self, attempt: _QueryAttemptV1 | None) -> None:
+        """Fail closed for a native query error without clearing a newer query."""
+
+        if attempt is None:
+            return
+        attempt_generation = attempt[0]
+        with self._lock:
+            if self._generation != attempt_generation:
+                return
+            self._generation += 1
+            self._ready = False
+            self._active_request_id = None
             self._failed_request_id = None
             self._callback_count = 0
 
@@ -120,8 +168,14 @@ def attach_ctp_position_readiness_v1(ctp_td_api: Any) -> PositionQueryReadinessT
     tracker = PositionQueryReadinessTrackerV1()
 
     def wrapped_query(subject: Any, request: Any, request_id: Any) -> Any:
-        tracker.begin_query(request_id)
-        result = query(request, request_id)
+        attempt = tracker.begin_query(request_id)
+        try:
+            result = query(request, request_id)
+        except Exception:
+            tracker.reset_query_if_current(attempt)
+            raise
+        if type(result) is not int or result != 0:
+            tracker.rollback_unaccepted_query(attempt)
         state = tracker.observability_state_v1()
         _write_position_query_observation_v1(
             subject,
