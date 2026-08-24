@@ -39,6 +39,39 @@ def test_preflight_reports_unreadable_mount_before_quote_gate(
     assert exc.value.category == "mount"
 
 
+def test_preflight_reads_inputs_with_stable_reader_labels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target_path = tmp_path / "target.json"
+    bundle_path = tmp_path / "monthly.json"
+    target_path.write_text('{"target": true}\n', encoding="utf-8")
+    bundle_path.write_text('{"bundle": true}\n', encoding="utf-8")
+    target_path.chmod(0o444)
+    bundle_path.chmod(0o444)
+    labels: list[str] = []
+
+    original_reader = preflight.read_json_stable
+
+    def read(path: Path, *, label: str, **kwargs: object) -> tuple[dict[str, object], bytes]:
+        labels.append(label)
+        return original_reader(path, label=label, **kwargs)
+
+    monkeypatch.setattr(preflight, "read_json_stable", read)
+    monkeypatch.setattr(preflight, "_check_readonly_file", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(preflight, "validate_planner_bundle", lambda value: value)
+    monkeypatch.setattr(
+        preflight,
+        "validate_test_target_bundle_binding",
+        lambda target, _bundle: target,
+    )
+
+    target, bundle = preflight._read_inputs(target_path, bundle_path)
+
+    assert target == {"target": True}
+    assert bundle == {"bundle": True}
+    assert labels == ["experimental target", "monthly planner bundle"]
+
+
 def test_preflight_requires_keyless_setting_without_exposing_secrets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
