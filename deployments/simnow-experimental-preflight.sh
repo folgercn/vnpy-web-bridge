@@ -47,6 +47,33 @@ if [[ -z "$image" ]] || ! "$docker_bin" --context "$docker_context" image inspec
   exit 1
 fi
 
+# This reads only the one non-secret boolean from the exact active Custody
+# container.  Do not inspect or print the full environment: it contains the
+# custody shared secret.  The one-off Compose config is useful wiring evidence,
+# but the running container is the source of truth for this gate.
+custody_container="${SIMNOW_EXPERIMENTAL_CUSTODY_CONTAINER:-${COMPOSE_PROJECT_NAME}-artifact-custody-1}"
+if ! keyless_enabled="$("$docker_bin" --context "$docker_context" inspect \
+  --format '{{range .Config.Env}}{{if eq . "SIMNOW_TRUSTED_KEYLESS_CUSTODY_ENABLED=true"}}true{{else if eq . "SIMNOW_TRUSTED_KEYLESS_CUSTODY_ENABLED=false"}}false{{end}}{{end}}' \
+  "$custody_container" 2>/dev/null)"; then
+  echo "STOP custody-config=container-unavailable" >&2
+  exit 1
+fi
+case "$keyless_enabled" in
+  true) ;;
+  false)
+    echo "STOP custody-config=keyless-disabled" >&2
+    exit 1
+    ;;
+  "")
+    echo "STOP custody-config=keyless-setting-missing" >&2
+    exit 1
+    ;;
+  *)
+    echo "STOP custody-config=keyless-setting-invalid" >&2
+    exit 1
+    ;;
+esac
+
 exec "${compose[@]}" run --rm --no-deps --entrypoint python simnow-experimental-runner \
   /app/scripts/simnow_experimental_preflight.py \
   --target /run/simnow-experimental/target.json \
