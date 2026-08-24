@@ -169,6 +169,9 @@ class ExecutionQualityWorker:
         )
         self._last_error: str | None = None
         self._state_recovered = False
+        # A process-local cursor keeps normal catch-up O(N), while the
+        # checkpoint remains the only durable resume authority.
+        self._stream_offset: int | None = None
         self._lock = threading.RLock()
 
     def _stream_after_recovery(self) -> VerifiedTickSource:
@@ -210,6 +213,7 @@ class ExecutionQualityWorker:
             stream = self._stream_after_recovery()
             stream.stats()  # type: ignore[attr-defined]
             evidence_records = self.evidence.records()
+            parsed_evidence: list[ExecutionQualityEvidence] = []
             for raw in evidence_records:
                 try:
                     evidence = ExecutionQualityEvidence.from_dict(raw)
@@ -224,7 +228,27 @@ class ExecutionQualityWorker:
                     raise GenerationMismatch(
                         "execution-quality evidence generation/algorithm mismatch"
                     )
-                tick = stream.get(evidence.ingest_id)  # type: ignore[attr-defined]
+                parsed_evidence.append(evidence)
+            # The normal worker writes evidence in contiguous ingest order.
+            # Validate that history with the same short-lived cursor used by
+            # live consumption instead of issuing one full-journal lookup per
+            # evidence item.  A gap still falls back to the durable seek used
+            # by the previous implementation.
+            evidence_offset: int | None = None
+            prior_evidence_seq = 0
+            next_after = getattr(stream, "next_after", None)
+            for evidence in sorted(parsed_evidence, key=lambda item: item.ingest_seq):
+                if callable(next_after):
+                    tick, evidence_offset = next_after(
+                        evidence.ingest_seq - 1,
+                        offset=(
+                            evidence_offset
+                            if evidence.ingest_seq == prior_evidence_seq + 1
+                            else None
+                        ),
+                    )
+                else:
+                    tick = stream.get(evidence.ingest_id)  # type: ignore[attr-defined]
                 if (
                     tick is None
                     or tick.stream_generation != self.config.stream_generation
@@ -234,6 +258,7 @@ class ExecutionQualityWorker:
                     raise DurableCorruptionError(
                         "execution-quality evidence has no matching verified tick"
                     )
+                prior_evidence_seq = evidence.ingest_seq
             state = self.checkpoint.read()
             if (
                 str(state.get("stream_generation") or self.config.stream_generation)
@@ -287,19 +312,28 @@ class ExecutionQualityWorker:
             raise
         else:
             self._state_recovered = True
+            self._stream_offset = None
             self._last_error = None
 
-    def _next_evidence(self) -> tuple[VerifiedTick, ExecutionQualityEvidence] | None:
-        tick = next(
-            self._stream_after_recovery().iter_from(self.last_ingest_seq, limit=1), None
-        )
+    def _next_evidence(
+        self,
+    ) -> tuple[VerifiedTick, ExecutionQualityEvidence, int | None] | None:
+        stream = self._stream_after_recovery()
+        next_after = getattr(stream, "next_after", None)
+        if callable(next_after):
+            tick, offset = next_after(
+                self.last_ingest_seq, offset=self._stream_offset
+            )
+        else:
+            tick = next(stream.iter_from(self.last_ingest_seq, limit=1), None)
+            offset = None
         if tick is None:
             return None
         return tick, ExecutionQualityEvidence.for_tick(
             tick,
             metrics=self.measure(tick),
             algorithm_version=self.config.algorithm_version,
-        )
+        ), offset
 
     def _make_evidence(self, tick: VerifiedTick) -> ExecutionQualityEvidence:
         return ExecutionQualityEvidence.for_tick(
@@ -313,7 +347,7 @@ class ExecutionQualityWorker:
             item = self._next_evidence()
             if item is None:
                 return None
-            tick, evidence = item
+            tick, evidence, offset = item
             try:
                 if (
                     tick.stream_generation != self.config.stream_generation
@@ -340,6 +374,7 @@ class ExecutionQualityWorker:
             )
             self.metrics.checkpoint_or_watermark = tick.ingest_seq
             self.metrics.last_success_at_utc = isoformat()
+            self._stream_offset = offset
             self._last_error = None
             return evidence
 

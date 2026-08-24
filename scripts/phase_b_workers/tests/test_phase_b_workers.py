@@ -19,6 +19,7 @@ from phase_b_artifact_custody import _publish_projection as publish_custody_proj
 
 import phase_b_workers.durable as durable_module
 import phase_b_workers.market_data_worker as market_data_module
+from phase_b_workers.benchmark_execution_quality_journal import benchmark
 from phase_b_workers.contracts import GatewayTickEnvelope, VerifiedTick
 from phase_b_workers.durable import (
     AppendOnlyJsonl,
@@ -2378,6 +2379,110 @@ def test_execution_checkpoint_follows_evidence(tmp_path):
     prior = eq._make_evidence(tick)
     eq.evidence.append(prior)
     assert eq.process_one() is not None and eq.last_ingest_seq == 1
+
+
+def test_execution_quality_uses_seek_cursor_and_reseeks_after_restart(
+    tmp_path, monkeypatch
+):
+    stream_dir = tmp_path / "market" / "stream"
+    producer = DurableVerifiedTickStream(stream_dir, generation="g1")
+    producer.initialize()
+    for sequence in range(1, 4):
+        assert producer.append(
+            VerifiedTick.from_raw(
+                {
+                    "source_event_id": f"tick-{sequence}",
+                    "vt_symbol": "rb2610.SHFE",
+                },
+                stream_generation="g1",
+                ingest_seq=sequence,
+                source="gateway-market-reader",
+            )
+        )
+
+    stream = DurableVerifiedTickStream(stream_dir, generation="g1", read_only=True)
+    quality = ExecutionQualityWorker(tmp_path / "eq", generation="g1", stream=stream)
+    quality.recover()
+
+    def fail_iter_from(*_args, **_kwargs):
+        raise AssertionError("execution-quality must use the seek cursor")
+
+    monkeypatch.setattr(stream, "iter_from", fail_iter_from)
+    assert quality.consume(limit=2) == 2
+    assert quality.last_ingest_seq == 2
+    assert quality._stream_offset is not None
+
+    restarted = ExecutionQualityWorker(
+        tmp_path / "eq", generation="g1", tick_stream_dir=stream_dir
+    )
+    restarted.recover()
+    assert restarted._stream_offset is None
+    assert restarted.consume() == 1
+    assert restarted.last_ingest_seq == 3
+
+
+def test_verified_tick_seek_cursor_releases_shared_lock_before_writer_append(tmp_path):
+    stream_dir = tmp_path / "stream"
+    producer = DurableVerifiedTickStream(stream_dir, generation="g1")
+    producer.initialize()
+    first = VerifiedTick.from_raw(
+        {"source_event_id": "one", "vt_symbol": "rb2610.SHFE"},
+        stream_generation="g1",
+        ingest_seq=1,
+        source="gateway-market-reader",
+    )
+    second = VerifiedTick.from_raw(
+        {"source_event_id": "two", "vt_symbol": "rb2610.SHFE"},
+        stream_generation="g1",
+        ingest_seq=2,
+        source="gateway-market-reader",
+    )
+    assert producer.append(first)
+    consumer = DurableVerifiedTickStream(stream_dir, generation="g1", read_only=True)
+    observed, offset = consumer.next_after()
+    assert observed == first and offset > 0
+    # ``next_after`` has returned, so it cannot leave the shared flock open
+    # while the consumer writes evidence/checkpoint state.
+    assert producer.append(second)
+    observed, _ = consumer.next_after(1, offset=offset)
+    assert observed == second
+
+
+def test_execution_quality_journal_benchmark_is_read_only_and_matches_legacy(
+    tmp_path,
+):
+    stream_dir = tmp_path / "stream"
+    producer = DurableVerifiedTickStream(stream_dir, generation="g1")
+    producer.initialize()
+    for sequence in range(1, 4):
+        assert producer.append(
+            VerifiedTick.from_raw(
+                {
+                    "source_event_id": f"tick-{sequence}",
+                    "vt_symbol": "rb2610.SHFE",
+                },
+                stream_generation="g1",
+                ingest_seq=sequence,
+                source="gateway-market-reader",
+            )
+        )
+    before = {
+        path.name: (path.stat().st_mtime_ns, path.stat().st_size)
+        for path in stream_dir.iterdir()
+    }
+    cursor = benchmark(stream_dir, generation="g1", after_seq=1, count=2)
+    legacy = benchmark(
+        stream_dir, generation="g1", after_seq=1, count=2, legacy=True
+    )
+    assert cursor["producer_mutation"] is False
+    assert legacy["producer_mutation"] is False
+    assert cursor["consumed"] == legacy["consumed"] == 2
+    assert cursor["last_ingest_seq"] == legacy["last_ingest_seq"] == 3
+    after = {
+        path.name: (path.stat().st_mtime_ns, path.stat().st_size)
+        for path in stream_dir.iterdir()
+    }
+    assert after == before
 
 
 def test_execution_recovery_binds_checkpoint_event_evidence_generation_and_algorithm(

@@ -16,7 +16,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import blake2b
-from itertools import islice
+from itertools import islice, pairwise
 from pathlib import Path
 from typing import Generic, TypeVar
 
@@ -684,6 +684,9 @@ class DurableVerifiedTickStream:
         self._write_poisoned = False
         self._event_count = 0
         self._ack_count = 0
+        self._cursor_cache: dict[
+            tuple[int, int], tuple[VerifiedTick, int]
+        ] = {}
         self._ingest_membership = _BoundedMembershipFilter()
         self._source_event_membership = _BoundedMembershipFilter()
         self._raw_membership = _BoundedMembershipFilter()
@@ -1098,8 +1101,12 @@ class DurableVerifiedTickStream:
         return found
 
     def next_sequence(self) -> int:
-        with self._lock, self._process_lock():
-            self._load_index_unlocked()
+        with self._lock:
+            # Recovery already validated the producer snapshot under this
+            # flock.  Do not hold it while a consumer seeks an old immutable
+            # prefix: an append-only writer must not wait behind that scan.
+            with self._process_lock():
+                self._load_index_unlocked()
             state = self.watermark.read()
             return int(state.get("last_ingest_seq") or 0) + 1
 
@@ -1248,6 +1255,119 @@ class DurableVerifiedTickStream:
                 yield tick
                 if remaining is not None:
                     remaining -= 1
+
+    def next_after(
+        self, after_seq: int = 0, *, offset: int | None = None
+    ) -> tuple[VerifiedTick | None, int]:
+        """Return one next tick without retaining the shared snapshot lock.
+
+        A long-running read-only consumer must not keep ``iter_from`` open:
+        that generator deliberately owns the shared process lock while it
+        yields.  Re-opening ``iter_from(..., limit=1)`` for every record is
+        safe but rescans the whole journal each time.  This cursor is only an
+        in-memory byte offset; recovery still validates the full durable
+        stream and a restart re-seeks from its durable checkpoint.
+        """
+
+        sequence = int(after_seq)
+        if sequence < 0:
+            raise DurableCorruptionError("verified tick sequence is negative")
+        if offset is not None:
+            cached = self._cursor_cache.pop((sequence, int(offset)), None)
+            if cached is not None:
+                return cached
+        with self._lock, self._process_lock():
+            self._load_index_unlocked()
+            parent_fd, _ = _open_parent(self.journal.path)
+            descriptor = -1
+            try:
+                flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                if hasattr(os, "O_NOFOLLOW"):
+                    flags |= os.O_NOFOLLOW
+                descriptor = os.open(self.journal.path.name, flags, dir_fd=parent_fd)
+                info = os.fstat(descriptor)
+                if (
+                    stat.S_ISLNK(info.st_mode)
+                    or not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != os.geteuid()
+                    or info.st_nlink != 1
+                    or info.st_mode & 0o077
+                ):
+                    raise DurableCorruptionError(
+                        f"journal is not a regular file: {self.journal.path}"
+                    )
+                position = 0 if offset is None else int(offset)
+                if position < 0 or position > info.st_size:
+                    raise DurableCorruptionError("verified tick cursor is outside journal")
+                os.lseek(descriptor, position, os.SEEK_SET)
+                buffered = b""
+                expected_sequence = sequence + 1
+                def read_tick() -> VerifiedTick | None:
+                    nonlocal buffered, position
+                    newline = buffered.find(b"\n")
+                    while newline < 0:
+                        # The cursor returns one record.  Keep the read
+                        # bounded to avoid turning a long recovery into a
+                        # repeated megabyte read per evidence record.
+                        chunk = os.read(descriptor, 4096)
+                        if not chunk:
+                            if not buffered:
+                                return None
+                            # An unlocked producer may be between partial
+                            # writes at the live tail.  Leave that record for
+                            # the next short read instead of accepting it.
+                            return None
+                        buffered += chunk
+                        newline = buffered.find(b"\n")
+                    line = buffered[: newline + 1]
+                    buffered = buffered[newline + 1 :]
+                    position += len(line)
+                    try:
+                        raw = _strict_json_line(line.decode("utf-8"), self.journal.path, 0)
+                    except UnicodeDecodeError as exc:
+                        raise DurableCorruptionError(f"invalid UTF-8 journal {self.journal.path}") from exc
+                    if set(raw) != {"record_type", "tick"} or raw.get("record_type") != "verified_tick":
+                        raise DurableCorruptionError("unexpected record type in verified tick stream")
+                    try:
+                        return VerifiedTick.from_dict(raw["tick"])  # type: ignore[arg-type]
+                    except (KeyError, TypeError, ValueError) as exc:
+                        raise DurableCorruptionError("invalid verified tick record") from exc
+
+                while True:
+                    tick = read_tick()
+                    if tick is None:
+                        return None, position
+                    if tick.ingest_seq <= sequence:
+                        if offset is not None:
+                            raise DurableCorruptionError(
+                                "verified tick cursor is behind checkpoint"
+                            )
+                        continue
+                    if tick.ingest_seq != expected_sequence:
+                        raise DurableCorruptionError(
+                            "verified tick cursor sequence is not contiguous"
+                        )
+                    prefetched = [(tick, position)]
+                    while len(prefetched) < 64:
+                        following = read_tick()
+                        if following is None:
+                            break
+                        if following.ingest_seq != prefetched[-1][0].ingest_seq + 1:
+                            raise DurableCorruptionError(
+                                "verified tick cursor sequence is not contiguous"
+                            )
+                        prefetched.append((following, position))
+                    for previous, current in pairwise(prefetched):
+                        self._cursor_cache[(previous[0].ingest_seq, previous[1])] = current
+                    return prefetched[0]
+            except OSError as exc:
+                raise DurableCorruptionError(
+                    f"cannot read journal {self.journal.path}"
+                ) from exc
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+                os.close(parent_fd)
 
     def pending_for_tick_writer(self) -> list[VerifiedTick]:
         # Do not call the public ``is_acknowledged`` from ``iter_from``: that
