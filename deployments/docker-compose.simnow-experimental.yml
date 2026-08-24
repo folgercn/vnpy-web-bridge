@@ -4,7 +4,6 @@ services:
   simnow-experimental-runner:
     image: ${SIMNOW_EXPERIMENTAL_RUNNER_IMAGE:-vnpy-web-bridge-simnow-experimental-runner:final}
     restart: "no"
-    user: "${SIMNOW_EXPERIMENTAL_UID:?required}:${SIMNOW_EXPERIMENTAL_GID:?required}"
     entrypoint: ["python", "/app/scripts/simnow_experimental_run_once.py"]
     environment:
       PRODUCTION: "false"

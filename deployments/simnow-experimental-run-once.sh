@@ -7,8 +7,6 @@ set -euo pipefail
 : "${SIMNOW_EXPERIMENTAL_TARGET_PATH:?required}"
 : "${SIMNOW_EXPERIMENTAL_MONTHLY_BUNDLE_DIR:?required}"
 : "${SIMNOW_EXPERIMENTAL_COMPOSE_FILE:?required}"
-: "${SIMNOW_EXPERIMENTAL_UID:?required}"
-: "${SIMNOW_EXPERIMENTAL_GID:?required}"
 : "${SIMNOW_EXPERIMENTAL_PROJECT_DIRECTORY:?required}"
 
 target_path="$SIMNOW_EXPERIMENTAL_TARGET_PATH"
@@ -51,8 +49,6 @@ print((datetime.now(timezone.utc) + timedelta(seconds=300)).replace(microsecond=
 
 export SIMNOW_EXPERIMENTAL_TARGET_PATH
 export SIMNOW_EXPERIMENTAL_MONTHLY_BUNDLE_DIR
-export SIMNOW_EXPERIMENTAL_UID
-export SIMNOW_EXPERIMENTAL_GID
 
 exec "${SIMNOW_EXPERIMENTAL_DOCKER_BIN:-/Applications/Docker.app/Contents/Resources/bin/docker}" \
   --context "${SIMNOW_EXPERIMENTAL_DOCKER_CONTEXT:-desktop-linux}" \

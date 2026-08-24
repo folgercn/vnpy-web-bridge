@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import stat
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -67,6 +68,8 @@ def test_materializer_fixed_ten_contract_canonical_identity_and_false_authority(
     assert {field: target[field] for field in ("production", "live_trading_authorized", "countable_forward", "official_forward_claimed")} == {"production": False, "live_trading_authorized": False, "countable_forward": False, "official_forward_claimed": False}
     output = tmp_path / "target.json"
     materializer.write_target_atomic(output, target)
+    assert stat.S_IMODE(output.stat().st_mode) == 0o644
+    assert stat.S_IMODE(output.parent.stat().st_mode) == 0o755
     loaded, raw = materializer.read_json_stable(output, label="target")
     assert materializer.validate_target(loaded, raw=raw) == target
 
