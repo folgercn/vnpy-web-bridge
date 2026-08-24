@@ -170,8 +170,13 @@ def _read_inputs(target_path: Path, bundle_path: Path) -> tuple[dict[str, Any], 
     _check_readonly_file(target_path, label="target")
     _check_readonly_file(bundle_path, label="monthly bundle")
     try:
-        target = read_json_stable(target_path)
-        bundle = validate_planner_bundle(read_json_stable(bundle_path))
+        target, _target_raw = read_json_stable(
+            target_path, label="experimental target"
+        )
+        bundle, _bundle_raw = read_json_stable(
+            bundle_path, label="monthly planner bundle"
+        )
+        bundle = validate_planner_bundle(bundle)
         target = validate_test_target_bundle_binding(target, bundle)
     except (ExperimentalTargetError, OSError, ValueError, TypeError) as exc:
         raise PreflightStop("input", "target/monthly bundle validation failed") from exc
