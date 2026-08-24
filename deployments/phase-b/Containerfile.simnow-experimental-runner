@@ -11,7 +11,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY backend/app /app/backend/app
 COPY scripts /app/scripts
 COPY shared /app/shared
-RUN python -m py_compile /app/scripts/simnow_experimental_materialize_target.py /app/scripts/simnow_experimental_monthly_once.py /app/scripts/simnow_experimental_run_once.py /app/scripts/simnow_experimental_offline_harness.py
+RUN python -m py_compile /app/scripts/simnow_experimental_materialize_target.py /app/scripts/simnow_experimental_monthly_once.py /app/scripts/simnow_experimental_run_once.py /app/scripts/simnow_experimental_offline_harness.py /app/scripts/simnow_experimental_preflight.py
 RUN groupadd --system --gid 65532 simnow && useradd --system --uid 65532 --gid 65532 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin simnow
 USER 65532:65532
 ENTRYPOINT ["python", "/app/scripts/simnow_experimental_run_once.py"]
