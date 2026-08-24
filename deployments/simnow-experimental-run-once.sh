@@ -6,7 +6,6 @@ set -euo pipefail
 
 : "${SIMNOW_EXPERIMENTAL_TARGET_PATH:?required}"
 : "${SIMNOW_EXPERIMENTAL_MONTHLY_BUNDLE_DIR:?required}"
-: "${SIMNOW_EXPERIMENTAL_BASE_COMPOSE_FILE:?required}"
 : "${SIMNOW_EXPERIMENTAL_COMPOSE_FILE:?required}"
 : "${SIMNOW_EXPERIMENTAL_UID:?required}"
 : "${SIMNOW_EXPERIMENTAL_GID:?required}"
@@ -18,6 +17,10 @@ bundle_directory="$SIMNOW_EXPERIMENTAL_MONTHLY_BUNDLE_DIR"
 # WatchPaths and calendar wakes commonly occur before the materializer has a
 # target.  Do not start Docker, create a file, or mutate any runtime state.
 [[ -f "$target_path" ]] || exit 0
+
+: "${COMPOSE_PROJECT_NAME:?required}"
+active_project="$COMPOSE_PROJECT_NAME"
+export SIMNOW_EXPERIMENTAL_ACTIVE_PROJECT="$active_project"
 
 source_month="$(/usr/bin/python3 - "$target_path" <<'PY'
 import json
@@ -54,8 +57,8 @@ export SIMNOW_EXPERIMENTAL_GID
 exec "${SIMNOW_EXPERIMENTAL_DOCKER_BIN:-/Applications/Docker.app/Contents/Resources/bin/docker}" \
   --context "${SIMNOW_EXPERIMENTAL_DOCKER_CONTEXT:-desktop-linux}" \
   compose \
+  --project-name "${active_project}-simnow-experimental" \
   --project-directory "$SIMNOW_EXPERIMENTAL_PROJECT_DIRECTORY" \
-  -f "$SIMNOW_EXPERIMENTAL_BASE_COMPOSE_FILE" \
   -f "$SIMNOW_EXPERIMENTAL_COMPOSE_FILE" \
   run --rm --no-deps simnow-experimental-runner \
   --target /run/simnow-experimental/target.json \

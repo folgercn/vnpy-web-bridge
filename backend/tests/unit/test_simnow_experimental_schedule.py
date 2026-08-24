@@ -45,9 +45,6 @@ def _launcher_environment(tmp_path: Path, *, target_path: Path, docker_bin: Path
         {
             "SIMNOW_EXPERIMENTAL_TARGET_PATH": str(target_path),
             "SIMNOW_EXPERIMENTAL_MONTHLY_BUNDLE_DIR": str(tmp_path / "monthly"),
-            "SIMNOW_EXPERIMENTAL_BASE_COMPOSE_FILE": str(
-                ROOT / "deployments/docker-compose.final.yml"
-            ),
             "SIMNOW_EXPERIMENTAL_COMPOSE_FILE": str(
                 ROOT / "deployments/docker-compose.simnow-experimental.yml"
             ),
@@ -55,6 +52,7 @@ def _launcher_environment(tmp_path: Path, *, target_path: Path, docker_bin: Path
             "SIMNOW_EXPERIMENTAL_GID": "20",
             "SIMNOW_EXPERIMENTAL_PROJECT_DIRECTORY": str(ROOT),
             "SIMNOW_EXPERIMENTAL_DOCKER_BIN": str(docker_bin),
+            "COMPOSE_PROJECT_NAME": "issue362-test",
         }
     )
     return environment
@@ -77,13 +75,15 @@ def test_experimental_launcher_exits_before_docker_without_target(tmp_path: Path
     assert "sleep " not in launcher
     assert "flock" not in launcher
 
+    environment = _launcher_environment(
+        tmp_path,
+        target_path=tmp_path / "absent-target.json",
+        docker_bin=tmp_path / "docker-must-not-run",
+    )
+    environment.pop("COMPOSE_PROJECT_NAME")
     result = subprocess.run(
         ["/bin/bash", str(ROOT / "deployments/simnow-experimental-run-once.sh")],
-        env=_launcher_environment(
-            tmp_path,
-            target_path=tmp_path / "absent-target.json",
-            docker_bin=tmp_path / "docker-must-not-run",
-        ),
+        env=environment,
         check=False,
         capture_output=True,
         text=True,
@@ -121,6 +121,10 @@ def test_experimental_launcher_invokes_one_existing_runner_with_selected_bundle(
     assert result.returncode == 0, result.stderr
     invoked = json.loads(arguments.read_text(encoding="utf-8"))
     assert invoked.count("compose") == 1
+    assert invoked[invoked.index("--project-name") + 1] == (
+        "issue362-test-simnow-experimental"
+    )
+    assert str(ROOT / "deployments/docker-compose.final.yml") not in invoked
     assert invoked[invoked.index("run") : invoked.index("run") + 4] == [
         "run",
         "--rm",
@@ -145,14 +149,11 @@ def test_experimental_compose_reuses_final_boundaries_without_a_new_stack() -> N
     compose = yaml.safe_load(raw)
     service = compose["services"]["simnow-experimental-runner"]
 
-    assert set(compose) == {"services"}
-    assert service["profiles"] == ["simnow-experimental"]
+    assert set(compose) == {"services", "networks", "volumes"}
     assert service["restart"] == "no"
     assert service["networks"] == ["private-control", "control-custody"]
-    assert service["depends_on"] == {
-        "artifact-custody": {"condition": "service_healthy"},
-        "execution-orchestrator": {"condition": "service_started"},
-    }
+    assert "depends_on" not in service
+    assert "build" not in service
     assert service["environment"]["PRODUCTION"] == "false"
     assert service["environment"]["LIVE_TRADING_AUTHORIZED"] == "false"
     assert service["environment"]["COUNTABLE_FORWARD"] == "false"
@@ -160,7 +161,26 @@ def test_experimental_compose_reuses_final_boundaries_without_a_new_stack() -> N
     assert service["read_only"] is True
     assert service["cap_drop"] == ["ALL"]
     assert "network_mode" not in service
-    assert "volumes:" not in raw.split("services:", 1)[0]
+    assert compose["networks"] == {
+        "private-control": {
+            "external": True,
+            "name": "${SIMNOW_EXPERIMENTAL_ACTIVE_PROJECT:?required}_private-control",
+        },
+        "control-custody": {
+            "external": True,
+            "name": "${SIMNOW_EXPERIMENTAL_ACTIVE_PROJECT:?required}_control-custody",
+        },
+    }
+    assert compose["volumes"] == {
+        "market_data_state": {
+            "external": True,
+            "name": "${SIMNOW_EXPERIMENTAL_ACTIVE_PROJECT:?required}_market_data_state",
+        },
+        "market_projection": {
+            "external": True,
+            "name": "${SIMNOW_EXPERIMENTAL_ACTIVE_PROJECT:?required}_market_projection",
+        },
+    }
 
 
 def test_experimental_schedule_glue_stays_on_the_contract_only_lane() -> None:
