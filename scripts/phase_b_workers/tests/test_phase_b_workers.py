@@ -7,6 +7,7 @@ import pickle
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2446,6 +2447,53 @@ def test_verified_tick_seek_cursor_releases_shared_lock_before_writer_append(tmp
     assert producer.append(second)
     observed, _ = consumer.next_after(1, offset=offset)
     assert observed == second
+
+
+def test_read_only_stream_recovery_releases_flock_before_full_snapshot_parse(
+    tmp_path, monkeypatch
+):
+    stream_dir = tmp_path / "stream"
+    producer = DurableVerifiedTickStream(stream_dir, generation="g1")
+    producer.initialize()
+    first = VerifiedTick.from_raw(
+        {"source_event_id": "one", "vt_symbol": "rb2610.SHFE"},
+        stream_generation="g1",
+        ingest_seq=1,
+        source="gateway-market-reader",
+    )
+    second = VerifiedTick.from_raw(
+        {"source_event_id": "two", "vt_symbol": "rb2610.SHFE"},
+        stream_generation="g1",
+        ingest_seq=2,
+        source="gateway-market-reader",
+    )
+    assert producer.append(first)
+    parsing = threading.Event()
+    original = AppendOnlyJsonl.records_from_snapshot
+
+    def slow_snapshot(*args, **kwargs):
+        for record in original(*args, **kwargs):
+            parsing.set()
+            time.sleep(0.15)
+            yield record
+
+    monkeypatch.setattr(AppendOnlyJsonl, "records_from_snapshot", slow_snapshot)
+    failures = []
+
+    def recover_consumer():
+        try:
+            DurableVerifiedTickStream(stream_dir, generation="g1", read_only=True)
+        except (DurableStateError, OSError) as exc:  # pragma: no cover
+            failures.append(exc)
+
+    consumer = threading.Thread(target=recover_consumer)
+    consumer.start()
+    assert parsing.wait(timeout=2)
+    started = time.monotonic()
+    assert producer.append(second)
+    assert time.monotonic() - started < 0.1
+    consumer.join(timeout=2)
+    assert not consumer.is_alive() and not failures
 
 
 def test_execution_quality_journal_benchmark_is_read_only_and_matches_legacy(
