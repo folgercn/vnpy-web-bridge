@@ -38,8 +38,6 @@
     <string>/Users/fujun/services/vnpy-web-bridge/runtime/simnow-experimental/target.json</string>
     <key>SIMNOW_EXPERIMENTAL_MONTHLY_BUNDLE_DIR</key>
     <string>/Users/fujun/services/vnpy-web-bridge/runtime/simnow-experimental/monthly</string>
-    <key>SIMNOW_EXPERIMENTAL_BASE_COMPOSE_FILE</key>
-    <string>/Users/fujun/services/vnpy-web-bridge/deployments/docker-compose.final.yml</string>
     <key>SIMNOW_EXPERIMENTAL_COMPOSE_FILE</key>
     <string>/Users/fujun/services/vnpy-web-bridge/deployments/docker-compose.simnow-experimental.yml</string>
     <key>SIMNOW_EXPERIMENTAL_PROJECT_DIRECTORY</key>
