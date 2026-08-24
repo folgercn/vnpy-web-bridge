@@ -44,6 +44,7 @@ from phase_b_workers.market_data_worker import (
     MarketDataWorker,
     QuestDbTickWriter,
     ZmqPublishTickSource,
+    ZmqTickWireSourceV1,
     restricted_tick_wire_loads,
     verified_tick_to_market_tick_v3,
 )
@@ -1030,6 +1031,121 @@ def test_zmq_source_drains_bounded_burst_without_reordering_or_loss(tmp_path):
     envelopes = [GatewayTickEnvelope.from_dict(value) for value in received]
     assert [event.source_seq for event in envelopes] == [1, 2, 3, 4, 5]
     assert [event.payload["last_price"] for event in envelopes] == [1, 2, 3, 4, 5]
+    source.close()
+
+
+def test_tick_wire_source_keeps_durable_cursor_but_reads_it_once_per_owner(
+    tmp_path, monkeypatch
+):
+    state_dir = tmp_path / "tick-wire"
+    source = ZmqTickWireSourceV1(
+        "tcp://tick-wire-proxy:4103",
+        state_dir=state_dir,
+        source_generation="gateway-g1",
+        context=FakeContext([FakeSocket()]),
+        zmq_module=FakeZmq,
+    )
+    source.subscribe(lambda _value: None)
+    original_read = source._cursor.read
+    read_count = 0
+
+    def count_read():
+        nonlocal read_count
+        read_count += 1
+        return original_read()
+
+    monkeypatch.setattr(source._cursor, "read", count_read)
+    assert source._next_source_seq() == 1
+    assert source._next_source_seq() == 2
+    assert read_count == 1
+    assert source._cursor.read()["last_source_seq"] == 64
+    source.close()
+
+    restarted = ZmqTickWireSourceV1(
+        "tcp://tick-wire-proxy:4103",
+        state_dir=state_dir,
+        source_generation="gateway-g1",
+        context=FakeContext([FakeSocket()]),
+        zmq_module=FakeZmq,
+    )
+    restarted.subscribe(lambda _value: None)
+    assert restarted._next_source_seq() == 65
+    restarted.close()
+
+
+def test_tick_wire_source_reserves_one_durable_cursor_per_bounded_sequence_group(
+    tmp_path, monkeypatch
+):
+    source = ZmqTickWireSourceV1(
+        "tcp://tick-wire-proxy:4103",
+        state_dir=tmp_path / "tick-wire",
+        source_generation="gateway-g1",
+        context=FakeContext([FakeSocket()]),
+        zmq_module=FakeZmq,
+    )
+    source.subscribe(lambda _value: None)
+    original_write = source._cursor.write
+    write_count = 0
+
+    def count_write(value):
+        nonlocal write_count
+        write_count += 1
+        original_write(value)
+
+    monkeypatch.setattr(source._cursor, "write", count_write)
+    assert [source._next_source_seq() for _ in range(64)] == list(range(1, 65))
+    assert write_count == 1
+    assert source._next_source_seq() == 65
+    assert write_count == 2
+    source.close()
+
+
+def test_tick_wire_source_does_not_expose_sequence_when_reservation_write_fails(
+    tmp_path, monkeypatch
+):
+    source = ZmqTickWireSourceV1(
+        "tcp://tick-wire-proxy:4103",
+        state_dir=tmp_path / "tick-wire",
+        source_generation="gateway-g1",
+        context=FakeContext([FakeSocket()]),
+        zmq_module=FakeZmq,
+    )
+    source.subscribe(lambda _value: None)
+    original_write = source._cursor.write
+    monkeypatch.setattr(
+        source._cursor,
+        "write",
+        lambda _value: (_ for _ in ()).throw(OSError("cursor unavailable")),
+    )
+    with pytest.raises(OSError, match="cursor unavailable"):
+        source._next_source_seq()
+    monkeypatch.setattr(source._cursor, "write", original_write)
+    assert source._next_source_seq() == 1
+    source.close()
+
+
+def test_market_source_fence_allows_restart_reservation_gap(tmp_path):
+    worker = MarketDataWorker(tmp_path / "market", generation="g1", writer=Writer())
+    worker.recover()
+    worker.accept(envelope("before-crash", 1))
+    worker.process_one()
+    worker.accept(envelope("after-crash", 65, last_price=101))
+    worker.process_one()
+    assert [tick.ingest_seq for tick in worker.writer.events] == [1, 2]
+
+
+def test_tick_wire_source_reservation_still_rejects_generation_change(tmp_path):
+    source = ZmqTickWireSourceV1(
+        "tcp://tick-wire-proxy:4103",
+        state_dir=tmp_path / "tick-wire",
+        source_generation="gateway-g1",
+        context=FakeContext([FakeSocket()]),
+        zmq_module=FakeZmq,
+    )
+    source._cursor.write({"source_generation": "gateway-g2", "last_source_seq": 64})
+    source.subscribe(lambda _value: None)
+    with pytest.raises(GenerationMismatch):
+        source._next_source_seq()
     source.close()
 
 
