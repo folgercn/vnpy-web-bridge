@@ -169,7 +169,7 @@ def test_position_query_rejection_preserves_accepted_query_readiness() -> None:
     }
 
 
-def test_position_query_inflight_identity_is_not_replaced_and_failure_can_retry() -> None:
+def test_position_query_accepted_handoff_replaces_stale_identity_and_failure_can_retry() -> None:
     class TdApi:
         def __init__(self) -> None:
             self.gateway = object()
@@ -193,13 +193,15 @@ def test_position_query_inflight_identity_is_not_replaced_and_failure_can_retry(
     assert api.reqQryInvestorPosition({}, 28) == 0
     assert api.reqQryInvestorPosition({}, 50) == 0
     assert tracker.observability_state_v1() == {
-        "generation": 1,
-        "active_request_id": 28,
+        "generation": 2,
+        "active_request_id": 50,
         "failed_request_id": None,
         "ready": False,
         "callback_count": 0,
     }
     api.onRspQryInvestorPosition(None, {"ErrorID": 0}, 28, True)
+    assert not tracker.is_ready()
+    api.onRspQryInvestorPosition(None, {"ErrorID": 0}, 50, True)
     assert tracker.is_ready()
 
     assert api.reqQryInvestorPosition({}, 28) == 0
@@ -207,7 +209,7 @@ def test_position_query_inflight_identity_is_not_replaced_and_failure_can_retry(
     assert not tracker.is_ready()
     assert api.reqQryInvestorPosition({}, 50) == 0
     assert tracker.observability_state_v1() == {
-        "generation": 3,
+        "generation": 4,
         "active_request_id": 50,
         "failed_request_id": None,
         "ready": False,
@@ -215,7 +217,246 @@ def test_position_query_inflight_identity_is_not_replaced_and_failure_can_retry(
     }
 
 
-def test_position_query_exception_resets_ready_state_and_reraises() -> None:
+def test_position_handoff_clears_a_partial_rows_before_replaying_accepted_b() -> None:
+    class TdApi:
+        def __init__(self) -> None:
+            self.gateway = object()
+            self.positions: dict[str, object] = {}
+            self.native_rows: list[tuple[int, str | None, bool]] = []
+            self.published: list[dict[str, object]] = []
+
+        def reqQryInvestorPosition(self, request: object, request_id: int) -> int:
+            _ = request
+            if request_id == 2:
+                # B callbacks can be synchronous with reqQry... and must not
+                # touch the native accumulator before acceptance.
+                self.onRspQryInvestorPosition(
+                    {"symbol": "B"}, {"ErrorID": 0}, 2, True
+                )
+            return 0
+
+        def onRspQryInvestorPosition(
+            self, data: object, error: object, request_id: int, b_is_last: bool
+        ) -> None:
+            _ = error
+            symbol = data.get("symbol") if isinstance(data, dict) else None
+            if symbol is not None:
+                self.positions[symbol] = data
+            self.native_rows.append((request_id, symbol, b_is_last))
+            if b_is_last:
+                self.published.append(dict(self.positions))
+                self.positions.clear()
+
+    api = TdApi()
+    tracker = attach_ctp_position_readiness_v1(api)
+    assert api.reqQryInvestorPosition({}, 1) == 0
+    api.onRspQryInvestorPosition({"symbol": "A"}, {"ErrorID": 0}, 1, False)
+    assert api.positions == {"A": {"symbol": "A"}}
+
+    assert api.reqQryInvestorPosition({}, 2) == 0
+    assert api.published == [{"B": {"symbol": "B"}}]
+    assert api.native_rows == [(1, "A", False), (2, "B", True)]
+    assert tracker.is_ready()
+
+
+def test_position_handoff_rejected_b_keeps_a_authoritative_through_final() -> None:
+    class TdApi:
+        def __init__(self) -> None:
+            self.gateway = object()
+            self.positions: dict[str, object] = {}
+            self.native_rows: list[tuple[int, str | None, bool]] = []
+
+        def reqQryInvestorPosition(self, request: object, request_id: int) -> int:
+            _ = request
+            if request_id == 2:
+                self.onRspQryInvestorPosition(
+                    {"symbol": "A"}, {"ErrorID": 0}, 1, True
+                )
+                self.onRspQryInvestorPosition(
+                    {"symbol": "B"}, {"ErrorID": 0}, 2, True
+                )
+                return -2
+            return 0
+
+        def onRspQryInvestorPosition(
+            self, data: object, error: object, request_id: int, b_is_last: bool
+        ) -> None:
+            _ = error
+            symbol = data.get("symbol") if isinstance(data, dict) else None
+            self.native_rows.append((request_id, symbol, b_is_last))
+            if symbol is not None:
+                self.positions[symbol] = data
+            if b_is_last:
+                self.positions.clear()
+
+    api = TdApi()
+    tracker = attach_ctp_position_readiness_v1(api)
+    assert api.reqQryInvestorPosition({}, 1) == 0
+    api.onRspQryInvestorPosition({"symbol": "A"}, {"ErrorID": 0}, 1, False)
+    assert api.reqQryInvestorPosition({}, 2) == -2
+    assert api.native_rows == [(1, "A", False), (1, "A", True)]
+    assert tracker.is_ready()
+    assert tracker.observability_state_v1()["active_request_id"] == 1
+
+
+def test_position_handoff_exception_discards_b_and_keeps_a_authoritative() -> None:
+    class TdApi:
+        def __init__(self) -> None:
+            self.gateway = object()
+            self.positions: dict[str, object] = {}
+            self.native_rows: list[tuple[int, str | None, bool]] = []
+
+        def reqQryInvestorPosition(self, request: object, request_id: int) -> int:
+            _ = request
+            if request_id == 2:
+                self.onRspQryInvestorPosition(
+                    {"symbol": "B"}, {"ErrorID": 0}, 2, False
+                )
+                raise RuntimeError("CTP req failure")
+            return 0
+
+        def onRspQryInvestorPosition(
+            self, data: object, error: object, request_id: int, b_is_last: bool
+        ) -> None:
+            _ = error
+            symbol = data.get("symbol") if isinstance(data, dict) else None
+            self.native_rows.append((request_id, symbol, b_is_last))
+            if symbol is not None:
+                self.positions[symbol] = data
+            if b_is_last:
+                self.positions.clear()
+
+    api = TdApi()
+    tracker = attach_ctp_position_readiness_v1(api)
+    assert api.reqQryInvestorPosition({}, 1) == 0
+    api.onRspQryInvestorPosition({"symbol": "A"}, {"ErrorID": 0}, 1, False)
+    with pytest.raises(RuntimeError, match="CTP req failure"):
+        api.reqQryInvestorPosition({}, 2)
+    assert api.native_rows == [(1, "A", False)]
+    assert tracker.observability_state_v1()["active_request_id"] == 1
+    assert not tracker.is_ready()
+
+    api.onRspQryInvestorPosition({"symbol": "A"}, {"ErrorID": 0}, 1, True)
+    assert api.native_rows == [(1, "A", False), (1, "A", True)]
+    assert tracker.is_ready()
+
+
+def test_position_handoff_drops_late_a_before_native_after_b_acceptance() -> None:
+    class TdApi:
+        def __init__(self) -> None:
+            self.gateway = object()
+            self.positions: dict[str, object] = {}
+            self.native_rows: list[tuple[int, str | None]] = []
+
+        def reqQryInvestorPosition(self, request: object, request_id: int) -> int:
+            _ = (request, request_id)
+            return 0
+
+        def onRspQryInvestorPosition(
+            self, data: object, error: object, request_id: int, b_is_last: bool
+        ) -> None:
+            _ = (error, b_is_last)
+            symbol = data.get("symbol") if isinstance(data, dict) else None
+            self.native_rows.append((request_id, symbol))
+            if symbol is not None:
+                self.positions[symbol] = data
+
+    api = TdApi()
+    tracker = attach_ctp_position_readiness_v1(api)
+    assert api.reqQryInvestorPosition({}, 1) == 0
+    api.onRspQryInvestorPosition({"symbol": "A"}, {"ErrorID": 0}, 1, False)
+    assert api.reqQryInvestorPosition({}, 2) == 0
+    api.onRspQryInvestorPosition({"symbol": "A-late"}, {"ErrorID": 0}, 1, True)
+    api.onRspQryInvestorPosition({"symbol": "B"}, {"ErrorID": 0}, 2, True)
+    assert api.native_rows == [(1, "A"), (2, "B")]
+    assert api.positions == {"B": {"symbol": "B"}}
+    assert tracker.is_ready()
+
+
+def test_position_handoff_disconnect_clears_candidate_and_native_rows() -> None:
+    class TdApi:
+        def __init__(self) -> None:
+            self.gateway = object()
+            self.positions: dict[str, object] = {}
+            self.native_rows: list[int] = []
+
+        def reqQryInvestorPosition(self, request: object, request_id: int) -> int:
+            _ = request
+            if request_id == 2:
+                self.onRspQryInvestorPosition({"B": 1}, {"ErrorID": 0}, 2, False)
+                self.onFrontDisconnected(8193)
+            return 0
+
+        def onRspQryInvestorPosition(
+            self, data: object, error: object, request_id: int, b_is_last: bool
+        ) -> None:
+            _ = (error, b_is_last)
+            self.native_rows.append(request_id)
+            if isinstance(data, dict):
+                self.positions.update(data)
+
+        def onFrontDisconnected(self, reason: int) -> None:
+            _ = reason
+
+    api = TdApi()
+    tracker = attach_ctp_position_readiness_v1(api)
+    assert attach_ctp_position_readiness_v1(api) is tracker
+    assert api.reqQryInvestorPosition({}, 1) == 0
+    api.onRspQryInvestorPosition({"A": 1}, {"ErrorID": 0}, 1, False)
+    assert api.reqQryInvestorPosition({}, 2) == 0
+    assert api.positions == {}
+    assert tracker.observability_state_v1()["active_request_id"] is None
+    api.onRspQryInvestorPosition({"A-late": 1}, {"ErrorID": 0}, 1, True)
+    assert api.native_rows == [1]
+
+    assert api.reqQryInvestorPosition({}, 3) == 0
+    api.onRspQryInvestorPosition({"C": 1}, {"ErrorID": 0}, 3, True)
+    assert api.native_rows == [1, 3]
+    assert tracker.is_ready()
+
+
+def test_position_query_disconnect_reconnect_hands_readiness_to_new_query() -> None:
+    class TdApi:
+        def __init__(self) -> None:
+            self.gateway = object()
+
+        def reqQryInvestorPosition(self, request: object, request_id: int) -> int:
+            _ = (request, request_id)
+            return 0
+
+        def onRspQryInvestorPosition(
+            self,
+            data: object,
+            error: object,
+            request_id: int,
+            b_is_last: bool,
+        ) -> None:
+            _ = (data, error, request_id, b_is_last)
+
+        def onFrontDisconnected(self, reason: int) -> None:
+            _ = reason
+
+    api = TdApi()
+    tracker = attach_ctp_position_readiness_v1(api)
+
+    assert api.reqQryInvestorPosition({}, 6585) == 0
+    api.onFrontDisconnected(8193)
+    assert tracker.observability_state_v1() == {
+        "generation": 2,
+        "active_request_id": None,
+        "failed_request_id": None,
+        "ready": False,
+        "callback_count": 0,
+    }
+
+    assert api.reqQryInvestorPosition({}, 6590) == 0
+    api.onRspQryInvestorPosition(None, {"ErrorID": 0}, 6585, True)
+    assert not tracker.is_ready()
+    api.onRspQryInvestorPosition(None, {"ErrorID": 0}, 6590, True)
+    assert tracker.is_ready()
+
+
+def test_position_query_exception_preserves_prior_accepted_query_and_reraises() -> None:
     class TdApi:
         def __init__(self) -> None:
             self.gateway = object()
@@ -244,11 +485,11 @@ def test_position_query_exception_resets_ready_state_and_reraises() -> None:
     with pytest.raises(RuntimeError, match="native CTP query failure"):
         api.reqQryInvestorPosition({}, 2)
     assert tracker.observability_state_v1() == {
-        "generation": 3,
-        "active_request_id": None,
+        "generation": 1,
+        "active_request_id": 1,
         "failed_request_id": None,
-        "ready": False,
-        "callback_count": 0,
+        "ready": True,
+        "callback_count": 1,
     }
 
 
