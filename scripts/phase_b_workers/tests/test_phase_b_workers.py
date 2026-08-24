@@ -2382,6 +2382,43 @@ def test_execution_checkpoint_follows_evidence(tmp_path):
     assert eq.process_one() is not None and eq.last_ingest_seq == 1
 
 
+def test_execution_recovery_resumes_from_checkpoint_before_recovered_append(tmp_path):
+    stream_dir = tmp_path / "market" / "stream"
+    producer = DurableVerifiedTickStream(stream_dir, generation="g1")
+    producer.initialize()
+    ticks = []
+    for sequence, event_id in ((1, "one"), (2, "two")):
+        tick = VerifiedTick.from_raw(
+            {"source_event_id": event_id, "vt_symbol": "rb2610.SHFE"},
+            stream_generation="g1",
+            ingest_seq=sequence,
+            source="gateway-market-reader",
+        )
+        assert producer.append(tick)
+        ticks.append(tick)
+    second = ticks[1]
+
+    initial = ExecutionQualityWorker(
+        tmp_path / "eq", generation="g1", tick_stream_dir=stream_dir
+    )
+    initial.recover()
+    assert initial.process_one() is not None
+    assert initial.last_ingest_seq == 1
+    # Simulate the durable evidence append that completed immediately before
+    # a crash, while its checkpoint has not advanced beyond sequence 1.
+    assert initial.evidence.append(initial._make_evidence(second))
+
+    restarted = ExecutionQualityWorker(
+        tmp_path / "eq", generation="g1", tick_stream_dir=stream_dir
+    )
+    restarted.recover()
+    assert restarted.last_ingest_seq == 1
+    assert restarted._stream_offset is not None
+    recovered = restarted.process_one()
+    assert recovered is not None and recovered.ingest_seq == 2
+    assert restarted.last_ingest_seq == 2
+
+
 def test_execution_quality_uses_seek_cursor_and_reseeks_after_restart(
     tmp_path, monkeypatch
 ):
@@ -2417,9 +2454,20 @@ def test_execution_quality_uses_seek_cursor_and_reseeks_after_restart(
         tmp_path / "eq", generation="g1", tick_stream_dir=stream_dir
     )
     restarted.recover()
-    assert restarted._stream_offset is None
+    assert restarted._stream_offset is not None
+    recovered_offset = restarted._stream_offset
+    restarted_stream = restarted._stream_after_recovery()
+    observed_offsets = []
+    original_next_after = restarted_stream.next_after  # type: ignore[attr-defined]
+
+    def observe_next_after(after_seq, *, offset=None):
+        observed_offsets.append(offset)
+        return original_next_after(after_seq, offset=offset)
+
+    monkeypatch.setattr(restarted_stream, "next_after", observe_next_after)
     assert restarted.consume() == 1
     assert restarted.last_ingest_seq == 3
+    assert observed_offsets[0] == recovered_offset
 
 
 def test_verified_tick_seek_cursor_releases_shared_lock_before_writer_append(tmp_path):

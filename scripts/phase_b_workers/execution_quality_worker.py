@@ -203,6 +203,7 @@ class ExecutionQualityWorker:
         # evidence even when the checkpoint itself still points at an older
         # item.
         self._state_recovered = False
+        resume_offset: int | None = None
         try:
             if self.stream is None:
                 self.stream = DurableVerifiedTickStream(
@@ -213,6 +214,8 @@ class ExecutionQualityWorker:
             stream = self._stream_after_recovery()
             stream.stats()  # type: ignore[attr-defined]
             evidence_records = self.evidence.records()
+            state = self.checkpoint.read()
+            checkpoint_seq_for_offset = int(state.get("last_ingest_seq") or 0)
             parsed_evidence: list[ExecutionQualityEvidence] = []
             for raw in evidence_records:
                 try:
@@ -259,7 +262,11 @@ class ExecutionQualityWorker:
                         "execution-quality evidence has no matching verified tick"
                     )
                 prior_evidence_seq = evidence.ingest_seq
-            state = self.checkpoint.read()
+                if evidence.ingest_seq == checkpoint_seq_for_offset:
+                    # Use only the evidence that the durable checkpoint
+                    # later authenticates.  A recovered append at N+1 must
+                    # be replayed when the checkpoint is still N.
+                    resume_offset = evidence_offset
             if (
                 str(state.get("stream_generation") or self.config.stream_generation)
                 != self.config.stream_generation
@@ -312,7 +319,7 @@ class ExecutionQualityWorker:
             raise
         else:
             self._state_recovered = True
-            self._stream_offset = None
+            self._stream_offset = resume_offset
             self._last_error = None
 
     def _next_evidence(
