@@ -16,6 +16,7 @@ from research_warehouse.canonical import canonical_json, sha256
 from research_warehouse.calendar_models import CalendarDay, OfficialCalendar
 from research_warehouse.shfe_contract_parameters import (
     ShfeContractParameterError,
+    evidence_from_pinned_raw,
     endpoint_for_day,
     evidence_from_raw,
     expiry_for_exact_contract,
@@ -61,6 +62,15 @@ def test_current_ru2701_contract_parameter_parses_to_exchange_expiry() -> None:
     lineage = lineage_for_exact_contract(evidence, exact_contract="SHFE.ru2701")
     assert lineage["instrument_id"] == "ru2701"
     assert lineage["expire_date"] == "2027-01-15"
+
+
+def test_pinned_raw_derives_its_strict_report_day() -> None:
+    evidence = evidence_from_pinned_raw(
+        observed_at="2026-08-21T11:52:57.000000Z",
+        raw=_raw(),
+        expected_raw_sha256=sha256(_raw()),
+    )
+    assert evidence.query_day == date(2026, 8, 19)
 
 
 def test_exact_mismatch_hash_tamper_and_missing_or_invalid_expiry_fail_closed() -> None:

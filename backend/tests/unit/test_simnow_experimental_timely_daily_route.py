@@ -3,7 +3,8 @@ from __future__ import annotations
 import importlib
 import json
 import sys
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,6 +38,28 @@ def _context(tmp_path: Path, calendar) -> SimpleNamespace:
     )
 
 
+def _shfe_parameter_raw(*, query_day: str, delivery: str) -> bytes:
+    query = query_day.replace("-", "")
+    expiry = "20261015" if delivery == "2610" else "20270115"
+    return materializer.canonical_json_line(
+        {
+            "ContractBaseInfo": [
+                {
+                    "INSTRUMENTID": f"{product}{delivery}",
+                    "EXCHANGEID": "SHFE",
+                    "COMMODITYID": product,
+                    "TRADINGDAY": query,
+                    "EXPIREDATE": expiry,
+                }
+                for product in materializer.PRODUCTS
+                if materializer.PRODUCT_EXCHANGES[product] == "SHFE"
+            ],
+            "report_date": query,
+            "update_date": f"{query} 16:20:09",
+        }
+    )
+
+
 def test_timely_route_reuses_frozen_kernel_and_binds_experimental_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -46,6 +69,8 @@ def test_timely_route_reuses_frozen_kernel_and_binds_experimental_metadata(
     context = _context(tmp_path, inputs["calendar"])
     registry_path = tmp_path / "contract-registry.json"
     registry_path.write_bytes(inputs["contract_registry_raw"])
+    parameter_path = tmp_path / "shfe-contract-parameters.dat"
+    parameter_raw = _shfe_parameter_raw(query_day="2026-08-18", delivery="2610")
     receipt_path = context.runtime.run_receipts / "2026-08-18.json"
     raw_paths = {
         context.paths.root / row["raw_relative_path"]: inputs["daily_source_raw"][
@@ -64,7 +89,10 @@ def test_timely_route_reuses_frozen_kernel_and_binds_experimental_metadata(
     monkeypatch.setattr(
         route_builder,
         "_read_private_protected_evidence",
-        lambda *_args, **_kwargs: inputs["contract_registry_raw"],
+        lambda path, *_args, **_kwargs: {
+            registry_path: inputs["contract_registry_raw"],
+            parameter_path: parameter_raw,
+        }[path],
     )
     monkeypatch.setattr(
         route_builder,
@@ -78,11 +106,16 @@ def test_timely_route_reuses_frozen_kernel_and_binds_experimental_metadata(
         expected_contract_registry_raw_sha256=(
             route_builder.sha256(inputs["contract_registry_raw"])
         ),
+        shfe_contract_parameters_path=parameter_path,
+        expected_shfe_contract_parameters_raw_sha256=route_builder.sha256(parameter_raw),
+        shfe_contract_parameters_observed_at="2026-08-19T01:00:00.000000Z",
     )
 
     assert route["schema_version"] == "daily-pit-route-v1"
     assert route["metadata"]["route_mode"] == route_builder.ROUTE_MODE
     assert route["metadata"]["production"] is False
+    assert route["metadata"]["shfe_contract_parameters_raw_sha256"] == route_builder.sha256(parameter_raw)
+    assert route["metadata"]["shfe_contract_parameters_observed_at"] == "2026-08-19T01:00:00.000000Z"
     assert [row["product"] for row in route["mains"]] == list(materializer.PRODUCTS)
     bundle = importlib.import_module("test_simnow_experimental_target")._bundle()
     target = materializer.materialize_target(
@@ -123,7 +156,82 @@ def test_late_receipt_stops_without_route_output(
             official_day="2026-08-18",
             contract_registry_path=tmp_path / "unused.json",
             expected_contract_registry_raw_sha256="a" * 64,
+            shfe_contract_parameters_path=tmp_path / "unused-parameters.dat",
+            expected_shfe_contract_parameters_raw_sha256="b" * 64,
+            shfe_contract_parameters_observed_at="2026-08-19T01:00:00.000000Z",
         )
+
+
+def test_future_shfe_main_uses_pinned_exact_expiry_outside_calendar_coverage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs = daily_fixture._inputs()
+    official_day = "2026-08-20"
+    receipt = json.loads(inputs["run_receipt_raw"])
+    receipt["trade_day"] = official_day
+    raws = {
+        exchange: daily_fixture._raw_for_day(
+            official_day,
+            exchange,
+            deliveries=("2701", "2702", "2703"),
+        )
+        for exchange in ("SHFE", "INE")
+    }
+    for source in receipt["sources"]:
+        raw = raws[source["exchange"]]
+        source["raw_sha256"] = route_builder.sha256(raw)
+        source["raw_bytes"] = len(raw)
+    receipt_raw = materializer.canonical_json_line(receipt)
+    context = _context(
+        tmp_path,
+        replace(inputs["calendar"], valid_to=date(2026, 12, 31)),
+    )
+    registry_path = tmp_path / "contract-registry.json"
+    parameter_path = tmp_path / "shfe-contract-parameters.dat"
+    parameter_raw = _shfe_parameter_raw(query_day="2026-08-19", delivery="2701")
+    receipt_path = context.runtime.run_receipts / f"{official_day}.json"
+    raw_paths = {
+        context.paths.root / source["raw_relative_path"]: raws[source["exchange"]]
+        for source in receipt["sources"]
+    }
+
+    def strict(path: Path, *_args, **_kwargs) -> bytes:
+        if path == receipt_path:
+            return receipt_raw
+        return raw_paths[path]
+
+    monkeypatch.setattr(route_builder, "load_run_receipt", lambda _path: receipt)
+    monkeypatch.setattr(route_builder, "read_regular_strict", strict)
+    monkeypatch.setattr(
+        route_builder,
+        "_read_private_protected_evidence",
+        lambda path, *_args, **_kwargs: {
+            registry_path: inputs["contract_registry_raw"],
+            parameter_path: parameter_raw,
+        }[path],
+    )
+    monkeypatch.setattr(
+        route_builder,
+        "verify_daily_run_receipt",
+        lambda *_args, **_kwargs: datetime(2026, 8, 20, 10, 30, tzinfo=timezone.utc),
+    )
+
+    route = route_builder.build_timely_experimental_route(
+        context=context,
+        official_day=official_day,
+        contract_registry_path=registry_path,
+        expected_contract_registry_raw_sha256=route_builder.sha256(
+            inputs["contract_registry_raw"]
+        ),
+        shfe_contract_parameters_path=parameter_path,
+        expected_shfe_contract_parameters_raw_sha256=route_builder.sha256(parameter_raw),
+        shfe_contract_parameters_observed_at="2026-08-21T11:52:57.000000Z",
+    )
+
+    ru = next(row for row in route["mains"] if row["product"] == "ru")
+    assert ru["exact_contract"] == "SHFE.ru2701"
+    assert route["metadata"]["shfe_contract_parameters_raw_sha256"] == route_builder.sha256(parameter_raw)
 
 
 def test_materializer_rejects_forged_or_nonexperimental_timely_metadata() -> None:
@@ -155,6 +263,8 @@ def test_materializer_rejects_experimental_route_with_extra_top_level_fields() -
         "run_receipt_id": "run-test",
         "run_receipt_raw_sha256": "a" * 64,
         "contract_registry_raw_sha256": "b" * 64,
+        "shfe_contract_parameters_raw_sha256": "c" * 64,
+        "shfe_contract_parameters_observed_at": "2026-08-20T01:00:00.000000Z",
         "production": False,
         "live_trading_authorized": False,
         "countable_forward": False,
@@ -187,6 +297,8 @@ def test_service_stdout_route_is_canonical_and_consumable_by_materializer(
         "run_receipt_id": "run-service-503",
         "run_receipt_raw_sha256": "a" * 64,
         "contract_registry_raw_sha256": "b" * 64,
+        "shfe_contract_parameters_raw_sha256": "c" * 64,
+        "shfe_contract_parameters_observed_at": "2026-08-20T01:00:00.000000Z",
         "production": False,
         "live_trading_authorized": False,
         "countable_forward": False,
@@ -196,6 +308,9 @@ def test_service_stdout_route_is_canonical_and_consumable_by_materializer(
     projection = SimpleNamespace(
         contract_registry_path=Path("/service/private/contracts.json"),
         contract_registry_raw_sha256="b" * 64,
+        shfe_contract_parameters_path=Path("/service/private/shfe-contracts.dat"),
+        shfe_contract_parameters_raw_sha256="c" * 64,
+        shfe_contract_parameters_observed_at="2026-08-20T01:00:00.000000Z",
     )
     monkeypatch.setattr(route_builder, "_service_context", lambda _path: context)
     monkeypatch.setattr(route_builder, "_config_raw", lambda *_args, **_kwargs: b"{}")
@@ -257,6 +372,9 @@ def test_stdout_route_mode_keeps_stop_payload_off_stdout(
     projection = SimpleNamespace(
         contract_registry_path=Path("/service/private/contracts.json"),
         contract_registry_raw_sha256="b" * 64,
+        shfe_contract_parameters_path=Path("/service/private/shfe-contracts.dat"),
+        shfe_contract_parameters_raw_sha256="c" * 64,
+        shfe_contract_parameters_observed_at="2026-08-20T01:00:00.000000Z",
     )
     monkeypatch.setattr(route_builder, "_service_context", lambda _path: context)
     monkeypatch.setattr(route_builder, "_config_raw", lambda *_args, **_kwargs: b"{}")
