@@ -16,7 +16,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import blake2b
-from itertools import islice
+from itertools import islice, pairwise
 from pathlib import Path
 from typing import Generic, TypeVar
 
@@ -545,6 +545,44 @@ class AppendOnlyJsonl:
                 os.close(fd)
             os.close(parent_fd)
 
+    @staticmethod
+    def records_from_snapshot(
+        descriptor: int, path: Path, size: int
+    ) -> Iterator[dict[str, object]]:
+        """Replay a fixed, already-validated descriptor without path access."""
+
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        remaining = int(size)
+        buffered = ""
+        decoder = codecs.getincrementaldecoder("utf-8")("strict")
+        line_number = 0
+        while remaining:
+            try:
+                chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            except OSError as exc:
+                raise DurableCorruptionError(f"cannot read journal {path}") from exc
+            if not chunk:
+                raise DurableCorruptionError(f"journal snapshot truncated: {path}")
+            remaining -= len(chunk)
+            try:
+                buffered += decoder.decode(chunk, final=False)
+            except UnicodeDecodeError as exc:
+                raise DurableCorruptionError(f"invalid UTF-8 journal {path}") from exc
+            while True:
+                newline = buffered.find("\n")
+                if newline < 0:
+                    break
+                line_number += 1
+                line = buffered[: newline + 1]
+                buffered = buffered[newline + 1 :]
+                yield _strict_json_line(line, path, line_number)
+        try:
+            buffered += decoder.decode(b"", final=True)
+        except UnicodeDecodeError as exc:
+            raise DurableCorruptionError(f"invalid UTF-8 journal {path}") from exc
+        if buffered:
+            raise DurableCorruptionError(f"noncanonical JSONL at {path}")
+
     def read_all(self) -> list[dict[str, object]]:
         return list(self.records())
 
@@ -638,6 +676,20 @@ class AppendOnlySet:
             return set(self._load())
 
 
+@dataclass
+class _ReadOnlyStreamSnapshot:
+    tick_fd: int
+    tick_size: int
+    acknowledgements_fd: int
+    acknowledgements_size: int
+    watermark: dict[str, object]
+    acknowledgements_fingerprint: tuple[int, int, int, int]
+
+    def close(self) -> None:
+        os.close(self.tick_fd)
+        os.close(self.acknowledgements_fd)
+
+
 class DurableVerifiedTickStream:
     """Producer-owned verified stream plus explicit writer acknowledgements."""
 
@@ -684,6 +736,9 @@ class DurableVerifiedTickStream:
         self._write_poisoned = False
         self._event_count = 0
         self._ack_count = 0
+        self._cursor_cache: dict[
+            tuple[int, int], tuple[VerifiedTick, int]
+        ] = {}
         self._ingest_membership = _BoundedMembershipFilter()
         self._source_event_membership = _BoundedMembershipFilter()
         self._raw_membership = _BoundedMembershipFilter()
@@ -800,6 +855,61 @@ class DurableVerifiedTickStream:
                     os.close(descriptor)
             os.close(parent_fd)
 
+    @staticmethod
+    def _open_snapshot_descriptor(path: Path) -> tuple[int, os.stat_result]:
+        parent_fd, _ = _open_parent(path)
+        descriptor = -1
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(path.name, flags, dir_fd=parent_fd)
+            info = os.fstat(descriptor)
+            if (
+                stat.S_ISLNK(info.st_mode)
+                or not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or info.st_nlink != 1
+                or info.st_mode & 0o077
+            ):
+                raise DurableCorruptionError(f"journal is not a regular file: {path}")
+            return descriptor, info
+        except OSError as exc:
+            if descriptor >= 0:
+                os.close(descriptor)
+            raise DurableCorruptionError(f"cannot read journal {path}") from exc
+        finally:
+            os.close(parent_fd)
+
+    def _capture_read_only_snapshot_unlocked(self) -> _ReadOnlyStreamSnapshot:
+        """Pin fixed journal descriptors while the producer is momentarily stable."""
+
+        tick_fd = acknowledgements_fd = -1
+        try:
+            tick_fd, tick_info = self._open_snapshot_descriptor(self.journal.path)
+            acknowledgements_fd, acknowledgements_info = self._open_snapshot_descriptor(
+                self.acknowledgements.journal.path
+            )
+            return _ReadOnlyStreamSnapshot(
+                tick_fd=tick_fd,
+                tick_size=tick_info.st_size,
+                acknowledgements_fd=acknowledgements_fd,
+                acknowledgements_size=acknowledgements_info.st_size,
+                watermark=self.watermark.read(),
+                acknowledgements_fingerprint=(
+                    acknowledgements_info.st_dev,
+                    acknowledgements_info.st_ino,
+                    acknowledgements_info.st_size,
+                    acknowledgements_info.st_mtime_ns,
+                ),
+            )
+        except Exception:
+            if tick_fd >= 0:
+                os.close(tick_fd)
+            if acknowledgements_fd >= 0:
+                os.close(acknowledgements_fd)
+            raise
+
     def _load_index(self) -> dict[str, VerifiedTick]:
         if self._index is None:
             # Recovery readers, including the default health worker, scan the
@@ -807,11 +917,23 @@ class DurableVerifiedTickStream:
             # snapshot.  Producers hold the exclusive side of this same flock
             # for append and acknowledgement transitions, so a scan cannot
             # combine an old journal tail with a newer checkpoint.
+            if self.read_only:
+                # Capture inode-stable byte bounds under the producer flock,
+                # then validate the potentially large immutable prefixes after
+                # releasing it.  Producer appends cannot alter captured bytes.
+                with self._process_lock():
+                    snapshot = self._capture_read_only_snapshot_unlocked()
+                try:
+                    return self._load_index_unlocked(snapshot=snapshot)
+                finally:
+                    snapshot.close()
             with self._process_lock():
                 return self._load_index_unlocked()
         return self._index
 
-    def _load_index_unlocked(self) -> dict[str, VerifiedTick]:
+    def _load_index_unlocked(
+        self, *, snapshot: _ReadOnlyStreamSnapshot | None = None
+    ) -> dict[str, VerifiedTick]:
         """Validate and cache the stream while its caller owns any needed lock."""
 
         if self._index is None:
@@ -827,7 +949,14 @@ class DurableVerifiedTickStream:
             # discarded before the worker accepts new ingress.
             recovery_bindings = bytearray()
             last_tick: VerifiedTick | None = None
-            for record in self.journal.records():
+            records = (
+                AppendOnlyJsonl.records_from_snapshot(
+                    snapshot.tick_fd, self.journal.path, snapshot.tick_size
+                )
+                if snapshot is not None
+                else self.journal.records()
+            )
+            for record in records:
                 if (
                     set(record) != {"record_type", "tick"}
                     or record.get("record_type") != "verified_tick"
@@ -883,7 +1012,7 @@ class DurableVerifiedTickStream:
                     cache.pop(next(iter(cache)))
                 last_tick = tick
                 expected_seq += 1
-            state = self.watermark.read()
+            state = snapshot.watermark if snapshot is not None else self.watermark.read()
             state_generation = str(state.get("stream_generation") or self.generation)
             if state_generation != self.generation:
                 raise GenerationMismatch(
@@ -913,8 +1042,21 @@ class DurableVerifiedTickStream:
                 )
             elif watermark_hash != expected_hash:
                 raise DurableCorruptionError("verified tick watermark hash mismatch")
-            self._rebuild_ack_frontier_unlocked(recovery_bindings)
-            self._ack_fingerprint = self.acknowledgements.journal.fingerprint()
+            acknowledgements = (
+                AppendOnlyJsonl.records_from_snapshot(
+                    snapshot.acknowledgements_fd,
+                    self.acknowledgements.journal.path,
+                    snapshot.acknowledgements_size,
+                )
+                if snapshot is not None
+                else None
+            )
+            self._rebuild_ack_frontier_unlocked(recovery_bindings, acknowledgements)
+            self._ack_fingerprint = (
+                snapshot.acknowledgements_fingerprint
+                if snapshot is not None
+                else self.acknowledgements.journal.fingerprint()
+            )
             # Do not retain a partial journal if checkpoint or acknowledgement
             # validation fails.  A later access must fail closed again.
             # Keep a bounded hot cache only.  Positive membership checks fall
@@ -938,7 +1080,9 @@ class DurableVerifiedTickStream:
             digest_size=32,
         ).digest()
 
-    def _rebuild_ack_frontier_unlocked(self, bindings: bytes) -> None:
+    def _rebuild_ack_frontier_unlocked(
+        self, bindings: bytes, records: Iterable[dict[str, object]] | None = None
+    ) -> None:
         """Rebuild the compact acknowledgement frontier from durable JSONL.
 
         This is recovery-only.  In the steady state ``acknowledge_tick_write``
@@ -952,7 +1096,7 @@ class DurableVerifiedTickStream:
         ack_count = 0
         seen = _BoundedMembershipFilter()
         self._ack_membership = _BoundedMembershipFilter()
-        for record in self.acknowledgements.journal.records():
+        for record in records or self.acknowledgements.journal.records():
             if set(record) != {"ingest_id", "stream_generation", "ingest_seq", "event_hash"}:
                 raise DurableCorruptionError("acknowledgement fields are invalid")
             identity = str(record.get("ingest_id") or "")
@@ -1098,8 +1242,12 @@ class DurableVerifiedTickStream:
         return found
 
     def next_sequence(self) -> int:
-        with self._lock, self._process_lock():
-            self._load_index_unlocked()
+        with self._lock:
+            # Recovery already validated the producer snapshot under this
+            # flock.  Do not hold it while a consumer seeks an old immutable
+            # prefix: an append-only writer must not wait behind that scan.
+            with self._process_lock():
+                self._load_index_unlocked()
             state = self.watermark.read()
             return int(state.get("last_ingest_seq") or 0) + 1
 
@@ -1248,6 +1396,119 @@ class DurableVerifiedTickStream:
                 yield tick
                 if remaining is not None:
                     remaining -= 1
+
+    def next_after(
+        self, after_seq: int = 0, *, offset: int | None = None
+    ) -> tuple[VerifiedTick | None, int]:
+        """Return one next tick without retaining the shared snapshot lock.
+
+        A long-running read-only consumer must not keep ``iter_from`` open:
+        that generator deliberately owns the shared process lock while it
+        yields.  Re-opening ``iter_from(..., limit=1)`` for every record is
+        safe but rescans the whole journal each time.  This cursor is only an
+        in-memory byte offset; recovery still validates the full durable
+        stream and a restart re-seeks from its durable checkpoint.
+        """
+
+        sequence = int(after_seq)
+        if sequence < 0:
+            raise DurableCorruptionError("verified tick sequence is negative")
+        if offset is not None:
+            cached = self._cursor_cache.pop((sequence, int(offset)), None)
+            if cached is not None:
+                return cached
+        with self._lock, self._process_lock():
+            self._load_index_unlocked()
+            parent_fd, _ = _open_parent(self.journal.path)
+            descriptor = -1
+            try:
+                flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                if hasattr(os, "O_NOFOLLOW"):
+                    flags |= os.O_NOFOLLOW
+                descriptor = os.open(self.journal.path.name, flags, dir_fd=parent_fd)
+                info = os.fstat(descriptor)
+                if (
+                    stat.S_ISLNK(info.st_mode)
+                    or not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != os.geteuid()
+                    or info.st_nlink != 1
+                    or info.st_mode & 0o077
+                ):
+                    raise DurableCorruptionError(
+                        f"journal is not a regular file: {self.journal.path}"
+                    )
+                position = 0 if offset is None else int(offset)
+                if position < 0 or position > info.st_size:
+                    raise DurableCorruptionError("verified tick cursor is outside journal")
+                os.lseek(descriptor, position, os.SEEK_SET)
+                buffered = b""
+                expected_sequence = sequence + 1
+                def read_tick() -> VerifiedTick | None:
+                    nonlocal buffered, position
+                    newline = buffered.find(b"\n")
+                    while newline < 0:
+                        # The cursor returns one record.  Keep the read
+                        # bounded to avoid turning a long recovery into a
+                        # repeated megabyte read per evidence record.
+                        chunk = os.read(descriptor, 4096)
+                        if not chunk:
+                            if not buffered:
+                                return None
+                            # An unlocked producer may be between partial
+                            # writes at the live tail.  Leave that record for
+                            # the next short read instead of accepting it.
+                            return None
+                        buffered += chunk
+                        newline = buffered.find(b"\n")
+                    line = buffered[: newline + 1]
+                    buffered = buffered[newline + 1 :]
+                    position += len(line)
+                    try:
+                        raw = _strict_json_line(line.decode("utf-8"), self.journal.path, 0)
+                    except UnicodeDecodeError as exc:
+                        raise DurableCorruptionError(f"invalid UTF-8 journal {self.journal.path}") from exc
+                    if set(raw) != {"record_type", "tick"} or raw.get("record_type") != "verified_tick":
+                        raise DurableCorruptionError("unexpected record type in verified tick stream")
+                    try:
+                        return VerifiedTick.from_dict(raw["tick"])  # type: ignore[arg-type]
+                    except (KeyError, TypeError, ValueError) as exc:
+                        raise DurableCorruptionError("invalid verified tick record") from exc
+
+                while True:
+                    tick = read_tick()
+                    if tick is None:
+                        return None, position
+                    if tick.ingest_seq <= sequence:
+                        if offset is not None:
+                            raise DurableCorruptionError(
+                                "verified tick cursor is behind checkpoint"
+                            )
+                        continue
+                    if tick.ingest_seq != expected_sequence:
+                        raise DurableCorruptionError(
+                            "verified tick cursor sequence is not contiguous"
+                        )
+                    prefetched = [(tick, position)]
+                    while len(prefetched) < 64:
+                        following = read_tick()
+                        if following is None:
+                            break
+                        if following.ingest_seq != prefetched[-1][0].ingest_seq + 1:
+                            raise DurableCorruptionError(
+                                "verified tick cursor sequence is not contiguous"
+                            )
+                        prefetched.append((following, position))
+                    for previous, current in pairwise(prefetched):
+                        self._cursor_cache[(previous[0].ingest_seq, previous[1])] = current
+                    return prefetched[0]
+            except OSError as exc:
+                raise DurableCorruptionError(
+                    f"cannot read journal {self.journal.path}"
+                ) from exc
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+                os.close(parent_fd)
 
     def pending_for_tick_writer(self) -> list[VerifiedTick]:
         # Do not call the public ``is_acknowledged`` from ``iter_from``: that
