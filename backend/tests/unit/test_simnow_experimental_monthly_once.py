@@ -111,7 +111,15 @@ def test_same_month_restart_reuses_bundle_and_preserves_target_bytes_and_mtime(
     assert _run(paths)["status"] == "MATERIALIZED"
     target_before = paths["target_path"].read_bytes()
     target_mtime_before = paths["target_path"].stat().st_mtime_ns
-    bundle_before = (paths["monthly_bundle_directory"] / "2030-01.json").read_bytes()
+    target_directory_mtime_before = paths["target_path"].parent.stat().st_mtime_ns
+    bundle_path = paths["monthly_bundle_directory"] / "2030-01.json"
+    bundle_before = bundle_path.read_bytes()
+    bundle_mtime_before = bundle_path.stat().st_mtime_ns
+    bundle_directory_mtime_before = bundle_path.parent.stat().st_mtime_ns
+    paths["target_path"].chmod(0o600)
+    paths["target_path"].parent.chmod(0o700)
+    bundle_path.chmod(0o600)
+    bundle_path.parent.chmod(0o700)
 
     assert _run(paths) == {
         "status": "NO_NEW_TARGET",
@@ -121,7 +129,14 @@ def test_same_month_restart_reuses_bundle_and_preserves_target_bytes_and_mtime(
     assert calls == {"static": 1, "thermostat": 1}
     assert paths["target_path"].read_bytes() == target_before
     assert paths["target_path"].stat().st_mtime_ns == target_mtime_before
-    assert (paths["monthly_bundle_directory"] / "2030-01.json").read_bytes() == bundle_before
+    assert paths["target_path"].parent.stat().st_mtime_ns == target_directory_mtime_before
+    assert stat.S_IMODE(paths["target_path"].stat().st_mode) == 0o644
+    assert stat.S_IMODE(paths["target_path"].parent.stat().st_mode) == 0o755
+    assert bundle_path.read_bytes() == bundle_before
+    assert bundle_path.stat().st_mtime_ns == bundle_mtime_before
+    assert bundle_path.parent.stat().st_mtime_ns == bundle_directory_mtime_before
+    assert stat.S_IMODE(bundle_path.stat().st_mode) == 0o644
+    assert stat.S_IMODE(bundle_path.parent.stat().st_mode) == 0o755
 
 
 def test_same_route_with_changed_daily_metadata_preserves_target_bytes_and_mtime(

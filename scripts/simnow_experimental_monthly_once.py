@@ -35,6 +35,7 @@ from simnow_experimental_materialize_target import (
     ExperimentalTargetError,
     canonical_json_line,
     materialize_target,
+    normalize_readonly_input_permissions,
     read_json_stable,
     validate_planner_bundle,
     validate_target,
@@ -109,7 +110,9 @@ def _read_existing_bundle(path: Path, *, source_month: str) -> tuple[dict[str, A
         bundle, raw = read_json_stable(path, label="monthly planner bundle")
         if raw != canonical_json_line(bundle):
             raise ExperimentalMonthlyError("monthly planner bundle must be canonical JSON")
-        return validate_monthly_bundle(bundle, expected_source_month=source_month), raw
+        verified = validate_monthly_bundle(bundle, expected_source_month=source_month)
+        normalize_readonly_input_permissions(path)
+        return verified, raw
     except ExperimentalMonthlyError:
         raise
     except ExperimentalTargetError as exc:
@@ -143,7 +146,6 @@ def _create_only_bundle(path: Path, value: Mapping[str, Any], *, source_month: s
         existing = _read_existing_bundle(path, source_month=source_month)
         if existing is None or existing[1] != raw:
             raise ExperimentalMonthlyError("monthly planner bundle already exists with different bytes")
-        os.chmod(path, 0o644)
         return existing[0], existing[1], False
     finally:
         try:
@@ -213,7 +215,9 @@ def _read_current_target(path: Path) -> tuple[dict[str, Any], bytes] | None:
         return None
     try:
         current, raw = read_json_stable(path, label="experimental target")
-        return validate_target(current, raw=raw), raw
+        verified = validate_target(current, raw=raw)
+        normalize_readonly_input_permissions(path)
+        return verified, raw
     except ExperimentalTargetError as exc:
         raise ExperimentalMonthlyError(str(exc)) from exc
 

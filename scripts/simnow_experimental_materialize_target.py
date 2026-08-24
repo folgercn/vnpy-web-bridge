@@ -54,6 +54,13 @@ def _sha256(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def normalize_readonly_input_permissions(path: Path) -> None:
+    """Make a verified experimental input readable by the image runtime."""
+
+    os.chmod(path.parent, 0o755)
+    os.chmod(path, 0o644)
+
+
 def read_json_stable(path: Path, *, label: str, limit: int = MAX_INPUT_BYTES) -> tuple[dict[str, Any], bytes]:
     """Read one regular JSON file twice-bound to its stat identity."""
 
