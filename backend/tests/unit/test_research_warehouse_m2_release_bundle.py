@@ -263,6 +263,9 @@ def test_build_and_verify_bundle_is_exact(
     assert (
         output / "bin/research-warehouse-linked-publisher"
     ).stat().st_mode & 0o777 == 0o555
+    assert (
+        output / "bin/research-warehouse-experimental-timely-route"
+    ).stat().st_mode & 0o777 == 0o555
     assert b"research_warehouse.m2_scheduler_cli" in (
         output / "app/research_warehouse_job.py"
     ).read_bytes()
@@ -274,6 +277,9 @@ def test_build_and_verify_bundle_is_exact(
     ).read_bytes()
     assert b"research_warehouse.m2_linked_predecessor_cli" in (
         output / "app/research_warehouse_linked_publisher.py"
+    ).read_bytes()
+    assert b"simnow_experimental_timely_daily_route" in (
+        output / "app/research_warehouse_experimental_timely_route.py"
     ).read_bytes()
     for source in GENESIS_RELEASE_APP_SOURCE_FILES:
         module = output / "app" / Path(source).name
@@ -321,9 +327,11 @@ def test_genesis_publisher_release_app_import_closure_is_clean(
             (
                 "from research_warehouse import m2_genesis_predecessor_cli; "
                 "from research_warehouse import m2_linked_predecessor_cli; "
+                "import simnow_experimental_timely_daily_route; "
                 "from research_warehouse import verified_daily_pit_main_roll_source; "
                 "assert m2_genesis_predecessor_cli.__name__; "
                 "assert m2_linked_predecessor_cli.__name__; "
+                "assert simnow_experimental_timely_daily_route.ROUTE_MODE; "
                 "assert verified_daily_pit_main_roll_source.SCHEMA_VERSION"
             ),
         ],

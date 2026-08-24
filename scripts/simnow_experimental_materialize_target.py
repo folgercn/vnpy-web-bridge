@@ -26,6 +26,9 @@ PLANNER_BUNDLE_SCHEMA_VERSION = "simnow-experimental-monthly-planner-bundle-v1"
 STATIC_CORE_EQUAL_MONTHLY = "STATIC_CORE_EQUAL_MONTHLY"
 SIMNOW_EXPERIMENTAL_TEST = "SIMNOW_EXPERIMENTAL_TEST"
 NOT_OFFICIAL_STRATEGY_OUTPUT = "NOT OFFICIAL STRATEGY OUTPUT"
+SIMNOW_EXPERIMENTAL_TIMELY_ROUTE = (
+    "SIMNOW_EXPERIMENTAL_TIMELY_COMPLETED_RECEIPT_ONLY"
+)
 PRODUCT_EXCHANGES = {
     "ag": "SHFE", "al": "SHFE", "au": "SHFE", "bu": "SHFE",
     "cu": "SHFE", "rb": "SHFE", "ru": "SHFE", "sc": "INE",
@@ -143,6 +146,57 @@ def validate_planner_bundle(value: Any) -> dict[str, Any]:
 
 
 def _daily_routes(value: Mapping[str, Any]) -> dict[str, str]:
+    metadata = value.get("metadata")
+    if isinstance(metadata, Mapping) and "route_mode" in metadata:
+        required = {
+            "route_mode",
+            "strategy_output_claim",
+            "official_day",
+            "execution_day",
+            "execution_cutoff_utc",
+            "run_receipt_id",
+            "run_receipt_raw_sha256",
+            "contract_registry_raw_sha256",
+            "production",
+            "live_trading_authorized",
+            "countable_forward",
+            "official_forward_claimed",
+        }
+        if (
+            set(value) != {"schema_version", "mains", "metadata"}
+            or value.get("schema_version") != "daily-pit-route-v1"
+            or set(metadata) != required
+            or metadata["route_mode"] != SIMNOW_EXPERIMENTAL_TIMELY_ROUTE
+            or metadata["strategy_output_claim"] != NOT_OFFICIAL_STRATEGY_OUTPUT
+            or any(
+                metadata[field] is not False
+                for field in (
+                    "production",
+                    "live_trading_authorized",
+                    "countable_forward",
+                    "official_forward_claimed",
+                )
+            )
+            or any(
+                not isinstance(metadata[field], str) or not metadata[field]
+                for field in (
+                    "official_day",
+                    "execution_day",
+                    "execution_cutoff_utc",
+                    "run_receipt_id",
+                    "run_receipt_raw_sha256",
+                    "contract_registry_raw_sha256",
+                )
+            )
+            or any(
+                _SHA.fullmatch(metadata[field]) is None
+                for field in (
+                    "run_receipt_raw_sha256",
+                    "contract_registry_raw_sha256",
+                )
+            )
+        ):
+            raise ExperimentalTargetError("experimental timely route metadata is invalid")
     rows = value.get("mains", value.get("targets"))
     by_product = _rows_by_product(rows)
     routes: dict[str, str] = {}
