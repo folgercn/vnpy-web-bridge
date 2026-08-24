@@ -23,16 +23,16 @@ REQUIREMENTS_RAW_SHA256 = (
     "4a372ecbd149efbb19bb1fd251a13c1ca395cc8356a7a66e325ed65a8b4094bf"
 )
 
-# The root-managed Genesis publisher imports the verified daily PIT builder,
-# whose pure, no-authority producer dependencies live beside (rather than in)
-# ``research_warehouse``.  Keep this deliberately finite: it is the complete
-# app-root import closure required by that publisher, not a general scripts
-# release mechanism.
+# The released root publishers and the experimental timely-route adapter import
+# these finite app-root modules beside ``research_warehouse``.  This is not a
+# general scripts release mechanism.
 GENESIS_RELEASE_APP_SOURCE_FILES = (
     "scripts/commodity_c_fast_pure_producer_kernel.py",
     "scripts/commodity_relative_vol_snapshot_producer.py",
     "scripts/commodity_static_core_equal_formula_v1.py",
     "scripts/commodity_static_core_equal_pure_producer.py",
+    "scripts/simnow_experimental_materialize_target.py",
+    "scripts/simnow_experimental_timely_daily_route.py",
 )
 GENESIS_RELEASE_SCHEMA_FILES = (
     "deployments/research-warehouse/verified-daily-pit-main-roll-source-v2.schema.json",
@@ -44,6 +44,7 @@ REQUIRED_ENTRYPOINTS = {
     "bin/research-warehouse-evidence-capture",
     "bin/research-warehouse-genesis-publisher",
     "bin/research-warehouse-linked-publisher",
+    "bin/research-warehouse-experimental-timely-route",
     "bin/research-warehouse-job",
     "bin/research-warehouse-manifest-signer",
     "bin/research-warehouse-monitor",
@@ -144,6 +145,7 @@ def release_launcher(role: str) -> bytes:
         "evidence-capture": "research_warehouse_evidence_capture.py",
         "genesis-publisher": "research_warehouse_genesis_publisher.py",
         "linked-publisher": "research_warehouse_linked_publisher.py",
+        "experimental-timely-route": "research_warehouse_experimental_timely_route.py",
         "manifest-signer": "research_warehouse_manifest_signer.py",
         "monitor": "research_warehouse_monitor.py",
         "operator-state": "research_warehouse_operator_state.py",
@@ -206,6 +208,10 @@ def verify_release_bundle(root: Path, manifest: object) -> None:
         ("evidence-capture", "bin/research-warehouse-evidence-capture"),
         ("genesis-publisher", "bin/research-warehouse-genesis-publisher"),
         ("linked-publisher", "bin/research-warehouse-linked-publisher"),
+        (
+            "experimental-timely-route",
+            "bin/research-warehouse-experimental-timely-route",
+        ),
         ("warehouse", "bin/research-warehouse-job"),
         ("manifest-signer", "bin/research-warehouse-manifest-signer"),
         ("monitor", "bin/research-warehouse-monitor"),
