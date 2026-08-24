@@ -1220,6 +1220,125 @@ def test_linked_day_uses_catalog_head_and_extends_receipt_chain(
     )
 
 
+def test_linked_catalog_requires_each_signed_root_before_the_next_append(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Exercise the operational chain: root19 -> append20 -> root21 -> append21.
+
+    The fixture's July business days stand in for the live August 19/20/21
+    chain: Genesis is already catalogued, each next signed root must be
+    appended before a later root can be used, and a skipped root is rejected.
+    """
+
+    kwargs, inputs, holder = _genesis_setup(monkeypatch, tmp_path)
+    genesis = catalog.publish_predecessor_artifact(**kwargs)
+
+    def append_for_signed_root(
+        *,
+        official_day: str,
+        sequence: int,
+        head: str,
+        commit: str,
+        predecessor: catalog.CatalogEntry,
+    ) -> catalog.CatalogEntry:
+        state = replace(
+            _state(official_day, head, commit, sequence=sequence),
+            path=kwargs["operator_state"].path,
+        )
+        holder["state"] = state
+        current = _verified_input(
+            official_day,
+            head_seal=head,
+            head_commit=commit,
+            parent_seal=predecessor.artifact["verified_lineage"]["manifest"][
+                "batch_seal_sha256"
+            ],
+            parent_commit=predecessor.artifact["verified_lineage"]["manifest"][
+                "commit_seal_sha256"
+            ],
+            expected_genesis_baseline=None,
+        )
+        inputs[official_day] = replace(current, predecessor_entry=predecessor)
+        return catalog.publish_predecessor_artifact(
+            **{
+                **kwargs,
+                "operator_state": state,
+                "official_day": official_day,
+                "genesis": None,
+                "predecessor": verified_roll.PredecessorContinuity(),
+            }
+        )
+
+    # A root for the day after next cannot bridge a catalog that still ends at
+    # Genesis: this is the fail-closed guard that forbids catalog19 -> root21.
+    skipped_state = replace(
+        _state("2026-07-03", "b" * 64, "c" * 64, sequence=2),
+        path=kwargs["operator_state"].path,
+    )
+    skipped_current = _verified_input(
+        "2026-07-03",
+        head_seal="b" * 64,
+        head_commit="c" * 64,
+        parent_seal=genesis.artifact["verified_lineage"]["manifest"][
+            "batch_seal_sha256"
+        ],
+        parent_commit=genesis.artifact["verified_lineage"]["manifest"][
+            "commit_seal_sha256"
+        ],
+        expected_genesis_baseline=None,
+    )
+    with pytest.raises(
+        catalog.DailyRollPredecessorCatalogError,
+        match="predecessor/current-root continuity mismatch",
+    ):
+        catalog._load_linked_predecessor_locked(
+            operator_state=skipped_state,
+            current_official_day=verified_roll._day("2026-07-03", "test day"),
+            current_execution_day=verified_roll._day("2026-07-06", "test day"),
+            current_manifest=skipped_current.manifest,
+            runtime_input_raw_sha256=kwargs["context"].runtime_input.raw_sha256,
+            calendar_raw_sha256=kwargs["context"].calendar.raw_sha256,
+            calendar_availability_anchor_raw_sha256=kwargs[
+                "context"
+            ].availability.raw_sha256,
+            isolation_policy_raw_sha256=kwargs["context"].policy.raw_sha256,
+            warehouse_registry_raw_sha256=kwargs["context"].registry.raw_sha256,
+            contract_registry_raw_sha256=kwargs[
+                "expected_contract_registry_raw_sha256"
+            ],
+        )
+    assert [entry.receipt["official_day"] for entry in catalog._load_catalog(
+        catalog.catalog_root(kwargs["operator_state"].path)
+    ).entries] == ["2026-07-01"]
+
+    day20 = append_for_signed_root(
+        official_day="2026-07-02",
+        sequence=2,
+        head="9" * 64,
+        commit="a" * 64,
+        predecessor=genesis,
+    )
+    day21 = append_for_signed_root(
+        official_day="2026-07-03",
+        sequence=3,
+        head="b" * 64,
+        commit="c" * 64,
+        predecessor=day20,
+    )
+
+    loaded = catalog._load_catalog(catalog.catalog_root(kwargs["operator_state"].path))
+    assert [entry.receipt["official_day"] for entry in loaded.entries] == [
+        "2026-07-01",
+        "2026-07-02",
+        "2026-07-03",
+    ]
+    assert [entry.receipt["sequence"] for entry in loaded.entries] == [1, 2, 3]
+    assert loaded.head == day21
+    assert day20.receipt["previous_artifact_id"] == genesis.artifact["artifact_id"]
+    assert day21.receipt["previous_artifact_id"] == day20.artifact["artifact_id"]
+
+
 def test_catalog_rejects_nonfirst_genesis_cross_branch(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

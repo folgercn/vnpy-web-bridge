@@ -20,7 +20,10 @@ from research_warehouse.m2_python_runtime import (
     create_python_runtime_manifest,
 )
 from research_warehouse.m2_python_runtime_archive import prepare_python_runtime
-from research_warehouse.m2_release_builder import _copy_source_tree, build_release_bundle
+from research_warehouse.m2_release_builder import (
+    _copy_source_tree,
+    build_release_bundle,
+)
 from research_warehouse.m2_release_contracts import (
     GENESIS_RELEASE_APP_SOURCE_FILES,
     GENESIS_RELEASE_SCHEMA_FILES,
@@ -257,6 +260,9 @@ def test_build_and_verify_bundle_is_exact(
     assert (
         output / "bin/research-warehouse-genesis-publisher"
     ).stat().st_mode & 0o777 == 0o555
+    assert (
+        output / "bin/research-warehouse-linked-publisher"
+    ).stat().st_mode & 0o777 == 0o555
     assert b"research_warehouse.m2_scheduler_cli" in (
         output / "app/research_warehouse_job.py"
     ).read_bytes()
@@ -265,6 +271,9 @@ def test_build_and_verify_bundle_is_exact(
     ).read_bytes()
     assert b"research_warehouse.m2_genesis_predecessor_cli" in (
         output / "app/research_warehouse_genesis_publisher.py"
+    ).read_bytes()
+    assert b"research_warehouse.m2_linked_predecessor_cli" in (
+        output / "app/research_warehouse_linked_publisher.py"
     ).read_bytes()
     for source in GENESIS_RELEASE_APP_SOURCE_FILES:
         module = output / "app" / Path(source).name
@@ -311,8 +320,10 @@ def test_genesis_publisher_release_app_import_closure_is_clean(
             "-c",
             (
                 "from research_warehouse import m2_genesis_predecessor_cli; "
+                "from research_warehouse import m2_linked_predecessor_cli; "
                 "from research_warehouse import verified_daily_pit_main_roll_source; "
                 "assert m2_genesis_predecessor_cli.__name__; "
+                "assert m2_linked_predecessor_cli.__name__; "
                 "assert verified_daily_pit_main_roll_source.SCHEMA_VERSION"
             ),
         ],
