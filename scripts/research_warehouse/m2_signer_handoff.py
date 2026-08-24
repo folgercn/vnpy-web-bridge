@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import grp
 import os
 import pwd
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -29,25 +31,67 @@ def _require_service_identity(uid: int, gid: int) -> None:
             raise RegistryError(f"M2 signer service {label} is invalid")
 
 
+def _darwin_memberships(account: pwd.struct_passwd) -> set[int]:
+    """Resolve the account's own non-privileged directory memberships."""
+    values = set(os.getgrouplist(account.pw_name, account.pw_gid))
+    values.add(account.pw_gid)
+    if any(
+        not isinstance(value, int) or isinstance(value, bool) or value < 0
+        for value in values
+    ):
+        raise RegistryError("M2 signer Darwin account memberships are invalid")
+    for value in values:
+        if value == 0:
+            raise RegistryError("M2 signer Darwin membership is privileged")
+        try:
+            name = grp.getgrgid(value).gr_name.lower()
+        except KeyError as exc:
+            raise RegistryError("M2 signer Darwin membership is unresolved") from exc
+        if name in {"root", "wheel", "admin"}:
+            raise RegistryError("M2 signer Darwin membership is privileged")
+    return values
+
+
+def _drop_identity(uid: int, gid: int) -> None:
+    if hasattr(os, "setresgid"):
+        os.setresgid(gid, gid, gid)
+    else:
+        os.setgid(gid)
+    if hasattr(os, "setresuid"):
+        os.setresuid(uid, uid, uid)
+    else:
+        os.setuid(uid)
+
+
 def _drop_privileges(uid: int, gid: int, *, key_path: Path) -> None:
     account = pwd.getpwuid(uid)
-    if account.pw_uid != uid or account.pw_gid != gid:
+    if account.pw_uid != uid:
         raise RegistryError("M2 signer service account identity mismatch")
-    expected_groups = set(os.getgrouplist(account.pw_name, gid))
-    os.initgroups(account.pw_name, gid)
-    os.setgid(gid)
-    os.setuid(uid)
+    if sys.platform == "darwin":
+        expected_groups = _darwin_memberships(account)
+        os.initgroups(account.pw_name, account.pw_gid)
+    else:
+        if account.pw_gid != gid:
+            raise RegistryError("M2 signer service account identity mismatch")
+        expected_groups = set(os.getgrouplist(account.pw_name, gid))
+        os.initgroups(account.pw_name, gid)
+    _drop_identity(uid, gid)
+    observed_groups = set(os.getgroups())
     if (
         os.getuid() != uid
         or os.geteuid() != uid
         or os.getgid() != gid
         or os.getegid() != gid
-        or set(os.getgroups()) != expected_groups
+        or (
+            observed_groups != expected_groups
+            if sys.platform != "darwin"
+            else not observed_groups.issubset(expected_groups)
+        )
     ):
         raise RegistryError("M2 signer privilege drop did not bind exact identity")
-    if hasattr(os, "getresuid") and set(os.getresuid()) != {uid}:
+    if hasattr(os, "getresuid") and os.getresuid() != (uid, uid, uid):
         raise RegistryError("M2 signer retained a privileged saved UID")
-    if hasattr(os, "getresgid") and set(os.getresgid()) != {gid}:
+    if hasattr(os, "getresgid") and os.getresgid() != (gid, gid, gid):
         raise RegistryError("M2 signer retained a privileged saved GID")
     try:
         descriptor = os.open(
