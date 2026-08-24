@@ -124,6 +124,119 @@ def test_position_tracker_rejects_stale_and_error_last_callbacks() -> None:
     assert not tracker.is_ready()
 
 
+def test_position_query_rejection_preserves_accepted_query_readiness() -> None:
+    class TdApi:
+        def __init__(self) -> None:
+            self.gateway = object()
+
+        def reqQryInvestorPosition(self, request: object, request_id: int) -> int:
+            _ = request
+            return {4951: 0, 4958: -2, 4959: -1, 4960: -2}[request_id]
+
+        def onRspQryInvestorPosition(
+            self,
+            data: object,
+            error: object,
+            request_id: int,
+            b_is_last: bool,
+        ) -> None:
+            _ = (data, error, request_id, b_is_last)
+
+    api = TdApi()
+    tracker = attach_ctp_position_readiness_v1(api)
+
+    assert api.reqQryInvestorPosition({}, 4951) == 0
+    assert tracker.observability_state_v1() == {
+        "generation": 1,
+        "active_request_id": 4951,
+        "failed_request_id": None,
+        "ready": False,
+        "callback_count": 0,
+    }
+    assert api.reqQryInvestorPosition({}, 4958) == -2
+    assert tracker.observability_state_v1()["active_request_id"] == 4951
+    api.onRspQryInvestorPosition(None, {"ErrorID": 0}, 4951, True)
+    assert tracker.is_ready()
+
+    assert api.reqQryInvestorPosition({}, 4959) == -1
+    assert api.reqQryInvestorPosition({}, 4960) == -2
+    assert tracker.observability_state_v1() == {
+        "generation": 1,
+        "active_request_id": 4951,
+        "failed_request_id": None,
+        "ready": True,
+        "callback_count": 1,
+    }
+
+
+def test_position_query_exception_resets_ready_state_and_reraises() -> None:
+    class TdApi:
+        def __init__(self) -> None:
+            self.gateway = object()
+
+        def reqQryInvestorPosition(self, request: object, request_id: int) -> int:
+            _ = request
+            if request_id == 2:
+                raise RuntimeError("native CTP query failure")
+            return 0
+
+        def onRspQryInvestorPosition(
+            self,
+            data: object,
+            error: object,
+            request_id: int,
+            b_is_last: bool,
+        ) -> None:
+            _ = (data, error, request_id, b_is_last)
+
+    api = TdApi()
+    tracker = attach_ctp_position_readiness_v1(api)
+    assert api.reqQryInvestorPosition({}, 1) == 0
+    api.onRspQryInvestorPosition(None, {"ErrorID": 0}, 1, True)
+    assert tracker.is_ready()
+
+    with pytest.raises(RuntimeError, match="native CTP query failure"):
+        api.reqQryInvestorPosition({}, 2)
+    assert tracker.observability_state_v1() == {
+        "generation": 3,
+        "active_request_id": None,
+        "failed_request_id": None,
+        "ready": False,
+        "callback_count": 0,
+    }
+
+
+def test_position_query_synchronous_final_callback_is_observed() -> None:
+    class TdApi:
+        def __init__(self) -> None:
+            self.gateway = object()
+
+        def reqQryInvestorPosition(self, request: object, request_id: int) -> int:
+            _ = request
+            self.onRspQryInvestorPosition(None, {"ErrorID": 0}, request_id, True)
+            return 0
+
+        def onRspQryInvestorPosition(
+            self,
+            data: object,
+            error: object,
+            request_id: int,
+            b_is_last: bool,
+        ) -> None:
+            _ = (data, error, request_id, b_is_last)
+
+    api = TdApi()
+    tracker = attach_ctp_position_readiness_v1(api)
+    assert api.reqQryInvestorPosition({}, 4951) == 0
+    assert tracker.observability_state_v1() == {
+        "generation": 1,
+        "active_request_id": 4951,
+        "failed_request_id": None,
+        "ready": True,
+        "callback_count": 1,
+    }
+
+
 def test_position_query_observability_logs_only_allowed_ctp_fields() -> None:
     class Gateway:
         def __init__(self) -> None:
