@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import importlib
 import os
 import pwd
 import sys
@@ -12,8 +13,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from research_warehouse import m2_signer_handoff
-from research_warehouse.errors import RegistryError
+m2_signer_handoff = importlib.import_module("research_warehouse.m2_signer_handoff")
+RegistryError = importlib.import_module("research_warehouse.errors").RegistryError
 
 
 def test_privilege_drop_is_exact_binds_groups_and_cannot_reopen_key(
@@ -52,8 +53,20 @@ def test_privilege_drop_is_exact_binds_groups_and_cannot_reopen_key(
     )
     monkeypatch.setattr(
         m2_signer_handoff.os,
+        "setresgid",
+        lambda _real, effective, _saved: identity.update(gid=effective),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        m2_signer_handoff.os,
         "setuid",
         lambda uid: identity.update(uid=uid),
+    )
+    monkeypatch.setattr(
+        m2_signer_handoff.os,
+        "setresuid",
+        lambda _real, effective, _saved: identity.update(uid=effective),
+        raising=False,
     )
     monkeypatch.setattr(
         m2_signer_handoff.os,
@@ -170,7 +183,19 @@ def _install_darwin_drop(
         m2_signer_handoff.os, "setgid", lambda _gid: identity.update(gid=final_gid)
     )
     monkeypatch.setattr(
+        m2_signer_handoff.os,
+        "setresgid",
+        lambda _real, _effective, _saved: identity.update(gid=final_gid),
+        raising=False,
+    )
+    monkeypatch.setattr(
         m2_signer_handoff.os, "setuid", lambda uid: identity.update(uid=uid)
+    )
+    monkeypatch.setattr(
+        m2_signer_handoff.os,
+        "setresuid",
+        lambda _real, effective, _saved: identity.update(uid=effective),
+        raising=False,
     )
     monkeypatch.setattr(m2_signer_handoff.os, "getuid", lambda: identity["uid"])
     monkeypatch.setattr(m2_signer_handoff.os, "geteuid", lambda: identity["uid"])

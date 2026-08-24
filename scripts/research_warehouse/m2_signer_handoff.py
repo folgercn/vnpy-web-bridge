@@ -35,7 +35,10 @@ def _darwin_memberships(account: pwd.struct_passwd) -> set[int]:
     """Resolve the account's own non-privileged directory memberships."""
     values = set(os.getgrouplist(account.pw_name, account.pw_gid))
     values.add(account.pw_gid)
-    if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in values):
+    if any(
+        not isinstance(value, int) or isinstance(value, bool) or value < 0
+        for value in values
+    ):
         raise RegistryError("M2 signer Darwin account memberships are invalid")
     for value in values:
         if value == 0:
