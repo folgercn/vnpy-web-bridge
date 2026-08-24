@@ -64,7 +64,6 @@ def test_cli_replays_current_root_as_linked_catalog_append(
         payload={"last_trade_day": "2026-08-21"},
     )
     runtime_input = SimpleNamespace(raw_sha256="1" * 64)
-    context = SimpleNamespace(runtime_input=runtime_input)
     entry = SimpleNamespace(
         receipt_raw=b"receipt\n",
         artifact_raw=b"artifact\n",
@@ -87,9 +86,6 @@ def test_cli_replays_current_root_as_linked_catalog_append(
     monkeypatch.setattr(linked_cli, "operator_state_lock", lambda *_a, **_k: _Lock())
     monkeypatch.setattr(linked_cli, "load_operator_state", lambda _path: state)
     monkeypatch.setattr(linked_cli, "_load_projection_as_service", lambda **_k: projection)
-    monkeypatch.setattr(linked_cli, "load_runtime_context_readonly", lambda _path: context)
-    monkeypatch.setattr(linked_cli, "read_regular_strict", lambda *_a, **_k: b"registry")
-
     def publish(**kwargs):
         captured.update(kwargs)
         return entry
@@ -103,14 +99,18 @@ def test_cli_replays_current_root_as_linked_catalog_append(
 
     assert linked_cli.main(["--continuous-config", str(tmp_path / "config.json")]) == 0
     assert captured["official_day"] == "2026-08-21"
-    assert captured["history_receipt_path"] == projection.history_receipt_path
-    assert captured["contract_registry_raw"] == b"registry"
-    assert captured["predecessor"].__class__.__name__ == "PredecessorContinuity"
-    assert captured["pins"].operator_state_raw_sha256 == state.raw_sha256
+    assert captured["context"] is None
+    assert captured["history_receipt_path"] is None
+    protected = captured["protected_linked_inputs"]
+    assert protected.history_receipt_path == projection.history_receipt_path
+    assert protected.runtime_input_raw_sha256 == runtime_input.raw_sha256
+    assert protected.contract_registry_path == projection.contract_registry_path
+    assert protected.service_uid == 503
+    assert protected.service_gid == 503
     assert '"status":"LINKED_PUBLISHED"' in capsys.readouterr().out
 
 
-def test_cli_rejects_runtime_root_drift_before_read_or_publish(
+def test_cli_rejects_config_runtime_pin_drift_before_protected_replay_or_publish(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -130,14 +130,23 @@ def test_cli_rejects_runtime_root_drift_before_read_or_publish(
     monkeypatch.setattr(linked_cli, "operator_state_lock", lambda *_a, **_k: _Lock())
     monkeypatch.setattr(linked_cli, "load_operator_state", lambda _path: state)
     monkeypatch.setattr(linked_cli, "_load_projection_as_service", lambda **_k: projection)
-    monkeypatch.setattr(
-        linked_cli,
-        "load_runtime_context_readonly",
-        lambda _path: SimpleNamespace(runtime_input=SimpleNamespace(raw_sha256="f" * 64)),
-    )
-    monkeypatch.setattr(linked_cli, "read_regular_strict", unexpected)
+    projection = _projection(tmp_path)
+    projection.runtime_input_raw_sha256 = "f" * 64
+    monkeypatch.setattr(linked_cli, "_load_projection_as_service", lambda **_k: projection)
+    monkeypatch.setattr(linked_cli, "publish_predecessor_artifact", unexpected)
     assert linked_cli.main(["--continuous-config", str(tmp_path / "config.json")]) == 2
     assert called is False
+
+
+def test_cli_has_no_root_runtime_or_private_evidence_read_seam() -> None:
+    tree = ast.parse(Path(linked_cli.__file__).read_text(encoding="utf-8"))
+    names = {
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name)
+    }
+    assert "load_runtime_context_readonly" not in names
+    assert "read_regular_strict" not in names
 
 
 def test_cli_has_no_execution_gateway_or_network_import_seam() -> None:

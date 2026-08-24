@@ -20,19 +20,16 @@ from typing import Any
 
 from .canonical import canonical_json_line, sha256
 from .daily_roll_predecessor_catalog import (
+    ProtectedLinkedReplayInputs,
     load_current_catalog_head,
     publish_predecessor_artifact,
 )
 from .errors import RegistryError
-from .file_integrity import read_regular_strict
 from .m2_genesis_predecessor_cli import _load_projection_as_service, _require_root
 from .m2_isolation_contracts import false_authority, load_isolation_policy
 from .m2_operator_defaults import DEFAULT_OPERATOR_STATE
 from .m2_operator_state import load_operator_state, operator_state_lock
 from .m2_runtime_input import DEFAULT_RUNTIME_INPUT, load_runtime_input
-from .m2_runtime_loader import load_runtime_context_readonly
-from .pit_source_view import SourcePins
-from .verified_daily_pit_main_roll_source import PredecessorContinuity
 
 
 class LinkedPublisherCliError(RegistryError):
@@ -67,32 +64,34 @@ def main(argv: list[str] | None = None) -> int:
         official_day = state.payload["last_trade_day"]
         if not isinstance(official_day, str):
             raise LinkedPublisherCliError("current root official day is invalid")
-        context = load_runtime_context_readonly(args.runtime_input)
-        if context.runtime_input.raw_sha256 != runtime_input.raw_sha256:
-            raise LinkedPublisherCliError("linked publisher runtime root drifted")
-        contract_registry_raw = read_regular_strict(
-            projection.contract_registry_path,
-            "linked publisher contract registry",
-            limit=1024 * 1024,
-        )
-        pins = SourcePins(
-            history_receipt_raw_sha256=projection.history_receipt_raw_sha256,
-            operator_state_raw_sha256=state.raw_sha256,
-            manifest_public_key_raw_sha256=projection.manifest_public_key_raw_sha256,
-            baseline_public_key_raw_sha256=projection.business_public_key_raw_sha256,
-        )
         entry = publish_predecessor_artifact(
-            context=context,
+            context=None,
             operator_state=state,
-            history_receipt_path=projection.history_receipt_path,
-            pins=pins,
-            manifest_public_key_path=projection.manifest_public_key_path,
+            history_receipt_path=None,
+            pins=None,
+            manifest_public_key_path=None,
             official_day=official_day,
-            contract_registry_raw=contract_registry_raw,
-            expected_contract_registry_raw_sha256=(
-                projection.contract_registry_raw_sha256
+            contract_registry_raw=None,
+            expected_contract_registry_raw_sha256=None,
+            protected_linked_inputs=ProtectedLinkedReplayInputs(
+                history_receipt_path=projection.history_receipt_path,
+                runtime_input_path=args.runtime_input,
+                runtime_input_raw_sha256=runtime_input.raw_sha256,
+                service_uid=policy.uid,
+                service_gid=policy.gid,
+                history_receipt_raw_sha256=projection.history_receipt_raw_sha256,
+                manifest_public_key_path=projection.manifest_public_key_path,
+                manifest_public_key_raw_sha256=(
+                    projection.manifest_public_key_raw_sha256
+                ),
+                business_public_key_raw_sha256=(
+                    projection.business_public_key_raw_sha256
+                ),
+                contract_registry_path=projection.contract_registry_path,
+                contract_registry_raw_sha256=(
+                    projection.contract_registry_raw_sha256
+                ),
             ),
-            predecessor=PredecessorContinuity(),
         )
         head = load_current_catalog_head(args.operator_state)
         if head.receipt_raw != entry.receipt_raw or head.artifact_raw != entry.artifact_raw:
