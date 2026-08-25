@@ -764,6 +764,73 @@ def test_simnow_preview_proof_survives_execution_restart(tmp_path: Path) -> None
     assert len(gateway.send_calls) == 1
 
 
+def test_start_rejects_tampered_durable_preview_custody_evidence() -> None:
+    service, core, repo, gateway, _ = runtime(execute=True)
+    target = plan()
+    target_receipt = service.custody.add_target(target)
+    service.process_command(
+        command(
+            "preview",
+            "preview-tamper-0001",
+            repo.state_version,
+            {
+                "plan_hash": target["plan_hash"],
+                "artifact_hash": target_receipt["artifact_sha256"],
+                "mode": "simnow_preview",
+                "receipt_id": target_receipt["receipt_id"],
+            },
+        )
+    )
+    service.process_command(
+        command(
+            "reconcile",
+            "reconcile-tamper-01",
+            repo.state_version,
+            {
+                "reconciliation_run_id": "run-tamper-0001",
+                "snapshot_id": "snapshot-default",
+                "reason": "fresh SIMNOW facts",
+            },
+        )
+    )
+    service.process_command(
+        command(
+            "enable",
+            "enable-tamper-00001",
+            repo.state_version,
+            {
+                "authority_artifact_id": target["authority_artifact_id"],
+                "authority_hash": target["authority_artifact_sha256"],
+                "expires_at": target["expires_at"],
+                "reason": "verified custody authority",
+            },
+        )
+    )
+    token = core.acquire_leader("leader-tamper-0001")
+    repo.mutate(
+        lambda state: state["plan"].update({"preview_artifact_sha256": "f" * 64})
+    )
+
+    with pytest.raises(PlanRejected, match="preview custody evidence changed"):
+        service.process_command(
+            command(
+                "start",
+                "start-tamper-00001",
+                repo.state_version,
+                {
+                    "plan_id": target["plan_id"],
+                    "plan_hash": target["plan_hash"],
+                    "reason": "tampered preview custody evidence",
+                },
+                fence={
+                    "leader_epoch": token.epoch,
+                    "fencing_token": token.fencing_token,
+                },
+            )
+        )
+    assert gateway.send_calls == []
+
+
 def test_simnow_preview_fetches_receipt_then_exact_custody_artifact() -> None:
     authority = receipt()
     target = plan(authority)

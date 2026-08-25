@@ -1570,6 +1570,74 @@ def _production_backend_without_clients(tmp_path: Path, *, enabled: bool):
     return backend
 
 
+def _post_renew_status(*, plan: dict) -> dict:
+    return {
+        "lifecycle": "READY",
+        "reconciliation": {"state": "RECONCILED", "unknown_outcomes": 0},
+        "plan": plan,
+    }
+
+
+def _post_renew_recovery() -> dict:
+    return {
+        "plan_id": "continuous-open-plan-test-0001",
+        "plan_hash": "a" * 64,
+    }
+
+
+def test_post_renew_matching_public_preview_status_needs_only_public_projection(
+    tmp_path: Path,
+) -> None:
+    backend = _production_backend_without_clients(tmp_path, enabled=True)
+    recovery = _post_renew_recovery()
+
+    backend._require_post_renew_status(
+        _post_renew_status(
+            plan={
+                "state": "PREVIEWED",
+                "plan_id": f"preview-{recovery['plan_hash'][:16]}",
+                "plan_hash": recovery["plan_hash"],
+                "version": 7,
+            }
+        ),
+        recovery,
+        allow_active=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("state", "plan_id", "plan_hash", "allow_active", "message"),
+    [
+        ("PREVIEWED", "preview-foreign0000000", "a" * 64, False, "preview is foreign"),
+        ("PREVIEWED", "preview-aaaaaaaaaaaaaaaa", "f" * 64, False, "preview is foreign"),
+        ("ACTIVE", "foreign-active-plan-0001", "f" * 64, True, "foreign active"),
+    ],
+)
+def test_post_renew_foreign_preview_or_active_status_stops(
+    tmp_path: Path,
+    state: str,
+    plan_id: str,
+    plan_hash: str,
+    allow_active: bool,
+    message: str,
+) -> None:
+    backend = _production_backend_without_clients(tmp_path, enabled=True)
+
+    with pytest.raises(runner.ContinuousRunError, match=message):
+        backend._require_post_renew_status(
+            _post_renew_status(
+                plan={
+                    "state": state,
+                    "plan_id": plan_id,
+                    "plan_hash": plan_hash,
+                    "version": 7,
+                }
+            ),
+            _post_renew_recovery(),
+            allow_active=allow_active,
+        )
+
+
 def test_production_adapter_requires_explicit_root_config_enable(tmp_path: Path):
     assert (
         _production_backend_without_clients(
