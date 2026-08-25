@@ -501,7 +501,7 @@ async def execute_once(
             continue
         require_binding(recovery, existing_phase)
         installed = await backend._install_or_recover_plan(
-            phase_key=phase_key(existing_phase), handoff=None
+            phase_key=phase_key(existing_phase), handoff=None, recovery=recovery
         )
         require_binding(installed, existing_phase)
         lifecycle = await backend._drive_installed_plan(installed)
