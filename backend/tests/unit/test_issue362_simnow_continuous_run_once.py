@@ -1736,6 +1736,61 @@ def test_foreign_non_idle_plan_stops_before_leader_acquire(tmp_path: Path):
     assert execution.acquire_calls == 0
 
 
+def test_audited_backend_rejects_foreign_retired_plan_before_leader_acquire(
+    tmp_path: Path,
+) -> None:
+    """Only SIMNOW_EXPERIMENTAL opts in to replacing retired foreign plans."""
+
+    backend = _production_backend_without_clients(tmp_path, enabled=True)
+
+    class Execution:
+        def __init__(self) -> None:
+            self.acquire_calls = 0
+
+        async def status(self):
+            return SimpleNamespace(
+                as_dict=lambda: {
+                    "state_version": 4,
+                    "lifecycle": "READY",
+                    "plan": {
+                        "state": "TERMINAL",
+                        "plan_id": "foreign-retired-plan-test-0001",
+                        "plan_hash": "f" * 64,
+                    },
+                    "authority": {"state": "REVOKED"},
+                    "leader": {"held": False},
+                    "reconciliation": {
+                        "state": "RECONCILED",
+                        "unknown_outcomes": 0,
+                    },
+                    "broker": {"active_order_count": 0},
+                    "send_intents": [{"state": "TERMINAL"}],
+                }
+            )
+
+        async def acquire_leader(self, owner_id):
+            del owner_id
+            self.acquire_calls += 1
+
+    execution = Execution()
+    backend.execution = execution
+    with pytest.raises(
+        runner.ContinuousRunError,
+        match="foreign non-idle TargetPlan",
+    ):
+        asyncio.run(
+            backend._drive_installed_plan(
+                {
+                    "plan_id": "expected-plan-test-0001",
+                    "plan_hash": "a" * 64,
+                    "phase": "OPEN",
+                    "custody_idempotency_key": "b" * 64,
+                }
+            )
+        )
+    assert execution.acquire_calls == 0
+
+
 def test_published_target_plan_uses_stored_install_only_and_never_republishes(
     tmp_path: Path,
 ):
