@@ -743,6 +743,31 @@ def _decimal(value: Any, field: str) -> Decimal:
     return result
 
 
+def normalize_near_grid_price(value: Decimal, *, tick: Decimal) -> Decimal:
+    """Return the nearest grid value for a float representation artifact.
+
+    Formal CTP prices reach this contract as JSON floats.  Keep the narrow
+    tolerance introduced for the full-portfolio adapter: it covers only a
+    nearest-grid machine representation error, never a real off-tick price.
+    Callers retain their own typed error contracts.
+    """
+
+    if not value.is_finite() or not tick.is_finite() or tick <= 0:
+        raise ValueError("price or tick is invalid")
+    quotient = value / tick
+    aligned = quotient.to_integral_value() * tick
+    price_error = abs(value - aligned)
+    value_float = float(value)
+    tick_float = float(tick)
+    tolerance = min(
+        abs(tick_float) * 1e-6,
+        max(8.0 * math.ulp(value_float), abs(tick_float) * 1e-9),
+    )
+    if float(price_error) > tolerance:
+        raise ValueError("price is not aligned to tick")
+    return aligned
+
+
 def is_simnow_experimental_execution_run_id(value: Any) -> bool:
     """Return whether an existing run identity selects the experimental lane."""
 
@@ -808,6 +833,15 @@ def simnow_experimental_price_contract(
             raise CommodityExecutionContractError(
                 "SIMNOW_EXPERIMENTAL target plan quote binding is invalid"
             ) from exc
+        try:
+            reference = normalize_near_grid_price(reference, tick=tick)
+            order_price = normalize_near_grid_price(
+                Decimal(str(order.price)), tick=tick
+            )
+        except ValueError as exc:
+            raise CommodityExecutionContractError(
+                "target plan creation quote does not bind order price"
+            ) from exc
         expected_side = "ask" if order.direction == "LONG" else "bid"
         if binding.get("price_side") != expected_side:
             raise CommodityExecutionContractError(
@@ -816,7 +850,6 @@ def simnow_experimental_price_contract(
         legacy_price = (
             reference + tick if expected_side == "ask" else reference - tick
         )
-        order_price = Decimal(str(order.price))
         if order_price == legacy_price:
             contracts.add("LEGACY_EXACT" if experimental else "EXACT")
             continue
@@ -1021,7 +1054,15 @@ def _creation_quote_proof(
             raw["price_tick"],
             f"target plan creation quote price_tick: {exact_contract}",
         )
-        if reference_price <= 0 or price_tick <= 0 or reference_price % price_tick != 0:
+        try:
+            reference_price = normalize_near_grid_price(
+                reference_price, tick=price_tick
+            )
+        except ValueError as exc:
+            raise CommodityExecutionContractError(
+                f"target plan creation quote price is invalid: {exact_contract}"
+            ) from exc
+        if reference_price <= 0:
             raise CommodityExecutionContractError(
                 f"target plan creation quote price is invalid: {exact_contract}"
             )

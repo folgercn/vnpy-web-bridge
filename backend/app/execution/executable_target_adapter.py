@@ -14,7 +14,8 @@ import json
 import math
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field as dataclass_field
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -44,6 +45,7 @@ from shared.commodity_execution import (
     build_trusted_keyless_target_plan_v3,
     canonical_before_position_projection,
     canonical_target_position_projection,
+    normalize_near_grid_price,
     sha256_json,
     simnow_experimental_adverse_cushion_ticks,
     target_position_projection_hash,
@@ -2217,23 +2219,6 @@ def _full_portfolio_quote_request(
         ) from exc
 
 
-def _full_portfolio_price_is_tick_aligned(
-    value: Decimal, *, tick: Decimal
-) -> bool:
-    """Accept only a nearest-grid representation error from a formal float."""
-
-    quotient = value / tick
-    aligned = quotient.to_integral_value() * tick
-    price_error = abs(value - aligned)
-    value_float = float(value)
-    tick_float = float(tick)
-    tolerance = min(
-        abs(tick_float) * 1e-6,
-        max(8.0 * math.ulp(value_float), abs(tick_float) * 1e-9),
-    )
-    return float(price_error) <= tolerance
-
-
 def _full_portfolio_formal_quote(
     values: Mapping[str, Any] | None,
     *,
@@ -2352,11 +2337,13 @@ def _full_portfolio_formal_quote(
         raise ExecutableTargetAdapterError(
             f"full-portfolio frozen product price tick mismatch: {exact_contract}"
         )
-    if (
-        not reference.is_finite()
-        or reference <= 0
-        or not _full_portfolio_price_is_tick_aligned(reference, tick=frozen_tick)
-    ):
+    try:
+        reference = normalize_near_grid_price(reference, tick=frozen_tick)
+    except ValueError as exc:
+        raise ExecutableTargetAdapterError(
+            f"full-portfolio formal quote price is invalid: {exact_contract}"
+        ) from exc
+    if reference <= 0:
         raise ExecutableTargetAdapterError(
             f"full-portfolio formal quote price is invalid: {exact_contract}"
         )
@@ -2366,17 +2353,22 @@ def _full_portfolio_formal_quote(
         if price_side == "ask"
         else reference - frozen_tick * protected_steps
     )
-    if (
-        not protected.is_finite()
-        or protected <= 0
-        or not _full_portfolio_price_is_tick_aligned(protected, tick=frozen_tick)
-    ):
+    try:
+        protected = normalize_near_grid_price(protected, tick=frozen_tick)
+    except ValueError as exc:  # pragma: no cover - protected derives from grid values
+        raise ExecutableTargetAdapterError(
+            f"full-portfolio protected limit price is invalid: {exact_contract}"
+        ) from exc
+    if protected <= 0:
         raise ExecutableTargetAdapterError(
             f"full-portfolio protected limit price is invalid: {exact_contract}"
         )
     return (
         float(protected),
-        _mapping(quote, "full-portfolio formal quote binding"),
+        _mapping(
+            {**quote, "reference_price": float(reference)},
+            "full-portfolio formal quote binding",
+        ),
         request,
     )
 

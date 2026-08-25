@@ -13,10 +13,16 @@ from app.execution.executable_target_adapter import (
     StaticCoreEqualFullPortfolioQuoteRequirements,
     build_full_portfolio_quote_requests,
     build_static_core_equal_full_portfolio_keyless_decision,
-    full_portfolio_phase_plan_id_from_preimage,
     full_portfolio_phase_plan_id_from_payload,
+    full_portfolio_phase_plan_id_from_preimage,
 )
 from app.execution.formal_tick_reader import FormalTickRequest
+from test_issue353_static_core_keyless import (
+    _position_manager_snapshot,
+    _snapshot,
+    _static_outputs,
+)
+
 from shared.commodity_execution import (
     FORMAL_QUOTE_PROOF_SCHEMA_VERSION,
     KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
@@ -27,11 +33,6 @@ from shared.commodity_execution import (
     canonical_target_position_projection,
     sha256_json,
     target_position_projection_hash,
-)
-from test_issue353_static_core_keyless import (
-    _position_manager_snapshot,
-    _snapshot,
-    _static_outputs,
 )
 
 PRODUCTS = ("ag", "al", "au", "bu", "cu", "rb", "ru", "sc", "sp", "zn")
@@ -1123,7 +1124,7 @@ def test_full_portfolio_formal_quote_only_allows_float_tick_representation_error
     decision = _decision(**kwargs)
     assert (
         decision.open_formal_quote_bindings[sc["exact_contract"]]["reference_price"]
-        == reference_price
+        == 596.3
     )
 
 

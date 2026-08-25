@@ -21,6 +21,7 @@ from shared.commodity_execution import (
     KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
     V3_FORMAL_QUOTE_MAX_AGE_SECONDS,
     TargetPlan,
+    normalize_near_grid_price,
     sha256_json,
     simnow_experimental_price_contract,
 )
@@ -71,6 +72,7 @@ _BINDING_FIELDS = {
     "price_tick",
     "protected_price",
 }
+_BOUNDED_BINDING_FIELDS = _BINDING_FIELDS | {"immutable_order_price"}
 
 
 class ExecutionStartQuoteProofError(ValueError):
@@ -141,9 +143,24 @@ def _decimal(value: Any, label: str) -> Decimal:
 def _protected_price(binding: Mapping[str, Any]) -> Decimal:
     reference = _decimal(binding["reference_price"], "quote reference_price")
     tick = _decimal(binding["price_tick"], "quote price_tick")
-    if reference <= 0 or tick <= 0 or reference % tick != 0:
-        raise ExecutionStartQuoteProofError("quote price/tick is invalid")
-    return reference + tick if binding["price_side"] == "ask" else reference - tick
+    try:
+        reference = normalize_near_grid_price(reference, tick=tick)
+    except ValueError as exc:
+        raise ExecutionStartQuoteProofError("quote price/tick is invalid") from exc
+    protected = reference + tick if binding["price_side"] == "ask" else reference - tick
+    try:
+        return normalize_near_grid_price(protected, tick=tick)
+    except ValueError as exc:  # pragma: no cover - protected derives from grid values
+        raise ExecutionStartQuoteProofError("quote price/tick is invalid") from exc
+
+
+def _order_limit_price(order: Any, *, tick: Decimal) -> Decimal:
+    try:
+        return normalize_near_grid_price(Decimal(str(order.price)), tick=tick)
+    except ValueError as exc:
+        raise ExecutionStartQuoteProofError(
+            "immutable order price/tick is invalid"
+        ) from exc
 
 
 def _protected_price_is_compatible(
@@ -216,7 +233,11 @@ def validate_execution_start_quote_proof(
             "execution start quote proof bindings are invalid"
         )
     for order_ref, binding in bindings.items():
-        if not isinstance(binding, Mapping) or set(binding) != _BINDING_FIELDS:
+        if (
+            not isinstance(binding, Mapping)
+            or set(binding) != _BINDING_FIELDS
+            and set(binding) != _BOUNDED_BINDING_FIELDS
+        ):
             raise ExecutionStartQuoteProofError(
                 "execution start quote binding fields are not exact"
             )
@@ -263,12 +284,21 @@ def validate_execution_start_quote_proof(
                 "execution start quote binding is stale or from the future"
             )
         protected = _protected_price(binding)
-        if protected <= 0 or protected != _decimal(
-            binding["protected_price"], "quote protected_price"
-        ):
+        try:
+            bound_protected = normalize_near_grid_price(
+                _decimal(binding["protected_price"], "quote protected_price"),
+                tick=_decimal(binding["price_tick"], "quote price_tick"),
+            )
+        except ValueError as exc:
+            raise ExecutionStartQuoteProofError(
+                "execution start quote protected price is invalid"
+            ) from exc
+        if protected <= 0 or protected != bound_protected:
             raise ExecutionStartQuoteProofError(
                 "execution start quote protected price is invalid"
             )
+        if "immutable_order_price" in binding:
+            _decimal(binding["immutable_order_price"], "immutable order price")
 
     if plan is None:
         return raw
@@ -326,11 +356,27 @@ def validate_execution_start_quote_proof(
         if not _protected_price_is_compatible(
             price_contract=price_contract,
             direction=order.direction,
-            protected=_decimal(binding["protected_price"], "quote protected_price"),
-            limit=Decimal(str(order.price)),
+            protected=_protected_price(binding),
+            limit=_order_limit_price(
+                order,
+                tick=_decimal(binding["price_tick"], "quote price_tick"),
+            ),
         ):
             raise ExecutionStartQuotePriceIncompatible(
                 _incompatible_price_message(price_contract)
+            )
+        if price_contract == "BOUNDED":
+            if (
+                "immutable_order_price" not in binding
+                or _decimal(binding["immutable_order_price"], "immutable order price")
+                != Decimal(str(order.price))
+            ):
+                raise ExecutionStartQuoteProofError(
+                    "execution start quote immutable order price does not match plan"
+                )
+        elif "immutable_order_price" in binding:
+            raise ExecutionStartQuoteProofError(
+                "execution start quote immutable order price is unexpected"
             )
     return raw
 
@@ -408,18 +454,29 @@ def build_execution_start_quote_proof(
     for order_ref in wanted:
         order = by_ref[order_ref]
         tick = observed_by_symbol[f"{order.symbol}.{order.exchange}"]
-        raw_tick = tick.as_dict()
+        raw_tick = {
+            **tick.as_dict(),
+            "reference_price": float(
+                normalize_near_grid_price(
+                    _decimal(tick.reference_price, "quote reference_price"),
+                    tick=_decimal(tick.price_tick, "quote price_tick"),
+                )
+            ),
+        }
         protected = _protected_price(raw_tick)
         if not _protected_price_is_compatible(
             price_contract=price_contract,
             direction=order.direction,
             protected=protected,
-            limit=Decimal(str(order.price)),
+            limit=_order_limit_price(
+                order,
+                tick=_decimal(raw_tick["price_tick"], "quote price_tick"),
+            ),
         ):
             raise ExecutionStartQuotePriceIncompatible(
                 _incompatible_price_message(price_contract)
             )
-        bindings[order_ref] = {
+        binding = {
             "order_ref": order_ref,
             "exact_contract": f"{order.exchange}.{order.symbol}",
             "offset": order.offset,
@@ -427,6 +484,9 @@ def build_execution_start_quote_proof(
             **raw_tick,
             "protected_price": float(protected),
         }
+        if price_contract == "BOUNDED":
+            binding["immutable_order_price"] = order.price
+        bindings[order_ref] = binding
     preimage = {
         "schema_version": EXECUTION_START_QUOTE_PROOF_SCHEMA_VERSION,
         **common,
@@ -461,6 +521,14 @@ def quote_proof_for_order(
         key: deepcopy(item) for key, item in raw.items() if key != "proof_sha256"
     }
     preimage["bindings"] = {order_ref: deepcopy(raw["bindings"][order_ref])}
+    if simnow_experimental_price_contract(
+        execution_run_id=plan.raw["execution_run_id"],
+        orders=plan.orders,
+        bindings=plan.raw["creation_quote_proof"]["bindings"],
+    ) == "BOUNDED":
+        preimage["bindings"][order_ref]["immutable_order_price"] = next(
+            order.price for order in plan.orders if order.reference == order_ref
+        )
     return validate_execution_start_quote_proof(
         {**preimage, "proof_sha256": sha256_json(preimage)},
         plan=plan,
@@ -489,8 +557,25 @@ def require_quote_proof_order_request(
         or binding["vt_symbol"] != f"{request.get('symbol')}.{request.get('exchange')}"
         or binding["price_side"] != expected_side
         or binding["offset"] != request.get("offset")
-        or _decimal(binding["protected_price"], "quote protected_price")
-        != _decimal(request.get("price"), "order price")
+    ):
+        raise ExecutionStartQuoteProofError(
+            "execution start quote proof does not bind order request"
+        )
+    protected = _protected_price(binding)
+    request_price = _decimal(request.get("price"), "order price")
+    immutable = binding.get("immutable_order_price")
+    if immutable is None:
+        if protected != request_price:
+            raise ExecutionStartQuoteProofError(
+                "execution start quote proof does not bind order request"
+            )
+        return raw
+    limit = _decimal(immutable, "immutable order price")
+    if request_price != limit or not _protected_price_is_compatible(
+        price_contract="BOUNDED",
+        direction=direction,
+        protected=protected,
+        limit=limit,
     ):
         raise ExecutionStartQuoteProofError(
             "execution start quote proof does not bind order request"
