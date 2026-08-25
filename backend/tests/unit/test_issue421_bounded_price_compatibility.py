@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
@@ -8,6 +9,7 @@ from app.execution.start_quote_proof import (
     ExecutionStartQuotePriceIncompatible,
     build_execution_start_quote_proof,
 )
+from app.execution.final_runtime import DurableTargetPlanRepository
 from shared.commodity_execution import (
     CommodityExecutionContractError,
     TargetPlan,
@@ -72,6 +74,10 @@ def _experimental_plan() -> TargetPlan:
     return TargetPlan.from_mapping(plan)
 
 
+def _legacy_experimental_plan() -> TargetPlan:
+    return TargetPlan.from_mapping(_v3_plan(execution_run_id=EXPERIMENTAL_RUN_ID))
+
+
 def _experimental_short_plan() -> TargetPlan:
     fields = _v3_fields()
     fields["execution_run_id"] = EXPERIMENTAL_RUN_ID
@@ -119,6 +125,36 @@ def _experimental_au_budget_plan(order_count: int) -> dict:
             "gateway_name": "CTP",
         }
         for index in range(1, order_count + 1)
+    ]
+    return _v3_plan(**fields)
+
+
+def _mixed_experimental_plan() -> dict:
+    fields = _v3_fields()
+    fields["execution_run_id"] = EXPERIMENTAL_RUN_ID
+    au_binding = deepcopy(fields["creation_quote_proof"]["bindings"]["SHFE.ag2609"])
+    au_binding.update(
+        {
+            "vt_symbol": "au2609.SHFE",
+            "price_side": "ask",
+            "reference_price": 5000.0,
+            "price_tick": 0.02,
+        }
+    )
+    fields["creation_quote_proof"]["bindings"]["SHFE.au2609"] = au_binding
+    fields["orders"] = [
+        fields["orders"][0],
+        {
+            "symbol": "au2609",
+            "exchange": "SHFE",
+            "direction": "LONG",
+            "type": "LIMIT",
+            "volume": 1,
+            "price": 5000.32,
+            "offset": "OPEN",
+            "reference": "issue421-mixed-bounded-0001",
+            "gateway_name": "CTP",
+        },
     ]
     return _v3_plan(**fields)
 
@@ -209,6 +245,32 @@ def test_experimental_start_rejects_price_beyond_immutable_limit() -> None:
         )
 
 
+def test_legacy_experimental_durable_plan_recovers_and_keeps_exact_equality(
+    tmp_path: Path,
+) -> None:
+    legacy = _legacy_experimental_plan()
+    repository = DurableTargetPlanRepository(tmp_path / "plans")
+    repository.put(legacy)
+    recovered = repository.get(legacy.plan_id)
+    assert recovered is not None
+    assert recovered.plan_hash == legacy.plan_hash
+
+    build_execution_start_quote_proof(
+        recovered,
+        reader=_Reader(reference_price=5000.0),
+        clock=lambda: QUOTE_TIME,
+    )
+    with pytest.raises(
+        ExecutionStartQuotePriceIncompatible,
+        match="differs from immutable order price",
+    ):
+        build_execution_start_quote_proof(
+            recovered,
+            reader=_Reader(reference_price=4999.0),
+            clock=lambda: QUOTE_TIME,
+        )
+
+
 def test_experimental_short_start_accepts_favorable_or_within_limit_price() -> None:
     for reference_price, protected_price in ((4990.0, 4989.0), (4991.0, 4990.0)):
         proof = build_execution_start_quote_proof(
@@ -268,6 +330,14 @@ def test_experimental_adverse_limit_budget_rejects_over_cny_30000() -> None:
         match="adverse limit budget exceeds CNY 30000",
     ):
         _experimental_au_budget_plan(101)
+
+
+def test_experimental_creation_proof_rejects_mixed_price_contracts() -> None:
+    with pytest.raises(
+        CommodityExecutionContractError,
+        match="mixes price contracts",
+    ):
+        _mixed_experimental_plan()
 
 
 def test_non_experimental_start_keeps_exact_equality() -> None:

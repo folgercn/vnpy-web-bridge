@@ -776,13 +776,113 @@ def simnow_experimental_adverse_cushion_ticks(
         ) from exc
 
 
+def simnow_experimental_price_contract(
+    *,
+    execution_run_id: str,
+    orders: tuple[TargetPlanOrder, ...],
+    bindings: Mapping[str, Any],
+) -> str:
+    """Classify one whole plan as exact, legacy, or bounded.
+
+    Older durable experimental plans used the original one-tick protected
+    limit.  They remain recoverable but retain strict equality at start.  A
+    newly bounded plan must use the frozen per-product K for every protected
+    order; mixing the two price contracts is invalid.
+    """
+
+    experimental = is_simnow_experimental_execution_run_id(execution_run_id)
+    contracts: set[str] = set()
+    for order in orders:
+        exact_contract = f"{order.exchange}.{order.symbol}"
+        try:
+            binding = bindings[exact_contract]
+            reference = _decimal(
+                binding["reference_price"],
+                f"target plan creation quote reference_price: {exact_contract}",
+            )
+            tick = _decimal(
+                binding["price_tick"],
+                f"target plan creation quote price_tick: {exact_contract}",
+            )
+        except (KeyError, TypeError) as exc:
+            raise CommodityExecutionContractError(
+                "SIMNOW_EXPERIMENTAL target plan quote binding is invalid"
+            ) from exc
+        expected_side = "ask" if order.direction == "LONG" else "bid"
+        if binding.get("price_side") != expected_side:
+            raise CommodityExecutionContractError(
+                "SIMNOW_EXPERIMENTAL target plan quote side is invalid"
+            )
+        legacy_price = (
+            reference + tick if expected_side == "ask" else reference - tick
+        )
+        order_price = Decimal(str(order.price))
+        if order_price == legacy_price:
+            contracts.add("LEGACY_EXACT" if experimental else "EXACT")
+            continue
+        if not experimental:
+            raise CommodityExecutionContractError(
+                "target plan creation quote does not bind order price"
+            )
+        match = re.fullmatch(r"([A-Za-z]+)[0-9]{4}", order.symbol)
+        if match is None:  # pragma: no cover - checked before this helper
+            raise CommodityExecutionContractError(
+                "SIMNOW_EXPERIMENTAL target plan symbol is invalid"
+            )
+        product = match.group(1).lower()
+        try:
+            frozen_tick, _multiplier = _SIMNOW_EXPERIMENTAL_PRODUCT_SPECS[product]
+        except KeyError as exc:  # pragma: no cover - cushion validation precedes this
+            raise CommodityExecutionContractError(
+                "SIMNOW_EXPERIMENTAL target plan product is outside the frozen universe"
+            ) from exc
+        if tick != frozen_tick:
+            raise CommodityExecutionContractError(
+                "SIMNOW_EXPERIMENTAL target plan price tick mismatches frozen product spec"
+            )
+        bounded_price = (
+            reference
+            + tick
+            * (1 + simnow_experimental_adverse_cushion_ticks(
+                execution_run_id=execution_run_id, symbol=order.symbol
+            ))
+            if expected_side == "ask"
+            else reference
+            - tick
+            * (1 + simnow_experimental_adverse_cushion_ticks(
+                execution_run_id=execution_run_id, symbol=order.symbol
+            ))
+        )
+        if order_price != bounded_price:
+            raise CommodityExecutionContractError(
+                "target plan creation quote does not bind order price"
+            )
+        contracts.add("BOUNDED")
+    if contracts == {"EXACT"}:
+        return "EXACT"
+    if contracts == {"LEGACY_EXACT"}:
+        return "LEGACY_EXACT"
+    if contracts == {"BOUNDED"}:
+        return "BOUNDED"
+    raise CommodityExecutionContractError(
+        "SIMNOW_EXPERIMENTAL target plan mixes price contracts"
+    )
+
+
 def _simnow_experimental_adverse_limit_budget_cny(
     *, execution_run_id: str, orders: tuple[TargetPlanOrder, ...],
     bindings: Mapping[str, Any],
 ) -> Decimal:
     """Calculate the immutable experimental adverse-price budget in CNY."""
 
-    if not is_simnow_experimental_execution_run_id(execution_run_id):
+    if (
+        simnow_experimental_price_contract(
+            execution_run_id=execution_run_id,
+            orders=orders,
+            bindings=bindings,
+        )
+        != "BOUNDED"
+    ):
         return Decimal(0)
     total = Decimal(0)
     for order in orders:
@@ -798,15 +898,6 @@ def _simnow_experimental_adverse_limit_budget_cny(
             raise CommodityExecutionContractError(
                 "SIMNOW_EXPERIMENTAL target plan product is outside the frozen universe"
             ) from exc
-        exact_contract = f"{order.exchange}.{order.symbol}"
-        quote_tick = _decimal(
-            bindings[exact_contract]["price_tick"],
-            f"target plan creation quote price_tick: {exact_contract}",
-        )
-        if quote_tick != frozen_tick:
-            raise CommodityExecutionContractError(
-                "SIMNOW_EXPERIMENTAL target plan price tick mismatches frozen product spec"
-            )
         total += (
             Decimal(order.volume)
             * Decimal(
@@ -934,19 +1025,19 @@ def _creation_quote_proof(
             raise CommodityExecutionContractError(
                 f"target plan creation quote price is invalid: {exact_contract}"
             )
-        protected_steps = 1 + simnow_experimental_adverse_cushion_ticks(
-            execution_run_id=execution_run_id,
-            symbol=symbol,
-        )
-        protected_price = (
-            reference_price + price_tick * protected_steps
+        if (
+            reference_price + price_tick
             if expected_side == "ask"
-            else reference_price - price_tick * protected_steps
-        )
-        if protected_price <= 0 or protected_price != order_price:
+            else reference_price - price_tick
+        ) <= 0:
             raise CommodityExecutionContractError(
-                f"target plan creation quote does not bind order price: {exact_contract}"
+                f"target plan creation quote price is invalid: {exact_contract}"
             )
+    simnow_experimental_price_contract(
+        execution_run_id=execution_run_id,
+        orders=orders,
+        bindings=bindings,
+    )
     budget_cny = _simnow_experimental_adverse_limit_budget_cny(
         execution_run_id=execution_run_id,
         orders=orders,

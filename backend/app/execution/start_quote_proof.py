@@ -3,8 +3,8 @@
 The proof is generated only inside Execution from the authenticated, read-only
 formal tick projection.  It is deliberately separate from the immutable
 creation proof carried by TargetPlan v3: creation evidence participates in the
-plan identity, while this fresh proof admits one start or first dispatch at the
-same protected price.
+plan identity, while this fresh proof admits one start or first dispatch only
+within the immutable order limit.
 """
 
 from __future__ import annotations
@@ -21,8 +21,8 @@ from shared.commodity_execution import (
     KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
     V3_FORMAL_QUOTE_MAX_AGE_SECONDS,
     TargetPlan,
-    is_simnow_experimental_execution_run_id,
     sha256_json,
+    simnow_experimental_price_contract,
 )
 
 from .formal_tick_reader import (
@@ -147,17 +147,17 @@ def _protected_price(binding: Mapping[str, Any]) -> Decimal:
 
 
 def _protected_price_is_compatible(
-    *, plan: TargetPlan, direction: str, protected: Decimal, limit: Decimal
+    *, price_contract: str, direction: str, protected: Decimal, limit: Decimal
 ) -> bool:
-    """Apply the experimental bounded limit only to its existing run identity."""
+    """Bounded experimental plans admit only their immutable limit range."""
 
-    if is_simnow_experimental_execution_run_id(plan.raw["execution_run_id"]):
+    if price_contract == "BOUNDED":
         return protected <= limit if direction == "LONG" else protected >= limit
     return protected == limit
 
 
-def _incompatible_price_message(plan: TargetPlan) -> str:
-    if is_simnow_experimental_execution_run_id(plan.raw["execution_run_id"]):
+def _incompatible_price_message(price_contract: str) -> str:
+    if price_contract == "BOUNDED":
         return "fresh protected price is outside immutable order limit"
     return "fresh protected price differs from immutable order price"
 
@@ -297,6 +297,11 @@ def validate_execution_start_quote_proof(
         raise ExecutionStartQuoteProofError(
             "execution start quote proof names a foreign order"
         )
+    price_contract = simnow_experimental_price_contract(
+        execution_run_id=plan.raw["execution_run_id"],
+        orders=plan.orders,
+        bindings=plan.raw["creation_quote_proof"]["bindings"],
+    )
     for order_ref in wanted:
         order = by_ref[order_ref]
         binding = bindings[order_ref]
@@ -319,12 +324,14 @@ def validate_execution_start_quote_proof(
                 "execution start quote binding does not match order"
             )
         if not _protected_price_is_compatible(
-            plan=plan,
+            price_contract=price_contract,
             direction=order.direction,
             protected=_decimal(binding["protected_price"], "quote protected_price"),
             limit=Decimal(str(order.price)),
         ):
-            raise ExecutionStartQuotePriceIncompatible(_incompatible_price_message(plan))
+            raise ExecutionStartQuotePriceIncompatible(
+                _incompatible_price_message(price_contract)
+            )
     return raw
 
 
@@ -385,6 +392,11 @@ def build_execution_start_quote_proof(
     if not isinstance(now, datetime) or now.tzinfo is None:
         raise ExecutionStartQuoteProofError("execution quote clock is invalid")
     creation_hash = sha256_json(plan.raw["creation_quote_proof"])
+    price_contract = simnow_experimental_price_contract(
+        execution_run_id=plan.raw["execution_run_id"],
+        orders=plan.orders,
+        bindings=plan.raw["creation_quote_proof"]["bindings"],
+    )
     common = {
         "execution_run_id": plan.raw["execution_run_id"],
         "phase": plan.raw["phase"],
@@ -399,12 +411,14 @@ def build_execution_start_quote_proof(
         raw_tick = tick.as_dict()
         protected = _protected_price(raw_tick)
         if not _protected_price_is_compatible(
-            plan=plan,
+            price_contract=price_contract,
             direction=order.direction,
             protected=protected,
             limit=Decimal(str(order.price)),
         ):
-            raise ExecutionStartQuotePriceIncompatible(_incompatible_price_message(plan))
+            raise ExecutionStartQuotePriceIncompatible(
+                _incompatible_price_message(price_contract)
+            )
         bindings[order_ref] = {
             "order_ref": order_ref,
             "exact_contract": f"{order.exchange}.{order.symbol}",
