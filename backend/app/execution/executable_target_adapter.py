@@ -2216,6 +2216,23 @@ def _full_portfolio_quote_request(
         ) from exc
 
 
+def _full_portfolio_price_is_tick_aligned(
+    value: Decimal, *, tick: Decimal
+) -> bool:
+    """Accept only a nearest-grid representation error from a formal float."""
+
+    quotient = value / tick
+    aligned = quotient.to_integral_value() * tick
+    price_error = abs(value - aligned)
+    value_float = float(value)
+    tick_float = float(tick)
+    tolerance = min(
+        abs(tick_float) * 1e-6,
+        max(8.0 * math.ulp(value_float), abs(tick_float) * 1e-9),
+    )
+    return float(price_error) <= tolerance
+
+
 def _full_portfolio_formal_quote(
     values: Mapping[str, Any] | None,
     *,
@@ -2325,14 +2342,22 @@ def _full_portfolio_formal_quote(
         raise ExecutableTargetAdapterError(
             f"full-portfolio frozen product price tick mismatch: {exact_contract}"
         )
-    if not reference.is_finite() or reference <= 0 or reference % frozen_tick != 0:
+    if (
+        not reference.is_finite()
+        or reference <= 0
+        or not _full_portfolio_price_is_tick_aligned(reference, tick=frozen_tick)
+    ):
         raise ExecutableTargetAdapterError(
             f"full-portfolio formal quote price is invalid: {exact_contract}"
         )
     protected = (
         reference + frozen_tick if price_side == "ask" else reference - frozen_tick
     )
-    if not protected.is_finite() or protected <= 0 or protected % frozen_tick != 0:
+    if (
+        not protected.is_finite()
+        or protected <= 0
+        or not _full_portfolio_price_is_tick_aligned(protected, tick=frozen_tick)
+    ):
         raise ExecutableTargetAdapterError(
             f"full-portfolio protected limit price is invalid: {exact_contract}"
         )

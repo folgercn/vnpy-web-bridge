@@ -1094,6 +1094,39 @@ def test_roll_quote_binding_requires_exact_frozen_tick_identity_and_freshness() 
         )
 
 
+@pytest.mark.parametrize(
+    ("reference_price", "accepted"),
+    [
+        (596.3000000000001, True),
+        (596.300001, False),
+    ],
+)
+def test_full_portfolio_formal_quote_only_allows_float_tick_representation_error(
+    reference_price: float, accepted: bool
+) -> None:
+    _projection, _freeze, target = _static_outputs()
+    manager = _position_manager_snapshot(target, selected=_targets(sc=1))
+    sc = _row_by_product(manager)["sc"]
+    assert sc["price_tick"] == 0.1
+
+    kwargs = {
+        "selected": _targets(sc=1),
+        "quote_overrides": {
+            sc["exact_contract"]: {"reference_price": reference_price}
+        },
+    }
+    if not accepted:
+        with pytest.raises(ExecutableTargetAdapterError, match="price is invalid"):
+            _decision(**kwargs)
+        return
+
+    decision = _decision(**kwargs)
+    assert (
+        decision.open_formal_quote_bindings[sc["exact_contract"]]["reference_price"]
+        == reference_price
+    )
+
+
 def test_ambiguous_or_out_of_universe_portfolio_fails_closed() -> None:
     _projection, _freeze, target = _static_outputs()
     manager = _position_manager_snapshot(target, selected=_targets(ag=1))
