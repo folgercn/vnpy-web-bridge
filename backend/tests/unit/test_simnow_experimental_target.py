@@ -794,6 +794,10 @@ def test_completed_open_recovery_returns_fresh_planner_noop(monkeypatch: pytest.
     }
 
     class RecoveryExecution(_Execution):
+        def __init__(self, facts: dict) -> None:
+            super().__init__(facts)
+            self.recovery_keys: list[str] = []
+
         async def status(self):
             return SimpleNamespace(
                 as_dict=lambda: {
@@ -803,17 +807,14 @@ def test_completed_open_recovery_returns_fresh_planner_noop(monkeypatch: pytest.
             )
 
         async def target_plan_recovery(self, key: str):
+            self.recovery_keys.append(key)
             return SimpleNamespace(as_dict=lambda: open_recovery if key == phase_key("OPEN") else {"state": "BEFORE_CUSTODY"})
 
-    class RecoveryBackend:
+    class RecoveryBackend(runner._ExperimentalBackend):
         def __init__(self) -> None:
-            self.execution = RecoveryExecution(_facts(positions=_target_positions(target)))
-            self.install_calls: list[object] = []
-
-        async def _install_or_recover_plan(self, *, phase_key: str, handoff):
-            self.install_calls.append(handoff)
-            assert phase_key == open_recovery["custody_idempotency_key"]
-            return open_recovery
+            execution = RecoveryExecution(_facts(positions=_target_positions(target)))
+            super().__init__(execution=execution, phase_c=object())
+            self.recovery_execution = execution
 
         async def _drive_installed_plan(self, recovery):
             assert recovery is open_recovery
@@ -823,7 +824,10 @@ def test_completed_open_recovery_returns_fresh_planner_noop(monkeypatch: pytest.
     monkeypatch.setattr(runner, "read_simnow_continuous_v3_formal_tick_bindings", lambda *_args, **_kwargs: pytest.fail("completed recovery must reach NOOP without quotes"))
     result = asyncio.run(runner.execute_once(target, bundle, backend=backend, formal_state_dir=Path("/unused"), formal_projection_dir=Path("/unused"), expires_at="2099-01-01T00:00:00Z"))
     assert result["status"] == "NOOP"
-    assert backend.install_calls == [None]
+    assert backend.recovery_execution.recovery_keys == [
+        phase_key("CLOSE"),
+        phase_key("OPEN"),
+    ]
 
 
 def test_execute_once_drives_close_then_fresh_open_without_deferred_reuse(

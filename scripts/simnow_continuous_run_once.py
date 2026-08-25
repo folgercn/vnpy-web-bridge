@@ -1758,8 +1758,15 @@ class _ProductionBackend:
         *,
         phase_key: str,
         handoff: StaticCoreEqualFullPortfolioPhaseHandoff | None,
+        recovery: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        recovery = (await self.execution.target_plan_recovery(phase_key)).as_dict()
+        if recovery is None:
+            recovery = (await self.execution.target_plan_recovery(phase_key)).as_dict()
+        elif (
+            recovery.get("state") != "BEFORE_CUSTODY"
+            and recovery.get("custody_idempotency_key") != phase_key
+        ):
+            raise ContinuousRunError("TargetPlan recovery identity mismatches phase key")
         state = recovery["state"]
         if state == "BEFORE_CUSTODY":
             if handoff is None:
