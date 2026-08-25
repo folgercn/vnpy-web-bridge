@@ -9,13 +9,13 @@ acknowledgement, producer watermark, source fence, and healthy projection.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 import os
 import re
 import stat
 import time
-import hashlib
-import json
-import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -23,7 +23,10 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Literal
 
-from shared.commodity_execution import V3_FORMAL_QUOTE_MAX_AGE_SECONDS
+from shared.commodity_execution import (
+    V3_FORMAL_QUOTE_MAX_AGE_SECONDS,
+    normalize_near_grid_price,
+)
 
 FORMAL_TICK_SOURCE = "windows-tick-wire-v1"
 _PHASE_B_CONTRACT_VERSION = "phase_b_worker_contract_v1"
@@ -136,20 +139,9 @@ class FormalTickBinding:
             raise ValueError("formal CTP tick event hash is invalid")
         _parse_explicit_utc(self.received_at_utc, label="formal CTP tick")
         try:
-            quotient = Decimal(str(price)) / Decimal(str(tick))
-        except (InvalidOperation, ZeroDivisionError) as exc:
+            normalize_near_grid_price(Decimal(str(price)), tick=Decimal(str(tick)))
+        except (InvalidOperation, ValueError) as exc:
             raise ValueError("formal CTP tick is not aligned to price tick") from exc
-        integral = quotient.to_integral_value()
-        aligned_price = integral * Decimal(str(tick))
-        price_error = abs(Decimal(str(price)) - aligned_price)
-        price_float = float(price)
-        tick_float = float(tick)
-        tolerance = min(
-            abs(tick_float) * 1e-6,
-            max(8.0 * math.ulp(price_float), abs(tick_float) * 1e-9),
-        )
-        if float(price_error) > tolerance:
-            raise ValueError("formal CTP tick is not aligned to price tick")
 
     def as_legacy_tuple(self) -> LegacyTickBinding:
         return (
