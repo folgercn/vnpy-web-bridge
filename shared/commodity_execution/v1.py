@@ -49,11 +49,26 @@ _SYMBOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,31}$")
 _EXACT_COMMODITY_SYMBOL_RE = re.compile(r"^[A-Za-z]+[0-9]{4}$")
 _REFERENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
 _EXECUTION_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$")
+_SIMNOW_EXPERIMENTAL_EXECUTION_RUN_ID_RE = re.compile(
+    r"simnow-experimental-[0-9a-f]{48}"
+)
 _GATEWAY_NAME_RE = re.compile(r"^(?:CTP|[A-Za-z0-9][A-Za-z0-9._:-]{7,127})$")
 _EXCHANGES = frozenset({"CFFEX", "CZCE", "DCE", "GFEX", "INE", "SHFE"})
 _CLOSE_ORDER_OFFSETS = frozenset({"CLOSE", "CLOSETODAY", "CLOSEYESTERDAY"})
 _YD_AWARE_EXCHANGES = frozenset({"INE", "SHFE"})
 _FORMAL_QUOTE_FUTURE_SKEW_SECONDS = 2
+_SIMNOW_EXPERIMENTAL_ADVERSE_CUSHION_TICKS = {
+    "ag": 10,
+    "al": 1,
+    "au": 15,
+    "bu": 2,
+    "cu": 1,
+    "rb": 1,
+    "ru": 1,
+    "sc": 3,
+    "sp": 1,
+    "zn": 1,
+}
 
 
 class CommodityExecutionContractError(ValueError):
@@ -715,8 +730,44 @@ def _decimal(value: Any, field: str) -> Decimal:
     return result
 
 
+def is_simnow_experimental_execution_run_id(value: Any) -> bool:
+    """Return whether an existing run identity selects the experimental lane."""
+
+    return isinstance(value, str) and (
+        _SIMNOW_EXPERIMENTAL_EXECUTION_RUN_ID_RE.fullmatch(value) is not None
+    )
+
+
+def simnow_experimental_adverse_cushion_ticks(
+    *, execution_run_id: str, symbol: str
+) -> int:
+    """Return the frozen per-product experimental limit budget.
+
+    The non-experimental value is zero, preserving the historical exact
+    creation-price contract.  Experimental symbols must remain within the
+    frozen ten-product universe; there is no caller-supplied cushion.
+    """
+
+    if not is_simnow_experimental_execution_run_id(execution_run_id):
+        return 0
+    match = re.fullmatch(r"([A-Za-z]+)[0-9]{4}", symbol)
+    if match is None:
+        raise CommodityExecutionContractError(
+            "SIMNOW_EXPERIMENTAL target plan symbol is invalid"
+        )
+    try:
+        return _SIMNOW_EXPERIMENTAL_ADVERSE_CUSHION_TICKS[match.group(1).lower()]
+    except KeyError as exc:
+        raise CommodityExecutionContractError(
+            "SIMNOW_EXPERIMENTAL target plan product is outside the frozen universe"
+        ) from exc
+
+
 def _creation_quote_proof(
-    value: Any, *, orders: tuple[TargetPlanOrder, ...]
+    value: Any,
+    *,
+    execution_run_id: str,
+    orders: tuple[TargetPlanOrder, ...],
 ) -> dict[str, Any]:
     proof = _detached_mapping(value, "target plan creation_quote_proof")
     if set(proof) != _FORMAL_QUOTE_PROOF_FIELDS:
@@ -826,10 +877,14 @@ def _creation_quote_proof(
             raise CommodityExecutionContractError(
                 f"target plan creation quote price is invalid: {exact_contract}"
             )
+        protected_steps = 1 + simnow_experimental_adverse_cushion_ticks(
+            execution_run_id=execution_run_id,
+            symbol=symbol,
+        )
         protected_price = (
-            reference_price + price_tick
+            reference_price + price_tick * protected_steps
             if expected_side == "ask"
-            else reference_price - price_tick
+            else reference_price - price_tick * protected_steps
         )
         if protected_price <= 0 or protected_price != order_price:
             raise CommodityExecutionContractError(
@@ -1030,7 +1085,9 @@ class TargetPlan:
             )
         if is_keyless_v3:
             raw["creation_quote_proof"] = _creation_quote_proof(
-                raw["creation_quote_proof"], orders=orders
+                raw["creation_quote_proof"],
+                execution_run_id=raw["execution_run_id"],
+                orders=orders,
             )
             quote_validated_at = datetime.fromisoformat(
                 raw["creation_quote_proof"]["validated_at_utc"][:-1] + "+00:00"
