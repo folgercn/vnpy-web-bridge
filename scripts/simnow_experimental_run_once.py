@@ -91,6 +91,11 @@ class _ExperimentalBackend(_ProductionBackend):
         self.execution = execution or ExecutionClient()
         self.phase_c = phase_c or RemotePhaseCWorkflowClient()
 
+    def _allows_retired_plan_replacement(self) -> bool:
+        """Admit Execution's documented TERMINAL/REVOKED zero-work boundary."""
+
+        return True
+
 
 def _require_fresh_clear_facts(facts: Mapping[str, Any]) -> None:
     if (
@@ -311,6 +316,10 @@ async def _advance_current_execution_identity(
     if not isinstance(plan_id, str) or not isinstance(plan_hash, str):
         raise ExperimentalRunError("Execution current plan identity is invalid")
     if state == "TERMINAL":
+        if backend._is_retired_execution_boundary(
+            status, require_leader_clear=True
+        ):
+            return None
         if await terminal_completion_matches(
             status, plan_id=plan_id, plan_hash=plan_hash
         ):

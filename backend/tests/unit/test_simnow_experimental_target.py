@@ -61,6 +61,23 @@ def _target(bundle: dict | None = None) -> dict:
     return materializer.materialize_target(planner_bundle=bundle, planner_bundle_raw=_raw(bundle), daily_route=route, daily_route_raw=_raw(route), generated_at=generated_at)
 
 
+def _retired_execution_status() -> dict:
+    return {
+        "state_version": 10,
+        "lifecycle": "READY",
+        "plan": {
+            "state": "TERMINAL",
+            "plan_id": "retired-plan-0001",
+            "plan_hash": "b" * 64,
+        },
+        "authority": {"state": "REVOKED"},
+        "leader": {"held": False},
+        "reconciliation": {"state": "RECONCILED", "unknown_outcomes": 0},
+        "broker": {"active_order_count": 0},
+        "send_intents": [{"state": "TERMINAL"}],
+    }
+
+
 def test_materializer_fixed_ten_contract_canonical_identity_and_false_authority(tmp_path: Path) -> None:
     target = _target()
     assert target["target_id"] == materializer._target_id(target)
@@ -72,6 +89,159 @@ def test_materializer_fixed_ten_contract_canonical_identity_and_false_authority(
     assert stat.S_IMODE(output.parent.stat().st_mode) == 0o755
     loaded, raw = materializer.read_json_stable(output, label="target")
     assert materializer.validate_target(loaded, raw=raw) == target
+
+
+def test_experimental_backend_replaces_foreign_retired_plan_with_preview() -> None:
+    retired = _retired_execution_status()
+    calls: list[str] = []
+
+    class Execution:
+        async def status(self) -> object:
+            calls.append("status")
+            return SimpleNamespace(as_dict=lambda: dict(retired))
+
+        async def acquire_leader(self, _owner_id: str) -> object:
+            calls.append("acquire")
+            return SimpleNamespace(epoch=1, fencing_token=1)
+
+        async def renew_leader(self, token: object) -> object:
+            calls.append("renew")
+            return token
+
+        async def submit(self, command: dict) -> object:
+            calls.append(command["command"])
+            if command["command"] == "preview":
+                raise RuntimeError("stop after preview admission")
+            raise AssertionError("retired admission must preview before any other command")
+
+        async def release_leader(self, _token: object) -> None:
+            calls.append("release")
+
+    backend = runner._ExperimentalBackend(execution=Execution(), phase_c=object())
+    with pytest.raises(RuntimeError, match="stop after preview admission"):
+        asyncio.run(
+            backend._drive_installed_plan(
+                {
+                    "plan_id": "new-plan-0001",
+                    "plan_hash": "a" * 64,
+                    "phase": "OPEN",
+                    "custody_idempotency_key": "c" * 64,
+                    "artifact_sha256": "d" * 64,
+                    "receipt_id": "receipt-0001",
+                }
+            )
+        )
+
+    assert calls == ["status", "acquire", "renew", "status", "preview", "release"]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda status: status.update({"authority": {"state": "ENABLED"}}),
+        lambda status: status["reconciliation"].update({"unknown_outcomes": 1}),
+        lambda status: status["broker"].update({"active_order_count": 1}),
+        lambda status: status.update({"send_intents": [{"state": "PERSISTED"}]}),
+    ),
+)
+def test_experimental_backend_rejects_unsafe_foreign_terminal_plan_before_leader(
+    mutate,
+) -> None:
+    status = _retired_execution_status()
+    mutate(status)
+
+    class Execution:
+        def __init__(self) -> None:
+            self.acquire_calls = 0
+
+        async def status(self) -> object:
+            return SimpleNamespace(as_dict=lambda: dict(status))
+
+        async def acquire_leader(self, _owner_id: str) -> object:
+            self.acquire_calls += 1
+            raise AssertionError("unsafe terminal plan must not acquire leader")
+
+    execution = Execution()
+    backend = runner._ExperimentalBackend(execution=execution, phase_c=object())
+    with pytest.raises(runner.ContinuousRunError, match="foreign non-idle TargetPlan"):
+        asyncio.run(
+            backend._drive_installed_plan(
+                {
+                    "plan_id": "new-plan-0001",
+                    "plan_hash": "a" * 64,
+                    "phase": "OPEN",
+                    "custody_idempotency_key": "c" * 64,
+                }
+            )
+        )
+    assert execution.acquire_calls == 0
+
+
+def test_experimental_backend_rejects_idle_with_enabled_authority_before_leader() -> None:
+    status = _retired_execution_status()
+    status["plan"] = {"state": "IDLE"}
+    status["authority"] = {"state": "ENABLED"}
+
+    class Execution:
+        def __init__(self) -> None:
+            self.acquire_calls = 0
+
+        async def status(self) -> object:
+            return SimpleNamespace(as_dict=lambda: dict(status))
+
+        async def acquire_leader(self, _owner_id: str) -> object:
+            self.acquire_calls += 1
+            raise AssertionError("invalid idle authority must not acquire leader")
+
+    execution = Execution()
+    backend = runner._ExperimentalBackend(execution=execution, phase_c=object())
+    with pytest.raises(runner.ContinuousRunError, match="admission boundary is invalid"):
+        asyncio.run(
+            backend._drive_installed_plan(
+                {
+                    "plan_id": "new-plan-0001",
+                    "plan_hash": "a" * 64,
+                    "phase": "OPEN",
+                    "custody_idempotency_key": "c" * 64,
+                }
+            )
+        )
+    assert execution.acquire_calls == 0
+
+
+@pytest.mark.parametrize("state", ("ACTIVE", "PREVIEWED"))
+def test_experimental_backend_rejects_foreign_non_retired_plan_before_leader(
+    state: str,
+) -> None:
+    status = _retired_execution_status()
+    status["plan"]["state"] = state
+    status["authority"] = {"state": "ENABLED"}
+
+    class Execution:
+        def __init__(self) -> None:
+            self.acquire_calls = 0
+
+        async def status(self) -> object:
+            return SimpleNamespace(as_dict=lambda: dict(status))
+
+        async def acquire_leader(self, _owner_id: str) -> object:
+            self.acquire_calls += 1
+            raise AssertionError("foreign active/previewed plan must not acquire leader")
+
+    execution = Execution()
+    backend = runner._ExperimentalBackend(execution=execution, phase_c=object())
+    with pytest.raises(runner.ContinuousRunError, match="foreign non-idle TargetPlan"):
+        asyncio.run(
+            backend._drive_installed_plan(
+                {
+                    "plan_id": "new-plan-0001",
+                    "plan_hash": "a" * 64,
+                    "phase": "OPEN",
+                    "custody_idempotency_key": "c" * 64,
+                }
+            )
+        )
+    assert execution.acquire_calls == 0
 
 
 def test_daily_route_change_preserves_quantities_when_bound_to_bundle() -> None:

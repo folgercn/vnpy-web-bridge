@@ -148,13 +148,79 @@ def test_preflight_requires_exact_clear_execution_status() -> None:
                         "lifecycle": "READY",
                         "plan": {"state": "IDLE"},
                         "authority": {"state": "DISABLED"},
+                        "leader": {"held": False},
                         "reconciliation": {"state": "RECONCILED", "unknown_outcomes": 0},
+                        "broker": {"active_order_count": 0},
                         "send_intents": [],
                     }
 
             return Projection()
 
     asyncio.run(preflight._check_execution_state(FakeExecution()))  # type: ignore[arg-type]
+
+
+def test_preflight_accepts_retired_terminal_revoked_zero_work_boundary() -> None:
+    class FakeExecution:
+        async def status(self) -> object:
+            class Projection:
+                def as_dict(self) -> dict[str, object]:
+                    return {
+                        "lifecycle": "READY",
+                        "plan": {"state": "TERMINAL"},
+                        "authority": {"state": "REVOKED"},
+                        "leader": {"held": False},
+                        "reconciliation": {
+                            "state": "RECONCILED",
+                            "unknown_outcomes": 0,
+                        },
+                        "broker": {"active_order_count": 0},
+                        "send_intents": [
+                            {"state": "TERMINAL"},
+                            {"state": "RECONCILED"},
+                        ],
+                    }
+
+            return Projection()
+
+    asyncio.run(preflight._check_execution_state(FakeExecution()))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    (
+        ("authority", {"state": "ENABLED"}),
+        ("reconciliation", {"state": "RECONCILED", "unknown_outcomes": 1}),
+        ("broker", {"active_order_count": 1}),
+        ("send_intents", [{"state": "PERSISTED"}]),
+        ("leader", {"held": True}),
+    ),
+)
+def test_preflight_rejects_unsafe_terminal_revoked_boundary(
+    field: str, value: object
+) -> None:
+    class FakeExecution:
+        async def status(self) -> object:
+            class Projection:
+                def as_dict(self) -> dict[str, object]:
+                    status: dict[str, object] = {
+                        "lifecycle": "READY",
+                        "plan": {"state": "TERMINAL"},
+                        "authority": {"state": "REVOKED"},
+                        "leader": {"held": False},
+                        "reconciliation": {
+                            "state": "RECONCILED",
+                            "unknown_outcomes": 0,
+                        },
+                        "broker": {"active_order_count": 0},
+                        "send_intents": [],
+                    }
+                    status[field] = value
+                    return status
+
+            return Projection()
+
+    with pytest.raises(preflight.PreflightStop, match="safe IDLE/DISABLED"):
+        asyncio.run(preflight._check_execution_state(FakeExecution()))  # type: ignore[arg-type]
 
 
 def test_preflight_host_adapter_checks_config_and_image_before_run() -> None:

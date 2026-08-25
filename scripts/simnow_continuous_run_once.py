@@ -1841,8 +1841,82 @@ class _ProductionBackend:
                     "Execution leader release outcome remains unknown"
                 ) from exc
 
+    def _allows_retired_plan_replacement(self) -> bool:
+        """Whether this lane may replace a fully retired foreign plan.
+
+        The audited continuous lane retains its existing IDLE-only admission.
+        SIMNOW_EXPERIMENTAL opts in explicitly, after checking the same
+        zero-work boundary that Execution exposes through account-facts v2.
+        """
+
+        return False
+
     @staticmethod
+    def _has_zero_work_boundary(
+        status: Mapping[str, Any], *, require_leader_clear: bool
+    ) -> bool:
+        reconciliation = status.get("reconciliation")
+        broker = status.get("broker")
+        intents = status.get("send_intents")
+        if (
+            status.get("lifecycle") != "READY"
+            or not isinstance(reconciliation, Mapping)
+            or reconciliation.get("state") != "RECONCILED"
+            or reconciliation.get("unknown_outcomes") != 0
+            or not isinstance(broker, Mapping)
+            or broker.get("active_order_count") != 0
+            or not isinstance(intents, list)
+            or any(
+                not isinstance(intent, Mapping)
+                or intent.get("state") not in {"RECONCILED", "CANCELLED", "TERMINAL"}
+                for intent in intents
+            )
+        ):
+            return False
+        if require_leader_clear:
+            leader = status.get("leader")
+            return isinstance(leader, Mapping) and leader.get("held") is False
+        return True
+
+    @classmethod
+    def _is_retired_execution_boundary(
+        cls, status: Mapping[str, Any], *, require_leader_clear: bool
+    ) -> bool:
+        plan = status.get("plan")
+        authority = status.get("authority")
+        return (
+            isinstance(plan, Mapping)
+            and plan.get("state") == "TERMINAL"
+            and isinstance(authority, Mapping)
+            and authority.get("state") == "REVOKED"
+            and cls._has_zero_work_boundary(
+                status, require_leader_clear=require_leader_clear
+            )
+        )
+
+    @classmethod
+    def _is_new_plan_admission_boundary(
+        cls, status: Mapping[str, Any], *, require_leader_clear: bool
+    ) -> bool:
+        plan = status.get("plan")
+        authority = status.get("authority")
+        return (
+            isinstance(plan, Mapping)
+            and isinstance(authority, Mapping)
+            and (
+                (plan.get("state") == "IDLE" and authority.get("state") == "DISABLED")
+                or (
+                    plan.get("state") == "TERMINAL"
+                    and authority.get("state") == "REVOKED"
+                )
+            )
+            and cls._has_zero_work_boundary(
+                status, require_leader_clear=require_leader_clear
+            )
+        )
+
     def _require_post_renew_status(
+        self,
         status: Mapping[str, Any],
         recovery: Mapping[str, Any],
         *,
@@ -1864,6 +1938,13 @@ class _ProductionBackend:
         state = plan.get("state")
         plan_id = recovery["plan_id"]
         plan_hash = recovery["plan_hash"]
+        if self._allows_retired_plan_replacement() and state in {"IDLE", "TERMINAL"}:
+            if not self._is_new_plan_admission_boundary(
+                status, require_leader_clear=False
+            ):
+                raise ContinuousRunError("Execution plan admission boundary is invalid")
+            if state == "TERMINAL":
+                return
         if state == "IDLE":
             return
         if state == "ACTIVE" and allow_active:
@@ -1883,13 +1964,12 @@ class _ProductionBackend:
         ):
             raise ContinuousRunError("Execution preview is foreign to this plan")
 
-    @classmethod
     def _require_start_status(
-        cls, status: Mapping[str, Any], recovery: Mapping[str, Any]
+        self, status: Mapping[str, Any], recovery: Mapping[str, Any]
     ) -> None:
         """Require the final fresh pre-start status and authority boundary."""
 
-        cls._require_post_renew_status(status, recovery, allow_active=False)
+        self._require_post_renew_status(status, recovery, allow_active=False)
         authority = status.get("authority", {})
         if (
             authority.get("state") != "ENABLED"
@@ -1948,10 +2028,31 @@ class _ProductionBackend:
                 current_plan.get("plan_id") == plan_id
                 and current_plan.get("plan_hash") == plan_hash
             )
-            if current_state != "IDLE" and not (preview_matches or exact_plan_matches):
+            new_plan_boundary = self._is_new_plan_admission_boundary(
+                status, require_leader_clear=True
+            )
+            retired_boundary = (
+                new_plan_boundary and current_state == "TERMINAL"
+            )
+            if (
+                current_state != "IDLE"
+                and not (preview_matches or exact_plan_matches)
+                and not (
+                    self._allows_retired_plan_replacement() and retired_boundary
+                )
+            ):
                 raise ContinuousRunError(
                     "Execution holds a foreign non-idle TargetPlan"
                 )
+
+            if self._allows_retired_plan_replacement() and current_state in {
+                "IDLE",
+                "TERMINAL",
+            }:
+                if not new_plan_boundary:
+                    raise ContinuousRunError(
+                        "Execution plan admission boundary is invalid"
+                    )
 
             leader = status.get("leader", {})
             if leader.get("held"):
@@ -1984,7 +2085,15 @@ class _ProductionBackend:
                     .isoformat()
                     .replace("+00:00", "Z")
                 )
-                if status.get("plan", {}).get("state") == "IDLE":
+                if (
+                    status.get("plan", {}).get("state") == "IDLE"
+                    or (
+                        self._allows_retired_plan_replacement()
+                        and self._is_retired_execution_boundary(
+                            status, require_leader_clear=False
+                        )
+                    )
+                ):
                     await self.execution.submit(
                         _command(
                             name="preview",

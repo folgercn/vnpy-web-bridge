@@ -152,18 +152,41 @@ async def _check_execution_state(execution: ExecutionClient) -> None:
     reconciliation = status.get("reconciliation")
     plan = status.get("plan")
     authority = status.get("authority")
+    broker = status.get("broker")
+    leader = status.get("leader")
+    intents = status.get("send_intents")
+    safe_boundary = (
+        isinstance(plan, Mapping)
+        and isinstance(authority, Mapping)
+        and (
+            (plan.get("state") == "IDLE" and authority.get("state") == "DISABLED")
+            or (
+                plan.get("state") == "TERMINAL"
+                and authority.get("state") == "REVOKED"
+            )
+        )
+    )
     if (
         status.get("lifecycle") != "READY"
-        or not isinstance(plan, Mapping)
-        or plan.get("state") != "IDLE"
-        or not isinstance(authority, Mapping)
-        or authority.get("state") != "DISABLED"
+        or not safe_boundary
         or not isinstance(reconciliation, Mapping)
         or reconciliation.get("state") != "RECONCILED"
         or reconciliation.get("unknown_outcomes") != 0
-        or status.get("send_intents") != []
+        or not isinstance(broker, Mapping)
+        or broker.get("active_order_count") != 0
+        or not isinstance(leader, Mapping)
+        or leader.get("held") is not False
+        or not isinstance(intents, list)
+        or any(
+            not isinstance(intent, Mapping)
+            or intent.get("state") not in {"RECONCILED", "CANCELLED", "TERMINAL"}
+            for intent in intents
+        )
     ):
-        raise PreflightStop("execution-state", "Execution is not READY/IDLE/DISABLED/RECONCILED")
+        raise PreflightStop(
+            "execution-state",
+            "Execution is not at a safe IDLE/DISABLED or TERMINAL/REVOKED boundary",
+        )
 
 
 def _read_inputs(target_path: Path, bundle_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
