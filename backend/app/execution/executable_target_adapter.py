@@ -45,6 +45,7 @@ from shared.commodity_execution import (
     canonical_before_position_projection,
     canonical_target_position_projection,
     sha256_json,
+    simnow_experimental_adverse_cushion_ticks,
     target_position_projection_hash,
     trusted_keyless_target_plan_v3_plan_id,
 )
@@ -2242,6 +2243,7 @@ def _full_portfolio_formal_quote(
     expected_price_tick: Any,
     now: datetime,
     requirements_only: bool = False,
+    adverse_cushion_ticks: int = 0,
 ) -> tuple[float, dict[str, Any], FormalTickRequest]:
     request = _full_portfolio_quote_request(
         exact_contract=exact_contract,
@@ -2251,6 +2253,14 @@ def _full_portfolio_formal_quote(
     )
     if requirements_only:
         return request.price_tick, {}, request
+    if (
+        isinstance(adverse_cushion_ticks, bool)
+        or not isinstance(adverse_cushion_ticks, int)
+        or adverse_cushion_ticks < 0
+    ):
+        raise ExecutableTargetAdapterError(
+            f"full-portfolio adverse cushion is invalid: {exact_contract}"
+        )
     if not isinstance(values, Mapping):
         raise ExecutableTargetAdapterError(
             "full-portfolio formal quote bindings must be an object"
@@ -2350,8 +2360,11 @@ def _full_portfolio_formal_quote(
         raise ExecutableTargetAdapterError(
             f"full-portfolio formal quote price is invalid: {exact_contract}"
         )
+    protected_steps = 1 + adverse_cushion_ticks
     protected = (
-        reference + frozen_tick if price_side == "ask" else reference - frozen_tick
+        reference + frozen_tick * protected_steps
+        if price_side == "ask"
+        else reference - frozen_tick * protected_steps
     )
     if (
         not protected.is_finite()
@@ -2366,6 +2379,22 @@ def _full_portfolio_formal_quote(
         _mapping(quote, "full-portfolio formal quote binding"),
         request,
     )
+
+
+def _simnow_experimental_adverse_cushion_ticks(
+    *, run_id: str, product: str
+) -> int:
+    """Return the fixed experimental budget, never an operator-supplied value."""
+
+    try:
+        return simnow_experimental_adverse_cushion_ticks(
+            execution_run_id=run_id,
+            symbol=f"{product}0000",
+        )
+    except CommodityExecutionContractError as exc:  # pragma: no cover - frozen caller
+        raise ExecutableTargetAdapterError(
+            "SIMNOW_EXPERIMENTAL product is outside the frozen universe"
+        ) from exc
 
 
 def full_portfolio_phase_plan_id_from_preimage(
@@ -2763,6 +2792,11 @@ def _build_static_core_equal_full_portfolio(
                     expected_price_tick=target["price_tick"],
                     now=current_time,
                     requirements_only=requirements_only,
+                    adverse_cushion_ticks=(
+                        _simnow_experimental_adverse_cushion_ticks(
+                            run_id=normalized_run_id, product=product
+                        )
+                    ),
                 )
             )
             close_formal_quote_bindings.setdefault(
@@ -2947,6 +2981,11 @@ def _build_static_core_equal_full_portfolio(
                     expected_price_tick=intent["frozen_product_price_tick"],
                     now=current_time,
                     requirements_only=requirements_only,
+                    adverse_cushion_ticks=(
+                        _simnow_experimental_adverse_cushion_ticks(
+                            run_id=normalized_run_id, product=product
+                        )
+                    ),
                 )
             )
             open_formal_quote_bindings.setdefault(exact_contract, formal_quote_binding)

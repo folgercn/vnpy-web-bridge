@@ -3,8 +3,8 @@
 The proof is generated only inside Execution from the authenticated, read-only
 formal tick projection.  It is deliberately separate from the immutable
 creation proof carried by TargetPlan v3: creation evidence participates in the
-plan identity, while this fresh proof admits one start or first dispatch at the
-same protected price.
+plan identity, while this fresh proof admits one start or first dispatch only
+within the immutable order limit.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from shared.commodity_execution import (
     V3_FORMAL_QUOTE_MAX_AGE_SECONDS,
     TargetPlan,
     sha256_json,
+    simnow_experimental_price_contract,
 )
 
 from .formal_tick_reader import (
@@ -77,7 +78,7 @@ class ExecutionStartQuoteProofError(ValueError):
 
 
 class ExecutionStartQuotePriceIncompatible(ExecutionStartQuoteProofError):
-    """The current protected price no longer equals the immutable order price."""
+    """The current protected price is outside the immutable order limit."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +144,22 @@ def _protected_price(binding: Mapping[str, Any]) -> Decimal:
     if reference <= 0 or tick <= 0 or reference % tick != 0:
         raise ExecutionStartQuoteProofError("quote price/tick is invalid")
     return reference + tick if binding["price_side"] == "ask" else reference - tick
+
+
+def _protected_price_is_compatible(
+    *, price_contract: str, direction: str, protected: Decimal, limit: Decimal
+) -> bool:
+    """Bounded experimental plans admit only their immutable limit range."""
+
+    if price_contract == "BOUNDED":
+        return protected <= limit if direction == "LONG" else protected >= limit
+    return protected == limit
+
+
+def _incompatible_price_message(price_contract: str) -> str:
+    if price_contract == "BOUNDED":
+        return "fresh protected price is outside immutable order limit"
+    return "fresh protected price differs from immutable order price"
 
 
 def validate_execution_start_quote_proof(
@@ -280,6 +297,11 @@ def validate_execution_start_quote_proof(
         raise ExecutionStartQuoteProofError(
             "execution start quote proof names a foreign order"
         )
+    price_contract = simnow_experimental_price_contract(
+        execution_run_id=plan.raw["execution_run_id"],
+        orders=plan.orders,
+        bindings=plan.raw["creation_quote_proof"]["bindings"],
+    )
     for order_ref in wanted:
         order = by_ref[order_ref]
         binding = bindings[order_ref]
@@ -301,11 +323,14 @@ def validate_execution_start_quote_proof(
             raise ExecutionStartQuoteProofError(
                 "execution start quote binding does not match order"
             )
-        if _decimal(binding["protected_price"], "quote protected_price") != Decimal(
-            str(order.price)
+        if not _protected_price_is_compatible(
+            price_contract=price_contract,
+            direction=order.direction,
+            protected=_decimal(binding["protected_price"], "quote protected_price"),
+            limit=Decimal(str(order.price)),
         ):
             raise ExecutionStartQuotePriceIncompatible(
-                "fresh protected price differs from immutable order price"
+                _incompatible_price_message(price_contract)
             )
     return raw
 
@@ -367,6 +392,11 @@ def build_execution_start_quote_proof(
     if not isinstance(now, datetime) or now.tzinfo is None:
         raise ExecutionStartQuoteProofError("execution quote clock is invalid")
     creation_hash = sha256_json(plan.raw["creation_quote_proof"])
+    price_contract = simnow_experimental_price_contract(
+        execution_run_id=plan.raw["execution_run_id"],
+        orders=plan.orders,
+        bindings=plan.raw["creation_quote_proof"]["bindings"],
+    )
     common = {
         "execution_run_id": plan.raw["execution_run_id"],
         "phase": plan.raw["phase"],
@@ -380,9 +410,14 @@ def build_execution_start_quote_proof(
         tick = observed_by_symbol[f"{order.symbol}.{order.exchange}"]
         raw_tick = tick.as_dict()
         protected = _protected_price(raw_tick)
-        if protected != Decimal(str(order.price)):
+        if not _protected_price_is_compatible(
+            price_contract=price_contract,
+            direction=order.direction,
+            protected=protected,
+            limit=Decimal(str(order.price)),
+        ):
             raise ExecutionStartQuotePriceIncompatible(
-                "fresh protected price differs from immutable order price"
+                _incompatible_price_message(price_contract)
             )
         bindings[order_ref] = {
             "order_ref": order_ref,
