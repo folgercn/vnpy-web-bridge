@@ -160,6 +160,9 @@ def test_experimental_compose_reuses_final_boundaries_without_a_new_stack() -> N
     assert service["environment"]["SIMNOW_TRUSTED_KEYLESS_CUSTODY_ENABLED"] == (
         "${SIMNOW_TRUSTED_KEYLESS_CUSTODY_ENABLED:?required}"
     )
+    assert service["environment"]["SIMNOW_EXPERIMENTAL_PRINCIPAL"] == (
+        "${CONTROL_EXECUTION_PRINCIPAL:?required}"
+    )
     assert service["read_only"] is True
     assert service["cap_drop"] == ["ALL"]
     assert "network_mode" not in service

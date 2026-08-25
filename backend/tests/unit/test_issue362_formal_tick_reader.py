@@ -218,6 +218,7 @@ def test_batch_reader_uses_one_stable_generation_window(
         return projection, watermark, fence
 
     monkeypatch.setattr(reader, "_formal_market_checkpoint", generation_crossing)
+    monkeypatch.setattr(reader, "_wait_for_formal_snapshot", lambda _deadline: False)
     with pytest.raises(reader.FormalTickEvidenceInvalid, match="durable tick state"):
         reader.read_formal_tick_bindings(
             requests,
@@ -226,6 +227,85 @@ def test_batch_reader_uses_one_stable_generation_window(
             clock=lambda: NOW,
         )
     assert calls == 2
+
+
+def test_strict_reader_retries_projection_readiness_until_checkpoint_is_stable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_state(tmp_path)
+    original = reader._formal_market_checkpoint
+    checkpoint_calls = 0
+    waiter_calls = 0
+
+    def transient_projection_then_ready(
+        *, state_dir: Path, projection_dir: Path
+    ) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+        nonlocal checkpoint_calls
+        checkpoint_calls += 1
+        if checkpoint_calls == 1:
+            raise ValueError("formal CTP market projection is not ready")
+        return original(state_dir=state_dir, projection_dir=projection_dir)
+
+    def wait(_deadline: float) -> bool:
+        nonlocal waiter_calls
+        waiter_calls += 1
+        return True
+
+    monkeypatch.setattr(
+        reader, "_formal_market_checkpoint", transient_projection_then_ready
+    )
+    observed = reader._read_observed_formal_ticks(
+        state_dir=tmp_path,
+        projection_dir=tmp_path / "projection",
+        clock=lambda: NOW,
+        requests=(("ru2609.SHFE", "bid"),),
+        strict_snapshot=True,
+        snapshot_waiter=wait,
+    )
+
+    assert observed[0].vt_symbol == "ru2609.SHFE"
+    assert checkpoint_calls == 3
+    assert waiter_calls == 1
+
+
+def test_strict_reader_retries_checkpoint_change_until_before_equals_after(
+    tmp_path: Path,
+) -> None:
+    _write_state(tmp_path)
+    original = reader._formal_market_checkpoint
+    checkpoint_calls = 0
+    waiter_calls = 0
+
+    def changing_then_stable() -> tuple[
+        dict[str, object], dict[str, object], dict[str, object]
+    ]:
+        nonlocal checkpoint_calls
+        checkpoint_calls += 1
+        projection, watermark, fence = original(
+            state_dir=tmp_path, projection_dir=tmp_path / "projection"
+        )
+        if checkpoint_calls == 2:
+            projection = {**projection, "generation": "transient-change"}
+        return projection, watermark, fence
+
+    def wait(_deadline: float) -> bool:
+        nonlocal waiter_calls
+        waiter_calls += 1
+        return True
+
+    observed = reader._read_observed_formal_ticks(
+        state_dir=tmp_path,
+        projection_dir=tmp_path / "projection",
+        clock=lambda: NOW,
+        requests=(("ru2609.SHFE", "bid"),),
+        strict_snapshot=True,
+        checkpoint_reader=changing_then_stable,
+        snapshot_waiter=wait,
+    )
+
+    assert observed[0].vt_symbol == "ru2609.SHFE"
+    assert checkpoint_calls == 4
+    assert waiter_calls == 1
 
 
 @pytest.mark.parametrize(
@@ -264,6 +344,25 @@ def test_reader_rejects_unaligned_price_and_nonexact_contract_set(
             projection_dir=tmp_path / "projection",
             clock=lambda: NOW,
         )
+
+
+def test_binding_accepts_float_tick_rounding_but_rejects_real_off_tick(
+    tmp_path: Path,
+) -> None:
+    _write_state(tmp_path)
+    binding = _read(tmp_path, side="bid")
+
+    rounded = replace(binding, price_tick=0.1, reference_price=590.3000000001)
+    assert rounded.reference_price == 590.3000000001
+
+    with pytest.raises(ValueError, match="aligned"):
+        replace(binding, price_tick=0.1, reference_price=590.300001)
+
+    with pytest.raises(ValueError, match="aligned"):
+        replace(binding, price_tick=0.1, reference_price=1_000_000_000_000.05)
+
+    with pytest.raises(ValueError, match="aligned"):
+        replace(binding, price_tick=100.0, reference_price=10_000_000_000_000_002.0)
 
 
 @pytest.mark.parametrize("delta", [timedelta(seconds=-3), timedelta(seconds=3)])
