@@ -1960,14 +1960,11 @@ class _ProductionBackend:
             return
         if state != "PREVIEWED":
             raise ContinuousRunError("Execution holds a foreign non-preview plan")
+        # Public status intentionally omits durable custody provenance; Execution
+        # revalidates that evidence before it starts or finalizes a plan.
         if (
             plan.get("plan_id") != f"preview-{str(plan_hash)[:16]}"
             or plan.get("plan_hash") != plan_hash
-            or plan.get("preview_mode") != "simnow_preview"
-            or plan.get("preview_receipt_id") != recovery.get("receipt_id")
-            or plan.get("preview_receipt_sha256") != recovery.get("receipt_sha256")
-            or plan.get("preview_artifact_id") != recovery.get("artifact_id")
-            or plan.get("preview_artifact_sha256") != recovery.get("artifact_sha256")
         ):
             raise ContinuousRunError("Execution preview is foreign to this plan")
 
