@@ -11,8 +11,8 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import simnow_execution_path_offline_harness as harness
-from test_simnow_experimental_target import (
+import simnow_execution_path_offline_harness as harness  # noqa: E402
+from test_simnow_experimental_target import (  # noqa: E402
     _bundle,
     _raw,
     _route,

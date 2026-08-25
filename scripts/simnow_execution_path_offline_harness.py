@@ -26,28 +26,28 @@ for candidate in (ROOT, ROOT / "backend", ROOT / "scripts"):
     if str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))
 
-from app.execution.formal_tick_reader import (
+from app.execution.formal_tick_reader import (  # noqa: E402
     FormalTickBinding,
     FormalTickRequest,
 )
-from app.execution.start_quote_proof import (
+from app.execution.start_quote_proof import (  # noqa: E402
     ExecutionStartQuotePriceIncompatible,
     build_execution_start_quote_proof,
 )
-from simnow_experimental_materialize_target import (
+from simnow_experimental_materialize_target import (  # noqa: E402
     ExperimentalTargetError,
     materialize_target,
     read_json_stable,
     validate_planner_bundle,
     validate_target,
 )
-from simnow_experimental_run_once import (
+from simnow_experimental_run_once import (  # noqa: E402
     ExperimentalRunError,
     _planner_inputs,
     preview_once,
 )
 
-from shared.commodity_execution import TargetPlan, sha256_json
+from shared.commodity_execution import TargetPlan, sha256_json  # noqa: E402
 
 OFFLINE_TEST_MARKER = "SIMNOW_EXPERIMENTAL_EXECUTION_PATH_OFFLINE_TEST"
 _DISCLAIMERS = (
