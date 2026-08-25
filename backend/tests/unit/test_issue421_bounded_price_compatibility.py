@@ -9,12 +9,13 @@ from app.execution.start_quote_proof import (
     build_execution_start_quote_proof,
 )
 from shared.commodity_execution import (
+    CommodityExecutionContractError,
     TargetPlan,
     simnow_experimental_adverse_cushion_ticks,
 )
 from test_issue362_execution_two_quote_proofs import QUOTE_TIME, _Reader
 from test_issue362_full_portfolio_planner import _decision
-from test_issue362_target_plan_v3 import _v3_plan
+from test_issue362_target_plan_v3 import _v3_fields, _v3_plan
 
 
 EXPERIMENTAL_RUN_ID = "simnow-experimental-" + "a" * 48
@@ -69,6 +70,57 @@ def _experimental_plan() -> TargetPlan:
         ],
     )
     return TargetPlan.from_mapping(plan)
+
+
+def _experimental_short_plan() -> TargetPlan:
+    fields = _v3_fields()
+    fields["execution_run_id"] = EXPERIMENTAL_RUN_ID
+    binding = fields["creation_quote_proof"]["bindings"]["SHFE.ag2609"]
+    binding["price_side"] = "bid"
+    fields["orders"] = [
+        {
+            "symbol": "ag2609",
+            "exchange": "SHFE",
+            "direction": "SHORT",
+            "type": "LIMIT",
+            "volume": 1,
+            "price": 4989.0,
+            "offset": "OPEN",
+            "reference": "issue421-bounded-short-0001",
+            "gateway_name": "CTP",
+        }
+    ]
+    return TargetPlan.from_mapping(_v3_plan(**fields))
+
+
+def _experimental_au_budget_plan(order_count: int) -> dict:
+    fields = _v3_fields()
+    fields["execution_run_id"] = EXPERIMENTAL_RUN_ID
+    binding = fields["creation_quote_proof"]["bindings"].pop("SHFE.ag2609")
+    binding.update(
+        {
+            "vt_symbol": "au2609.SHFE",
+            "price_side": "ask",
+            "reference_price": 5000.0,
+            "price_tick": 0.02,
+        }
+    )
+    fields["creation_quote_proof"]["bindings"] = {"SHFE.au2609": binding}
+    fields["orders"] = [
+        {
+            "symbol": "au2609",
+            "exchange": "SHFE",
+            "direction": "LONG",
+            "type": "LIMIT",
+            "volume": 1,
+            "price": 5000.32,
+            "offset": "OPEN",
+            "reference": f"issue421-au-budget-{index:04d}",
+            "gateway_name": "CTP",
+        }
+        for index in range(1, order_count + 1)
+    ]
+    return _v3_plan(**fields)
 
 
 def test_experimental_plan_uses_frozen_product_cushions_within_budget() -> None:
@@ -155,6 +207,67 @@ def test_experimental_start_rejects_price_beyond_immutable_limit() -> None:
             reader=_Reader(reference_price=5011.0),
             clock=lambda: QUOTE_TIME,
         )
+
+
+def test_experimental_short_start_accepts_favorable_or_within_limit_price() -> None:
+    for reference_price, protected_price in ((4990.0, 4989.0), (4991.0, 4990.0)):
+        proof = build_execution_start_quote_proof(
+            _experimental_short_plan(),
+            reader=_Reader(reference_price=reference_price),
+            clock=lambda: QUOTE_TIME,
+        )
+        assert (
+            proof["bindings"]["issue421-bounded-short-0001"]["protected_price"]
+            == protected_price
+        )
+
+
+def test_experimental_short_start_rejects_price_beyond_immutable_limit() -> None:
+    with pytest.raises(
+        ExecutionStartQuotePriceIncompatible,
+        match="outside immutable order limit",
+    ):
+        build_execution_start_quote_proof(
+            _experimental_short_plan(),
+            reader=_Reader(reference_price=4988.0),
+            clock=lambda: QUOTE_TIME,
+        )
+
+
+def test_experimental_creation_proof_rejects_arbitrarily_wider_cushion() -> None:
+    fields = _v3_fields()
+    fields["execution_run_id"] = EXPERIMENTAL_RUN_ID
+    fields["orders"][0]["price"] = 5012.0
+    with pytest.raises(
+        CommodityExecutionContractError,
+        match="creation quote does not bind order price",
+    ):
+        _v3_plan(**fields)
+
+
+def test_experimental_creation_proof_rejects_non_frozen_price_tick() -> None:
+    fields = _v3_fields()
+    fields["execution_run_id"] = EXPERIMENTAL_RUN_ID
+    fields["creation_quote_proof"]["bindings"]["SHFE.ag2609"]["price_tick"] = 0.5
+    fields["orders"][0]["price"] = 5005.5
+    with pytest.raises(
+        CommodityExecutionContractError,
+        match="price tick mismatches frozen product spec",
+    ):
+        _v3_plan(**fields)
+
+
+def test_experimental_adverse_limit_budget_accepts_exact_cny_30000() -> None:
+    plan = _experimental_au_budget_plan(100)
+    assert len(plan["orders"]) == 100
+
+
+def test_experimental_adverse_limit_budget_rejects_over_cny_30000() -> None:
+    with pytest.raises(
+        CommodityExecutionContractError,
+        match="adverse limit budget exceeds CNY 30000",
+    ):
+        _experimental_au_budget_plan(101)
 
 
 def test_non_experimental_start_keeps_exact_equality() -> None:
