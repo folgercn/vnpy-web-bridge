@@ -9,6 +9,8 @@ from app.execution.start_quote_proof import (
     ExecutionStartQuotePriceIncompatible,
     ExecutionStartQuoteProofError,
     build_execution_start_quote_proof,
+    quote_proof_for_order,
+    require_quote_proof_order_request,
     validate_execution_start_quote_proof,
 )
 from test_issue362_execution_two_quote_proofs import QUOTE_TIME, _Reader
@@ -465,3 +467,89 @@ def test_creation_and_start_quote_proofs_reject_real_off_grid_prices(
     )
     with pytest.raises(ExecutionStartQuoteProofError, match="price/tick is invalid"):
         validate_execution_start_quote_proof(proof, plan=plan)
+
+
+@pytest.mark.parametrize("reference_price", [5009.0, 5010.0])
+def test_bounded_order_slice_binds_immutable_limit_before_favorable_start(
+    reference_price: float,
+) -> None:
+    plan = _experimental_plan()
+    order = plan.orders[0]
+    proof = build_execution_start_quote_proof(
+        plan,
+        reader=_Reader(reference_price=reference_price),
+        clock=lambda: QUOTE_TIME,
+    )
+    sliced = quote_proof_for_order(proof, plan=plan, order_ref=order.reference)
+
+    binding = sliced["bindings"][order.reference]
+    assert binding["protected_price"] in {5010.0, 5011.0}
+    assert binding["immutable_order_price"] == order.price == 5011.0
+    assert require_quote_proof_order_request(sliced, order.as_dict()) == sliced
+
+
+def test_bounded_order_slice_rejects_outside_limit_before_send() -> None:
+    with pytest.raises(
+        ExecutionStartQuotePriceIncompatible,
+        match="outside immutable order limit",
+    ):
+        build_execution_start_quote_proof(
+            _experimental_plan(),
+            reader=_Reader(reference_price=5011.0),
+            clock=lambda: QUOTE_TIME,
+        )
+
+
+@pytest.mark.parametrize("reference_price", [4990.0, 4991.0])
+def test_bounded_short_order_slice_binds_immutable_limit_before_send(
+    reference_price: float,
+) -> None:
+    plan = _experimental_short_plan()
+    order = plan.orders[0]
+    proof = build_execution_start_quote_proof(
+        plan,
+        reader=_Reader(reference_price=reference_price),
+        clock=lambda: QUOTE_TIME,
+    )
+    sliced = quote_proof_for_order(proof, plan=plan, order_ref=order.reference)
+
+    binding = sliced["bindings"][order.reference]
+    assert binding["protected_price"] in {4989.0, 4990.0}
+    assert binding["immutable_order_price"] == order.price == 4989.0
+    assert require_quote_proof_order_request(sliced, order.as_dict()) == sliced
+
+
+def test_bounded_order_slice_rejects_request_price_tamper() -> None:
+    plan = _experimental_plan()
+    order = plan.orders[0]
+    proof = build_execution_start_quote_proof(
+        plan,
+        reader=_Reader(reference_price=5009.0),
+        clock=lambda: QUOTE_TIME,
+    )
+    sliced = quote_proof_for_order(proof, plan=plan, order_ref=order.reference)
+    tampered = order.as_dict()
+    tampered["price"] = 5010.0
+
+    with pytest.raises(ExecutionStartQuoteProofError, match="does not bind order"):
+        require_quote_proof_order_request(sliced, tampered)
+
+
+def test_legacy_order_slice_rejects_favorable_price_at_send_boundary() -> None:
+    plan = _legacy_experimental_plan()
+    order = plan.orders[0]
+    proof = build_execution_start_quote_proof(
+        plan,
+        reader=_Reader(reference_price=5000.0),
+        clock=lambda: QUOTE_TIME,
+    )
+    sliced = quote_proof_for_order(proof, plan=plan, order_ref=order.reference)
+    binding = sliced["bindings"][order.reference]
+    binding["reference_price"] = 4999.0
+    binding["protected_price"] = 5000.0
+    sliced["proof_sha256"] = sha256_json(
+        {key: item for key, item in sliced.items() if key != "proof_sha256"}
+    )
+
+    with pytest.raises(ExecutionStartQuoteProofError, match="does not bind order"):
+        require_quote_proof_order_request(sliced, order.as_dict())
