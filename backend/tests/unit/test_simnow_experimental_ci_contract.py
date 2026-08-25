@@ -13,6 +13,7 @@ def test_registered_experimental_glue_isolated_from_heavy_ci() -> None:
         "scripts/simnow_experimental_monthly_once.py",
         "scripts/simnow_experimental_timely_daily_route.py",
         "scripts/simnow_experimental_offline_harness.py",
+        "scripts/simnow_execution_path_offline_harness.py",
         "scripts/simnow_experimental_preflight.py",
         "scripts/simnow_experimental_run_once.py",
         "backend/tests/unit/test_simnow_experimental_ci_contract.py",
@@ -31,3 +32,11 @@ def test_unregistered_experimental_script_uses_normal_ci() -> None:
     assert result["backend_changed"] is True
     assert result["image_changed"] is True
     assert result["simnow_experimental_changed"] is False
+
+
+def test_execution_path_harness_is_explicit_fastlane_glue() -> None:
+    result = classify(["scripts/simnow_execution_path_offline_harness.py"])
+    assert result["simnow_experimental_changed"] is True
+    assert not any(
+        value for key, value in result.items() if key != "simnow_experimental_changed"
+    )

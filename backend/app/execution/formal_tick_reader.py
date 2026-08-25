@@ -139,7 +139,16 @@ class FormalTickBinding:
             quotient = Decimal(str(price)) / Decimal(str(tick))
         except (InvalidOperation, ZeroDivisionError) as exc:
             raise ValueError("formal CTP tick is not aligned to price tick") from exc
-        if quotient != quotient.to_integral_value():
+        integral = quotient.to_integral_value()
+        aligned_price = integral * Decimal(str(tick))
+        price_error = abs(Decimal(str(price)) - aligned_price)
+        price_float = float(price)
+        tick_float = float(tick)
+        tolerance = min(
+            abs(tick_float) * 1e-6,
+            max(8.0 * math.ulp(price_float), abs(tick_float) * 1e-9),
+        )
+        if float(price_error) > tolerance:
             raise ValueError("formal CTP tick is not aligned to price tick")
 
     def as_legacy_tuple(self) -> LegacyTickBinding:
@@ -894,7 +903,10 @@ def _read_observed_formal_ticks(
             try:
                 before_projection, before_watermark, before_fence = checkpoint_reader()
             except ValueError as exc:
-                if str(exc) != "formal CTP watermark/projection is invalid":
+                if str(exc) not in {
+                    "formal CTP market projection is not ready",
+                    "formal CTP watermark/projection is invalid",
+                }:
                     raise
                 if not snapshot_waiter(deadline):
                     raise
@@ -992,7 +1004,10 @@ def _read_observed_formal_ticks(
             try:
                 after_projection, after_watermark, after_fence = checkpoint_reader()
             except ValueError as exc:
-                if str(exc) != "formal CTP watermark/projection is invalid":
+                if str(exc) not in {
+                    "formal CTP market projection is not ready",
+                    "formal CTP watermark/projection is invalid",
+                }:
                     raise
                 if not snapshot_waiter(deadline):
                     raise
@@ -1004,6 +1019,12 @@ def _read_observed_formal_ticks(
             )
             if strict_snapshot and snapshot_stable:
                 break
+            if strict_snapshot:
+                if not snapshot_waiter(deadline):
+                    raise ValueError(
+                        "formal CTP durable tick state changed during validation"
+                    )
+                continue
             if not strict_snapshot and checkpoint_progress(
                 before_watermark, before_fence, after_watermark, after_fence
             ):

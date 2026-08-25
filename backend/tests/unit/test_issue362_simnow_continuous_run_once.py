@@ -1829,8 +1829,18 @@ def test_start_response_loss_queries_exact_receipt_and_never_resends(tmp_path: P
             "state": "PREVIEWED",
             "plan_id": f"preview-{plan_hash[:16]}",
             "plan_hash": plan_hash,
+            "preview_mode": "simnow_preview",
+            "preview_receipt_id": "receipt-0002",
+            "preview_receipt_sha256": "e" * 64,
+            "preview_artifact_id": plan_id,
+            "preview_artifact_sha256": "d" * 64,
         },
-        "authority": {"state": "ENABLED"},
+        "authority": {
+            "state": "ENABLED",
+            "artifact_id": plan_id,
+            "artifact_hash": plan_hash,
+            "expires_at": "2026-08-20T13:02:00Z",
+        },
         "leader": {"held": False},
         "reconciliation": {"state": "RECONCILED", "unknown_outcomes": 0},
         "broker": {"active_order_count": 0},
@@ -1850,7 +1860,7 @@ def test_start_response_loss_queries_exact_receipt_and_never_resends(tmp_path: P
     class Execution:
         def __init__(self):
             self.calls: list[str] = []
-            self.statuses = [previewed, terminal]
+            self.statuses = [previewed, previewed, previewed, terminal]
             self.token = SimpleNamespace(epoch=5, fencing_token=8)
             self.receipt_value = None
 
@@ -1903,9 +1913,11 @@ def test_start_response_loss_queries_exact_receipt_and_never_resends(tmp_path: P
                 "custody_idempotency_key": "b" * 64,
                 "start_quote_proof_state": "READY",
                 "expected_after_position_hash": "c" * 64,
-                "expires_at": "2026-08-20T13:02:00Z",
+                "receipt_id": "receipt-0002",
+                "receipt_sha256": "e" * 64,
+                "artifact_id": plan_id,
                 "artifact_sha256": "d" * 64,
-                "receipt_id": "continuous-receipt-test-0002",
+                "expires_at": "2026-08-20T13:02:00Z",
             }
         )
     )
@@ -1914,6 +1926,78 @@ def test_start_response_loss_queries_exact_receipt_and_never_resends(tmp_path: P
     assert execution.calls.count("start") == 1
     assert execution.calls.count("receipt") == 1
     assert execution.calls[-1] == "release"
+
+
+@pytest.mark.parametrize("drift", ["unknown", "foreign"])
+def test_post_renew_drift_never_submits_start(tmp_path: Path, drift: str) -> None:
+    backend = _production_backend_without_clients(tmp_path, enabled=True)
+    plan_id = "continuous-open-plan-test-0003"
+    plan_hash = "a" * 64
+    previewed = {
+        "state_version": 7,
+        "lifecycle": "READY",
+        "plan": {
+            "state": "IDLE",
+        },
+        "authority": {"state": "DISABLED"},
+        "reconciliation": {"state": "RECONCILED", "unknown_outcomes": 0},
+        "send_intents": [],
+    }
+    drifted = json.loads(json.dumps(previewed))
+    if drift == "unknown":
+        drifted["reconciliation"]["unknown_outcomes"] = 1
+    else:
+        drifted["plan"] = {
+            "state": "ACTIVE",
+            "plan_id": "foreign-plan",
+            "plan_hash": "b" * 64,
+        }
+
+    class Execution:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+            self.statuses = [previewed, drifted]
+            self.token = SimpleNamespace(epoch=5, fencing_token=8)
+
+        async def status(self):
+            self.calls.append("status")
+            return SimpleNamespace(as_dict=lambda: self.statuses.pop(0))
+
+        async def acquire_leader(self, owner_id):
+            self.calls.append(f"acquire:{owner_id}")
+            return self.token
+
+        async def renew_leader(self, token):
+            self.calls.append("renew")
+            return token
+
+        async def submit(self, command):
+            self.calls.append(command["name"])
+
+        async def release_leader(self, token):
+            self.calls.append("release")
+
+    execution = Execution()
+    backend.execution = execution
+    with pytest.raises(runner.ContinuousRunError):
+        asyncio.run(
+            backend._drive_installed_plan(
+                {
+                    "plan_id": plan_id,
+                    "plan_hash": plan_hash,
+                    "phase": "OPEN",
+                    "custody_idempotency_key": "b" * 64,
+                    "start_quote_proof_state": "READY",
+                    "expected_after_position_hash": "c" * 64,
+                    "expires_at": "2026-08-20T13:02:00Z",
+                    "artifact_sha256": "d" * 64,
+                    "receipt_id": "receipt-0002",
+                    "receipt_sha256": "e" * 64,
+                    "artifact_id": plan_id,
+                }
+            )
+        )
+    assert "start" not in execution.calls
 
 
 @pytest.mark.parametrize(
@@ -1987,7 +2071,7 @@ def test_active_plan_recovery_uses_exact_resume_api_and_releases_leader(
     class Execution:
         def __init__(self):
             self.calls: list[str] = []
-            self.statuses = [active, terminal]
+            self.statuses = [active, active, terminal]
             self.token = SimpleNamespace(epoch=3, fencing_token=4)
 
         async def status(self):
@@ -2037,6 +2121,7 @@ def test_active_plan_recovery_uses_exact_resume_api_and_releases_leader(
         "status",
         f"acquire:{_config_value(tmp_path)['leader_owner_id']}",
         "renew",
+        "status",
         "snapshot",
         "resume",
         "status",

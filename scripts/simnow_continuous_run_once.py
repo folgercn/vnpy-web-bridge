@@ -1841,6 +1841,64 @@ class _ProductionBackend:
                     "Execution leader release outcome remains unknown"
                 ) from exc
 
+    @staticmethod
+    def _require_post_renew_status(
+        status: Mapping[str, Any],
+        recovery: Mapping[str, Any],
+        *,
+        allow_active: bool,
+    ) -> None:
+        """Require the fresh post-renew status to remain on this plan boundary."""
+
+        if status.get("lifecycle") != "READY":
+            raise ContinuousRunError("Execution is not READY after leader renew")
+        reconciliation = status.get("reconciliation", {})
+        if (
+            reconciliation.get("state") != "RECONCILED"
+            or reconciliation.get("unknown_outcomes") != 0
+        ):
+            raise ContinuousRunError(
+                "Execution is not reconciled after leader renew"
+            )
+        plan = status.get("plan", {})
+        state = plan.get("state")
+        plan_id = recovery["plan_id"]
+        plan_hash = recovery["plan_hash"]
+        if state == "IDLE":
+            return
+        if state == "ACTIVE" and allow_active:
+            if plan.get("plan_id") != plan_id or plan.get("plan_hash") != plan_hash:
+                raise ContinuousRunError("Execution holds a foreign active plan")
+            return
+        if state != "PREVIEWED":
+            raise ContinuousRunError("Execution holds a foreign non-preview plan")
+        if (
+            plan.get("plan_id") != f"preview-{str(plan_hash)[:16]}"
+            or plan.get("plan_hash") != plan_hash
+            or plan.get("preview_mode") != "simnow_preview"
+            or plan.get("preview_receipt_id") != recovery.get("receipt_id")
+            or plan.get("preview_receipt_sha256") != recovery.get("receipt_sha256")
+            or plan.get("preview_artifact_id") != recovery.get("artifact_id")
+            or plan.get("preview_artifact_sha256") != recovery.get("artifact_sha256")
+        ):
+            raise ContinuousRunError("Execution preview is foreign to this plan")
+
+    @classmethod
+    def _require_start_status(
+        cls, status: Mapping[str, Any], recovery: Mapping[str, Any]
+    ) -> None:
+        """Require the final fresh pre-start status and authority boundary."""
+
+        cls._require_post_renew_status(status, recovery, allow_active=False)
+        authority = status.get("authority", {})
+        if (
+            authority.get("state") != "ENABLED"
+            or authority.get("artifact_id") != recovery.get("plan_id")
+            or authority.get("artifact_hash") != recovery.get("plan_hash")
+            or authority.get("expires_at") != recovery.get("expires_at")
+        ):
+            raise ContinuousRunError("Execution authority is foreign to this plan")
+
     async def _drive_installed_plan(
         self, recovery: Mapping[str, Any]
     ) -> dict[str, Any]:
@@ -1904,11 +1962,13 @@ class _ProductionBackend:
                 self.config.raw["leader_owner_id"]
             )
             token = await self.execution.renew_leader(token)
+            status = (await self.execution.status()).as_dict()
 
             if recovery.get("start_quote_proof_state") == "STARTED_MATCHED" or (
                 status.get("plan", {}).get("state") == "ACTIVE"
                 and status.get("plan", {}).get("plan_id") == plan_id
             ):
+                self._require_post_renew_status(status, recovery, allow_active=True)
                 snapshot = await self.execution.reconciliation_snapshot()
                 await self.execution.resume_active_plan(
                     plan_id=plan_id,
@@ -1917,6 +1977,7 @@ class _ProductionBackend:
                     reconciliation_snapshot=snapshot,
                 )
             else:
+                self._require_post_renew_status(status, recovery, allow_active=False)
                 now = (
                     datetime.now(timezone.utc)
                     .replace(microsecond=0)
@@ -1971,6 +2032,8 @@ class _ProductionBackend:
                     )
                     status = (await self.execution.status()).as_dict()
                 token = await self.execution.renew_leader(token)
+                status = (await self.execution.status()).as_dict()
+                self._require_start_status(status, recovery)
                 start = _command(
                     name="start",
                     suffix=f"continuous-start-{phase_key[:32]}",
