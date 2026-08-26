@@ -1440,12 +1440,29 @@ class ExecutionOrchestrator:
             raise GatewayUnavailable(f"gateway snapshot failed: {exc}") from exc
         state = self.repository.snapshot()
         if snapshot.snapshot_id != envelope.payload["snapshot_id"]:
-            self._mark_reconcile_halted(
-                reason="snapshot id does not match reconcile command"
+            requested_id = envelope.payload["snapshot_id"]
+            binding = envelope.payload.get("snapshot_fact_binding")
+            peek_equivalent = (
+                requested_id.startswith("snapshot-peek-")
+                and snapshot.snapshot_id.startswith("snapshot-peek-")
+                and isinstance(binding, Mapping)
+                and binding["generation"] == snapshot.generation
+                and binding["position_snapshot_hash"]
+                == snapshot.position_snapshot_hash
+                and binding["active_order_count"] == snapshot.active_order_count
+                and binding["active_orders_sha256"] == sha256_json(snapshot.orders)
+                and binding["state_version"] == envelope.expected.state_version
+                and binding["state_version"] == state["state_version"]
+                and binding["durable_broker_generation"]
+                == state["broker"]["generation"]
             )
-            raise SnapshotRejected(
-                "broker snapshot id does not match reconcile command"
-            )
+            if not peek_equivalent:
+                self._mark_reconcile_halted(
+                    reason="snapshot id does not match reconcile command"
+                )
+                raise SnapshotRejected(
+                    "broker snapshot id does not match reconcile command"
+                )
         try:
             self._validate_reconcile_snapshot(
                 state,

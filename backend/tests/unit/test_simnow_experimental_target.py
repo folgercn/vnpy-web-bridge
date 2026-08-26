@@ -465,7 +465,19 @@ def test_execute_once_recovers_existing_identity_before_new_target_planning(
 
         async def reconciliation_snapshot(self):
             events.append("snapshot")
-            return SimpleNamespace()
+            return SimpleNamespace(
+                as_dict=lambda: {
+                    "snapshot_id": f"snapshot-peek-{'1' * 64}",
+                    "generation": 17,
+                    "position_snapshot_hash": "c" * 64,
+                    "active_order_count": 0,
+                    "active_orders_sha256": "0" * 64,
+                    "state_binding": {
+                        "state_version": 9,
+                        "durable_broker_generation": 17,
+                    },
+                }
+            )
 
         async def resume_active_plan(self, **kwargs):
             assert kwargs["plan_id"] == old_plan_id
@@ -577,7 +589,19 @@ def test_execute_once_allows_new_target_only_after_old_identity_is_terminal(
 
         async def reconciliation_snapshot(self):
             events.append("snapshot")
-            return SimpleNamespace()
+            return SimpleNamespace(
+                as_dict=lambda: {
+                    "snapshot_id": f"snapshot-peek-{'1' * 64}",
+                    "generation": 17,
+                    "position_snapshot_hash": "c" * 64,
+                    "active_order_count": 0,
+                    "active_orders_sha256": "0" * 64,
+                    "state_binding": {
+                        "state_version": 9,
+                        "durable_broker_generation": 17,
+                    },
+                }
+            )
 
         async def resume_active_plan(self, **kwargs):
             assert kwargs["plan_id"] == old_plan_id
@@ -597,6 +621,14 @@ def test_execute_once_allows_new_target_only_after_old_identity_is_terminal(
         async def submit(self, command):
             assert command["command"] == "reconcile"
             assert command["expected"]["state_version"] == 9
+            assert command["payload"]["snapshot_fact_binding"] == {
+                "generation": 17,
+                "position_snapshot_hash": "c" * 64,
+                "active_order_count": 0,
+                "active_orders_sha256": "0" * 64,
+                "state_version": 9,
+                "durable_broker_generation": 17,
+            }
             events.append("final-reconcile-old-identity")
             return {"accepted": True}
 
@@ -631,7 +663,10 @@ def test_execute_once_allows_new_target_only_after_old_identity_is_terminal(
             events.append("install-new-target")
             return {"phase": handoff.target_plan["phase"], "phase_key": phase_key}
 
-        async def _drive_installed_plan(self, recovery):
+        async def _drive_installed_plan(
+            self, recovery, *, expected_intent_count=None
+        ):
+            assert expected_intent_count is not None
             events.append("drive-new-target")
             return {"state": "COMPLETED", "phase": recovery["phase"]}
 
@@ -880,7 +915,10 @@ def test_execute_once_drives_close_then_fresh_open_without_deferred_reuse(
             events.append(f"install-{handoff.target_plan['phase']}")
             return {"phase": handoff.target_plan["phase"], "phase_key": phase_key}
 
-        async def _drive_installed_plan(self, recovery):
+        async def _drive_installed_plan(
+            self, recovery, *, expected_intent_count=None
+        ):
+            assert expected_intent_count is not None
             events.append(f"drive-{recovery['phase']}")
             return {"state": "COMPLETED", "phase": recovery["phase"]}
 

@@ -1968,6 +1968,42 @@ class _ProductionBackend:
         ):
             raise ContinuousRunError("Execution preview is foreign to this plan")
 
+    def _require_active_reconcile_status(
+        self,
+        status: Mapping[str, Any],
+        recovery: Mapping[str, Any],
+        token: Any,
+    ) -> None:
+        """Permit only the exact halted ACTIVE identity to reconcile query-only."""
+
+        plan = status.get("plan", {})
+        if (
+            plan.get("state") != "ACTIVE"
+            or plan.get("plan_id") != recovery["plan_id"]
+            or plan.get("plan_hash") != recovery["plan_hash"]
+        ):
+            raise ContinuousRunError("Execution holds a foreign active plan")
+        leader = status.get("leader", {})
+        if (
+            leader.get("held") is not True
+            or leader.get("epoch") != token.epoch
+            or leader.get("fencing_token") != token.fencing_token
+        ):
+            raise ContinuousRunError("Execution leader changed after renew")
+        reconciliation = status.get("reconciliation", {})
+        if (
+            status.get("lifecycle")
+            not in {"HALTED_UNKNOWN_OUTCOME", "HALTED_RECONCILE_REQUIRED"}
+            or reconciliation.get("state") not in {"UNKNOWN", "REQUIRED"}
+            or isinstance(reconciliation.get("unknown_outcomes"), bool)
+            or not isinstance(reconciliation.get("unknown_outcomes"), int)
+            or reconciliation.get("unknown_outcomes") < 0
+            or status.get("broker", {}).get("active_order_count") != 0
+        ):
+            raise ContinuousRunError(
+                "Execution halted ACTIVE reconcile boundary is invalid"
+            )
+
     def _require_start_status(
         self, status: Mapping[str, Any], recovery: Mapping[str, Any]
     ) -> None:
@@ -2076,7 +2112,32 @@ class _ProductionBackend:
                 status.get("plan", {}).get("state") == "ACTIVE"
                 and status.get("plan", {}).get("plan_id") == plan_id
             ):
-                self._require_post_renew_status(status, recovery, allow_active=True)
+                if status.get("reconciliation", {}).get("state") != "RECONCILED":
+                    self._require_active_reconcile_status(status, recovery, token)
+                    await _submit_reconcile_with_ready_snapshot(
+                        self.execution,
+                        suffix=f"continuous-recovery-{phase_key[:32]}",
+                        version=status["state_version"],
+                        actor=actor,
+                        now=(
+                            datetime.now(timezone.utc)
+                            .replace(microsecond=0)
+                            .isoformat()
+                            .replace("+00:00", "Z")
+                        ),
+                        reconciliation_run_id=(
+                            f"continuous-recovery-{phase_key[:40]}"
+                        ),
+                        reason="query-only ACTIVE plan recovery reconciliation",
+                    )
+                    status = (await self.execution.status()).as_dict()
+                    self._require_post_renew_status(
+                        status, recovery, allow_active=True
+                    )
+                else:
+                    self._require_post_renew_status(
+                        status, recovery, allow_active=True
+                    )
                 snapshot = await self.execution.reconciliation_snapshot()
                 await self.execution.resume_active_plan(
                     plan_id=plan_id,

@@ -174,17 +174,20 @@ async def _submit_reconcile_with_ready_snapshot(
     reconciliation_run_id: str,
     reason: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Submit reconciliation against the immediately probed Gateway snapshot."""
+    """Submit reconciliation bound to one fresh full-facts snapshot."""
 
     try:
-        readiness = await execution.ready()
+        projection = await execution.reconciliation_snapshot()
     except ExecutionClientError as exc:
-        raise ValueError("Execution readiness is unavailable; refusing reconciliation") from exc
-    if not isinstance(readiness, Mapping):
-        raise ExecutionClientError("Execution readiness response is invalid")
-    gateway_snapshot_id = readiness.get("gateway_snapshot_id")
-    if not isinstance(gateway_snapshot_id, str) or not gateway_snapshot_id:
-        raise ExecutionClientError("Execution readiness gateway snapshot id is invalid")
+        raise ValueError(
+            "Execution reconciliation snapshot is unavailable; refusing reconciliation"
+        ) from exc
+    snapshot = projection.as_dict()
+    state_binding = snapshot["state_binding"]
+    if state_binding["state_version"] != version:
+        raise ExecutionClientError(
+            "Execution durable state changed after reconciliation snapshot"
+        )
     command = _command(
         name="reconcile",
         suffix=suffix,
@@ -193,7 +196,17 @@ async def _submit_reconcile_with_ready_snapshot(
         now=now,
         payload={
             "reconciliation_run_id": reconciliation_run_id,
-            "snapshot_id": gateway_snapshot_id,
+            "snapshot_id": snapshot["snapshot_id"],
+            "snapshot_fact_binding": {
+                "generation": snapshot["generation"],
+                "position_snapshot_hash": snapshot["position_snapshot_hash"],
+                "active_order_count": snapshot["active_order_count"],
+                "active_orders_sha256": snapshot["active_orders_sha256"],
+                "state_version": state_binding["state_version"],
+                "durable_broker_generation": state_binding[
+                    "durable_broker_generation"
+                ],
+            },
             "reason": reason,
         },
     )
