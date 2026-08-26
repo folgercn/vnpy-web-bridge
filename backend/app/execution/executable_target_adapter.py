@@ -1295,13 +1295,29 @@ def peek_current_facts_to_snapshot(
     if not account:
         raise ExecutableTargetAdapterError("peek account facts are empty")
     gateway = facts["gateway"]
-    if not isinstance(gateway, Mapping) or set(gateway) != {
+    gateway_fields = {
         "gateway_name",
         "account_scope",
         "environment",
         "connected",
-    }:
+    }
+    if isinstance(gateway, Mapping) and "trading_day" in gateway:
+        gateway_fields.add("trading_day")
+    if isinstance(gateway, Mapping) and "limit_time_condition" in gateway:
+        gateway_fields.add("limit_time_condition")
+    if not isinstance(gateway, Mapping) or set(gateway) != gateway_fields:
         raise ExecutableTargetAdapterError("peek gateway facts are invalid")
+    trading_day = gateway.get("trading_day")
+    if trading_day is not None and (
+        not isinstance(trading_day, str)
+        or re.fullmatch(r"[0-9]{8}", trading_day) is None
+    ):
+        raise ExecutableTargetAdapterError("peek gateway trading day is invalid")
+    limit_time_condition = gateway.get("limit_time_condition")
+    if limit_time_condition is not None and limit_time_condition != "GFD":
+        raise ExecutableTargetAdapterError(
+            "peek gateway LIMIT time condition is invalid"
+        )
     gateway_name = _require_text(gateway.get("gateway_name"), "peek gateway name")
     if (
         gateway_name != "CTP"

@@ -27,6 +27,31 @@ _FOUNDATION_ARCHIVE_PATH = Path(__file__).resolve().with_name(_FOUNDATION_ARCHIV
 _VERIFIED_FOUNDATION_ARCHIVE_RAW: bytes | None = None
 
 
+def _runtime_limit_time_condition(td_api: Any) -> str:
+    """Read the exact LIMIT TIF mapping from the loaded CTP gateway module."""
+
+    module = sys.modules.get(type(td_api).__module__)
+    mapping = getattr(module, "ORDERTYPE_VT2CTP", None)
+    order_type = getattr(module, "OrderType", None)
+    try:
+        raw = mapping[order_type.LIMIT]
+    except (AttributeError, KeyError, TypeError) as exc:
+        raise WindowsRpcDurableFenceError(
+            "CTP LIMIT time condition mapping is unavailable",
+            code="WINDOWS_EXECUTION_FACT_UNAVAILABLE",
+        ) from exc
+    if (
+        not isinstance(raw, (tuple, list))
+        or len(raw) != 3
+        or str(raw[1]) != "3"  # THOST_FTDC_TC_GFD
+    ):
+        raise WindowsRpcDurableFenceError(
+            "CTP LIMIT time condition is not GFD",
+            code="WINDOWS_EXECUTION_FACT_INVALID",
+        )
+    return "GFD"
+
+
 def _required_unique_argument(arguments: list[str], name: str) -> str:
     positions = [index for index, item in enumerate(arguments) if item == name]
     if len(positions) != 1 or positions[0] + 1 >= len(arguments):
@@ -638,6 +663,32 @@ class _WindowsExecutionFactsV1:
                 code="WINDOWS_POSITION_FACTS_NOT_READY",
             )
 
+    def _broker_trading_day(self) -> str:
+        source = getattr(self.runtime, "main_engine", None) or self.runtime.fact_source
+        gateway = source.get_gateway(self.config.gateway_name)
+        td_api = getattr(gateway, "td_api", None)
+        reader = getattr(td_api, "getTradingDay", None)
+        if not callable(reader):
+            raise WindowsRpcDurableFenceError(
+                "CTP trading day reader is unavailable",
+                code="WINDOWS_EXECUTION_FACT_UNAVAILABLE",
+            )
+        value = reader()
+        if isinstance(value, bytes):
+            value = value.decode("ascii", errors="strict")
+        trading_day = str(value)
+        if re.fullmatch(r"[0-9]{8}", trading_day) is None:
+            raise WindowsRpcDurableFenceError(
+                "CTP trading day is invalid",
+                code="WINDOWS_EXECUTION_FACT_INVALID",
+            )
+        return trading_day
+
+    def _broker_limit_time_condition(self) -> str:
+        source = getattr(self.runtime, "main_engine", None) or self.runtime.fact_source
+        gateway = source.get_gateway(self.config.gateway_name)
+        return _runtime_limit_time_condition(gateway.td_api)
+
     def peek_current_facts(self, request: Mapping[str, Any]) -> bytes:
         """Return canonical current facts without a disk write or generation bump."""
 
@@ -682,6 +733,8 @@ class _WindowsExecutionFactsV1:
                     "account_scope": expected["account_scope"],
                     "environment": expected["environment"],
                     "connected": bool(accounts),
+                    "trading_day": self._broker_trading_day(),
+                    "limit_time_condition": self._broker_limit_time_condition(),
                 },
                 "execution": {"orders": orders},
                 "admission": admission.peek_current_facts(),

@@ -16,7 +16,7 @@ import os
 import stat
 import tempfile
 from collections.abc import Callable, Mapping
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
 from typing import Any, Protocol
@@ -1427,6 +1427,46 @@ class FinalExecutionRuntime:
             )
         return evidence
 
+    def _trading_day_rollover_evidence(self) -> dict[str, Any] | None:
+        """Prove the narrow fixed CTP LIMIT->GFD day-session boundary."""
+
+        state = self.orchestrator.repository.snapshot()
+        active = state.get("plan", {})
+        if active.get("state") != "ACTIVE":
+            return None
+        plan = self._plan(str(active["plan_id"]), plan_hash=str(active["plan_hash"]))
+        if (
+            plan.raw.get("schema_version") != KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION
+            or plan.raw.get("environment") != "SIMNOW"
+            or plan.raw.get("gateway_name") != "CTP"
+            or any(order.get("type") != "LIMIT" for order in plan.raw["orders"])
+        ):
+            return None
+        generated_at = plan.raw.get("generated_at")
+        try:
+            generated = datetime.fromisoformat(
+                generated_at.removesuffix("Z") + "+00:00"
+            )
+        except (AttributeError, TypeError, ValueError):
+            return None
+        local = generated.astimezone(timezone(timedelta(hours=8)))
+        minute = local.hour * 60 + local.minute
+        if not (8 * 60 + 30 <= minute < 15 * 60):
+            return None
+        bindings = expected_send_intent_bindings(
+            plan,
+            account_scope=self.orchestrator.scope,
+            environment=self.orchestrator.environment,
+        )
+        return {
+            "schema_version": "execution_gfd_rollover_evidence_v1",
+            "plan_id": plan.plan_id,
+            "plan_hash": plan.plan_hash,
+            "intent_trading_day": local.strftime("%Y%m%d"),
+            "time_condition": "GFD",
+            "intent_ids": sorted(binding["intent_id"] for binding in bindings),
+        }
+
     def resume_active_plan(self, request: Mapping[str, Any]) -> dict[str, Any]:
         """Resume only the immutable deterministic children of one ACTIVE plan.
 
@@ -1860,8 +1900,15 @@ class FinalExecutionRuntime:
         finalization_evidence = (
             self._finalization_evidence() if envelope.command == "reconcile" else None
         )
+        rollover_evidence = (
+            self._trading_day_rollover_evidence()
+            if envelope.command == "reconcile"
+            else None
+        )
         return self.orchestrator.process_command(
-            envelope, finalization_evidence=finalization_evidence
+            envelope,
+            finalization_evidence=finalization_evidence,
+            rollover_evidence=rollover_evidence,
         )
 
     def _dispatch_accepted_start(
