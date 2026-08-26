@@ -347,6 +347,29 @@ async def _advance_current_execution_identity(
             backend.config.raw["leader_owner_id"]
         )
         token = await backend.execution.renew_leader(token)
+        recovery = {"plan_id": plan_id, "plan_hash": plan_hash}
+        status = (await backend.execution.status()).as_dict()
+        if status.get("reconciliation", {}).get("state") != "RECONCILED":
+            backend._require_active_reconcile_status(status, recovery, token)
+            await _submit_reconcile_with_ready_snapshot(
+                backend.execution,
+                suffix=(
+                    f"experimental-current-recovery-{plan_hash[:24]}-"
+                    f"{status['state_version']}"
+                ),
+                version=status["state_version"],
+                actor=backend._actor(),
+                now=datetime.now(timezone.utc)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                reconciliation_run_id=(
+                    f"simnow-experimental-current-recovery-{plan_hash[:32]}"
+                ),
+                reason="query-only reconcile exact existing SIMNOW TargetPlan",
+            )
+            status = (await backend.execution.status()).as_dict()
+        backend._require_post_renew_status(status, recovery, allow_active=True)
         snapshot = await backend.execution.reconciliation_snapshot()
         resumed = await backend.execution.resume_active_plan(
             plan_id=plan_id,
