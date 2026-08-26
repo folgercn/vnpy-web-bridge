@@ -261,7 +261,13 @@ def _accepted_start_receipt(
     )
 
 
-def _completion_state(status: dict[str, Any], *, plan_id: str, plan_hash: str) -> str:
+def _completion_state(
+    status: dict[str, Any],
+    *,
+    plan_id: str,
+    plan_hash: str,
+    expected_intent_count: int | None = None,
+) -> str:
     reconciliation = status.get("reconciliation", {})
     broker = status.get("broker", {})
     if (
@@ -281,12 +287,20 @@ def _completion_state(status: dict[str, Any], *, plan_id: str, plan_hash: str) -
         return "missing_send_intent"
     if any(item.get("state") == "UNKNOWN_OUTCOME" for item in intents):
         return "unknown_outcome"
+    if expected_intent_count is not None and len(intents) != expected_intent_count:
+        return "incomplete_send_intents"
     if any(item.get("state") not in _TERMINAL_INTENT_STATES for item in intents):
         return "pending_intents"
     return "ready_for_final_reconcile"
 
 
-def _completed(status: dict[str, Any], *, plan_id: str, plan_hash: str) -> bool:
+def _completed(
+    status: dict[str, Any],
+    *,
+    plan_id: str,
+    plan_hash: str,
+    expected_intent_count: int | None = None,
+) -> bool:
     intents = [
         item
         for item in status.get("send_intents", [])
@@ -304,6 +318,10 @@ def _completed(status: dict[str, Any], *, plan_id: str, plan_hash: str) -> bool:
         and status.get("broker", {}).get("active_order_count") == 0
         and bool(status.get("safe_to_restart"))
         and bool(intents)
+        and (
+            expected_intent_count is None
+            or len(intents) == expected_intent_count
+        )
         and all(item.get("state") in _TERMINAL_INTENT_STATES for item in intents)
     )
 
@@ -634,6 +652,10 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     result["start_submitted"] = True
 
     deadline = asyncio.get_running_loop().time() + args.completion_timeout_seconds
+    plan_orders = handoff.target_plan.get("orders")
+    expected_intent_count = (
+        len(plan_orders) if isinstance(plan_orders, (list, tuple)) else None
+    )
     reconciled_pending_versions: set[int] = set()
     while True:
         try:
@@ -644,6 +666,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             status,
             plan_id=handoff.target_plan["plan_id"],
             plan_hash=handoff.target_plan["plan_hash"],
+            expected_intent_count=expected_intent_count,
         )
         if state == "unknown_outcome":
             return _incomplete(result, reason=state, status=status)
@@ -707,6 +730,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                         completion_status,
                         plan_id=handoff.target_plan["plan_id"],
                         plan_hash=handoff.target_plan["plan_hash"],
+                        expected_intent_count=expected_intent_count,
                     ):
                         return _incomplete(
                             result,
@@ -759,6 +783,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         final_status,
         plan_id=handoff.target_plan["plan_id"],
         plan_hash=handoff.target_plan["plan_hash"],
+        expected_intent_count=expected_intent_count,
     ):
         return _incomplete(result, reason="final_reconcile_not_completed", status=final_status)
     return {**result, "executed": True, "completed": True, "archived": True, "execution_status": final_status}

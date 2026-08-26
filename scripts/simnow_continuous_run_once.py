@@ -1984,7 +1984,10 @@ class _ProductionBackend:
             raise ContinuousRunError("Execution authority is foreign to this plan")
 
     async def _drive_installed_plan(
-        self, recovery: Mapping[str, Any]
+        self,
+        recovery: Mapping[str, Any],
+        *,
+        expected_intent_count: int | None = None,
     ) -> dict[str, Any]:
         plan_id = str(recovery["plan_id"])
         plan_hash = str(recovery["plan_hash"])
@@ -2183,7 +2186,12 @@ class _ProductionBackend:
             reconciled_versions: set[int] = set()
             while True:
                 status = (await self.execution.status()).as_dict()
-                state = _completion_state(status, plan_id=plan_id, plan_hash=plan_hash)
+                state = _completion_state(
+                    status,
+                    plan_id=plan_id,
+                    plan_hash=plan_hash,
+                    expected_intent_count=expected_intent_count,
+                )
                 if state == "unknown_outcome":
                     raise ContinuousRunError("TargetPlan has an unknown broker outcome")
                 if state == "ready_for_final_reconcile":
@@ -2222,6 +2230,16 @@ class _ProductionBackend:
                         ):
                             status = final_status
                             break
+                if state == "incomplete_send_intents":
+                    try:
+                        token = await self.execution.renew_leader(token)
+                    except ExecutionClientError:
+                        return {
+                            "state": "ACTIVE",
+                            "phase": phase,
+                            "plan_id": plan_id,
+                            "reason": "completion_leader_renew_outcome_unknown",
+                        }
                 if asyncio.get_running_loop().time() >= deadline:
                     return {
                         "state": "ACTIVE",
@@ -2231,7 +2249,12 @@ class _ProductionBackend:
                     }
                 await asyncio.sleep(float(self.config.raw["completion_poll_seconds"]))
 
-            if not _completed(status, plan_id=plan_id, plan_hash=plan_hash):
+            if not _completed(
+                status,
+                plan_id=plan_id,
+                plan_hash=plan_hash,
+                expected_intent_count=expected_intent_count,
+            ):
                 token = await self.execution.renew_leader(token)
                 command, response = await _submit_reconcile_with_ready_snapshot(
                     self.execution,
@@ -2255,7 +2278,12 @@ class _ProductionBackend:
                     ],
                     final_status=status,
                     idempotency_key=command["idempotency_key"],
-                ) or not _completed(status, plan_id=plan_id, plan_hash=plan_hash):
+                ) or not _completed(
+                    status,
+                    plan_id=plan_id,
+                    plan_hash=plan_hash,
+                    expected_intent_count=expected_intent_count,
+                ):
                     raise ContinuousRunError(
                         "TargetPlan final reconciliation did not archive"
                     )

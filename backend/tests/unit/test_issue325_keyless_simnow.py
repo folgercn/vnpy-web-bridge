@@ -909,6 +909,66 @@ def test_simnow_run_once_completion_fails_closed_for_pending_unknown_and_active(
     )
 
 
+def test_simnow_run_once_does_not_finalize_from_partial_start_receipt_dispatch() -> None:
+    module = _run_once_module("issue421_partial_start_receipt_dispatch")
+    terminal_one_of_two = {
+        "lifecycle": "READY",
+        "reconciliation": {"state": "RECONCILED", "unknown_outcomes": 0},
+        "broker": {"active_order_count": 0},
+        "plan": {
+            "state": "TERMINAL",
+            "plan_id": "plan-0001",
+            "plan_hash": "a" * 64,
+        },
+        "authority": {"state": "REVOKED"},
+        "leader": {"held": False},
+        "safe_to_restart": True,
+        "send_intents": [
+            {
+                "plan_id": "plan-0001",
+                "plan_hash": "a" * 64,
+                "state": "TERMINAL",
+            }
+        ],
+    }
+
+    assert (
+        module._completion_state(
+            terminal_one_of_two,
+            plan_id="plan-0001",
+            plan_hash="a" * 64,
+            expected_intent_count=2,
+        )
+        == "incomplete_send_intents"
+    )
+    assert not module._completed(
+        terminal_one_of_two,
+        plan_id="plan-0001",
+        plan_hash="a" * 64,
+        expected_intent_count=2,
+    )
+
+    unknown_partial = {
+        **terminal_one_of_two,
+        "send_intents": [
+            {
+                "plan_id": "plan-0001",
+                "plan_hash": "a" * 64,
+                "state": "UNKNOWN_OUTCOME",
+            }
+        ],
+    }
+    assert (
+        module._completion_state(
+            unknown_partial,
+            plan_id="plan-0001",
+            plan_hash="a" * 64,
+            expected_intent_count=2,
+        )
+        == "unknown_outcome"
+    )
+
+
 def _run_once_module(name: str):
     path = Path(__file__).resolve().parents[3] / "scripts" / "simnow_run_once.py"
     spec = importlib.util.spec_from_file_location(name, path)

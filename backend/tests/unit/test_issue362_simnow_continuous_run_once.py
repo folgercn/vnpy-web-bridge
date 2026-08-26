@@ -2051,6 +2051,113 @@ def test_start_response_loss_queries_exact_receipt_and_never_resends(tmp_path: P
     assert execution.calls[-1] == "release"
 
 
+def test_partial_start_dispatch_renews_same_leader_without_reconcile_or_release(
+    tmp_path: Path,
+):
+    backend = _production_backend_without_clients(tmp_path, enabled=True)
+    plan_id = "continuous-open-plan-test-0004"
+    plan_hash = "a" * 64
+    intent = lambda index: {
+        "plan_id": plan_id,
+        "plan_hash": plan_hash,
+        "state": "TERMINAL",
+        "intent_id": f"intent-{index:03d}",
+    }
+    previewed = {
+        "state_version": 7,
+        "lifecycle": "READY",
+        "plan": {
+            "state": "PREVIEWED",
+            "plan_id": f"preview-{plan_hash[:16]}",
+            "plan_hash": plan_hash,
+            "preview_mode": "simnow_preview",
+            "preview_receipt_id": "receipt-0004",
+            "preview_receipt_sha256": "e" * 64,
+            "preview_artifact_id": plan_id,
+            "preview_artifact_sha256": "d" * 64,
+        },
+        "authority": {
+            "state": "ENABLED",
+            "artifact_id": plan_id,
+            "artifact_hash": plan_hash,
+            "expires_at": "2026-08-20T13:02:00Z",
+        },
+        "leader": {"held": False},
+        "reconciliation": {"state": "RECONCILED", "unknown_outcomes": 0},
+        "broker": {"active_order_count": 0},
+        "send_intents": [],
+        "safe_to_restart": False,
+    }
+    partial = {
+        **previewed,
+        "state_version": 8,
+        "plan": {"state": "ACTIVE", "plan_id": plan_id, "plan_hash": plan_hash},
+        "send_intents": [intent(index) for index in range(8)],
+    }
+    terminal = {
+        **partial,
+        "state_version": 9,
+        "plan": {"state": "TERMINAL", "plan_id": plan_id, "plan_hash": plan_hash},
+        "authority": {"state": "REVOKED"},
+        "leader": {"held": False},
+        "send_intents": [intent(index) for index in range(181)],
+        "safe_to_restart": True,
+    }
+
+    class Execution:
+        def __init__(self):
+            self.calls: list[str] = []
+            self.statuses = [previewed, previewed, previewed, partial, partial, terminal]
+            self.token = SimpleNamespace(epoch=5, fencing_token=8)
+
+        async def status(self):
+            self.calls.append("status")
+            return SimpleNamespace(as_dict=lambda: self.statuses.pop(0))
+
+        async def acquire_leader(self, owner_id):
+            self.calls.append(f"acquire:{owner_id}")
+            return self.token
+
+        async def renew_leader(self, token):
+            assert token is self.token
+            self.calls.append("renew")
+            return token
+
+        async def submit(self, command):
+            self.calls.append(command["command"])
+            return {"accepted": True}
+
+        async def release_leader(self, token):
+            assert token is self.token
+            self.calls.append("release")
+
+    execution = Execution()
+    backend.execution = execution
+    result = asyncio.run(
+        backend._drive_installed_plan(
+            {
+                "plan_id": plan_id,
+                "plan_hash": plan_hash,
+                "phase": "OPEN",
+                "custody_idempotency_key": "b" * 64,
+                "start_quote_proof_state": "READY",
+                "expected_after_position_hash": "c" * 64,
+                "receipt_id": "receipt-0004",
+                "receipt_sha256": "e" * 64,
+                "artifact_id": plan_id,
+                "artifact_sha256": "d" * 64,
+                "expires_at": "2026-08-20T13:02:00Z",
+            },
+            expected_intent_count=181,
+        )
+    )
+
+    assert result == {"state": "COMPLETED", "phase": "OPEN", "plan_id": plan_id}
+    assert execution.calls.count("renew") == 4
+    assert "reconcile" not in execution.calls
+    assert execution.calls[-1] == "release"
+
+
 @pytest.mark.parametrize("drift", ["unknown", "foreign"])
 def test_post_renew_drift_never_submits_start(tmp_path: Path, drift: str) -> None:
     backend = _production_backend_without_clients(tmp_path, enabled=True)
