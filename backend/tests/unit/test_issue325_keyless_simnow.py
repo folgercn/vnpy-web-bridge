@@ -1237,6 +1237,9 @@ def _install_fake_runner_dependencies(
                 "position_snapshot_hash": local_position_snapshot_hash,
                 "active_order_count": 0,
                 "active_orders_sha256": "0" * 64,
+                "account_scope": "account:windows",
+                "environment": "SIMNOW",
+                "positions": {},
                 "state_binding": {
                     "state_version": version,
                     "durable_broker_generation": durable_generation,
@@ -1448,7 +1451,9 @@ def test_simnow_run_once_fake_e2e_final_reconcile_archives_after_terminal(
         command["payload"]["snapshot_fact_binding"]
         == {
             "generation": 0,
-            "position_snapshot_hash": "c" * 64,
+            "position_snapshot_hash": before_position_projection_hash(
+                {}, account_scope="account:windows", environment="SIMNOW"
+            ),
             "active_order_count": 0,
             "active_orders_sha256": "0" * 64,
             "state_version": command["expected"]["state_version"],

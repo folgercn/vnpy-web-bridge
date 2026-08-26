@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from shared.commodity_execution import (
     CommodityExecutionContractError,
+    before_position_projection_hash,
     target_position_projection_hash,
 )
 
@@ -1442,13 +1443,21 @@ class ExecutionOrchestrator:
         if snapshot.snapshot_id != envelope.payload["snapshot_id"]:
             requested_id = envelope.payload["snapshot_id"]
             binding = envelope.payload.get("snapshot_fact_binding")
+            try:
+                current_before_position_hash = before_position_projection_hash(
+                    snapshot.positions,
+                    account_scope=snapshot.account_scope,
+                    environment=snapshot.environment,
+                )
+            except CommodityExecutionContractError:
+                current_before_position_hash = None
             peek_equivalent = (
                 requested_id.startswith("snapshot-peek-")
                 and snapshot.snapshot_id.startswith("snapshot-peek-")
                 and isinstance(binding, Mapping)
                 and binding["generation"] == snapshot.generation
                 and binding["position_snapshot_hash"]
-                == snapshot.position_snapshot_hash
+                == current_before_position_hash
                 and binding["active_order_count"] == snapshot.active_order_count
                 and binding["active_orders_sha256"] == sha256_json(snapshot.orders)
                 and binding["state_version"] == envelope.expected.state_version

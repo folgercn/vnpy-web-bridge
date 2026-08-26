@@ -24,6 +24,7 @@ from app.execution.errors import (
 )
 from app.execution.gateway import ZmqRpcTransport
 from app.execution.models import sha256_json
+from shared.commodity_execution import before_position_projection_hash
 
 
 def _free_tcp_address() -> str:
@@ -581,7 +582,19 @@ def _final_validation_facts() -> dict:
         "schema_version": "windows_execution_current_facts_v1",
         "position_query_complete": True,
         "account": {"CTP.sim-account": {"gateway_name": "CTP", "available": 90}},
-        "positions": {"rb-long": {"symbol": "rb", "volume": 2}},
+        "positions": {
+            "rb-long": {
+                "gateway_name": "CTP",
+                "symbol": "rb2610",
+                "exchange": "SHFE",
+                "direction": "LONG",
+                "volume": 2,
+                "yd_volume": 1,
+                "price": 3200.0,
+                "pnl": 100.0,
+                "frozen": 0,
+            }
+        },
         "active_orders": {"CTP.1": {"symbol": "rb", "status": "NOTTRADED"}},
         "gateway": {
             "gateway_name": "CTP",
@@ -656,7 +669,11 @@ def _snapshot_fact_binding(
     state = service.repository.snapshot()
     return {
         "generation": facts["admission"]["snapshot_generation"],
-        "position_snapshot_hash": sha256_json(facts["positions"]),
+        "position_snapshot_hash": before_position_projection_hash(
+            facts["positions"],
+            account_scope="account:prod",
+            environment="SIMNOW",
+        ),
         "active_order_count": len(facts["active_orders"]),
         "active_orders_sha256": sha256_json(facts["active_orders"]),
         "state_version": state["state_version"],
@@ -783,6 +800,65 @@ def test_final_validation_reconcile_accepts_equivalent_different_peek_id() -> No
     )
 
     assert response.result["accepted"] is True
+
+
+@pytest.mark.parametrize("field", ["pnl", "price"])
+def test_final_validation_reconcile_accepts_peek_valuation_drift(field: str) -> None:
+    requested_facts = _final_validation_facts()
+    requested_facts["active_orders"] = {}
+    requested_facts["execution"]["orders"] = {}
+    current_facts = deepcopy(requested_facts)
+    current_facts["positions"]["rb-long"][field] += 1
+    assert sha256_json(requested_facts["positions"]) != sha256_json(
+        current_facts["positions"]
+    )
+    service = _reconcile_service(
+        _final_validation_gateway(_FinalValidationPeekTransport(current_facts))
+    )
+
+    response = service.process_command(
+        _reconcile_command(
+            f"snapshot-peek-{sha256_json(requested_facts)}",
+            service.repository.state_version,
+            snapshot_fact_binding=_snapshot_fact_binding(requested_facts, service),
+        )
+    )
+
+    assert response.result["accepted"] is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("volume", 3),
+        ("direction", "SHORT"),
+        ("symbol", "ag2612"),
+        ("exchange", "INE"),
+        ("yd_volume", 0),
+    ],
+)
+def test_final_validation_reconcile_rejects_peek_position_identity_drift(
+    field: str, value: object
+) -> None:
+    requested_facts = _final_validation_facts()
+    requested_facts["active_orders"] = {}
+    requested_facts["execution"]["orders"] = {}
+    current_facts = deepcopy(requested_facts)
+    current_facts["positions"]["rb-long"][field] = value
+    service = _reconcile_service(
+        _final_validation_gateway(_FinalValidationPeekTransport(current_facts))
+    )
+
+    with pytest.raises(SnapshotRejected, match="does not match"):
+        service.process_command(
+            _reconcile_command(
+                f"snapshot-peek-{sha256_json(requested_facts)}",
+                service.repository.state_version,
+                snapshot_fact_binding=_snapshot_fact_binding(
+                    requested_facts, service
+                ),
+            )
+        )
 
 
 @pytest.mark.parametrize("drift", ["generation", "positions", "orders"])

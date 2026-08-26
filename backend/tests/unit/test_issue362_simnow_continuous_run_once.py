@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from app.phase_c.adapters import UnknownOutcomeError
 from app.phase_c.models import TrustedKeylessContinuousEventUploadDTO
 from app.execution.models import CommandEnvelope
+from shared.commodity_execution import before_position_projection_hash
 from research_warehouse.file_integrity import read_regular_strict
 from research_warehouse.continuous_event_selector import BuiltContinuousEventSelection
 from scripts.ci.classify_changes import (
@@ -2425,6 +2426,9 @@ def test_halted_unknown_active_plan_reconciles_before_exact_resume(tmp_path: Pat
                 "position_snapshot_hash": "c" * 64,
                 "active_order_count": 0,
                 "active_orders_sha256": "0" * 64,
+                "account_scope": "account:windows",
+                "environment": "SIMNOW",
+                "positions": {},
                 "state_binding": {
                     "state_version": 7,
                     "durable_broker_generation": 17,
