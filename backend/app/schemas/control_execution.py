@@ -527,6 +527,8 @@ _SEND_INTENT_OPTIONAL_FIELDS = frozenset(
         "receipt_hash",
         "broker_order_id",
         "unknown_reason",
+        "execution_start_quote_proof",
+        "execution_start_quote_proof_sha256",
     }
 )
 _STATUS_BINDING_FIELDS = frozenset(
@@ -570,6 +572,20 @@ def _strict_nonnegative_int(value: Any, *, field: str) -> None:
 def _strict_sha(value: Any, *, field: str) -> None:
     if not isinstance(value, str) or SHA256_RE.fullmatch(value) is None:
         raise ValueError(f"{field} is invalid")
+
+
+def _send_intent_start_quote_proof_fields_are_valid(row: Mapping[str, Any]) -> bool:
+    """Accept the v3 proof as opaque data while enforcing its field contract."""
+
+    has_proof = "execution_start_quote_proof" in row
+    has_proof_sha256 = "execution_start_quote_proof_sha256" in row
+    if has_proof != has_proof_sha256:
+        return False
+    return (
+        not has_proof_sha256
+        or isinstance(row["execution_start_quote_proof_sha256"], str)
+        and SHA256_RE.fullmatch(row["execution_start_quote_proof_sha256"]) is not None
+    )
 
 
 def _strict_utc(value: Any, *, field: str) -> datetime:
@@ -794,6 +810,7 @@ class ExecutionAccountFactsProjectionV2:
             )
             or not isinstance(row.get("created_at"), str)
             or UTC_RE.fullmatch(row["created_at"]) is None
+            or not _send_intent_start_quote_proof_fields_are_valid(row)
             for intent_id, row in intents.items()
         ):
             raise ValueError("execution account facts v2 send intents are invalid")
