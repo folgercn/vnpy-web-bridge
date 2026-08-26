@@ -154,6 +154,19 @@ def _two_order_plan() -> dict:
     )
 
 
+def _day_session_plan() -> dict:
+    fields = _plan()
+    quote_proof = deepcopy(fields["creation_quote_proof"])
+    quote_proof["validated_at_utc"] = "2026-08-26T06:33:00Z"
+    for binding in quote_proof["bindings"].values():
+        binding["received_at_utc"] = "2026-08-26T06:33:00Z"
+    return _v3_plan(
+        creation_quote_proof=quote_proof,
+        generated_at="2026-08-26T06:33:00Z",
+        expected_before_position_hash=fields["expected_before_position_hash"],
+    )
+
+
 def _runtime(plan: dict, reader: _Reader, *, repo=None):
     repo = repo or InMemoryExecutionRepository(scope="account:windows")
     gateway = InMemoryGateway(account_scope="account:windows", environment="SIMNOW")
@@ -176,6 +189,26 @@ def _runtime(plan: dict, reader: _Reader, *, repo=None):
         quote_clock=lambda: QUOTE_TIME,
     )
     return service, core, repo, gateway, custody
+
+
+def test_v3_day_session_active_plan_builds_exact_gfd_rollover_evidence() -> None:
+    plan = _day_session_plan()
+    service, _, repo, _, _ = _runtime(plan, _Reader())
+    service.plans.put(TargetPlan.from_mapping(plan))
+
+    def activate(state: dict) -> None:
+        state["plan"].update(
+            {"state": "ACTIVE", "plan_id": plan["plan_id"], "plan_hash": plan["plan_hash"]}
+        )
+
+    repo.mutate(activate)
+
+    evidence = service._trading_day_rollover_evidence()
+
+    assert evidence is not None
+    assert evidence["intent_trading_day"] == "20260826"
+    assert evidence["time_condition"] == "GFD"
+    assert len(evidence["intent_ids"]) == len(plan["orders"])
 
 
 def _prepare(service, core, repo, custody, plan: dict):

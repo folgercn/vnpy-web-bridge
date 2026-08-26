@@ -11,7 +11,8 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import re
 from threading import RLock
 from typing import Any
 from uuid import uuid4
@@ -757,6 +758,7 @@ class ExecutionOrchestrator:
         preview_evidence: Mapping[str, Any] | None = None,
         start_evidence: Mapping[str, Any] | None = None,
         finalization_evidence: Mapping[str, Any] | None = None,
+        rollover_evidence: Mapping[str, Any] | None = None,
     ) -> CommandResponse:
         """Apply a typed Control command.
 
@@ -775,12 +777,49 @@ class ExecutionOrchestrator:
         finalization = self._validated_finalization_evidence(
             envelope, finalization_evidence
         )
+        rollover = self._validated_rollover_evidence(envelope, rollover_evidence)
         with self._command_lock:
-            return self._process_envelope(envelope, preview, start, finalization)
+            return self._process_envelope(
+                envelope, preview, start, finalization, rollover
+            )
 
     handle_command = process_command
     execute_command = process_command
     submit_command = process_command
+
+    @staticmethod
+    def _validated_rollover_evidence(
+        envelope: CommandEnvelope, evidence: Mapping[str, Any] | None
+    ) -> dict[str, Any] | None:
+        if evidence is None:
+            return None
+        if envelope.command != "reconcile" or not isinstance(evidence, Mapping):
+            raise MutationRejected(
+                "internal trading-day rollover evidence is limited to reconcile"
+            )
+        raw = deepcopy(dict(evidence))
+        if set(raw) != {
+            "schema_version",
+            "plan_id",
+            "plan_hash",
+            "intent_trading_day",
+            "time_condition",
+            "intent_ids",
+        } or raw["schema_version"] != "execution_gfd_rollover_evidence_v1":
+            raise MutationRejected("internal trading-day rollover evidence is invalid")
+        validate_identifier(raw["plan_id"], "rollover_evidence.plan_id")
+        validate_sha256(raw["plan_hash"], "rollover_evidence.plan_hash")
+        if (
+            raw["time_condition"] != "GFD"
+            or not isinstance(raw["intent_trading_day"], str)
+            or re.fullmatch(r"[0-9]{8}", raw["intent_trading_day"]) is None
+            or not isinstance(raw["intent_ids"], list)
+            or raw["intent_ids"] != sorted(set(raw["intent_ids"]))
+        ):
+            raise MutationRejected("internal trading-day rollover evidence is invalid")
+        for intent_id in raw["intent_ids"]:
+            validate_identifier(intent_id, "rollover_evidence.intent_id")
+        return raw
 
     @staticmethod
     def _validated_preview_evidence(
@@ -968,6 +1007,7 @@ class ExecutionOrchestrator:
         preview_evidence: Mapping[str, str] | None,
         start_evidence: Mapping[str, Any] | None,
         finalization_evidence: Mapping[str, Any] | None,
+        rollover_evidence: Mapping[str, Any] | None,
     ) -> CommandResponse:
         command_key = f"{envelope.actor.service}:{envelope.idempotency_key}"
         command_hash = envelope.command_hash()
@@ -993,7 +1033,9 @@ class ExecutionOrchestrator:
         # state transaction.  A failed/uncertain read leaves no command receipt
         # and therefore cannot be mistaken for a completed reconcile.
         if envelope.command == "reconcile":
-            return self._reconcile_command(envelope, finalization_evidence)
+            return self._reconcile_command(
+                envelope, finalization_evidence, rollover_evidence
+            )
 
         if envelope.command in {"stop", "revoke", "drain"}:
             try:
@@ -1383,6 +1425,7 @@ class ExecutionOrchestrator:
         self,
         envelope: CommandEnvelope,
         finalization_evidence: Mapping[str, Any] | None = None,
+        rollover_evidence: Mapping[str, Any] | None = None,
     ) -> CommandResponse:
         # Read-only snapshot/query calls are safe without a leader token.  They
         # never construct a new send/cancel intent.  Reuse the readiness
@@ -1447,6 +1490,10 @@ class ExecutionOrchestrator:
                 continue
             outcomes[intent_id] = dict(outcome)
 
+        rollover_ids = self._trading_day_rollover_terminal_ids(
+            state, snapshot, outcomes, rollover_evidence
+        )
+
         expected = envelope.expected.state_version
 
         def writer(candidate: dict[str, Any]) -> dict[str, Any]:
@@ -1461,6 +1508,18 @@ class ExecutionOrchestrator:
                 if not isinstance(raw, dict):
                     continue
                 if _outcome_is_unknown(outcome):
+                    if intent_id in rollover_ids:
+                        self._apply_intent_result_transition(
+                            candidate,
+                            intent_id,
+                            state_name="RECONCILED",
+                            broker_order_id=raw.get("broker_order_id"),
+                        )
+                        raw["unknown_reason"] = (
+                            "RECONCILED_BY_TRADING_DAY_ROLLOVER"
+                        )
+                        candidate["unknown_outcomes"].pop(intent_id, None)
+                        continue
                     raw["state"] = "UNKNOWN_OUTCOME"
                     candidate["unknown_outcomes"][intent_id] = {
                         "reason": outcome.get("error", "outcome remains unknown")
@@ -1512,6 +1571,10 @@ class ExecutionOrchestrator:
                 "unknown_outcomes": unknown_count,
                 "lifecycle": candidate["lifecycle"],
             }
+            if rollover_ids:
+                result["trading_day_rollover_reconciled_intent_count"] = len(
+                    rollover_ids
+                )
             status = "COMPLETED" if unknown_count == 0 else "REJECTED"
             if unknown_count == 0 and finalization_evidence is not None:
                 finalization = self._apply_finalization_evidence(
@@ -1547,6 +1610,60 @@ class ExecutionOrchestrator:
             result=deepcopy(dict(result)),
             reused=False,
         )
+
+    @staticmethod
+    def _trading_day_rollover_terminal_ids(
+        state: Mapping[str, Any],
+        snapshot: GatewaySnapshot,
+        outcomes: Mapping[str, Mapping[str, Any]],
+        evidence: Mapping[str, Any] | None,
+    ) -> set[str]:
+        if evidence is None:
+            return set()
+        active = state.get("plan", {})
+        old_day = evidence["intent_trading_day"]
+        current_day = snapshot.broker_trading_day
+        if (
+            active.get("state") != "ACTIVE"
+            or active.get("plan_id") != evidence["plan_id"]
+            or active.get("plan_hash") != evidence["plan_hash"]
+            or not isinstance(current_day, str)
+            or re.fullmatch(r"[0-9]{8}", current_day) is None
+            or current_day <= old_day
+            or snapshot.broker_limit_time_condition != "GFD"
+            or snapshot.active_order_count != 0
+            or bool(snapshot.orders)
+        ):
+            return set()
+        shanghai = timezone(timedelta(hours=8))
+        eligible: set[str] = set()
+        allowed_ids = set(evidence["intent_ids"])
+        for intent_id, outcome in outcomes.items():
+            raw = state.get("send_intents", {}).get(intent_id)
+            if (
+                intent_id not in allowed_ids
+                or not isinstance(raw, Mapping)
+                or raw.get("action") != "send"
+                or raw.get("plan_id") != evidence["plan_id"]
+                or raw.get("plan_hash") != evidence["plan_hash"]
+                or not _outcome_is_unknown(outcome)
+            ):
+                continue
+            created_at = raw.get("created_at")
+            try:
+                parse_utc(created_at, field_name="intent.created_at")
+                local = datetime.fromisoformat(
+                    created_at.removesuffix("Z") + "+00:00"
+                ).astimezone(shanghai)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            minute = local.hour * 60 + local.minute
+            if (
+                local.strftime("%Y%m%d") == old_day
+                and 8 * 60 + 30 <= minute < 15 * 60
+            ):
+                eligible.add(intent_id)
+        return eligible
 
     def _apply_finalization_evidence(
         self, state: dict[str, Any], evidence: Mapping[str, Any]

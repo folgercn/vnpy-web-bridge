@@ -1452,6 +1452,158 @@ def test_reconcile_query_only_submitted_unknown_or_error_fails_closed(
     assert core.status()["lifecycle"] == "HALTED_UNKNOWN_OUTCOME"
 
 
+def _rollover_evidence(target: dict, intent_id: str) -> dict:
+    return {
+        "schema_version": "execution_gfd_rollover_evidence_v1",
+        "plan_id": target["plan_id"],
+        "plan_hash": target["plan_hash"],
+        "intent_trading_day": "20260826",
+        "time_condition": "GFD",
+        "intent_ids": [intent_id],
+    }
+
+
+def test_reconcile_unknown_gfd_intent_after_trading_day_rollover_is_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.execution.orchestrator.utc_now",
+        lambda: datetime(2026, 8, 26, 6, 47, 26, tzinfo=timezone.utc),
+    )
+    service, core, repo, gateway, _ = runtime(execute=True)
+    target = plan()
+    gateway.snapshots.append(
+        GatewaySnapshot(
+            snapshot_id="snapshot-default",
+            generation=1,
+            connected=True,
+            position_snapshot_hash=sha256_json({}),
+            observed_at="2026-08-26T06:47:26Z",
+            account_scope=SCOPE,
+            environment="SIMNOW",
+        )
+    )
+    reconcile_enable_start(service, core, repo, target)
+    intent_id = next(iter(repo.snapshot()["send_intents"]))
+
+    def make_unknown(state: dict) -> None:
+        state["send_intents"][intent_id].update(
+            {
+                "state": "UNKNOWN_OUTCOME",
+            }
+        )
+        state["unknown_outcomes"][intent_id] = {"reason": "response lost"}
+        state["reconciliation"].update(
+            {"state": "UNKNOWN", "unknown_outcomes": 1}
+        )
+        state["lifecycle"] = "HALTED_UNKNOWN_OUTCOME"
+
+    repo.mutate(make_unknown)
+    gateway.intent_outcomes[intent_id] = {"state": "UNKNOWN_OUTCOME"}
+    gateway.snapshots.append(
+        GatewaySnapshot(
+            snapshot_id="snapshot-rollover-0001",
+            generation=2,
+            connected=True,
+            active_order_count=0,
+            position_snapshot_hash=sha256_json(target_position_rows()),
+            observed_at="2026-08-26T06:47:26Z",
+            positions=target_position_rows(),
+            account_scope=SCOPE,
+            environment="SIMNOW",
+            broker_trading_day="20260827",
+            broker_limit_time_condition="GFD",
+        )
+    )
+    gateway.send_calls.clear()
+    gateway.cancel_calls.clear()
+
+    response = core.process_command(
+        command(
+            "reconcile",
+            "reconcile-rollover-0001",
+            repo.state_version,
+            {
+                "reconciliation_run_id": "run-rollover-0001",
+                "snapshot_id": "snapshot-rollover-0001",
+                "reason": "terminalize expired GFD intent after trading-day rollover",
+            },
+        ),
+        rollover_evidence=_rollover_evidence(target, intent_id),
+    )
+
+    state = repo.snapshot()
+    assert gateway.query_calls[-1:] == [intent_id]
+    assert gateway.send_calls == []
+    assert gateway.cancel_calls == []
+    assert state["send_intents"][intent_id]["state"] == "RECONCILED"
+    assert state["send_intents"][intent_id]["unknown_reason"] == (
+        "RECONCILED_BY_TRADING_DAY_ROLLOVER"
+    )
+    assert state["unknown_outcomes"] == {}
+    assert state["lifecycle"] == "READY"
+    assert response.result["trading_day_rollover_reconciled_intent_count"] == 1
+
+
+@pytest.mark.parametrize(
+    "trading_day,active_order_count,orders,created_at,time_condition",
+    [
+        ("20260826", 0, {}, "2026-08-26T06:47:26Z", "GFD"),
+        (
+            "20260827",
+            1,
+            {"CTP.1": {"status": "NOTTRADED"}},
+            "2026-08-26T06:47:26Z",
+            "GFD",
+        ),
+        ("20260827", 0, {}, "2026-08-26T13:01:00Z", "GFD"),
+        (None, 0, {}, "2026-08-26T06:47:26Z", "GFD"),
+        ("20260827", 0, {}, "2026-08-26T06:47:26Z", None),
+    ],
+)
+def test_reconcile_rollover_evidence_fails_closed_without_every_boundary(
+    trading_day: str | None,
+    active_order_count: int,
+    orders: dict,
+    created_at: str,
+    time_condition: str | None,
+) -> None:
+    target = plan()
+    intent_id = "intent-rollover-0001"
+    state = {
+        "plan": {
+            "state": "ACTIVE",
+            "plan_id": target["plan_id"],
+            "plan_hash": target["plan_hash"],
+        },
+        "send_intents": {
+            intent_id: {
+                "intent_id": intent_id,
+                "action": "send",
+                "plan_id": target["plan_id"],
+                "plan_hash": target["plan_hash"],
+                "created_at": created_at,
+            }
+        },
+    }
+    snapshot = GatewaySnapshot(
+        snapshot_id="snapshot-rollover-negative-0001",
+        generation=2,
+        connected=True,
+        active_order_count=active_order_count,
+        orders=orders,
+        broker_trading_day=trading_day,
+        broker_limit_time_condition=time_condition,
+    )
+    outcomes = {intent_id: {"state": "UNKNOWN_OUTCOME"}}
+    assert ExecutionOrchestrator._trading_day_rollover_terminal_ids(
+        state,
+        snapshot,
+        outcomes,
+        _rollover_evidence(target, intent_id),
+    ) == set()
+
+
 def test_target_position_projection_normalizes_aggregates_and_rejects_bad_rows() -> (
     None
 ):
