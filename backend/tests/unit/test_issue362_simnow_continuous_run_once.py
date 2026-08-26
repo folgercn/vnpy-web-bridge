@@ -2359,6 +2359,117 @@ def test_active_plan_recovery_uses_exact_resume_api_and_releases_leader(
     ]
 
 
+def test_halted_unknown_active_plan_reconciles_before_exact_resume(tmp_path: Path):
+    backend = _production_backend_without_clients(tmp_path, enabled=True)
+    plan_id = "continuous-open-plan-halted-0001"
+    plan_hash = "a" * 64
+    initial = {
+        "state_version": 7,
+        "lifecycle": "HALTED_UNKNOWN_OUTCOME",
+        "plan": {"state": "ACTIVE", "plan_id": plan_id, "plan_hash": plan_hash},
+        "authority": {"state": "ENABLED"},
+        "leader": {"held": False, "epoch": 3, "fencing_token": 4},
+        "reconciliation": {"state": "UNKNOWN", "unknown_outcomes": 58},
+        "broker": {"active_order_count": 0},
+        "send_intents": [],
+        "safe_to_restart": False,
+    }
+    halted_with_leader = {
+        **initial,
+        "leader": {"held": True, "epoch": 3, "fencing_token": 4},
+    }
+    reconciled = {
+        **halted_with_leader,
+        "state_version": 8,
+        "lifecycle": "READY",
+        "reconciliation": {"state": "RECONCILED", "unknown_outcomes": 0},
+    }
+    terminal = {
+        **reconciled,
+        "state_version": 9,
+        "plan": {"state": "TERMINAL", "plan_id": plan_id, "plan_hash": plan_hash},
+        "authority": {"state": "REVOKED"},
+        "leader": {"held": False, "epoch": 3, "fencing_token": 4},
+        "send_intents": [
+            {"plan_id": plan_id, "plan_hash": plan_hash, "state": "RECONCILED"}
+        ],
+        "safe_to_restart": True,
+    }
+
+    class Execution:
+        def __init__(self):
+            self.calls: list[str] = []
+            self.statuses = [initial, halted_with_leader, reconciled, terminal]
+            self.token = SimpleNamespace(epoch=3, fencing_token=4)
+            self.snapshot_count = 0
+
+        async def status(self):
+            self.calls.append("status")
+            return SimpleNamespace(as_dict=lambda: self.statuses.pop(0))
+
+        async def acquire_leader(self, owner_id):
+            self.calls.append(f"acquire:{owner_id}")
+            return self.token
+
+        async def renew_leader(self, token):
+            assert token is self.token
+            self.calls.append("renew")
+            return token
+
+        async def reconciliation_snapshot(self):
+            self.snapshot_count += 1
+            self.calls.append(f"snapshot:{self.snapshot_count}")
+            value = {
+                "snapshot_id": f"snapshot-peek-{self.snapshot_count:064x}",
+                "generation": 17,
+                "position_snapshot_hash": "c" * 64,
+                "active_order_count": 0,
+                "active_orders_sha256": "0" * 64,
+                "state_binding": {
+                    "state_version": 7,
+                    "durable_broker_generation": 17,
+                },
+            }
+            return SimpleNamespace(as_dict=lambda: value)
+
+        async def submit(self, command):
+            assert command["command"] == "reconcile"
+            self.calls.append("reconcile")
+            return {"accepted": True}
+
+        async def resume_active_plan(self, **kwargs):
+            assert kwargs["plan_id"] == plan_id
+            assert kwargs["plan_hash"] == plan_hash
+            assert kwargs["leader_token"] is self.token
+            self.calls.append("resume")
+
+        async def release_leader(self, token):
+            assert token is self.token
+            self.calls.append("release")
+
+    execution = Execution()
+    backend.execution = execution
+    result = asyncio.run(
+        backend._drive_installed_plan(
+            {
+                "plan_id": plan_id,
+                "plan_hash": plan_hash,
+                "phase": "OPEN",
+                "custody_idempotency_key": "b" * 64,
+                "start_quote_proof_state": "STARTED_MATCHED",
+                "expected_after_position_hash": "c" * 64,
+            },
+            expected_intent_count=1,
+        )
+    )
+
+    assert result == {"state": "COMPLETED", "phase": "OPEN", "plan_id": plan_id}
+    assert "reconcile" in execution.calls
+    assert execution.calls.index("reconcile") < execution.calls.index("resume")
+    assert "start" not in execution.calls
+    assert "cancel" not in execution.calls
+
+
 def test_noop_ownership_is_full_domain_zero_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
