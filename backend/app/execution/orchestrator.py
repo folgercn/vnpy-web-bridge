@@ -326,11 +326,11 @@ class ExecutionOrchestrator:
         The HTTP adapter obtains ``snapshot`` through the bounded
         :class:`GatewayReadinessProbe`; this method independently closes the
         full position/order rows and binds them to one durable Execution state
-        snapshot.  A final-validation ``snapshot-peek-<sha256>`` id is stable
-        and therefore binds exactly.  Other transports may mint a new id/time
-        per read, so generation and both canonical fact-set hashes define
-        equivalent facts while durable time may not move into the future.  It
-        never persists the broker facts or calls a gateway.
+        snapshot.  Final-validation ``snapshot-peek-<sha256>`` ids include
+        admission metadata that may change without a portfolio change, so
+        generation and both canonical fact-set hashes define equivalent facts
+        while durable time may not move into the future.  It never persists
+        the broker facts or calls a gateway.
         """
 
         current = self._coerce_snapshot(snapshot)
@@ -398,7 +398,6 @@ class ExecutionOrchestrator:
         durable_active_orders_sha256 = sha256_json(durable_active_orders)
         durable_positions_sha256 = sha256_json(durable_positions)
         status = self._projection(state, observed)
-        stable_snapshot_identity = current.snapshot_id.startswith("snapshot-peek-")
         status_binding = {
             "status_schema_version": status["schema_version"],
             "state_version": status["state_version"],
@@ -408,11 +407,7 @@ class ExecutionOrchestrator:
             "broker": deepcopy(status["broker"]),
             "durable_active_orders_sha256": durable_active_orders_sha256,
             "durable_positions_sha256": durable_positions_sha256,
-            "snapshot_identity_mode": (
-                "EXACT"
-                if stable_snapshot_identity
-                else "GENERATION_FACT_HASH_EQUIVALENT"
-            ),
+            "snapshot_identity_mode": "GENERATION_FACT_HASH_EQUIVALENT",
         }
         durable_broker = status_binding["broker"]
         reconciliation = status_binding["reconciliation"]
@@ -430,10 +425,6 @@ class ExecutionOrchestrator:
             or durable_broker["active_order_count"] != current.active_order_count
             or durable_broker["active_order_count"] != len(durable_active_orders)
             or durable_active_orders_sha256 != active_orders_sha256
-            or (
-                stable_snapshot_identity
-                and reconciliation["fresh_snapshot_id"] != current.snapshot_id
-            )
             or durable_snapshot_observed > snapshot_observed
         ):
             raise SnapshotRejected(

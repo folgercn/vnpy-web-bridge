@@ -716,14 +716,8 @@ class ExecutionAccountFactsProjection:
             or broker["active_order_count"] != candidate["active_order_count"]
             or binding["durable_active_orders_sha256"]
             != candidate["active_orders_sha256"]
-            or binding["snapshot_identity_mode"]
-            != (
-                "EXACT"
-                if stable_snapshot_identity
-                else "GENERATION_FACT_HASH_EQUIVALENT"
-            )
             or (
-                stable_snapshot_identity
+                binding["snapshot_identity_mode"] == "EXACT"
                 and reconciliation["fresh_snapshot_id"] != candidate["snapshot_id"]
             )
             or durable_observed_at > observed_at

@@ -438,7 +438,7 @@ def test_account_facts_rejects_durable_positions_rows_that_do_not_close(
     assert service.repository.snapshot() == before
 
 
-def test_account_facts_requires_exact_stable_peek_snapshot_identity(
+def test_account_facts_accepts_equivalent_peek_snapshot_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("CONTROL_EXECUTION_SHARED_SECRET", EXECUTION_SECRET)
@@ -453,8 +453,42 @@ def test_account_facts_requires_exact_stable_peek_snapshot_identity(
     before = service.repository.snapshot()
     with TestClient(create_execution_app(service)) as client:
         response = client.get("/internal/v1/account-facts", headers=EXECUTION_HEADERS)
-    assert response.status_code == 503
+    assert response.status_code == 200
+    assert response.json()["status_binding"]["snapshot_identity_mode"] == (
+        "GENERATION_FACT_HASH_EQUIVALENT"
+    )
     assert service.repository.snapshot() == before
+
+
+@pytest.mark.parametrize("drift", ["generation", "positions", "orders"])
+def test_account_facts_rejects_peek_portfolio_drift(
+    monkeypatch: pytest.MonkeyPatch, drift: str
+) -> None:
+    monkeypatch.setenv("CONTROL_EXECUTION_SHARED_SECRET", EXECUTION_SECRET)
+    raw = _fresh_snapshot().as_dict()
+    if drift == "generation":
+        raw["generation"] += 1
+    elif drift == "positions":
+        raw["positions"] = {
+            **raw["positions"],
+            "cu2601.SHFE.LONG.CTP.full": {
+                "gateway_name": "CTP",
+                "symbol": "cu2601",
+                "exchange": "SHFE",
+                "direction": "LONG",
+                "volume": 1,
+            },
+        }
+        raw["position_snapshot_hash"] = sha256_json(raw["positions"])
+    else:
+        raw["orders"] = _active_orders()
+        raw["active_order_count"] = 1
+    fresh = GatewaySnapshot(**{**raw, "snapshot_id": f"snapshot-peek-{'c' * 64}"})
+    service = _orchestrator(_fresh_snapshot())
+    service.gateway.snapshots[-1] = fresh
+    with TestClient(create_execution_app(service)) as client:
+        response = client.get("/internal/v1/account-facts", headers=EXECUTION_HEADERS)
+    assert response.status_code == 503
 
 
 def test_account_facts_accepts_nonstable_id_and_time_when_fact_identity_is_equal(
