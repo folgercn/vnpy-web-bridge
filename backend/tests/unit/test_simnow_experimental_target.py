@@ -441,19 +441,44 @@ def test_execute_once_recovers_existing_identity_before_new_target_planning(
     old_plan_hash = "a" * 64
     events: list[str] = []
 
-    def status(state: str) -> dict:
+    def status(*, reconciled: bool, leader_held: bool, version: int) -> dict:
         return {
-            "plan": {"state": state, "plan_id": old_plan_id, "plan_hash": old_plan_hash},
-            "leader": {"held": False},
-            "reconciliation": {"state": reconciliation_state, "unknown_outcomes": 1 if reconciliation_state == "UNKNOWN" else 0},
+            "state_version": version,
+            "lifecycle": "READY" if reconciled else "HALTED_UNKNOWN_OUTCOME",
+            "plan": {"state": "ACTIVE", "plan_id": old_plan_id, "plan_hash": old_plan_hash},
+            "leader": {
+                "held": leader_held,
+                "epoch": 1,
+                "fencing_token": 1,
+            },
+            "reconciliation": {
+                "state": "RECONCILED" if reconciled else "UNKNOWN",
+                "unknown_outcomes": 0 if reconciled else 1,
+            },
             "broker": {"active_order_count": 0},
             "send_intents": [{"plan_id": old_plan_id, "plan_hash": old_plan_hash, "state": "PERSISTED"}],
         }
 
     class Execution:
+        def __init__(self) -> None:
+            starts_reconciled = reconciliation_state == "RECONCILED"
+            self.statuses = [
+                status(reconciled=starts_reconciled, leader_held=False, version=9),
+                status(reconciled=starts_reconciled, leader_held=True, version=9),
+            ]
+            if not starts_reconciled:
+                self.statuses.append(
+                    status(reconciled=True, leader_held=True, version=10)
+                )
+            self.statuses.append(
+                status(reconciled=True, leader_held=True, version=10)
+            )
+            self.latest = self.statuses[0]
+
         async def status(self):
             events.append("status")
-            return SimpleNamespace(as_dict=lambda: status("ACTIVE"))
+            self.latest = self.statuses.pop(0)
+            return SimpleNamespace(as_dict=lambda: self.latest)
 
         async def acquire_leader(self, _owner_id: str):
             events.append("acquire")
@@ -465,6 +490,7 @@ def test_execute_once_recovers_existing_identity_before_new_target_planning(
 
         async def reconciliation_snapshot(self):
             events.append("snapshot")
+            version = self.latest["state_version"]
             return SimpleNamespace(
                 as_dict=lambda: {
                     "snapshot_id": f"snapshot-peek-{'1' * 64}",
@@ -473,11 +499,16 @@ def test_execute_once_recovers_existing_identity_before_new_target_planning(
                     "active_order_count": 0,
                     "active_orders_sha256": "0" * 64,
                     "state_binding": {
-                        "state_version": 9,
+                        "state_version": version,
                         "durable_broker_generation": 17,
                     },
                 }
             )
+
+        async def submit(self, command):
+            assert command["command"] == "reconcile"
+            events.append("reconcile")
+            return {"accepted": True}
 
         async def resume_active_plan(self, **kwargs):
             assert kwargs["plan_id"] == old_plan_id
@@ -497,12 +528,30 @@ def test_execute_once_recovers_existing_identity_before_new_target_planning(
             pytest.fail("new target planner must wait for old identity terminal")
 
     class Backend:
+        _require_active_reconcile_status = (
+            runner._ExperimentalBackend._require_active_reconcile_status
+        )
+        _require_post_renew_status = (
+            runner._ExperimentalBackend._require_post_renew_status
+        )
+        _allows_retired_plan_replacement = (
+            runner._ExperimentalBackend._allows_retired_plan_replacement
+        )
+
         def __init__(self) -> None:
             self.config = SimpleNamespace(raw={"leader_owner_id": "experimental-test"})
             self.execution = Execution()
 
         async def _release_leader(self, token):
             await self.execution.release_leader(token)
+
+        def _actor(self):
+            return {
+                "service": "control-api",
+                "principal": "test",
+                "operator": "test",
+                "role": "admin",
+            }
 
     result = asyncio.run(
         runner.execute_once(
@@ -522,10 +571,32 @@ def test_execute_once_recovers_existing_identity_before_new_target_planning(
     assert result["new_intents"] == 0
     assert result["execution_mutated"] is True
     assert result["gateway_mutated"] is False
-    assert result["reason"] == (
-        "unknown_outcome" if reconciliation_state == "UNKNOWN" else "pending_intents"
-    )
-    assert events == ["status", "acquire", "renew", "snapshot", "resume-old-identity", "status", "release"]
+    assert result["reason"] == "pending_intents"
+    if reconciliation_state == "UNKNOWN":
+        assert events == [
+            "status",
+            "acquire",
+            "renew",
+            "status",
+            "snapshot",
+            "reconcile",
+            "status",
+            "snapshot",
+            "resume-old-identity",
+            "status",
+            "release",
+        ]
+    else:
+        assert events == [
+            "status",
+            "acquire",
+            "renew",
+            "status",
+            "snapshot",
+            "resume-old-identity",
+            "status",
+            "release",
+        ]
 
 
 def test_execute_once_allows_new_target_only_after_old_identity_is_terminal(
@@ -648,6 +719,13 @@ def test_execute_once_allows_new_target_only_after_old_identity_is_terminal(
             return SimpleNamespace(as_dict=lambda: _facts())
 
     class Backend:
+        _require_post_renew_status = (
+            runner._ExperimentalBackend._require_post_renew_status
+        )
+        _allows_retired_plan_replacement = (
+            runner._ExperimentalBackend._allows_retired_plan_replacement
+        )
+
         def __init__(self) -> None:
             self.config = SimpleNamespace(raw={"leader_owner_id": "experimental-test"})
             self.execution = Execution()
@@ -688,7 +766,9 @@ def test_execute_once_allows_new_target_only_after_old_identity_is_terminal(
 
     assert result["status"] == "TARGET_PLAN_V3_DRY_RUN"
     assert events.index("resume-old-identity") < events.index("new-target-recovery")
-    assert events.index("final-reconcile-old-identity") < events.index("new-target-recovery")
+    assert events.index("old-identity-completion") < events.index(
+        "new-target-recovery"
+    )
     assert events.index("old-identity-completion") < events.index("new-target-recovery")
     assert events.index("new-target-recovery") < events.index("new-target-facts")
     assert events[-2:] == ["install-new-target", "drive-new-target"]
@@ -724,7 +804,7 @@ def test_execute_once_blocks_new_target_when_old_final_reconcile_is_unknown(
 
     class Execution:
         def __init__(self) -> None:
-            self.statuses = iter((active, active))
+            self.statuses = iter((active, active, active))
 
         async def status(self):
             events.append("status")
@@ -757,6 +837,13 @@ def test_execute_once_blocks_new_target_when_old_final_reconcile_is_unknown(
             pytest.fail("unknown final reconcile must not derive a new target")
 
     class Backend:
+        _require_post_renew_status = (
+            runner._ExperimentalBackend._require_post_renew_status
+        )
+        _allows_retired_plan_replacement = (
+            runner._ExperimentalBackend._allows_retired_plan_replacement
+        )
+
         def __init__(self) -> None:
             self.config = SimpleNamespace(raw={"leader_owner_id": "experimental-test"})
             self.execution = Execution()
@@ -789,7 +876,18 @@ def test_execute_once_blocks_new_target_when_old_final_reconcile_is_unknown(
     assert result["plan_id"] == old_plan_id
     assert result["plan_hash"] == old_plan_hash
     assert result["reason"] == "final_reconcile_outcome_unknown"
-    assert events == ["status", "acquire", "renew", "snapshot", "resume-old-identity", "status", "renew", "final-reconcile-old-identity", "release"]
+    assert events == [
+        "status",
+        "acquire",
+        "renew",
+        "status",
+        "snapshot",
+        "resume-old-identity",
+        "status",
+        "renew",
+        "final-reconcile-old-identity",
+        "release",
+    ]
 
 
 def test_runner_formal_quote_failure_is_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
