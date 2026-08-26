@@ -520,7 +520,9 @@ async def execute_once(
             raise ExperimentalRunError("existing planner has no lifecycle handoff")
         phase = str(handoff.target_plan["phase"])
         recovery = await backend._install_or_recover_plan(phase_key=phase_key(phase), handoff=handoff)
-        lifecycle = await backend._drive_installed_plan(recovery)
+        lifecycle = await backend._drive_installed_plan(
+            recovery, expected_intent_count=len(handoff.target_plan["orders"])
+        )
         if lifecycle.get("state") != "COMPLETED" or phase != "CLOSE":
             return _checkpoint(target, {**preview, "lifecycle": lifecycle})
         # A completed CLOSE must re-enter via fresh Execution facts, formal
