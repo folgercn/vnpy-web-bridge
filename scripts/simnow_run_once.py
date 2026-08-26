@@ -57,6 +57,9 @@ from shared.trust_contracts.v1 import (  # noqa: E402
     ContractError,
     canonical_json_line,
 )
+from shared.commodity_execution import (  # noqa: E402
+    before_position_projection_hash,
+)
 
 _TERMINAL_INTENT_STATES = frozenset({"TERMINAL", "RECONCILED", "CANCELLED"})
 
@@ -199,7 +202,11 @@ async def _submit_reconcile_with_ready_snapshot(
             "snapshot_id": snapshot["snapshot_id"],
             "snapshot_fact_binding": {
                 "generation": snapshot["generation"],
-                "position_snapshot_hash": snapshot["position_snapshot_hash"],
+                "position_snapshot_hash": before_position_projection_hash(
+                    snapshot["positions"],
+                    account_scope=snapshot["account_scope"],
+                    environment=snapshot["environment"],
+                ),
                 "active_order_count": snapshot["active_order_count"],
                 "active_orders_sha256": snapshot["active_orders_sha256"],
                 "state_version": state_binding["state_version"],

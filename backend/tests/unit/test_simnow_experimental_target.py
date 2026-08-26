@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 from app.execution.formal_tick_reader import FormalTickBinding
 
-from shared.commodity_execution import sha256_json
+from shared.commodity_execution import before_position_projection_hash, sha256_json
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -498,6 +498,9 @@ def test_execute_once_recovers_existing_identity_before_new_target_planning(
                     "position_snapshot_hash": "c" * 64,
                     "active_order_count": 0,
                     "active_orders_sha256": "0" * 64,
+                    "account_scope": "account:windows",
+                    "environment": "SIMNOW",
+                    "positions": {},
                     "state_binding": {
                         "state_version": version,
                         "durable_broker_generation": 17,
@@ -667,6 +670,9 @@ def test_execute_once_allows_new_target_only_after_old_identity_is_terminal(
                     "position_snapshot_hash": "c" * 64,
                     "active_order_count": 0,
                     "active_orders_sha256": "0" * 64,
+                    "account_scope": "account:windows",
+                    "environment": "SIMNOW",
+                    "positions": {},
                     "state_binding": {
                         "state_version": 9,
                         "durable_broker_generation": 17,
@@ -694,7 +700,9 @@ def test_execute_once_allows_new_target_only_after_old_identity_is_terminal(
             assert command["expected"]["state_version"] == 9
             assert command["payload"]["snapshot_fact_binding"] == {
                 "generation": 17,
-                "position_snapshot_hash": "c" * 64,
+                "position_snapshot_hash": before_position_projection_hash(
+                    {}, account_scope="account:windows", environment="SIMNOW"
+                ),
                 "active_order_count": 0,
                 "active_orders_sha256": "0" * 64,
                 "state_version": 9,
