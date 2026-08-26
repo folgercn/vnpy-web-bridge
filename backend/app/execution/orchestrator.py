@@ -1461,6 +1461,7 @@ class ExecutionOrchestrator:
         def writer(candidate: dict[str, Any]) -> dict[str, Any]:
             if int(candidate["state_version"]) != expected:
                 raise ExpectedVersionConflict(expected, int(candidate["state_version"]))
+            self._apply_remote_fence_high_water_floor(candidate, snapshot)
             self._apply_snapshot(
                 candidate, snapshot, envelope.payload["reconciliation_run_id"]
             )
@@ -1542,7 +1543,13 @@ class ExecutionOrchestrator:
             candidate["audit"].append({"kind": "command_receipt", **receipt})
             return result
 
-        result, state_after = self.repository.mutate(writer, expected_version=expected)
+        try:
+            result, state_after = self.repository.mutate(
+                writer, expected_version=expected
+            )
+        except SnapshotRejected as exc:
+            self._mark_reconcile_halted(reason=str(exc))
+            raise
         key = f"{envelope.actor.service}:{envelope.idempotency_key}"
         return CommandResponse(
             receipt=deepcopy(state_after["receipts"][key]),
@@ -1698,6 +1705,54 @@ class ExecutionOrchestrator:
                 "fresh_snapshot_id": snapshot.snapshot_id,
             }
         )
+
+    @staticmethod
+    def _apply_remote_fence_high_water_floor(
+        state: dict[str, Any], snapshot: GatewaySnapshot
+    ) -> None:
+        """Advance an idle local lease floor from verified Windows facts only.
+
+        Final-validation's read-only peek is already bound to the same account
+        and environment as reconciliation.  It may reveal a Windows durable
+        fence high-water greater than a restarted Execution repository has
+        retained.  Never lower local state, and never alter a live lease.
+        """
+
+        remote_epoch = snapshot.fence_high_water_epoch
+        remote_token = snapshot.fence_high_water_fencing_token
+        if remote_epoch is None and remote_token is None:
+            return
+        if (
+            remote_epoch is None
+            or remote_token is None
+            or isinstance(remote_epoch, bool)
+            or not isinstance(remote_epoch, int)
+            or remote_epoch < 0
+            or isinstance(remote_token, bool)
+            or not isinstance(remote_token, int)
+            or remote_token < 0
+        ):
+            raise SnapshotRejected("remote fence high-water is invalid")
+
+        lease = state.get("lease")
+        if not isinstance(lease, dict):
+            raise SnapshotRejected("durable lease is invalid")
+        try:
+            local_epoch = int(lease.get("epoch", 0))
+            local_token = int(lease.get("fencing_token", 0))
+            expires_at = _timestamp(str(lease.get("lease_expires_at", EPOCH_TIMESTAMP)))
+        except (TypeError, ValueError, CommandValidationError) as exc:
+            raise SnapshotRejected("durable lease is invalid") from exc
+        if local_epoch < 0 or local_token < 0:
+            raise SnapshotRejected("durable lease is invalid")
+        if remote_epoch <= local_epoch and remote_token <= local_token:
+            return
+        if bool(lease.get("owner_id")) and expires_at > utc_now():
+            raise SnapshotRejected(
+                "remote fence high-water conflicts with a live local leader"
+            )
+        lease["epoch"] = max(local_epoch, remote_epoch)
+        lease["fencing_token"] = max(local_token, remote_token)
 
     # ------------------------------------------------------------------
     # Order mutations (not Control commands)
@@ -2451,6 +2506,20 @@ class ExecutionOrchestrator:
             fresh = value.get("fresh", True)
             if not isinstance(fresh, bool):
                 raise TypeError("snapshot.fresh must be boolean")
+            remote_epoch = value.get("fence_high_water_epoch")
+            remote_token = value.get("fence_high_water_fencing_token")
+            if remote_epoch is not None and (
+                isinstance(remote_epoch, bool)
+                or not isinstance(remote_epoch, int)
+                or remote_epoch < 0
+            ):
+                raise TypeError("snapshot fence high-water epoch is invalid")
+            if remote_token is not None and (
+                isinstance(remote_token, bool)
+                or not isinstance(remote_token, int)
+                or remote_token < 0
+            ):
+                raise TypeError("snapshot fence high-water token is invalid")
         except (KeyError, TypeError, ValueError) as exc:
             raise GatewayUnavailable("gateway returned an invalid snapshot") from exc
         return GatewaySnapshot(
@@ -2465,6 +2534,8 @@ class ExecutionOrchestrator:
             account_scope=account_scope,
             environment=environment,
             fresh=fresh,
+            fence_high_water_epoch=remote_epoch,
+            fence_high_water_fencing_token=remote_token,
         )
 
     def _validate_reconcile_snapshot(

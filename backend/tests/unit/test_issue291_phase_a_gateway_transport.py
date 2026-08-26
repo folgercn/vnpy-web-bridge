@@ -689,6 +689,8 @@ def test_final_validation_readiness_uses_fixed_pure_peek_and_hash_binds_facts() 
     assert snapshot.account_scope == "account:prod"
     assert snapshot.environment == "SIMNOW"
     assert snapshot.fresh is True
+    assert snapshot.fence_high_water_epoch == 0
+    assert snapshot.fence_high_water_fencing_token == 0
 
 
 def test_final_validation_does_not_replace_durable_snapshot_path() -> None:
@@ -1065,12 +1067,16 @@ def test_final_validation_readiness_exposes_only_active_orders() -> None:
         lambda facts: facts["gateway"].update({"account_scope": "account:foreign"}),
         lambda facts: facts["gateway"].update({"environment": "SIMNOW"}),
         lambda facts: facts.update({"observed_at": "1970-01-01T00:00:00Z"}),
+        lambda facts: facts["admission"]["fence"].pop("high_water_epoch"),
+        lambda facts: facts["admission"]["fence"].update({"high_water_epoch": True}),
     ],
     ids=[
         "malformed",
         "foreign-gateway",
         "foreign-windows-environment",
         "stale-like-extra-fact",
+        "missing-fence-high-water",
+        "malformed-fence-high-water",
     ],
 )
 def test_final_validation_readiness_rejects_non_exact_or_foreign_facts(mutate) -> None:

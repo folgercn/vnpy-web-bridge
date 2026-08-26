@@ -889,6 +889,8 @@ class VnpyWindowsGateway:
                 account_scope=self.account_scope,
                 environment=self.environment,
                 fresh=True,
+                fence_high_water_epoch=fence["high_water_epoch"],
+                fence_high_water_fencing_token=fence["high_water_fencing_token"],
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise GatewayUnavailable(
