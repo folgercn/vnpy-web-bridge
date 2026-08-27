@@ -19,14 +19,15 @@ from test_issue362_simnow_continuous_run_once import (  # noqa: E402
 
 
 @pytest.mark.parametrize(
-    ("has_intent", "expected_error"),
+    ("intent_scope", "expected_error"),
     [
-        (False, "start was rejected before broker mutation"),
-        (True, "start outcome is unknown; query only"),
+        ("NONE", "start was rejected before broker mutation"),
+        ("HISTORICAL", "start was rejected before broker mutation"),
+        ("CURRENT", "start outcome is unknown; query only"),
     ],
 )
 def test_explicit_start_rejection_requires_zero_work_boundary(
-    tmp_path: Path, has_intent: bool, expected_error: str
+    tmp_path: Path, intent_scope: str, expected_error: str
 ) -> None:
     backend = _production_backend_without_clients(tmp_path, enabled=True)
     plan_id = "continuous-open-plan-rejected-0001"
@@ -48,7 +49,21 @@ def test_explicit_start_rejection_requires_zero_work_boundary(
         "leader": {"held": False},
         "reconciliation": {"state": "RECONCILED", "unknown_outcomes": 0},
         "broker": {"active_order_count": 0},
-        "send_intents": ([{"state": "TERMINAL"}] if has_intent else []),
+        "send_intents": (
+            []
+            if intent_scope == "NONE"
+            else [
+                {
+                    "state": "TERMINAL",
+                    "plan_id": (
+                        plan_id if intent_scope == "CURRENT" else "historical-plan"
+                    ),
+                    "plan_hash": (
+                        plan_hash if intent_scope == "CURRENT" else "f" * 64
+                    ),
+                }
+            ]
+        ),
         "safe_to_restart": False,
     }
 

@@ -1286,7 +1286,11 @@ def test_retired_predecessor_uses_stable_successor_and_never_publishes_k2(
                 status["plan"]["plan_id"] = (
                     f"preview-{predecessor['plan_hash'][:16]}"
                 )
-                status["send_intents"] = []
+                status["send_intents"] = [{
+                    "state": "TERMINAL",
+                    "plan_id": "historical-plan",
+                    "plan_hash": "9" * 64,
+                }]
             return SimpleNamespace(as_dict=lambda: status)
 
         async def target_plan_recovery(self, key: str):
@@ -1657,7 +1661,11 @@ def test_unsafe_predecessor_never_derives_successor(boundary: str) -> None:
             if boundary == "PREVIEW_FOREIGN":
                 status["authority"]["artifact_id"] = "foreign-plan"
             if boundary == "PREVIEW_INTENT":
-                status["send_intents"] = [{"state": "TERMINAL"}]
+                status["send_intents"] = [{
+                    "state": "TERMINAL",
+                    "plan_id": predecessor["plan_id"],
+                    "plan_hash": predecessor["plan_hash"],
+                }]
             return SimpleNamespace(as_dict=lambda: status)
 
         async def target_plan_recovery(self, key: str):
