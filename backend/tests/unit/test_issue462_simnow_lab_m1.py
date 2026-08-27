@@ -68,6 +68,7 @@ class FakeEventEngine:
 class FakeTracker:
     def __init__(self) -> None:
         self.ready = False
+        self.generation = 0
 
     def is_ready(self) -> bool:
         return self.ready
@@ -112,9 +113,13 @@ class FakeGateway:
         self.main = main
         self.td_api = FakeTdApi(main)
         self.md_api = SimpleNamespace(login_status=True)
+        self.position_query_rejected = False
 
     def query_position(self) -> None:
         tracker = self.td_api._vnpy_position_readiness_v1
+        if self.position_query_rejected:
+            return
+        tracker.generation += 1
         tracker.ready = False
         self.main.oms.positions = {row.vt_positionid: row for row in self.main.broker_positions}
         tracker.ready = True
@@ -423,6 +428,16 @@ def test_current_is_fresh_redacted_and_zero_mutation(lab: tuple[SimNowLabExecuto
     assert main.sent == 0
     with sqlite3.connect(db_path) as db:
         assert all(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0 for table in ("runs", "orders", "trades", "snapshots"))
+
+
+def test_position_query_reject_cannot_reuse_stale_ready_after_oms_clear(lab: tuple[SimNowLabExecutorV1, FakeMainEngine, Path]) -> None:
+    subject, main, _db_path = lab
+    subject.wait_seconds = 0.01
+    main.gateway.td_api._vnpy_position_readiness_v1.ready = True
+    main.gateway.position_query_rejected = True
+
+    with pytest.raises(SimNowLabError, match="CTP_POSITION_QUERY_TIMEOUT"):
+        subject._query_positions()
 
 
 def test_sync_callback_keeps_terminal_order_and_trade(lab: tuple[SimNowLabExecutorV1, FakeMainEngine, Path]) -> None:

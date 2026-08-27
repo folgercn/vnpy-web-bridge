@@ -376,12 +376,15 @@ class SimNowLabExecutorV1:
         tracker = getattr(gateway.td_api, "_vnpy_position_readiness_v1", None)
         if tracker is None or not callable(getattr(tracker, "is_ready", None)):
             raise SimNowLabError("CTP_POSITION_QUERY_UNAVAILABLE")
+        generation = getattr(tracker, "generation", None)
+        if type(generation) is not int:
+            raise SimNowLabError("CTP_POSITION_QUERY_UNAVAILABLE")
         self._oms().positions.clear()
         self._pace_query()
         gateway.query_position()
         deadline = time.monotonic() + self.wait_seconds
         while time.monotonic() < deadline:
-            if tracker.is_ready() is True:
+            if tracker.generation > generation and tracker.is_ready() is True:
                 return list(self.main_engine.get_all_positions())
             time.sleep(0.05)
         raise SimNowLabError("CTP_POSITION_QUERY_TIMEOUT")
