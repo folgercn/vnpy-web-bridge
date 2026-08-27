@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import inspect
 import os
-import sys
-from enum import Enum
 from hashlib import sha256
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -17,24 +15,22 @@ from scripts.windows_fence_foundation.admission import (
     WindowsRpcDurableFenceDenied,
     WindowsRpcDurableFenceError,
 )
-from scripts.windows_fence_foundation.final_admission_v1 import (
-    _receipt_digest,
-    _request_digest,
-)
 
 SIM_ACCOUNT = "synthetic-issue291-account"
-
-
-class _FakeOrderType:
-    LIMIT = object()
 
 
 class _FakeCtpTdApi(SimpleNamespace):
     pass
 
 
-ORDERTYPE_VT2CTP = {_FakeOrderType.LIMIT: ("2", "3", "1")}
-OrderType = _FakeOrderType
+class FakeEventEngine:
+    """Minimal event registry used by the in-process SIMNOW_LAB attachment."""
+
+    def __init__(self) -> None:
+        self.handlers: dict[Any, list[Any]] = {}
+
+    def register(self, event_type: Any, handler: Any) -> None:
+        self.handlers.setdefault(event_type, []).append(handler)
 
 
 @pytest.fixture(autouse=True)
@@ -189,7 +185,7 @@ def _attach(
         )
     durable_module.attach_windows_rpc_simnow_e2e_v1(
         rpc_engine=SimpleNamespace(server=server),
-        event_engine=object(),
+        event_engine=FakeEventEngine(),
         main_engine=engine,
         explicit_e2e_authorized=True,
         production_authorized=False,
@@ -198,107 +194,6 @@ def _attach(
         max_order_volume=1,
     )
     return engine
-
-
-def _request(volume: Any = 1) -> dict[str, Any]:
-    return {
-        "symbol": "RB2610",
-        "exchange": "SHFE",
-        "direction": "LONG",
-        "type": "LIMIT",
-        "volume": volume,
-        "price": 3100,
-        "offset": "OPEN",
-    }
-
-
-def _context(
-    request: dict[str, Any],
-    *,
-    intent_id: str,
-    leader_epoch: int = 1,
-    fencing_token: int = 1,
-    action: str = "send",
-) -> dict[str, Any]:
-    context = {
-        "account_scope": "account:windows",
-        "environment": "simnow",
-        "leader_epoch": leader_epoch,
-        "fencing_token": fencing_token,
-        "plan_id": "plan-000001",
-        "plan_hash": "a" * 64,
-        "intent_id": intent_id,
-        "idempotency_key": f"{action}-key-{intent_id}",
-        "action": action,
-        "receipt_id": f"receipt-{intent_id}",
-        "receipt_hash": "",
-        "request_hash": _request_digest(request),
-    }
-    context["receipt_hash"] = _receipt_digest(context)
-    return context
-
-
-def _install_fence(
-    server: FakeServer, *, leader_epoch: int = 1, fencing_token: int = 1
-) -> None:
-    server._functions["install_fence_v1"](
-        {
-            "account_scope": "account:windows",
-            "environment": "simnow",
-            "leader_epoch": leader_epoch,
-            "fencing_token": fencing_token,
-        }
-    )
-
-
-def _register(server: FakeServer, context: dict[str, Any]) -> None:
-    server._functions["register_receipt_v1"](
-        {"intent_id": context["intent_id"], "receipt": context}
-    )
-
-
-def _install_fake_vnpy(monkeypatch: pytest.MonkeyPatch) -> None:
-    class Direction(Enum):
-        LONG = "LONG"
-
-    class Exchange(Enum):
-        SHFE = "SHFE"
-
-    class Offset(Enum):
-        NONE = "NONE"
-        OPEN = "OPEN"
-
-    class OrderType(Enum):
-        LIMIT = "LIMIT"
-
-    class OrderRequest:
-        def __init__(self, **kwargs: Any) -> None:
-            self.__dict__.update(kwargs)
-
-    class CancelRequest:
-        def __init__(self, **kwargs: Any) -> None:
-            self.__dict__.update(kwargs)
-
-    vnpy_module = ModuleType("vnpy")
-    trader_module = ModuleType("vnpy.trader")
-    constant_module = ModuleType("vnpy.trader.constant")
-    object_module = ModuleType("vnpy.trader.object")
-    constant_module.Direction = Direction
-    constant_module.Exchange = Exchange
-    constant_module.Offset = Offset
-    constant_module.OrderType = OrderType
-    object_module.OrderRequest = OrderRequest
-    object_module.CancelRequest = CancelRequest
-    vnpy_module.trader = trader_module
-    trader_module.constant = constant_module
-    trader_module.object = object_module
-    for name, module in {
-        "vnpy": vnpy_module,
-        "vnpy.trader": trader_module,
-        "vnpy.trader.constant": constant_module,
-        "vnpy.trader.object": object_module,
-    }.items():
-        monkeypatch.setitem(sys.modules, name, module)
 
 
 def test_simnow_e2e_attach_has_exact_controlled_signature_and_negative_gates() -> None:
@@ -379,7 +274,7 @@ def test_simnow_e2e_attach_reads_only_the_actual_ctp_connect_binding(
 
     _attach(monkeypatch, tmp_path, server, main_engine=engine)
 
-    assert "send_order_fenced_v1" in server._functions
+    assert "simnow_lab_apply_target_v1" in server._functions
     assert binding.broker_id == "9999"
     assert binding.environment == "实盘"
     assert binding.trade_front == "tcp://182.254.243.31:30001"
@@ -398,7 +293,7 @@ def test_simnow_e2e_attach_rejects_missing_actual_ctp_connect_binding(
     with pytest.raises(WindowsRpcDurableFenceDenied, match="connect binding"):
         durable_module.attach_windows_rpc_simnow_e2e_v1(
             rpc_engine=SimpleNamespace(server=server),
-            event_engine=object(),
+            event_engine=FakeEventEngine(),
             main_engine=FactSource(),
             explicit_e2e_authorized=True,
             production_authorized=False,
@@ -587,7 +482,7 @@ def test_simnow_e2e_raw_id_hash_pin_accepts_only_synthetic_fixture(
         pin_test_account_hash=False,
     )
 
-    assert "send_order_fenced_v1" in server._functions
+    assert "simnow_lab_apply_target_v1" in server._functions
     assert server.send_calls == server.cancel_calls == 0
 
 
@@ -628,13 +523,8 @@ def test_simnow_e2e_attach_has_only_fixed_methods_and_frozen_legacy_denials(
     assert set(server._functions) == {
         "send_order",
         "cancel_order",
-        "install_fence_v1",
-        "register_receipt_v1",
-        "send_order_fenced_v1",
-        "cancel_order_fenced_v1",
-        "query_intent_v1",
-        "get_execution_snapshot_v1",
-        "peek_current_facts_v1",
+        "simnow_lab_apply_target_v1",
+        "simnow_lab_get_run_v1",
     }
     for name in ("send_order", "cancel_order"):
         with pytest.raises(WindowsRpcDurableFenceDenied, match="FROZEN"):
@@ -649,92 +539,27 @@ def test_simnow_e2e_attach_has_only_fixed_methods_and_frozen_legacy_denials(
         _attach(monkeypatch, tmp_path, server)
 
 
-def test_simnow_e2e_attach_requires_fence_and_receipt_before_one_lot_native_send(
+def test_simnow_e2e_legacy_lifecycle_methods_are_not_exposed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _install_fake_vnpy(monkeypatch)
     server = FakeServer()
     _attach(monkeypatch, tmp_path, server)
-    request = _request()
-    context = _context(request, intent_id="intent-send-0001")
-
-    with pytest.raises(WindowsRpcDurableFenceDenied):
-        server._functions["send_order_fenced_v1"](request, context)
-    assert server.send_calls == 0
-
-    _install_fence(server)
-    with pytest.raises(
-        WindowsRpcDurableFenceDenied, match="receipt was not registered"
-    ):
-        server._functions["send_order_fenced_v1"](request, context)
-    assert server.send_calls == 0
-
-    _register(server, context)
-    sent = server._functions["send_order_fenced_v1"](request, context)
-    assert sent["state"] == "SUBMITTED"
-    assert sent["broker_order_id"] == "CTP.1"
-    assert server.send_calls == 1
+    assert not {
+        "install_fence_v1",
+        "register_receipt_v1",
+        "send_order_fenced_v1",
+        "cancel_order_fenced_v1",
+        "query_intent_v1",
+        "get_execution_snapshot_v1",
+        "peek_current_facts_v1",
+    } & set(server._functions)
 
 
-@pytest.mark.parametrize("volume", [2, 0, -1, True, 1.0, 0.5, "1", None])
-def test_simnow_e2e_send_volume_is_fail_closed_before_native_handler(
-    volume: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _install_fake_vnpy(monkeypatch)
-    server = FakeServer()
-    _attach(monkeypatch, tmp_path, server)
-    _install_fence(server)
-    request = _request(volume)
-    context = _context(
-        request, intent_id=f"intent-volume-{str(volume).replace('-', 'n')}"
-    )
-    _register(server, context)
-
-    with pytest.raises(WindowsRpcDurableFenceDenied):
-        server._functions["send_order_fenced_v1"](request, context)
-    assert server.send_calls == 0
-
-
-def test_simnow_e2e_rejects_foreign_scope_receipt_and_fence_before_native_send(
+def test_simnow_e2e_lab_attach_failure_preserves_frozen_legacy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _install_fake_vnpy(monkeypatch)
-    server = FakeServer()
-    _attach(monkeypatch, tmp_path, server)
-    request = _request()
-    context = _context(request, intent_id="intent-scope-0001")
+    import scripts.windows_simnow_lab as simnow_lab
 
-    with pytest.raises(WindowsRpcDurableFenceDenied, match="scope is foreign"):
-        server._functions["install_fence_v1"](
-            {
-                "account_scope": "account:foreign",
-                "environment": "simnow",
-                "leader_epoch": 1,
-                "fencing_token": 1,
-            }
-        )
-    _install_fence(server)
-    foreign_receipt = {**context, "environment": "paper"}
-    foreign_receipt["receipt_hash"] = _receipt_digest(foreign_receipt)
-    with pytest.raises(WindowsRpcDurableFenceDenied, match="scope is foreign"):
-        _register(server, foreign_receipt)
-    _register(server, context)
-
-    foreign_scope = {**context, "account_scope": "account:foreign"}
-    with pytest.raises(WindowsRpcDurableFenceDenied, match="scope is foreign"):
-        server._functions["send_order_fenced_v1"](request, foreign_scope)
-    stale_fence = {**context, "fencing_token": 2}
-    with pytest.raises(WindowsRpcDurableFenceDenied, match="stale"):
-        server._functions["send_order_fenced_v1"](request, stale_fence)
-    foreign_receipt_context = {**context, "receipt_id": "receipt-foreign-0001"}
-    with pytest.raises(WindowsRpcDurableFenceDenied, match="receipt binding"):
-        server._functions["send_order_fenced_v1"](request, foreign_receipt_context)
-    assert server.send_calls == 0
-
-
-def test_simnow_e2e_failure_cleans_typed_methods_and_preserves_frozen_legacy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
     server = FakeServer()
     monkeypatch.setattr(
         durable_module,
@@ -742,16 +567,15 @@ def test_simnow_e2e_failure_cleans_typed_methods_and_preserves_frozen_legacy(
         lambda: tmp_path / "execution-final-admission-v1.json",
     )
 
-    def fail_after_registration(runtime: Any, *_args: Any, **_kwargs: Any) -> None:
-        for name in durable_module._VALIDATION_TRANSIENT_RPC_METHODS:
+    def fail_after_registration(*, runtime: Any, db_path: Path) -> None:
+        del db_path
+        for name in ("simnow_lab_apply_target_v1", "simnow_lab_get_run_v1"):
             runtime.rpc_engine.server._functions[name] = lambda: None
         raise WindowsRpcDurableFenceError(
             "injected E2E attach failure", code="RPC_REGISTRY_UNAVAILABLE"
         )
 
-    monkeypatch.setattr(
-        durable_module, "_attach_fixed_typed_fenced_methods", fail_after_registration
-    )
+    monkeypatch.setattr(simnow_lab, "attach_windows_simnow_lab_v1", fail_after_registration)
     with pytest.raises(WindowsRpcDurableFenceError, match="injected E2E"):
         _attach(monkeypatch, tmp_path, server)
 
@@ -779,7 +603,7 @@ def test_simnow_e2e_attach_is_mutually_exclusive_with_existing_attaches(
     )
     getattr(durable_module, attach_name)(
         rpc_engine=SimpleNamespace(server=server),
-        event_engine=object(),
+        event_engine=FakeEventEngine(),
         main_engine=FactSource(),
     )
     with pytest.raises(WindowsRpcDurableFenceError, match="already attached"):
@@ -807,115 +631,9 @@ def test_existing_attaches_reject_a_simnow_e2e_runtime(
     with pytest.raises(WindowsRpcDurableFenceError, match="already attached"):
         getattr(durable_module, attach_name)(
             rpc_engine=SimpleNamespace(server=server),
-            event_engine=object(),
+            event_engine=FakeEventEngine(),
             main_engine=FactSource(),
         )
-
-
-def test_simnow_e2e_restart_restores_high_water_and_receipt_query_then_cancels(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _install_fake_vnpy(monkeypatch)
-    orders: list[dict[str, Any]] = []
-    engine = FactSource(orders=orders)
-
-    class StatefulServer(FakeServer):
-        def __init__(self) -> None:
-            super().__init__()
-            self._functions["send_order"] = self.native_send
-            self._functions["cancel_order"] = self.native_cancel
-
-        def native_send(self, request: Any, gateway_name: str) -> str:
-            self.send_calls += 1
-            orderid = str(len(orders) + 1)
-            vt_orderid = f"{gateway_name}.{orderid}"
-            orders.append(
-                {
-                    "vt_orderid": vt_orderid,
-                    "orderid": orderid,
-                    "symbol": request.symbol,
-                    "exchange": request.exchange.name,
-                    "reference": request.reference,
-                    "gateway_name": gateway_name,
-                    "status": "not_traded",
-                }
-            )
-            return vt_orderid
-
-        def native_cancel(self, request: Any, gateway_name: str) -> None:
-            self.cancel_calls += 1
-            assert gateway_name == "CTP"
-            for order in orders:
-                if order["orderid"] == request.orderid:
-                    order["status"] = "cancelled"
-                    return
-            raise AssertionError("cancel target missing")
-
-    first_server = StatefulServer()
-    _attach(monkeypatch, tmp_path, first_server, main_engine=engine)
-    _install_fence(first_server)
-    send_request = _request()
-    send_context = _context(send_request, intent_id="intent-restart-send-0001")
-    _register(first_server, send_context)
-    sent = first_server._functions["send_order_fenced_v1"](send_request, send_context)
-    assert sent["broker_order_id"] == "CTP.1"
-
-    restarted_server = StatefulServer()
-    _attach(monkeypatch, tmp_path, restarted_server, main_engine=engine)
-    peek = restarted_server._functions["peek_current_facts_v1"](
-        {"account_scope": "account:windows", "environment": "simnow"}
-    )
-    assert peek["admission"]["fence"] == {
-        "active": False,
-        "current_epoch": 0,
-        "current_fencing_token": 0,
-        "high_water_epoch": 1,
-        "high_water_fencing_token": 1,
-    }
-    assert peek["admission"]["receipt_intents"] == [send_context["intent_id"]]
-
-    with pytest.raises(WindowsRpcDurableFenceDenied, match="strictly newer"):
-        _install_fence(restarted_server)
-    with pytest.raises(WindowsRpcDurableFenceDenied):
-        restarted_server._functions["send_order_fenced_v1"](send_request, send_context)
-    with pytest.raises(WindowsRpcDurableFenceDenied):
-        _register(restarted_server, send_context)
-    assert restarted_server.send_calls == 0
-
-    recovered = restarted_server._functions["query_intent_v1"](
-        {
-            "account_scope": "account:windows",
-            "environment": "simnow",
-            "intent_id": send_context["intent_id"],
-            "broker_order_id": "CTP.1",
-        }
-    )
-    assert recovered["state"] == "ACKNOWLEDGED"
-    assert recovered["broker_order_id"] == "CTP.1"
-
-    _install_fence(restarted_server, leader_epoch=2, fencing_token=2)
-    with pytest.raises(WindowsRpcDurableFenceDenied, match="stale"):
-        _register(restarted_server, send_context)
-    with pytest.raises(WindowsRpcDurableFenceDenied, match="stale"):
-        restarted_server._functions["send_order_fenced_v1"](send_request, send_context)
-    cancel_request = {
-        "target_intent_id": send_context["intent_id"],
-        "broker_order_id": "CTP.1",
-    }
-    cancel_context = _context(
-        cancel_request,
-        intent_id="intent-restart-cancel-001",
-        leader_epoch=2,
-        fencing_token=2,
-        action="cancel",
-    )
-    _register(restarted_server, cancel_context)
-    cancelled = restarted_server._functions["cancel_order_fenced_v1"](
-        cancel_request, cancel_context
-    )
-    assert cancelled["state"] == "CANCELLED"
-    assert restarted_server.cancel_calls == 1
-    assert orders[0]["status"] == "cancelled"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows RpcServer")
@@ -942,13 +660,8 @@ def test_simnow_e2e_attach_preserves_native_windows_rpc_contract(
         assert set(server._functions) == {
             "send_order",
             "cancel_order",
-            "install_fence_v1",
-            "register_receipt_v1",
-            "send_order_fenced_v1",
-            "cancel_order_fenced_v1",
-            "query_intent_v1",
-            "get_execution_snapshot_v1",
-            "peek_current_facts_v1",
+            "simnow_lab_apply_target_v1",
+            "simnow_lab_get_run_v1",
         }
         for name in ("send_order", "cancel_order"):
             with pytest.raises(WindowsRpcDurableFenceDenied, match="FROZEN"):
