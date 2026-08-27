@@ -8,12 +8,17 @@ import json
 import os
 import tempfile
 from collections.abc import Mapping
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from scripts.simnow_experimental_materialize_target import (
+    ExperimentalTargetError,
+)
+from scripts.simnow_experimental_materialize_target import (
+    validate_target as validate_source_target,
+)
+
 TARGET_SCHEMA = "simnow_lab_target_v1"
-SOURCE_SCHEMA = "simnow-experimental-target-v1"
 STRATEGY_ID = "STATIC_CORE_EQUAL"
 RPC_APPLY = "simnow_lab_apply_target_v1"
 RPC_GET = "simnow_lab_get_run_v1"
@@ -41,47 +46,12 @@ def _target_id(value: Mapping[str, Any]) -> str:
 
 
 def _source_rows(value: Any) -> list[Mapping[str, Any]]:
-    if not isinstance(value, Mapping):
-        raise SimNowLabCliError("SOURCE_TARGET_INVALID")
-    if value.get("schema_version") != SOURCE_SCHEMA or value.get("strategy_id") != STRATEGY_ID:
-        raise SimNowLabCliError("SOURCE_TARGET_IDENTITY_INVALID")
-    if any(value.get(field) is not False for field in (
-        "production", "live_trading_authorized", "countable_forward", "official_forward_claimed",
-    )):
-        raise SimNowLabCliError("SOURCE_TARGET_LANE_INVALID")
-    generated_at = value.get("generated_at")
-    if not isinstance(generated_at, str) or not generated_at.endswith("Z"):
-        raise SimNowLabCliError("SOURCE_TARGET_TIME_INVALID")
     try:
-        parsed = datetime.fromisoformat(generated_at.removesuffix("Z") + "+00:00")
-    except ValueError as exc:
-        raise SimNowLabCliError("SOURCE_TARGET_TIME_INVALID") from exc
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise SimNowLabCliError("SOURCE_TARGET_TIME_INVALID")
-    rows = value.get("targets")
-    if not isinstance(rows, list) or len(rows) != len(PRODUCTS):
-        raise SimNowLabCliError("SOURCE_TARGET_ROWS_INVALID")
-    result: dict[str, Mapping[str, Any]] = {}
-    for row in rows:
-        if not isinstance(row, Mapping) or set(row) != {"product", "exact_contract", "quantity"}:
-            raise SimNowLabCliError("SOURCE_TARGET_ROW_INVALID")
-        product, exact_contract, quantity = row.get("product"), row.get("exact_contract"), row.get("quantity")
-        exchange = PRODUCT_EXCHANGES.get(product) if isinstance(product, str) else None
-        prefix = f"{exchange}.{product}" if exchange is not None else ""
-        if (
-            exchange is None
-            or product in result
-            or not isinstance(exact_contract, str)
-            or not exact_contract.startswith(prefix)
-            or not exact_contract[len(prefix):].isdigit()
-            or isinstance(quantity, bool)
-            or not isinstance(quantity, int)
-        ):
-            raise SimNowLabCliError("SOURCE_TARGET_ROW_INVALID")
-        result[product] = row
-    if tuple(result) != PRODUCTS:
-        raise SimNowLabCliError("SOURCE_TARGET_PRODUCTS_INVALID")
-    return [result[product] for product in PRODUCTS]
+        source = validate_source_target(value)
+    except ExperimentalTargetError as exc:
+        raise SimNowLabCliError("SOURCE_TARGET_INVALID") from exc
+    rows = {row["product"]: row for row in source["targets"]}
+    return [rows[product] for product in PRODUCTS]
 
 
 def materialize_lab_target(source: Any) -> dict[str, Any]:

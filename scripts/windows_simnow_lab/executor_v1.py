@@ -792,10 +792,13 @@ class SimNowLabExecutorV1:
                     if self._at_target(target_map, facts["positions"]):
                         self._finish_run(run_id, "NOOP")
                         return self.simnow_lab_get_run_v1(run_id)
-                    results = [self._send(run_id, plan) for plan in self._plans(target_map, facts["positions"])]
-                    if "UNKNOWN" in results:
-                        self._finish_run(run_id, "FAILED", "UNKNOWN_ORDER_PRESENT")
-                        return self.simnow_lab_get_run_v1(run_id)
+                    results = []
+                    for plan in self._plans(target_map, facts["positions"]):
+                        result = self._send(run_id, plan)
+                        results.append(result)
+                        if result == "UNKNOWN":
+                            self._finish_run(run_id, "FAILED", "UNKNOWN_ORDER_PRESENT")
+                            return self.simnow_lab_get_run_v1(run_id)
                     self._wait_orders(run_id)
                     final_facts = self._fresh_facts()
                     self._snapshot(run_id, "AFTER", final_facts)

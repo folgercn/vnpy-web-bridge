@@ -34,12 +34,12 @@ from scripts.windows_simnow_lab.executor_v1 import (
 PRODUCTS = ("ag", "al", "au", "bu", "cu", "rb", "ru", "sc", "sp", "zn")
 
 
-def target(*, rb: int = 0) -> dict[str, Any]:
+def target(*, ag: int = 0, rb: int = 0) -> dict[str, Any]:
     rows = [
         {
             "product": product,
             "vt_symbol": f"{product}2610.{'INE' if product == 'sc' else 'SHFE'}",
-            "quantity": rb if product == "rb" else 0,
+            "quantity": ag if product == "ag" else rb if product == "rb" else 0,
         }
         for product in PRODUCTS
     ]
@@ -462,11 +462,12 @@ def test_oserror_without_fresh_queried_order_is_unknown_and_fails(lab: tuple[Sim
     subject, main, _db_path = lab
     main.send_failure = OSError()
 
-    result = subject.simnow_lab_apply_target_v1(target(rb=1))
+    result = subject.simnow_lab_apply_target_v1(target(ag=1, rb=1))
 
     assert result["run"]["status"] == "FAILED"
     assert result["run"]["error"] == "UNKNOWN_ORDER_PRESENT"
     assert [row["status"] for row in result["orders"]] == ["UNKNOWN"]
+    assert main.sent == 1
 
 
 def test_oserror_with_failed_fresh_query_is_unknown_and_fails(lab: tuple[SimNowLabExecutorV1, FakeMainEngine, Path]) -> None:

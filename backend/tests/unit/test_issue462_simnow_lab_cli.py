@@ -18,10 +18,14 @@ SPEC.loader.exec_module(cli)
 
 def source_target() -> dict[str, object]:
     products = ("ag", "al", "au", "bu", "cu", "rb", "ru", "sc", "sp", "zn")
-    return {
+    source = {
         "schema_version": "simnow-experimental-target-v1",
         "strategy_id": "STATIC_CORE_EQUAL",
+        "source_month": "2026-08",
         "generated_at": "2026-08-27T01:02:03Z",
+        "target_id": "",
+        "monthly_quantity_sha256": "1" * 64,
+        "daily_route_sha256": "2" * 64,
         "production": False,
         "live_trading_authorized": False,
         "countable_forward": False,
@@ -35,6 +39,12 @@ def source_target() -> dict[str, object]:
             for index, product in enumerate(products)
         ],
     }
+    body = dict(source)
+    body.pop("target_id")
+    source["target_id"] = hashlib.sha256(
+        json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode() + b"\n"
+    ).hexdigest()
+    return source
 
 
 def test_materialize_preserves_vector_and_converts_vt_symbols() -> None:
@@ -55,7 +65,15 @@ def test_materialize_rejects_cross_product_route() -> None:
     source = source_target()
     source["targets"][5]["exact_contract"] = "SHFE.cu2610"
 
-    with pytest.raises(cli.SimNowLabCliError, match="SOURCE_TARGET_ROW_INVALID"):
+    with pytest.raises(cli.SimNowLabCliError, match="SOURCE_TARGET_INVALID"):
+        cli.materialize_lab_target(source)
+
+
+def test_materialize_rejects_quantity_tamper_without_source_target_id_update() -> None:
+    source = source_target()
+    source["targets"][5]["quantity"] += 1
+
+    with pytest.raises(cli.SimNowLabCliError, match="SOURCE_TARGET_INVALID"):
         cli.materialize_lab_target(source)
 
 
