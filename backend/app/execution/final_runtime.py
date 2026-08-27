@@ -1312,21 +1312,6 @@ class FinalExecutionRuntime:
         active = state["plan"]
         if active.get("state") != "ACTIVE":
             return None
-        # An expired, revoked authority can only be reconciled query-only.  It
-        # must never be interpreted as the still-enabled completion authority
-        # for this ACTIVE identity.  The orchestrator keeps its normal
-        # finalization check strict (and therefore still rejects a revoked,
-        # unexpired authority when evidence is supplied).
-        authority = state.get("authority", {})
-        if authority.get("state") == "REVOKED":
-            try:
-                expires_at = datetime.fromisoformat(
-                    str(authority["expires_at"]).removesuffix("Z") + "+00:00"
-                )
-            except (KeyError, TypeError, ValueError) as exc:
-                raise PlanRejected("SIMNOW revoked authority expiry is invalid") from exc
-            if expires_at <= utc_now():
-                return None
         plan = self._plan(str(active["plan_id"]), plan_hash=str(active["plan_hash"]))
         proof = {
             field: active.get(field)
@@ -1441,6 +1426,43 @@ class FinalExecutionRuntime:
                 }
             )
         return evidence
+
+    def _expired_revoked_rollover_recovery(self, rollover: Mapping[str, Any] | None) -> bool:
+        """Allow query-only rollover recovery, never a revoked completion.
+
+        The authority expiry is persisted from the immutable TargetPlan by the
+        existing ``enable`` gate.  Recheck that equality here so an arbitrary
+        revoked status projection cannot suppress normal finalization.
+        """
+
+        if rollover is None:
+            return False
+        state = self.orchestrator.repository.snapshot()
+        active = state.get("plan", {})
+        authority = state.get("authority", {})
+        if (
+            not isinstance(active, Mapping)
+            or not isinstance(authority, Mapping)
+            or active.get("state") != "ACTIVE"
+            or authority.get("state") != "REVOKED"
+            or rollover.get("plan_id") != active.get("plan_id")
+            or rollover.get("plan_hash") != active.get("plan_hash")
+        ):
+            return False
+        plan = self._plan(str(active["plan_id"]), plan_hash=str(active["plan_hash"]))
+        if (
+            authority.get("artifact_id") != plan.authority_id
+            or authority.get("artifact_hash") != plan.authority_hash
+            or authority.get("expires_at") != plan.raw["expires_at"]
+        ):
+            return False
+        try:
+            expires_at = datetime.fromisoformat(
+                str(authority["expires_at"]).removesuffix("Z") + "+00:00"
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PlanRejected("SIMNOW revoked authority expiry is invalid") from exc
+        return expires_at <= utc_now()
 
     def _trading_day_rollover_evidence(self) -> dict[str, Any] | None:
         """Prove the narrow fixed CTP LIMIT->GFD day-session boundary."""
@@ -1912,14 +1934,13 @@ class FinalExecutionRuntime:
             return self._dispatch_accepted_start(
                 response, plan=plan, quote_proof=quote_proof
             )
-        finalization_evidence = (
-            self._finalization_evidence() if envelope.command == "reconcile" else None
-        )
-        rollover_evidence = (
-            self._trading_day_rollover_evidence()
-            if envelope.command == "reconcile"
-            else None
-        )
+        rollover_evidence = None
+        finalization_evidence = None
+        if envelope.command == "reconcile":
+            rollover_evidence = self._trading_day_rollover_evidence()
+            finalization_evidence = self._finalization_evidence()
+            if self._expired_revoked_rollover_recovery(rollover_evidence):
+                finalization_evidence = None
         return self.orchestrator.process_command(
             envelope,
             finalization_evidence=finalization_evidence,
