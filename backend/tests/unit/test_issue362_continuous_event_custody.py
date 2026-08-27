@@ -33,7 +33,10 @@ from app.phase_c.models import (
 from fastapi.testclient import TestClient
 
 from shared.artifact_contracts.v1 import new_artifact_envelope
-from shared.commodity_execution import target_position_projection_hash
+from shared.commodity_execution import (
+    before_position_projection_hash,
+    target_position_projection_hash,
+)
 from shared.phase_c_workflow import continuous_event_v1 as event_contract
 from shared.trust_contracts.v1 import canonical_json_line
 from research_warehouse import continuous_event_selector as canonical_selector
@@ -136,6 +139,7 @@ def _target_positions(
             "exchange": exchange,
             "direction": direction,
             "volume": abs(quantity),
+            "yd_volume": 0,
         }
     return positions
 
@@ -189,6 +193,11 @@ def _account_facts_v2(
             },
             "durable_active_orders_sha256": event_contract.sha256_json({}),
             "durable_positions_sha256": position_hash,
+            "durable_position_identity_sha256": before_position_projection_hash(
+                positions,
+                account_scope="account:windows",
+                environment="SIMNOW",
+            ),
             "snapshot_identity_mode": "EXACT",
         },
         "execution_binding": {

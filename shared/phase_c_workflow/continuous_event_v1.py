@@ -15,8 +15,11 @@ import re
 from datetime import date, datetime, timezone
 from typing import Any, Mapping
 
-from shared.commodity_execution import target_position_projection_hash
-
+from shared.commodity_execution import (
+    CommodityExecutionContractError,
+    before_position_projection_hash,
+    target_position_projection_hash,
+)
 
 CONTINUOUS_EVENT_SCHEMA_VERSION = "web-bridge-simnow-continuous-event-v1"
 CONTINUOUS_EVENT_ARTIFACT_TYPE = "simnow-continuous-event"
@@ -702,6 +705,7 @@ _STATUS_BINDING_FIELDS = {
     "broker",
     "durable_active_orders_sha256",
     "durable_positions_sha256",
+    "durable_position_identity_sha256",
     "snapshot_identity_mode",
 }
 _RECONCILIATION_FIELDS = {
@@ -914,6 +918,10 @@ def _validate_execution_account_facts_v2(
     _execution_utc(status["status_observed_at"], "Execution status observed_at")
     _sha(status["durable_active_orders_sha256"], "durable active-order hash")
     _sha(status["durable_positions_sha256"], "durable position hash")
+    _sha(
+        status["durable_position_identity_sha256"],
+        "durable position identity hash",
+    )
     reconciliation = _object(
         status["reconciliation"], _RECONCILIATION_FIELDS, "Execution reconciliation"
     )
@@ -939,13 +947,24 @@ def _validate_execution_account_facts_v2(
             facts["snapshot_id"].removeprefix("snapshot-peek-"),
             "Execution stable snapshot hash",
         )
+    try:
+        current_position_identity_sha256 = before_position_projection_hash(
+            positions,
+            account_scope=facts["account_scope"],
+            environment=facts["environment"],
+        )
+    except CommodityExecutionContractError as exc:
+        raise ContinuousEventContractError(
+            "Execution position identity is invalid"
+        ) from exc
     if (
         reconciliation["state"] != "RECONCILED"
         or reconciliation["unknown_outcomes"] != 0
         or broker["connected"] is not True
         or broker["generation"] != facts["generation"]
-        or broker["position_snapshot_hash"] != facts["position_snapshot_hash"]
-        or status["durable_positions_sha256"] != facts["position_snapshot_hash"]
+        or broker["position_snapshot_hash"] != status["durable_positions_sha256"]
+        or status["durable_position_identity_sha256"]
+        != current_position_identity_sha256
         or broker["active_order_count"] != facts["active_order_count"]
         or status["durable_active_orders_sha256"] != facts["active_orders_sha256"]
         or status["snapshot_identity_mode"]

@@ -22,6 +22,7 @@ from app.execution.full_account_ownership import (
 from shared.commodity_execution import (
     KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
     KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
+    before_position_projection_hash,
     sha256_json,
     target_position_projection_hash,
 )
@@ -82,6 +83,7 @@ def _position_rows(
             "exchange": exchange,
             "direction": direction,
             "volume": abs(quantity),
+            "yd_volume": 0,
         }
     return result
 
@@ -336,6 +338,9 @@ def _facts(
             },
             "durable_active_orders_sha256": order_hash,
             "durable_positions_sha256": position_hash,
+            "durable_position_identity_sha256": before_position_projection_hash(
+                position_rows, account_scope=SCOPE, environment=ENVIRONMENT
+            ),
             "snapshot_identity_mode": "GENERATION_FACT_HASH_EQUIVALENT",
         },
     }

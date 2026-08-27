@@ -108,6 +108,7 @@ def _positions() -> dict[str, dict[str, object]]:
             "exchange": "SHFE",
             "direction": "LONG",
             "volume": 1,
+            "yd_volume": 0,
         }
     }
 
@@ -218,6 +219,12 @@ def test_account_facts_is_authenticated_full_closed_and_read_only(
     assert (
         body["status_binding"]["durable_positions_sha256"]
         == body["position_snapshot_hash"]
+    )
+    assert (
+        body["status_binding"]["durable_position_identity_sha256"]
+        == before_position_projection_hash(
+            _positions(), account_scope=SCOPE, environment=ENVIRONMENT
+        )
     )
     assert (
         body["status_binding"]["snapshot_identity_mode"]
@@ -512,6 +519,156 @@ def test_account_facts_accepts_nonstable_id_and_time_when_fact_identity_is_equal
     assert response.json()["status_binding"]["snapshot_identity_mode"] == (
         "GENERATION_FACT_HASH_EQUIVALENT"
     )
+
+
+@pytest.mark.parametrize(
+    ("field", "before", "after"),
+    [
+        ("pnl", 123.45, 234.56),
+        ("price", 3500.0, 3501.0),
+    ],
+)
+def test_account_facts_accepts_valuation_only_position_drift(
+    monkeypatch: pytest.MonkeyPatch, field: str, before: float, after: float
+) -> None:
+    """Raw broker rows may revalue without changing the portfolio identity."""
+
+    monkeypatch.setenv("CONTROL_EXECUTION_SHARED_SECRET", EXECUTION_SECRET)
+    durable_raw = _fresh_snapshot().as_dict()
+    durable_positions = deepcopy(durable_raw["positions"])
+    next(iter(durable_positions.values()))[field] = before
+    durable_raw["positions"] = durable_positions
+    durable_raw["position_snapshot_hash"] = sha256_json(durable_positions)
+    durable = GatewaySnapshot(**durable_raw)
+    service = _orchestrator(durable)
+
+    fresh_raw = durable.as_dict()
+    fresh_positions = deepcopy(fresh_raw["positions"])
+    next(iter(fresh_positions.values()))[field] = after
+    fresh_raw["positions"] = fresh_positions
+    fresh_raw["position_snapshot_hash"] = sha256_json(fresh_positions)
+    service.gateway.snapshots[-1] = GatewaySnapshot(**fresh_raw)
+
+    app = create_execution_app(service)
+    with TestClient(app) as client:
+        response = client.get("/internal/v1/account-facts", headers=EXECUTION_HEADERS)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["position_snapshot_hash"] == sha256_json(fresh_positions)
+    assert body["status_binding"]["broker"]["position_snapshot_hash"] == sha256_json(
+        durable_positions
+    )
+
+    async def read_with_control() -> dict[str, object]:
+        execution = ExecutionClient(
+            ExecutionClientSettings(
+                base_url="http://execution", shared_secret=EXECUTION_SECRET
+            ),
+            transport=httpx.ASGITransport(app=app),
+        )
+        return (await execution.account_facts()).as_dict()
+
+    assert asyncio.run(read_with_control())["positions"] == fresh_positions
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("volume", 2),
+        ("direction", "SHORT"),
+        ("symbol", "cu2601"),
+        ("exchange", "DCE"),
+        ("yd_volume", 1),
+    ],
+)
+def test_account_facts_rejects_position_identity_drift(
+    monkeypatch: pytest.MonkeyPatch, field: str, value: object
+) -> None:
+    monkeypatch.setenv("CONTROL_EXECUTION_SHARED_SECRET", EXECUTION_SECRET)
+    durable = _fresh_snapshot()
+    service = _orchestrator(durable)
+    fresh_raw = durable.as_dict()
+    fresh_positions = deepcopy(fresh_raw["positions"])
+    next(iter(fresh_positions.values()))[field] = value
+    fresh_raw["positions"] = fresh_positions
+    fresh_raw["position_snapshot_hash"] = sha256_json(fresh_positions)
+    service.gateway.snapshots[-1] = GatewaySnapshot(**fresh_raw)
+
+    with TestClient(create_execution_app(service)) as client:
+        response = client.get("/internal/v1/account-facts", headers=EXECUTION_HEADERS)
+    assert response.status_code == 503
+
+
+def test_account_facts_accepts_frozen_ag_al_au_rb_pnl_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The observed SimNow valuation-only drift remains consumable by v2."""
+
+    monkeypatch.setenv("CONTROL_EXECUTION_SHARED_SECRET", EXECUTION_SECRET)
+    durable_positions = {
+        f"{symbol}.SHFE.{direction}.CTP.full": {
+            "gateway_name": "CTP",
+            "symbol": symbol,
+            "exchange": "SHFE",
+            "direction": direction,
+            "volume": volume,
+            "yd_volume": yd_volume,
+            "price": price,
+            "pnl": pnl,
+            "frozen": 0,
+            "commission": 0.0,
+        }
+        for symbol, direction, volume, yd_volume, price, pnl in (
+            ("ag2609", "LONG", 3, 1, 6821.0, 102.0),
+            ("al2609", "LONG", 11, 3, 20520.0, -218.0),
+            ("au2610", "SHORT", 2, 1, 781.4, 64.0),
+            ("rb2610", "SHORT", 4, 2, 3221.0, -75.0),
+        )
+    }
+    observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    durable = GatewaySnapshot(
+        snapshot_id="snapshot-peek-" + "a" * 64,
+        generation=58,
+        connected=True,
+        active_order_count=0,
+        position_snapshot_hash=sha256_json(durable_positions),
+        observed_at=observed_at,
+        orders={},
+        positions=durable_positions,
+        account_scope=SCOPE,
+        environment=ENVIRONMENT,
+        fresh=True,
+    )
+    service = _orchestrator(durable)
+    fresh_raw = durable.as_dict()
+    fresh_positions = deepcopy(durable_positions)
+    for index, row in enumerate(fresh_positions.values(), start=1):
+        row["pnl"] = float(row["pnl"]) + index * 17.25
+    fresh_raw.update(
+        {
+            "snapshot_id": "snapshot-peek-" + "b" * 64,
+            "positions": fresh_positions,
+            "position_snapshot_hash": sha256_json(fresh_positions),
+        }
+    )
+    service.gateway.snapshots[-1] = GatewaySnapshot(**fresh_raw)
+    app = create_execution_app(service)
+
+    with TestClient(app) as client:
+        response = client.get("/internal/v1/account-facts", headers=EXECUTION_HEADERS)
+    assert response.status_code == 200
+    assert response.json()["positions"] == fresh_positions
+
+    async def read_with_control() -> dict[str, object]:
+        execution = ExecutionClient(
+            ExecutionClientSettings(
+                base_url="http://execution", shared_secret=EXECUTION_SECRET
+            ),
+            transport=httpx.ASGITransport(app=app),
+        )
+        return (await execution.account_facts()).as_dict()
+
+    assert asyncio.run(read_with_control())["positions"] == fresh_positions
 
 
 def _v2_plan() -> dict[str, object]:
@@ -1400,6 +1557,7 @@ def test_clients_reject_extra_or_rehashed_read_model_state() -> None:
     for binding_field in (
         "durable_active_orders_sha256",
         "durable_positions_sha256",
+        "durable_position_identity_sha256",
     ):
         bound_snapshot = _fresh_snapshot()
         semantically_unbound = _orchestrator(bound_snapshot).account_facts_projection(
