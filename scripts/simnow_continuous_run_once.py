@@ -2246,6 +2246,19 @@ class _ProductionBackend:
                     rejected_broker = rejected_status.get("broker")
                     rejected_reconciliation = rejected_status.get("reconciliation")
                     rejected_intents = rejected_status.get("send_intents")
+                    matching_rejected_intents = (
+                        [
+                            intent
+                            for intent in rejected_intents
+                            if isinstance(intent, Mapping)
+                            and (
+                                intent.get("plan_id") == plan_id
+                                or intent.get("plan_hash") == plan_hash
+                            )
+                        ]
+                        if isinstance(rejected_intents, list)
+                        else None
+                    )
                     definitely_not_started = bool(
                         receipt is None
                         and isinstance(rejected_plan, Mapping)
@@ -2260,7 +2273,7 @@ class _ProductionBackend:
                         and rejected_broker.get("active_order_count") == 0
                         and isinstance(rejected_reconciliation, Mapping)
                         and rejected_reconciliation.get("unknown_outcomes") == 0
-                        and rejected_intents == []
+                        and matching_rejected_intents == []
                     )
                     if definitely_not_started:
                         raise ContinuousRunError(

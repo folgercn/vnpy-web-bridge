@@ -738,12 +738,21 @@ async def execute_once(
         if not isinstance(plan_hash, str) or not isinstance(plan_id, str):
             return False
         preview_id = f"preview-{plan_hash[:16]}"
+        matching_intents = [
+            intent
+            for intent in intents
+            if isinstance(intent, Mapping)
+            and (
+                intent.get("plan_id") == plan_id
+                or intent.get("plan_hash") == plan_hash
+            )
+        ]
         preview_zero_work = bool(
             plan.get("plan_id") == preview_id
             and plan.get("plan_hash") == plan_hash
             and authority.get("artifact_id") == plan_id
             and authority.get("artifact_hash") == plan_hash
-            and not intents
+            and not matching_intents
         )
         try:
             expires_at = datetime.fromisoformat(
