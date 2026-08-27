@@ -290,11 +290,13 @@ class SimNowLabExecutorV1:
         from vnpy.trader.event import (
             EVENT_ACCOUNT,
             EVENT_ORDER,
+            EVENT_POSITION,
             EVENT_TICK,
             EVENT_TRADE,
         )
 
         self.event_engine.register(EVENT_ORDER, self._on_order)
+        self.event_engine.register(EVENT_POSITION, self._notify)
         self.event_engine.register(EVENT_TRADE, self._on_trade)
         self.event_engine.register(EVENT_TICK, self._notify)
         self.event_engine.register(EVENT_ACCOUNT, self._on_account)
@@ -385,6 +387,8 @@ class SimNowLabExecutorV1:
         deadline = time.monotonic() + self.wait_seconds
         while time.monotonic() < deadline:
             if tracker.generation > generation and tracker.is_ready() is True:
+                with self._condition:
+                    self._condition.wait(0.25)
                 return list(self.main_engine.get_all_positions())
             time.sleep(0.05)
         raise SimNowLabError("CTP_POSITION_QUERY_TIMEOUT")

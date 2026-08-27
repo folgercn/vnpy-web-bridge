@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 from vnpy.event import Event
 from vnpy.trader.constant import Direction, Exchange, OrderType, Product, Status
-from vnpy.trader.event import EVENT_ACCOUNT, EVENT_ORDER, EVENT_TRADE
+from vnpy.trader.event import EVENT_ACCOUNT, EVENT_ORDER, EVENT_POSITION, EVENT_TRADE
 from vnpy.trader.object import (
     AccountData,
     ContractData,
@@ -114,6 +114,7 @@ class FakeGateway:
         self.td_api = FakeTdApi(main)
         self.md_api = SimpleNamespace(login_status=True)
         self.position_query_rejected = False
+        self.position_event_delayed = False
 
     def query_position(self) -> None:
         tracker = self.td_api._vnpy_position_readiness_v1
@@ -121,8 +122,19 @@ class FakeGateway:
             return
         tracker.generation += 1
         tracker.ready = False
-        self.main.oms.positions = {row.vt_positionid: row for row in self.main.broker_positions}
-        tracker.ready = True
+        positions = {row.vt_positionid: row for row in self.main.broker_positions}
+        if self.position_event_delayed:
+            tracker.ready = True
+
+            def publish() -> None:
+                self.main.oms.positions = positions
+                for position in positions.values():
+                    self.main.events.emit(EVENT_POSITION, position)
+
+            threading.Timer(0.01, publish).start()
+        else:
+            self.main.oms.positions = positions
+            tracker.ready = True
 
     def query_account(self) -> None:
         account = AccountData(accountid="redacted", balance=1_000_000, frozen=0, gateway_name="CTP")
@@ -438,6 +450,18 @@ def test_position_query_reject_cannot_reuse_stale_ready_after_oms_clear(lab: tup
 
     with pytest.raises(SimNowLabError, match="CTP_POSITION_QUERY_TIMEOUT"):
         subject._query_positions()
+
+
+def test_position_query_waits_for_oms_position_event_after_ctp_final(lab: tuple[SimNowLabExecutorV1, FakeMainEngine, Path]) -> None:
+    subject, main, _db_path = lab
+    position = PositionData(
+        symbol="rb2610", exchange=Exchange.SHFE, direction=Direction.LONG,
+        volume=1, gateway_name="CTP",
+    )
+    main.broker_positions = [position]
+    main.gateway.position_event_delayed = True
+
+    assert subject._query_positions() == [position]
 
 
 def test_sync_callback_keeps_terminal_order_and_trade(lab: tuple[SimNowLabExecutorV1, FakeMainEngine, Path]) -> None:
