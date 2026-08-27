@@ -1956,9 +1956,27 @@ class FinalExecutionRuntime:
     ) -> CommandResponse:
         if response.result.get("accepted") is not True:
             return response
-        token = self.orchestrator.fencer.token
-        if token is None:
+        start_token = self.orchestrator.fencer.token
+        if start_token is None:
             raise MutationRejected("SIMNOW runner lost its leader token")
+        start_identity = (
+            start_token.scope,
+            start_token.owner_id,
+            start_token.epoch,
+            start_token.fencing_token,
+            start_token.instance_id,
+        )
+        last_lease_expiry = datetime.fromisoformat(
+            start_token.lease_expires_at[:-1] + "+00:00"
+        )
+        bindings_by_order_ref = {
+            binding["order_ref"]: binding
+            for binding in expected_send_intent_bindings(
+                plan,
+                account_scope=self.orchestrator.scope,
+                environment=self.orchestrator.environment,
+            )
+        }
         proof_for_missing = quote_proof
         if (
             response.reused
@@ -1981,19 +1999,46 @@ class FinalExecutionRuntime:
                     plan, order_refs=missing_refs
                 )
         for order in plan.orders:
+            binding = bindings_by_order_ref[order.reference]
+            state = self.orchestrator.repository.snapshot()
+            existing_id = state["intent_keys"].get(binding["idempotency_key"])
+            dispatch_token = start_token
+            if existing_id != binding["intent_id"]:
+                # New children must use the current active lease.  A start can
+                # outlive several same-identity renewals, but it must never
+                # create another child after release, expiry, identity change,
+                # or a lease-expiry regression.
+                try:
+                    current_token = self.orchestrator.fencer.token
+                    if current_token is None:
+                        raise MutationRejected("SIMNOW runner lost its leader token")
+                    current_identity = (
+                        current_token.scope,
+                        current_token.owner_id,
+                        current_token.epoch,
+                        current_token.fencing_token,
+                        current_token.instance_id,
+                    )
+                    if current_identity != start_identity:
+                        raise MutationRejected(
+                            "SIMNOW runner leader identity changed during dispatch"
+                        )
+                    current_expiry = datetime.fromisoformat(
+                        current_token.lease_expires_at[:-1] + "+00:00"
+                    )
+                    if current_expiry < last_lease_expiry:
+                        raise MutationRejected(
+                            "SIMNOW runner leader lease expiry regressed during dispatch"
+                        )
+                    dispatch_token = self.orchestrator.fencer.validate(current_token)
+                    last_lease_expiry = current_expiry
+                except Exception as exc:
+                    self._halt_runner_after_failure(
+                        f"SIMNOW runner order {order.reference} failed: {exc}"
+                    )
+                    raise
             dispatch_proof = proof_for_missing
             if plan.raw["schema_version"] == KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION:
-                state = self.orchestrator.repository.snapshot()
-                binding = next(
-                    item
-                    for item in expected_send_intent_bindings(
-                        plan,
-                        account_scope=self.orchestrator.scope,
-                        environment=self.orchestrator.environment,
-                    )
-                    if item["order_ref"] == order.reference
-                )
-                existing_id = state["intent_keys"].get(binding["idempotency_key"])
                 existing = state["send_intents"].get(existing_id, {})
                 if (
                     isinstance(existing, Mapping)
@@ -2004,7 +2049,7 @@ class FinalExecutionRuntime:
                 result = self.send_plan_order(
                     plan.plan_id,
                     order.reference,
-                    token=token,
+                    token=dispatch_token,
                     execution_start_quote_proof=dispatch_proof,
                 )
             except Exception as exc:
