@@ -37,8 +37,9 @@ for candidate in (ROOT, ROOT / "backend", ROOT / "scripts"):
 from app.control_execution_client import (  # noqa: E402
     ExecutionClient,
     ExecutionClientError,
-    ExecutionUnknownOutcomeError,
     ExecutionClientSettings,
+    ExecutionRejectedError,
+    ExecutionUnknownOutcomeError,
 )
 from app.execution.full_account_ownership import (  # noqa: E402
     DesiredContinuousTargetBinding,
@@ -2229,6 +2230,46 @@ class _ProductionBackend:
                 )
                 try:
                     await self.execution.submit(start)
+                except ExecutionRejectedError:
+                    try:
+                        receipt = await self.execution.receipt(
+                            start["idempotency_key"], actor=actor
+                        )
+                    except ExecutionClientError:
+                        receipt = None
+                    try:
+                        rejected_status = (await self.execution.status()).as_dict()
+                    except ExecutionClientError:
+                        rejected_status = {}
+                    rejected_plan = rejected_status.get("plan")
+                    rejected_authority = rejected_status.get("authority")
+                    rejected_broker = rejected_status.get("broker")
+                    rejected_reconciliation = rejected_status.get("reconciliation")
+                    rejected_intents = rejected_status.get("send_intents")
+                    definitely_not_started = bool(
+                        receipt is None
+                        and isinstance(rejected_plan, Mapping)
+                        and rejected_plan.get("state") == "PREVIEWED"
+                        and rejected_plan.get("plan_id")
+                        == f"preview-{plan_hash[:16]}"
+                        and rejected_plan.get("plan_hash") == plan_hash
+                        and isinstance(rejected_authority, Mapping)
+                        and rejected_authority.get("artifact_id") == plan_id
+                        and rejected_authority.get("artifact_hash") == plan_hash
+                        and isinstance(rejected_broker, Mapping)
+                        and rejected_broker.get("active_order_count") == 0
+                        and isinstance(rejected_reconciliation, Mapping)
+                        and rejected_reconciliation.get("unknown_outcomes") == 0
+                        and rejected_intents == []
+                    )
+                    if definitely_not_started:
+                        raise ContinuousRunError(
+                            "TargetPlan start was rejected before broker mutation"
+                        )
+                    if not _accepted_start_receipt(receipt, command=start):
+                        raise ContinuousRunError(
+                            "TargetPlan start outcome is unknown; query only"
+                        )
                 except (ExecutionUnknownOutcomeError, ExecutionClientError):
                     try:
                         receipt = await self.execution.receipt(

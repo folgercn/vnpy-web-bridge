@@ -716,27 +716,53 @@ async def execute_once(
     def retired_predecessor_boundary(
         status: Mapping[str, Any], recovery: Mapping[str, Any]
     ) -> bool:
-        """Recognize only #456's fully retired, expired, zero-work plan."""
+        """Recognize an exact retired custody incarnation.
+
+        Normal plans retain the #456 expired/full-plan-id rule.  A plan whose
+        start was deterministically rejected can retain Execution's public
+        ``preview-<plan_hash>`` id after fenced revoke/stop.  That zero-work
+        boundary is bound back to the full Custody identity by authority.
+        """
 
         plan = status.get("plan")
         authority = status.get("authority")
-        if not isinstance(plan, Mapping) or not isinstance(authority, Mapping):
+        intents = status.get("send_intents")
+        if (
+            not isinstance(plan, Mapping)
+            or not isinstance(authority, Mapping)
+            or not isinstance(intents, list)
+        ):
             return False
+        plan_hash = recovery.get("plan_hash")
+        plan_id = recovery.get("plan_id")
+        if not isinstance(plan_hash, str) or not isinstance(plan_id, str):
+            return False
+        preview_id = f"preview-{plan_hash[:16]}"
+        preview_zero_work = bool(
+            plan.get("plan_id") == preview_id
+            and plan.get("plan_hash") == plan_hash
+            and authority.get("artifact_id") == plan_id
+            and authority.get("artifact_hash") == plan_hash
+            and not intents
+        )
         try:
             expires_at = datetime.fromisoformat(
                 str(recovery["expires_at"]).removesuffix("Z") + "+00:00"
             )
         except (KeyError, TypeError, ValueError):
             return False
+        ordinary_expired = bool(
+            plan.get("plan_id") == plan_id
+            and plan.get("plan_hash") == plan_hash
+            and authority.get("artifact_id") == plan_id
+            and authority.get("artifact_hash") == plan_hash
+            and expires_at <= datetime.now(timezone.utc)
+        )
         return bool(
             backend._is_retired_execution_boundary(
                 status, require_leader_clear=True
             )
-            and plan.get("plan_id") == recovery.get("plan_id")
-            and plan.get("plan_hash") == recovery.get("plan_hash")
-            and authority.get("artifact_id") == recovery.get("plan_id")
-            and authority.get("artifact_hash") == recovery.get("plan_hash")
-            and expires_at <= datetime.now(timezone.utc)
+            and (ordinary_expired or preview_zero_work)
         )
 
     async def successor_kind(recovery: Mapping[str, Any]) -> str | None:
@@ -755,11 +781,15 @@ async def execute_once(
             return "COMPLETED"
         status = (await backend.execution.status()).as_dict()
         plan = status.get("plan")
+        plan_hash = recovery.get("plan_hash")
+        preview_id = (
+            f"preview-{plan_hash[:16]}" if isinstance(plan_hash, str) else None
+        )
         if (
             isinstance(plan, Mapping)
             and plan.get("state") == "TERMINAL"
-            and plan.get("plan_id") == recovery.get("plan_id")
-            and plan.get("plan_hash") == recovery.get("plan_hash")
+            and plan.get("plan_hash") == plan_hash
+            and plan.get("plan_id") in {recovery.get("plan_id"), preview_id}
         ):
             if retired_predecessor_boundary(status, recovery):
                 return "RETIRED"
