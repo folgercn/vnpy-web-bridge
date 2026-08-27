@@ -70,6 +70,47 @@ class ExperimentalRunError(RuntimeError):
     """A fresh Execution fact does not admit a new experimental action."""
 
 
+_CUSTODY_KEY_DOMAIN = "simnow-experimental-target-v1"
+_CUSTODY_SUCCESSOR_KEY_DOMAIN = "simnow-experimental-target-v1-successor"
+_MAX_CUSTODY_SUCCESSOR_DEPTH = 32
+
+
+def _custody_phase_key(*, target_id: str, phase: str) -> str:
+    """Return the unchanged first-incarnation Custody key for one phase."""
+
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "domain": _CUSTODY_KEY_DOMAIN,
+                "target_id": target_id,
+                "phase": phase,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+
+def _custody_successor_phase_key(
+    *, target_id: str, phase: str, predecessor_plan_id: str, predecessor_plan_hash: str
+) -> str:
+    """Bind a later same-target incarnation to its exact retired predecessor."""
+
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "domain": _CUSTODY_SUCCESSOR_KEY_DOMAIN,
+                "target_id": target_id,
+                "phase": phase,
+                "predecessor_plan_id": predecessor_plan_id,
+                "predecessor_plan_hash": predecessor_plan_hash,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+
 class _ExperimentalBackend(_ProductionBackend):
     """Reuse only the existing TargetPlan custody/Execution lifecycle.
 
@@ -638,19 +679,15 @@ async def execute_once(
     final_target_sha256 = sha256_json(final_projection)
 
     def phase_key(phase: str) -> str:
-        return hashlib.sha256(
-            json.dumps(
-                {"domain": "simnow-experimental-target-v1", "target_id": target["target_id"], "phase": phase},
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
-        ).hexdigest()
+        return _custody_phase_key(target_id=str(target["target_id"]), phase=phase)
 
-    def require_binding(recovery: Mapping[str, Any], phase: str) -> None:
+    def require_binding(
+        recovery: Mapping[str, Any], phase: str, exact_phase_key: str
+    ) -> None:
         lineage = recovery.get("lineage")
         if (
             recovery.get("target_plan_schema_version") != KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION
-            or recovery.get("custody_idempotency_key") != phase_key(phase)
+            or recovery.get("custody_idempotency_key") != exact_phase_key
             or recovery.get("phase") != phase
             or recovery.get("execution_run_id") != run_id
             or not isinstance(lineage, Mapping)
@@ -659,6 +696,127 @@ async def execute_once(
             or lineage.get("final_target_sha256") != final_target_sha256
         ):
             raise ExperimentalRunError("existing recovery does not bind experimental target")
+
+    async def completion_matches(recovery: Mapping[str, Any]) -> bool:
+        """Read the immutable completion archive for one exact predecessor."""
+
+        completion = await backend.execution.completion(str(recovery["plan_id"]))
+        if completion is None:
+            return False
+        archived = completion.as_dict()
+        if (
+            archived.get("plan_id") != recovery.get("plan_id")
+            or archived.get("plan_hash") != recovery.get("plan_hash")
+        ):
+            raise ExperimentalRunError(
+                "completion archive does not bind custody predecessor"
+            )
+        return True
+
+    def retired_predecessor_boundary(
+        status: Mapping[str, Any], recovery: Mapping[str, Any]
+    ) -> bool:
+        """Recognize only #456's fully retired, expired, zero-work plan."""
+
+        plan = status.get("plan")
+        authority = status.get("authority")
+        if not isinstance(plan, Mapping) or not isinstance(authority, Mapping):
+            return False
+        try:
+            expires_at = datetime.fromisoformat(
+                str(recovery["expires_at"]).removesuffix("Z") + "+00:00"
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+        return bool(
+            backend._is_retired_execution_boundary(
+                status, require_leader_clear=True
+            )
+            and plan.get("plan_id") == recovery.get("plan_id")
+            and plan.get("plan_hash") == recovery.get("plan_hash")
+            and authority.get("artifact_id") == recovery.get("plan_id")
+            and authority.get("artifact_hash") == recovery.get("plan_hash")
+            and expires_at <= datetime.now(timezone.utc)
+        )
+
+    async def successor_kind(recovery: Mapping[str, Any]) -> str | None:
+        """Classify a custody incarnation without writing any state.
+
+        Completed plans can be successors only through their exact immutable
+        completion archive.  A #456 retirement has no completion archive, so
+        it additionally requires the current Execution projection to be the
+        same expired TERMINAL/REVOKED, leader-clear, zero-work boundary.
+        """
+
+        # Completion is immutable, exact, and sufficient even after a later
+        # same-target incarnation became Execution's current plan.  This is
+        # what permits NORMAL -> TEST -> restore NORMAL to traverse K0 -> K1.
+        if await completion_matches(recovery):
+            return "COMPLETED"
+        status = (await backend.execution.status()).as_dict()
+        plan = status.get("plan")
+        if (
+            isinstance(plan, Mapping)
+            and plan.get("state") == "TERMINAL"
+            and plan.get("plan_id") == recovery.get("plan_id")
+            and plan.get("plan_hash") == recovery.get("plan_hash")
+        ):
+            if retired_predecessor_boundary(status, recovery):
+                return "RETIRED"
+            raise ExperimentalRunError(
+                "terminal custody predecessor is not completed or safely retired"
+            )
+        return None
+
+    async def resolve_phase_recovery(
+        phase: str,
+    ) -> tuple[str, dict[str, Any]]:
+        """Follow K0 -> K1 -> ... until the exact live custody incarnation.
+
+        Looking up a successor is read-only.  A new key is only published
+        later, after the planner has proved a non-NOOP delta.
+        """
+
+        exact_key = phase_key(phase)
+        seen: set[str] = set()
+        for _depth in range(_MAX_CUSTODY_SUCCESSOR_DEPTH):
+            if exact_key in seen:
+                raise ExperimentalRunError("custody successor key chain cycles")
+            seen.add(exact_key)
+            recovery = (
+                await backend.execution.target_plan_recovery(exact_key)
+            ).as_dict()
+            if recovery.get("state") == "BEFORE_CUSTODY":
+                return exact_key, recovery
+            require_binding(recovery, phase, exact_key)
+            plan_id = recovery.get("plan_id")
+            plan_hash = recovery.get("plan_hash")
+            if not isinstance(plan_id, str) or not isinstance(plan_hash, str):
+                raise ExperimentalRunError("custody predecessor identity is invalid")
+            successor_key = _custody_successor_phase_key(
+                target_id=str(target["target_id"]),
+                phase=phase,
+                predecessor_plan_id=plan_id,
+                predecessor_plan_hash=plan_hash,
+            )
+            # Probe a deterministic successor before looking at current
+            # Execution state.  K0 may no longer be current once K1 was
+            # installed, so status cannot be used to rediscover an already
+            # published successor.  Its own strict binding remains required.
+            successor = (
+                await backend.execution.target_plan_recovery(successor_key)
+            ).as_dict()
+            if successor.get("state") != "BEFORE_CUSTODY":
+                exact_key = successor_key
+                continue
+            # Only a missing successor needs predecessor eligibility.  This
+            # read-only result is used later, after a fresh non-NOOP preview,
+            # to publish exactly successor_key.
+            kind = await successor_kind(recovery)
+            if kind is None:
+                return exact_key, recovery
+            return successor_key, successor
+        raise ExperimentalRunError("custody successor key chain exceeds depth limit")
 
     # Recovery of Execution's current identity always wins over fresh planning.
     # This covers a previous experimental target whose phase key is not
@@ -670,14 +828,13 @@ async def execute_once(
     # A recovered same-target TargetPlan may still have an installed custody
     # identity even when it is no longer the active Execution plan.
     for existing_phase in ("CLOSE", "OPEN"):
-        recovery = (await backend.execution.target_plan_recovery(phase_key(existing_phase))).as_dict()
+        exact_key, recovery = await resolve_phase_recovery(existing_phase)
         if recovery.get("state") == "BEFORE_CUSTODY":
             continue
-        require_binding(recovery, existing_phase)
         installed = await backend._install_or_recover_plan(
-            phase_key=phase_key(existing_phase), handoff=None, recovery=recovery
+            phase_key=exact_key, handoff=None, recovery=recovery
         )
-        require_binding(installed, existing_phase)
+        require_binding(installed, existing_phase, exact_key)
         lifecycle = await backend._drive_installed_plan(installed)
         if lifecycle.get("state") != "COMPLETED":
             return _checkpoint(target, {"status": "RECOVERY", "target_id": target["target_id"], "phase": existing_phase, "lifecycle": lifecycle})
@@ -693,7 +850,22 @@ async def execute_once(
         if handoff is None:
             raise ExperimentalRunError("existing planner has no lifecycle handoff")
         phase = str(handoff.target_plan["phase"])
-        recovery = await backend._install_or_recover_plan(phase_key=phase_key(phase), handoff=handoff)
+        exact_key, recovery = await resolve_phase_recovery(phase)
+        if recovery.get("state") != "BEFORE_CUSTODY":
+            # A concurrent/restarted invocation may have already published this
+            # exact incarnation.  Recover it; never jump to another successor.
+            installed = await backend._install_or_recover_plan(
+                phase_key=exact_key, handoff=None, recovery=recovery
+            )
+            require_binding(installed, phase, exact_key)
+            lifecycle = await backend._drive_installed_plan(installed)
+            return _checkpoint(
+                target, {**preview, "lifecycle": lifecycle, "recovered": True}
+            )
+        recovery = await backend._install_or_recover_plan(
+            phase_key=exact_key, handoff=handoff
+        )
+        require_binding(recovery, phase, exact_key)
         lifecycle = await backend._drive_installed_plan(
             recovery, expected_intent_count=len(handoff.target_plan["orders"])
         )
