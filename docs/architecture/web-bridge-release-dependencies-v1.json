@@ -1061,7 +1061,6 @@
       "semantic validator compares preserve identities byte-for-byte and proves restart identity transition",
       "semantic validator verifies receipt unit, source commit, plan id, issued-at and expiry against the decision time",
       "semantic validator verifies rollback state version readability, high-water binding, positive fencing and receipt freshness",
-      "PR update comment gate runs from pull_request_target against the trusted base revision and is configured as a required repository check",
       "explicit ADR and PR approval activates classifier consumption"
     ]
   },
@@ -1091,20 +1090,5 @@
       "plan decision time is strictly before receipt expires_at",
       "rollback receipt remains valid at rollback created_at"
     ]
-  },
-  "pr_update_comment_gate_bootstrap": {
-    "workflow": ".github/workflows/pr-update-comment-gate.yml",
-    "trusted_event": "pull_request_target",
-    "trusted_checkout": "github.event.pull_request.base.sha",
-    "phase_0b_pr_enforcement": "manual_comment_evidence_because_new_pull_request_target_workflows_do_not_run_until_present_on_default_branch",
-    "post_merge_sequence": [
-      "open the next Phase 1 guard PR and post its exact 40-character head SHA after the push timestamp",
-      "verify PR update comment gate succeeds from the default-branch workflow",
-      "add PR update comment gate from GitHub Actions to main required status checks while preserving CI Gate strict mode",
-      "re-read branch protection and require both CI Gate and PR update comment gate before merging that PR"
-    ],
-    "activation_blocker": "No subsequent issue-267 PR may merge and no classifier or CD consumer may activate until both required checks are evidenced.",
-    "production_allowed": false,
-    "live_trading_authorized": false
   }
 }

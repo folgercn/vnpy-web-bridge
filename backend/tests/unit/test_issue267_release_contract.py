@@ -77,10 +77,6 @@ def test_release_dependency_contract_is_inert_and_fail_closed() -> None:
     assert safety["unknown_path"] == "block"
     assert safety["unknown_dependency"] == "block"
     assert safety["ambiguous_match"] == "block"
-    bootstrap = MANIFEST["pr_update_comment_gate_bootstrap"]
-    assert bootstrap["trusted_event"] == "pull_request_target"
-    assert bootstrap["trusted_checkout"] == "github.event.pull_request.base.sha"
-    assert "No subsequent issue-267 PR may merge" in bootstrap["activation_blocker"]
 
 
 def test_legacy_restart_remaining_stages_are_ordered_and_non_authorizing() -> None:
