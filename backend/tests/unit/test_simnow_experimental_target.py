@@ -1249,8 +1249,9 @@ def test_custody_successor_key_preserves_k0_and_binds_exact_predecessor() -> Non
     )
 
 
+@pytest.mark.parametrize("preview_zero_work", [False, True])
 def test_retired_predecessor_uses_stable_successor_and_never_publishes_k2(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, preview_zero_work: bool,
 ) -> None:
     bundle = _bundle()
     target = _target(bundle)
@@ -1280,7 +1281,13 @@ def test_retired_predecessor_uses_stable_successor_and_never_publishes_k2(
             self.status_calls += 1
             if self.status_calls == 1:
                 return SimpleNamespace(as_dict=lambda: {"plan": {"state": "IDLE"}})
-            return SimpleNamespace(as_dict=lambda: _retired_predecessor_status(predecessor))
+            status = _retired_predecessor_status(predecessor)
+            if preview_zero_work:
+                status["plan"]["plan_id"] = (
+                    f"preview-{predecessor['plan_hash'][:16]}"
+                )
+                status["send_intents"] = []
+            return SimpleNamespace(as_dict=lambda: status)
 
         async def target_plan_recovery(self, key: str):
             calls.append(f"recovery:{key}")
@@ -1611,7 +1618,10 @@ def test_normal_test_restore_has_deterministic_separate_successor_chains() -> No
     )
 
 
-@pytest.mark.parametrize("boundary", ("ACTIVE", "UNKNOWN", "UNEXPIRED"))
+@pytest.mark.parametrize(
+    "boundary",
+    ("ACTIVE", "UNKNOWN", "UNEXPIRED", "PREVIEW_FOREIGN", "PREVIEW_INTENT"),
+)
 def test_unsafe_predecessor_never_derives_successor(boundary: str) -> None:
     bundle = _bundle()
     target = _target(bundle)
@@ -1636,9 +1646,19 @@ def test_unsafe_predecessor_never_derives_successor(boundary: str) -> None:
                     },
                     "leader": {"held": True},
                 })
-            return SimpleNamespace(as_dict=lambda: _retired_predecessor_status(
+            status = _retired_predecessor_status(
                 predecessor, unknown=1 if boundary == "UNKNOWN" else 0
-            ))
+            )
+            if boundary.startswith("PREVIEW_"):
+                status["plan"]["plan_id"] = (
+                    f"preview-{predecessor['plan_hash'][:16]}"
+                )
+                status["send_intents"] = []
+            if boundary == "PREVIEW_FOREIGN":
+                status["authority"]["artifact_id"] = "foreign-plan"
+            if boundary == "PREVIEW_INTENT":
+                status["send_intents"] = [{"state": "TERMINAL"}]
+            return SimpleNamespace(as_dict=lambda: status)
 
         async def target_plan_recovery(self, key: str):
             return SimpleNamespace(
@@ -1660,7 +1680,7 @@ def test_unsafe_predecessor_never_derives_successor(boundary: str) -> None:
             installs.append("install")
             raise AssertionError("unsafe predecessor must not publish a successor")
 
-    if boundary == "UNEXPIRED":
+    if boundary in {"UNEXPIRED", "PREVIEW_FOREIGN", "PREVIEW_INTENT"}:
         with pytest.raises(runner.ExperimentalRunError, match="not completed or safely retired"):
             asyncio.run(runner.execute_once(
                 target, bundle, backend=Backend(),
