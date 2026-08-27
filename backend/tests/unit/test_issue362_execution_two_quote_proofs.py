@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from app.execution import (
     DurableExecutionRepository,
     ExecutionOrchestrator,
+    GatewaySnapshot,
     InMemoryExecutionRepository,
     InMemoryGateway,
     RepositoryUnavailableError,
@@ -22,6 +23,7 @@ from app.execution.formal_tick_reader import (
     FormalTickEvidenceInvalid,
     FormalTickSourceUnavailable,
 )
+from app.execution.errors import PlanRejected
 from app.execution.models import format_utc, sha256_json
 from app.execution.start_quote_proof import (
     ExecutionStartQuoteProofV1,
@@ -209,6 +211,187 @@ def test_v3_day_session_active_plan_builds_exact_gfd_rollover_evidence() -> None
     assert evidence["intent_trading_day"] == "20260826"
     assert evidence["time_condition"] == "GFD"
     assert len(evidence["intent_ids"]) == len(plan["orders"])
+
+
+def test_expired_revoked_active_plan_suppresses_finalization_only_with_rollover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only immutable expired rollover evidence may skip finalization."""
+
+    template = _day_session_plan()
+    plan = _v3_plan(
+        generated_at="2026-08-26T06:33:00Z",
+        expires_at="2026-08-26T06:52:14Z",
+        creation_quote_proof=template["creation_quote_proof"],
+        expected_before_position_hash=template["expected_before_position_hash"],
+    )
+    service, core, repo, _, _ = _runtime(plan, _Reader())
+    parsed = TargetPlan.from_mapping(plan)
+    service.plans.put(parsed)
+
+    def active_revoked(state: dict) -> None:
+        state["plan"].update(
+            {
+                "state": "ACTIVE",
+                "plan_id": plan["plan_id"],
+                "plan_hash": plan["plan_hash"],
+            }
+        )
+        state["authority"].update(
+            {
+                "state": "REVOKED",
+                "artifact_id": parsed.authority_id,
+                "artifact_hash": parsed.authority_hash,
+                "expires_at": plan["expires_at"],
+            }
+        )
+
+    repo.mutate(active_revoked)
+    monkeypatch.setattr(
+        "app.execution.final_runtime.utc_now",
+        lambda: datetime(2026, 8, 27, tzinfo=timezone.utc),
+    )
+    rollover = service._trading_day_rollover_evidence()
+    assert rollover is not None
+    assert service._expired_revoked_rollover_recovery(rollover) is True
+    assert service._expired_revoked_rollover_recovery(None) is False
+
+    # Existing finalization behavior stays strict if that rollover evidence is
+    # unavailable: a revoked authority still reaches the normal rejection.
+    evidence = {
+        "plan_id": plan["plan_id"],
+        "plan_hash": plan["plan_hash"],
+        "expected_after_position_hash": plan["expected_after_position_hash"],
+        "authority_artifact_id": parsed.authority_id,
+        "authority_artifact_sha256": parsed.authority_hash,
+        "authority_receipt_id": "keyless-custody",
+        "authority_receipt_sha256": "0" * 64,
+        "preview_receipt_id": "preview-receipt-0001",
+        "preview_receipt_sha256": "a" * 64,
+        "preview_artifact_id": "preview-artifact-0001",
+        "preview_artifact_sha256": "b" * 64,
+        "expected_send_intent_bindings": [],
+    }
+    with pytest.raises(PlanRejected, match="does not bind active plan"):
+        core._apply_finalization_evidence(repo.snapshot(), evidence)
+
+
+@pytest.mark.parametrize("with_rollover", [True, False])
+def test_expired_revoked_rollover_reconcile_58_unknown_is_query_only(
+    monkeypatch: pytest.MonkeyPatch, with_rollover: bool
+) -> None:
+    """The frozen-size recovery either closes 58 GFD UNKNOWNs or stops."""
+
+    start_time = datetime(2026, 8, 26, 6, 47, tzinfo=timezone.utc)
+    rollover_time = datetime(2026, 8, 27, 1, 0, tzinfo=timezone.utc)
+    now = {"value": start_time}
+    monkeypatch.setattr("app.execution.orchestrator.utc_now", lambda: now["value"])
+    monkeypatch.setattr("app.execution.final_runtime.utc_now", lambda: now["value"])
+    template = _day_session_plan()
+    orders = []
+    for index in range(58):
+        order = deepcopy(template["orders"][0])
+        order["reference"] = f"issue456-rollover-{index:04d}"
+        orders.append(order)
+    plan = _v3_plan(
+        generated_at="2026-08-26T06:33:00Z",
+        expires_at="2026-08-26T06:52:14Z",
+        creation_quote_proof=template["creation_quote_proof"],
+        expected_before_position_hash=template["expected_before_position_hash"],
+        orders=orders,
+    )
+    service, core, repo, gateway, custody = _runtime(plan, _Reader())
+    gateway.snapshots.append(
+        GatewaySnapshot(
+            snapshot_id="snapshot-default",
+            generation=1,
+            connected=True,
+            active_order_count=0,
+            position_snapshot_hash=sha256_json({}),
+            observed_at="2026-08-26T06:47:00Z",
+            positions={},
+            account_scope="account:windows",
+            environment="SIMNOW",
+        )
+    )
+    _token, start = _prepare(service, core, repo, custody, plan)
+    service.process_command(start)
+    intent_ids = sorted(repo.snapshot()["send_intents"])
+    assert len(intent_ids) == 58
+    parsed = TargetPlan.from_mapping(plan)
+
+    def make_unknown_expired(state: dict) -> None:
+        for intent_id in intent_ids:
+            state["send_intents"][intent_id]["state"] = "UNKNOWN_OUTCOME"
+            state["unknown_outcomes"][intent_id] = {"reason": "response lost"}
+        state["reconciliation"].update({"state": "UNKNOWN", "unknown_outcomes": 58})
+        state["lifecycle"] = "HALTED_UNKNOWN_OUTCOME"
+        state["authority"].update(
+            {
+                "state": "REVOKED",
+                "artifact_id": parsed.authority_id,
+                "artifact_hash": parsed.authority_hash,
+                "expires_at": plan["expires_at"],
+            }
+        )
+
+    repo.mutate(make_unknown_expired)
+    for intent_id in intent_ids:
+        gateway.intent_outcomes[intent_id] = {"state": "UNKNOWN_OUTCOME"}
+    now["value"] = rollover_time
+    snapshot_id = "snapshot-rollover-issue456"
+    gateway.snapshots.append(
+        GatewaySnapshot(
+            snapshot_id=snapshot_id,
+            generation=2,
+            connected=True,
+            active_order_count=0,
+            position_snapshot_hash=sha256_json({}),
+            observed_at="2026-08-27T01:00:00Z",
+            positions={},
+            account_scope="account:windows",
+            environment="SIMNOW",
+            broker_trading_day="20260827",
+            broker_limit_time_condition="GFD",
+        )
+    )
+    gateway.send_calls.clear()
+    gateway.cancel_calls.clear()
+    if not with_rollover:
+        monkeypatch.setattr(service, "_trading_day_rollover_evidence", lambda: None)
+
+    response = service.process_command(
+        command(
+            "reconcile",
+            f"issue456-rollover-{'pass' if with_rollover else 'stop'}",
+            repo.state_version,
+            {
+                "reconciliation_run_id": (
+                    f"issue456-rollover-{'pass' if with_rollover else 'stop'}"
+                ),
+                "snapshot_id": snapshot_id,
+                "reason": "query-only expired GFD rollover reconciliation",
+            },
+        )
+    )
+    state = repo.snapshot()
+    assert gateway.send_calls == []
+    assert gateway.cancel_calls == []
+    assert gateway.query_calls[-58:] == intent_ids
+    if with_rollover:
+        assert response.result["accepted"] is True
+        assert response.result["trading_day_rollover_reconciled_intent_count"] == 58
+        assert state["unknown_outcomes"] == {}
+        assert state["lifecycle"] == "READY"
+        assert state["plan"]["state"] == "ACTIVE"
+        assert state["authority"]["state"] == "REVOKED"
+        assert {
+            row["state"] for row in state["send_intents"].values()
+        } == {"RECONCILED"}
+    else:
+        assert response.result["accepted"] is False
+        assert response.result["unknown_outcomes"] == 58
+        assert state["lifecycle"] == "HALTED_UNKNOWN_OUTCOME"
 
 
 def _prepare(service, core, repo, custody, plan: dict):
