@@ -14,7 +14,8 @@ import json
 import math
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field as dataclass_field
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -44,7 +45,9 @@ from shared.commodity_execution import (
     build_trusted_keyless_target_plan_v3,
     canonical_before_position_projection,
     canonical_target_position_projection,
+    normalize_near_grid_price,
     sha256_json,
+    simnow_experimental_adverse_cushion_ticks,
     target_position_projection_hash,
     trusted_keyless_target_plan_v3_plan_id,
 )
@@ -1292,13 +1295,29 @@ def peek_current_facts_to_snapshot(
     if not account:
         raise ExecutableTargetAdapterError("peek account facts are empty")
     gateway = facts["gateway"]
-    if not isinstance(gateway, Mapping) or set(gateway) != {
+    gateway_fields = {
         "gateway_name",
         "account_scope",
         "environment",
         "connected",
-    }:
+    }
+    if isinstance(gateway, Mapping) and "trading_day" in gateway:
+        gateway_fields.add("trading_day")
+    if isinstance(gateway, Mapping) and "limit_time_condition" in gateway:
+        gateway_fields.add("limit_time_condition")
+    if not isinstance(gateway, Mapping) or set(gateway) != gateway_fields:
         raise ExecutableTargetAdapterError("peek gateway facts are invalid")
+    trading_day = gateway.get("trading_day")
+    if trading_day is not None and (
+        not isinstance(trading_day, str)
+        or re.fullmatch(r"[0-9]{8}", trading_day) is None
+    ):
+        raise ExecutableTargetAdapterError("peek gateway trading day is invalid")
+    limit_time_condition = gateway.get("limit_time_condition")
+    if limit_time_condition is not None and limit_time_condition != "GFD":
+        raise ExecutableTargetAdapterError(
+            "peek gateway LIMIT time condition is invalid"
+        )
     gateway_name = _require_text(gateway.get("gateway_name"), "peek gateway name")
     if (
         gateway_name != "CTP"
@@ -2216,23 +2235,6 @@ def _full_portfolio_quote_request(
         ) from exc
 
 
-def _full_portfolio_price_is_tick_aligned(
-    value: Decimal, *, tick: Decimal
-) -> bool:
-    """Accept only a nearest-grid representation error from a formal float."""
-
-    quotient = value / tick
-    aligned = quotient.to_integral_value() * tick
-    price_error = abs(value - aligned)
-    value_float = float(value)
-    tick_float = float(tick)
-    tolerance = min(
-        abs(tick_float) * 1e-6,
-        max(8.0 * math.ulp(value_float), abs(tick_float) * 1e-9),
-    )
-    return float(price_error) <= tolerance
-
-
 def _full_portfolio_formal_quote(
     values: Mapping[str, Any] | None,
     *,
@@ -2242,6 +2244,7 @@ def _full_portfolio_formal_quote(
     expected_price_tick: Any,
     now: datetime,
     requirements_only: bool = False,
+    adverse_cushion_ticks: int = 0,
 ) -> tuple[float, dict[str, Any], FormalTickRequest]:
     request = _full_portfolio_quote_request(
         exact_contract=exact_contract,
@@ -2251,6 +2254,14 @@ def _full_portfolio_formal_quote(
     )
     if requirements_only:
         return request.price_tick, {}, request
+    if (
+        isinstance(adverse_cushion_ticks, bool)
+        or not isinstance(adverse_cushion_ticks, int)
+        or adverse_cushion_ticks < 0
+    ):
+        raise ExecutableTargetAdapterError(
+            f"full-portfolio adverse cushion is invalid: {exact_contract}"
+        )
     if not isinstance(values, Mapping):
         raise ExecutableTargetAdapterError(
             "full-portfolio formal quote bindings must be an object"
@@ -2342,30 +2353,56 @@ def _full_portfolio_formal_quote(
         raise ExecutableTargetAdapterError(
             f"full-portfolio frozen product price tick mismatch: {exact_contract}"
         )
-    if (
-        not reference.is_finite()
-        or reference <= 0
-        or not _full_portfolio_price_is_tick_aligned(reference, tick=frozen_tick)
-    ):
+    try:
+        reference = normalize_near_grid_price(reference, tick=frozen_tick)
+    except ValueError as exc:
+        raise ExecutableTargetAdapterError(
+            f"full-portfolio formal quote price is invalid: {exact_contract}"
+        ) from exc
+    if reference <= 0:
         raise ExecutableTargetAdapterError(
             f"full-portfolio formal quote price is invalid: {exact_contract}"
         )
+    protected_steps = 1 + adverse_cushion_ticks
     protected = (
-        reference + frozen_tick if price_side == "ask" else reference - frozen_tick
+        reference + frozen_tick * protected_steps
+        if price_side == "ask"
+        else reference - frozen_tick * protected_steps
     )
-    if (
-        not protected.is_finite()
-        or protected <= 0
-        or not _full_portfolio_price_is_tick_aligned(protected, tick=frozen_tick)
-    ):
+    try:
+        protected = normalize_near_grid_price(protected, tick=frozen_tick)
+    except ValueError as exc:  # pragma: no cover - protected derives from grid values
+        raise ExecutableTargetAdapterError(
+            f"full-portfolio protected limit price is invalid: {exact_contract}"
+        ) from exc
+    if protected <= 0:
         raise ExecutableTargetAdapterError(
             f"full-portfolio protected limit price is invalid: {exact_contract}"
         )
     return (
         float(protected),
-        _mapping(quote, "full-portfolio formal quote binding"),
+        _mapping(
+            {**quote, "reference_price": float(reference)},
+            "full-portfolio formal quote binding",
+        ),
         request,
     )
+
+
+def _simnow_experimental_adverse_cushion_ticks(
+    *, run_id: str, product: str
+) -> int:
+    """Return the fixed experimental budget, never an operator-supplied value."""
+
+    try:
+        return simnow_experimental_adverse_cushion_ticks(
+            execution_run_id=run_id,
+            symbol=f"{product}0000",
+        )
+    except CommodityExecutionContractError as exc:  # pragma: no cover - frozen caller
+        raise ExecutableTargetAdapterError(
+            "SIMNOW_EXPERIMENTAL product is outside the frozen universe"
+        ) from exc
 
 
 def full_portfolio_phase_plan_id_from_preimage(
@@ -2763,6 +2800,11 @@ def _build_static_core_equal_full_portfolio(
                     expected_price_tick=target["price_tick"],
                     now=current_time,
                     requirements_only=requirements_only,
+                    adverse_cushion_ticks=(
+                        _simnow_experimental_adverse_cushion_ticks(
+                            run_id=normalized_run_id, product=product
+                        )
+                    ),
                 )
             )
             close_formal_quote_bindings.setdefault(
@@ -2947,6 +2989,11 @@ def _build_static_core_equal_full_portfolio(
                     expected_price_tick=intent["frozen_product_price_tick"],
                     now=current_time,
                     requirements_only=requirements_only,
+                    adverse_cushion_ticks=(
+                        _simnow_experimental_adverse_cushion_ticks(
+                            run_id=normalized_run_id, product=product
+                        )
+                    ),
                 )
             )
             open_formal_quote_bindings.setdefault(exact_contract, formal_quote_binding)

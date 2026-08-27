@@ -17,12 +17,6 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
-from shared.commodity_execution import (
-    KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
-    KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
-    sha256_json,
-)
-
 from app.execution.models import (
     EPOCH_TIMESTAMP,
     FUTURE_SKEW_SECONDS,
@@ -32,6 +26,13 @@ from app.execution.models import (
     UTC_RE,
     CommandEnvelope,
     parse_utc,
+)
+from shared.commodity_execution import (
+    KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+    KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
+    CommodityExecutionContractError,
+    before_position_projection_hash,
+    sha256_json,
 )
 
 _SCHEMA_PATH = (
@@ -527,6 +528,8 @@ _SEND_INTENT_OPTIONAL_FIELDS = frozenset(
         "receipt_hash",
         "broker_order_id",
         "unknown_reason",
+        "execution_start_quote_proof",
+        "execution_start_quote_proof_sha256",
     }
 )
 _STATUS_BINDING_FIELDS = frozenset(
@@ -539,6 +542,7 @@ _STATUS_BINDING_FIELDS = frozenset(
         "broker",
         "durable_active_orders_sha256",
         "durable_positions_sha256",
+        "durable_position_identity_sha256",
         "snapshot_identity_mode",
     }
 )
@@ -570,6 +574,20 @@ def _strict_nonnegative_int(value: Any, *, field: str) -> None:
 def _strict_sha(value: Any, *, field: str) -> None:
     if not isinstance(value, str) or SHA256_RE.fullmatch(value) is None:
         raise ValueError(f"{field} is invalid")
+
+
+def _send_intent_start_quote_proof_fields_are_valid(row: Mapping[str, Any]) -> bool:
+    """Accept the v3 proof as opaque data while enforcing its field contract."""
+
+    has_proof = "execution_start_quote_proof" in row
+    has_proof_sha256 = "execution_start_quote_proof_sha256" in row
+    if has_proof != has_proof_sha256:
+        return False
+    return (
+        not has_proof_sha256
+        or isinstance(row["execution_start_quote_proof_sha256"], str)
+        and SHA256_RE.fullmatch(row["execution_start_quote_proof_sha256"]) is not None
+    )
 
 
 def _strict_utc(value: Any, *, field: str) -> datetime:
@@ -657,6 +675,10 @@ class ExecutionAccountFactsProjection:
             binding["durable_positions_sha256"],
             field="durable_positions_sha256",
         )
+        _strict_sha(
+            binding["durable_position_identity_sha256"],
+            field="durable_position_identity_sha256",
+        )
         reconciliation = binding["reconciliation"]
         broker = binding["broker"]
         if (
@@ -689,25 +711,28 @@ class ExecutionAccountFactsProjection:
                 candidate["snapshot_id"].removeprefix("snapshot-peek-"),
                 field="snapshot peek facts hash",
             )
+        try:
+            current_position_identity_sha256 = before_position_projection_hash(
+                positions,
+                account_scope=candidate["account_scope"],
+                environment=candidate["environment"],
+            )
+        except CommodityExecutionContractError as exc:
+            raise ValueError("execution position identity is invalid") from exc
         if (
             reconciliation["state"] != "RECONCILED"
             or reconciliation["unknown_outcomes"] != 0
             or broker["connected"] is not True
             or broker["generation"] != candidate["generation"]
-            or broker["position_snapshot_hash"] != candidate["position_snapshot_hash"]
-            or binding["durable_positions_sha256"]
-            != candidate["position_snapshot_hash"]
+            or broker["position_snapshot_hash"]
+            != binding["durable_positions_sha256"]
+            or binding["durable_position_identity_sha256"]
+            != current_position_identity_sha256
             or broker["active_order_count"] != candidate["active_order_count"]
             or binding["durable_active_orders_sha256"]
             != candidate["active_orders_sha256"]
-            or binding["snapshot_identity_mode"]
-            != (
-                "EXACT"
-                if stable_snapshot_identity
-                else "GENERATION_FACT_HASH_EQUIVALENT"
-            )
             or (
-                stable_snapshot_identity
+                binding["snapshot_identity_mode"] == "EXACT"
                 and reconciliation["fresh_snapshot_id"] != candidate["snapshot_id"]
             )
             or durable_observed_at > observed_at
@@ -794,6 +819,7 @@ class ExecutionAccountFactsProjectionV2:
             )
             or not isinstance(row.get("created_at"), str)
             or UTC_RE.fullmatch(row["created_at"]) is None
+            or not _send_intent_start_quote_proof_fields_are_valid(row)
             for intent_id, row in intents.items()
         ):
             raise ValueError("execution account facts v2 send intents are invalid")

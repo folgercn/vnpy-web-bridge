@@ -16,7 +16,7 @@ import os
 import stat
 import tempfile
 from collections.abc import Callable, Mapping
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
 from typing import Any, Protocol
@@ -1427,6 +1427,83 @@ class FinalExecutionRuntime:
             )
         return evidence
 
+    def _expired_revoked_rollover_recovery(self, rollover: Mapping[str, Any] | None) -> bool:
+        """Allow query-only rollover recovery, never a revoked completion.
+
+        The authority expiry is persisted from the immutable TargetPlan by the
+        existing ``enable`` gate.  Recheck that equality here so an arbitrary
+        revoked status projection cannot suppress normal finalization.
+        """
+
+        if rollover is None:
+            return False
+        state = self.orchestrator.repository.snapshot()
+        active = state.get("plan", {})
+        authority = state.get("authority", {})
+        if (
+            not isinstance(active, Mapping)
+            or not isinstance(authority, Mapping)
+            or active.get("state") != "ACTIVE"
+            or authority.get("state") != "REVOKED"
+            or rollover.get("plan_id") != active.get("plan_id")
+            or rollover.get("plan_hash") != active.get("plan_hash")
+        ):
+            return False
+        plan = self._plan(str(active["plan_id"]), plan_hash=str(active["plan_hash"]))
+        if (
+            authority.get("artifact_id") != plan.authority_id
+            or authority.get("artifact_hash") != plan.authority_hash
+            or authority.get("expires_at") != plan.raw["expires_at"]
+        ):
+            return False
+        try:
+            expires_at = datetime.fromisoformat(
+                str(authority["expires_at"]).removesuffix("Z") + "+00:00"
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PlanRejected("SIMNOW revoked authority expiry is invalid") from exc
+        return expires_at <= utc_now()
+
+    def _trading_day_rollover_evidence(self) -> dict[str, Any] | None:
+        """Prove the narrow fixed CTP LIMIT->GFD day-session boundary."""
+
+        state = self.orchestrator.repository.snapshot()
+        active = state.get("plan", {})
+        if active.get("state") != "ACTIVE":
+            return None
+        plan = self._plan(str(active["plan_id"]), plan_hash=str(active["plan_hash"]))
+        if (
+            plan.raw.get("schema_version") != KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION
+            or plan.raw.get("environment") != "SIMNOW"
+            or plan.raw.get("gateway_name") != "CTP"
+            or any(order.get("type") != "LIMIT" for order in plan.raw["orders"])
+        ):
+            return None
+        generated_at = plan.raw.get("generated_at")
+        try:
+            generated = datetime.fromisoformat(
+                generated_at.removesuffix("Z") + "+00:00"
+            )
+        except (AttributeError, TypeError, ValueError):
+            return None
+        local = generated.astimezone(timezone(timedelta(hours=8)))
+        minute = local.hour * 60 + local.minute
+        if not (8 * 60 + 30 <= minute < 15 * 60):
+            return None
+        bindings = expected_send_intent_bindings(
+            plan,
+            account_scope=self.orchestrator.scope,
+            environment=self.orchestrator.environment,
+        )
+        return {
+            "schema_version": "execution_gfd_rollover_evidence_v1",
+            "plan_id": plan.plan_id,
+            "plan_hash": plan.plan_hash,
+            "intent_trading_day": local.strftime("%Y%m%d"),
+            "time_condition": "GFD",
+            "intent_ids": sorted(binding["intent_id"] for binding in bindings),
+        }
+
     def resume_active_plan(self, request: Mapping[str, Any]) -> dict[str, Any]:
         """Resume only the immutable deterministic children of one ACTIVE plan.
 
@@ -1857,11 +1934,17 @@ class FinalExecutionRuntime:
             return self._dispatch_accepted_start(
                 response, plan=plan, quote_proof=quote_proof
             )
-        finalization_evidence = (
-            self._finalization_evidence() if envelope.command == "reconcile" else None
-        )
+        rollover_evidence = None
+        finalization_evidence = None
+        if envelope.command == "reconcile":
+            rollover_evidence = self._trading_day_rollover_evidence()
+            finalization_evidence = self._finalization_evidence()
+            if self._expired_revoked_rollover_recovery(rollover_evidence):
+                finalization_evidence = None
         return self.orchestrator.process_command(
-            envelope, finalization_evidence=finalization_evidence
+            envelope,
+            finalization_evidence=finalization_evidence,
+            rollover_evidence=rollover_evidence,
         )
 
     def _dispatch_accepted_start(
@@ -1873,9 +1956,27 @@ class FinalExecutionRuntime:
     ) -> CommandResponse:
         if response.result.get("accepted") is not True:
             return response
-        token = self.orchestrator.fencer.token
-        if token is None:
+        start_token = self.orchestrator.fencer.token
+        if start_token is None:
             raise MutationRejected("SIMNOW runner lost its leader token")
+        start_identity = (
+            start_token.scope,
+            start_token.owner_id,
+            start_token.epoch,
+            start_token.fencing_token,
+            start_token.instance_id,
+        )
+        last_lease_expiry = datetime.fromisoformat(
+            start_token.lease_expires_at[:-1] + "+00:00"
+        )
+        bindings_by_order_ref = {
+            binding["order_ref"]: binding
+            for binding in expected_send_intent_bindings(
+                plan,
+                account_scope=self.orchestrator.scope,
+                environment=self.orchestrator.environment,
+            )
+        }
         proof_for_missing = quote_proof
         if (
             response.reused
@@ -1898,19 +1999,46 @@ class FinalExecutionRuntime:
                     plan, order_refs=missing_refs
                 )
         for order in plan.orders:
+            binding = bindings_by_order_ref[order.reference]
+            state = self.orchestrator.repository.snapshot()
+            existing_id = state["intent_keys"].get(binding["idempotency_key"])
+            dispatch_token = start_token
+            if existing_id != binding["intent_id"]:
+                # New children must use the current active lease.  A start can
+                # outlive several same-identity renewals, but it must never
+                # create another child after release, expiry, identity change,
+                # or a lease-expiry regression.
+                try:
+                    current_token = self.orchestrator.fencer.token
+                    if current_token is None:
+                        raise MutationRejected("SIMNOW runner lost its leader token")
+                    current_identity = (
+                        current_token.scope,
+                        current_token.owner_id,
+                        current_token.epoch,
+                        current_token.fencing_token,
+                        current_token.instance_id,
+                    )
+                    if current_identity != start_identity:
+                        raise MutationRejected(
+                            "SIMNOW runner leader identity changed during dispatch"
+                        )
+                    current_expiry = datetime.fromisoformat(
+                        current_token.lease_expires_at[:-1] + "+00:00"
+                    )
+                    if current_expiry < last_lease_expiry:
+                        raise MutationRejected(
+                            "SIMNOW runner leader lease expiry regressed during dispatch"
+                        )
+                    dispatch_token = self.orchestrator.fencer.validate(current_token)
+                    last_lease_expiry = current_expiry
+                except Exception as exc:
+                    self._halt_runner_after_failure(
+                        f"SIMNOW runner order {order.reference} failed: {exc}"
+                    )
+                    raise
             dispatch_proof = proof_for_missing
             if plan.raw["schema_version"] == KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION:
-                state = self.orchestrator.repository.snapshot()
-                binding = next(
-                    item
-                    for item in expected_send_intent_bindings(
-                        plan,
-                        account_scope=self.orchestrator.scope,
-                        environment=self.orchestrator.environment,
-                    )
-                    if item["order_ref"] == order.reference
-                )
-                existing_id = state["intent_keys"].get(binding["idempotency_key"])
                 existing = state["send_intents"].get(existing_id, {})
                 if (
                     isinstance(existing, Mapping)
@@ -1921,7 +2049,7 @@ class FinalExecutionRuntime:
                 result = self.send_plan_order(
                     plan.plan_id,
                     order.reference,
-                    token=token,
+                    token=dispatch_token,
                     execution_start_quote_proof=dispatch_proof,
                 )
             except Exception as exc:

@@ -9,6 +9,7 @@ small and useful for offline safety tests.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from threading import RLock
@@ -806,18 +807,36 @@ class VnpyWindowsGateway:
                 result["active_orders"], field="active order"
             )
             gateway = result["gateway"]
+            gateway_fields = {
+                "gateway_name",
+                "account_scope",
+                "environment",
+                "connected",
+            }
+            if "trading_day" in gateway:
+                gateway_fields.add("trading_day")
+            if "limit_time_condition" in gateway:
+                gateway_fields.add("limit_time_condition")
             if (
                 not isinstance(gateway, Mapping)
-                or dict(gateway)
-                != {
-                    "gateway_name": self._FINAL_VALIDATION_GATEWAY_NAME,
-                    "account_scope": self.account_scope,
-                    "environment": self._FINAL_VALIDATION_WINDOWS_ENVIRONMENT,
-                    "connected": gateway.get("connected"),
-                }
+                or set(gateway) != gateway_fields
+                or gateway.get("gateway_name")
+                != self._FINAL_VALIDATION_GATEWAY_NAME
+                or gateway.get("account_scope") != self.account_scope
+                or gateway.get("environment")
+                != self._FINAL_VALIDATION_WINDOWS_ENVIRONMENT
                 or not isinstance(gateway["connected"], bool)
             ):
                 raise TypeError("current facts gateway binding is invalid")
+            trading_day = gateway.get("trading_day")
+            if trading_day is not None and (
+                not isinstance(trading_day, str)
+                or re.fullmatch(r"[0-9]{8}", trading_day) is None
+            ):
+                raise TypeError("current facts trading day is invalid")
+            limit_time_condition = gateway.get("limit_time_condition")
+            if limit_time_condition is not None and limit_time_condition != "GFD":
+                raise TypeError("current facts LIMIT time condition is invalid")
             execution = result["execution"]
             if not isinstance(execution, Mapping) or set(execution) != {"orders"}:
                 raise TypeError("current facts execution fields are not exact")
@@ -889,6 +908,10 @@ class VnpyWindowsGateway:
                 account_scope=self.account_scope,
                 environment=self.environment,
                 fresh=True,
+                fence_high_water_epoch=fence["high_water_epoch"],
+                fence_high_water_fencing_token=fence["high_water_fencing_token"],
+                broker_trading_day=trading_day,
+                broker_limit_time_condition=limit_time_condition,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise GatewayUnavailable(

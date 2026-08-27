@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from app.phase_c.adapters import UnknownOutcomeError
 from app.phase_c.models import TrustedKeylessContinuousEventUploadDTO
 from app.execution.models import CommandEnvelope
+from shared.commodity_execution import before_position_projection_hash
 from research_warehouse.file_integrity import read_regular_strict
 from research_warehouse.continuous_event_selector import BuiltContinuousEventSelection
 from scripts.ci.classify_changes import (
@@ -1570,6 +1571,74 @@ def _production_backend_without_clients(tmp_path: Path, *, enabled: bool):
     return backend
 
 
+def _post_renew_status(*, plan: dict) -> dict:
+    return {
+        "lifecycle": "READY",
+        "reconciliation": {"state": "RECONCILED", "unknown_outcomes": 0},
+        "plan": plan,
+    }
+
+
+def _post_renew_recovery() -> dict:
+    return {
+        "plan_id": "continuous-open-plan-test-0001",
+        "plan_hash": "a" * 64,
+    }
+
+
+def test_post_renew_matching_public_preview_status_needs_only_public_projection(
+    tmp_path: Path,
+) -> None:
+    backend = _production_backend_without_clients(tmp_path, enabled=True)
+    recovery = _post_renew_recovery()
+
+    backend._require_post_renew_status(
+        _post_renew_status(
+            plan={
+                "state": "PREVIEWED",
+                "plan_id": f"preview-{recovery['plan_hash'][:16]}",
+                "plan_hash": recovery["plan_hash"],
+                "version": 7,
+            }
+        ),
+        recovery,
+        allow_active=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("state", "plan_id", "plan_hash", "allow_active", "message"),
+    [
+        ("PREVIEWED", "preview-foreign0000000", "a" * 64, False, "preview is foreign"),
+        ("PREVIEWED", "preview-aaaaaaaaaaaaaaaa", "f" * 64, False, "preview is foreign"),
+        ("ACTIVE", "foreign-active-plan-0001", "f" * 64, True, "foreign active"),
+    ],
+)
+def test_post_renew_foreign_preview_or_active_status_stops(
+    tmp_path: Path,
+    state: str,
+    plan_id: str,
+    plan_hash: str,
+    allow_active: bool,
+    message: str,
+) -> None:
+    backend = _production_backend_without_clients(tmp_path, enabled=True)
+
+    with pytest.raises(runner.ContinuousRunError, match=message):
+        backend._require_post_renew_status(
+            _post_renew_status(
+                plan={
+                    "state": state,
+                    "plan_id": plan_id,
+                    "plan_hash": plan_hash,
+                    "version": 7,
+                }
+            ),
+            _post_renew_recovery(),
+            allow_active=allow_active,
+        )
+
+
 def test_production_adapter_requires_explicit_root_config_enable(tmp_path: Path):
     assert (
         _production_backend_without_clients(
@@ -1983,6 +2052,113 @@ def test_start_response_loss_queries_exact_receipt_and_never_resends(tmp_path: P
     assert execution.calls[-1] == "release"
 
 
+def test_partial_start_dispatch_renews_same_leader_without_reconcile_or_release(
+    tmp_path: Path,
+):
+    backend = _production_backend_without_clients(tmp_path, enabled=True)
+    plan_id = "continuous-open-plan-test-0004"
+    plan_hash = "a" * 64
+    intent = lambda index: {
+        "plan_id": plan_id,
+        "plan_hash": plan_hash,
+        "state": "TERMINAL",
+        "intent_id": f"intent-{index:03d}",
+    }
+    previewed = {
+        "state_version": 7,
+        "lifecycle": "READY",
+        "plan": {
+            "state": "PREVIEWED",
+            "plan_id": f"preview-{plan_hash[:16]}",
+            "plan_hash": plan_hash,
+            "preview_mode": "simnow_preview",
+            "preview_receipt_id": "receipt-0004",
+            "preview_receipt_sha256": "e" * 64,
+            "preview_artifact_id": plan_id,
+            "preview_artifact_sha256": "d" * 64,
+        },
+        "authority": {
+            "state": "ENABLED",
+            "artifact_id": plan_id,
+            "artifact_hash": plan_hash,
+            "expires_at": "2026-08-20T13:02:00Z",
+        },
+        "leader": {"held": False},
+        "reconciliation": {"state": "RECONCILED", "unknown_outcomes": 0},
+        "broker": {"active_order_count": 0},
+        "send_intents": [],
+        "safe_to_restart": False,
+    }
+    partial = {
+        **previewed,
+        "state_version": 8,
+        "plan": {"state": "ACTIVE", "plan_id": plan_id, "plan_hash": plan_hash},
+        "send_intents": [intent(index) for index in range(8)],
+    }
+    terminal = {
+        **partial,
+        "state_version": 9,
+        "plan": {"state": "TERMINAL", "plan_id": plan_id, "plan_hash": plan_hash},
+        "authority": {"state": "REVOKED"},
+        "leader": {"held": False},
+        "send_intents": [intent(index) for index in range(181)],
+        "safe_to_restart": True,
+    }
+
+    class Execution:
+        def __init__(self):
+            self.calls: list[str] = []
+            self.statuses = [previewed, previewed, previewed, partial, partial, terminal]
+            self.token = SimpleNamespace(epoch=5, fencing_token=8)
+
+        async def status(self):
+            self.calls.append("status")
+            return SimpleNamespace(as_dict=lambda: self.statuses.pop(0))
+
+        async def acquire_leader(self, owner_id):
+            self.calls.append(f"acquire:{owner_id}")
+            return self.token
+
+        async def renew_leader(self, token):
+            assert token is self.token
+            self.calls.append("renew")
+            return token
+
+        async def submit(self, command):
+            self.calls.append(command["command"])
+            return {"accepted": True}
+
+        async def release_leader(self, token):
+            assert token is self.token
+            self.calls.append("release")
+
+    execution = Execution()
+    backend.execution = execution
+    result = asyncio.run(
+        backend._drive_installed_plan(
+            {
+                "plan_id": plan_id,
+                "plan_hash": plan_hash,
+                "phase": "OPEN",
+                "custody_idempotency_key": "b" * 64,
+                "start_quote_proof_state": "READY",
+                "expected_after_position_hash": "c" * 64,
+                "receipt_id": "receipt-0004",
+                "receipt_sha256": "e" * 64,
+                "artifact_id": plan_id,
+                "artifact_sha256": "d" * 64,
+                "expires_at": "2026-08-20T13:02:00Z",
+            },
+            expected_intent_count=181,
+        )
+    )
+
+    assert result == {"state": "COMPLETED", "phase": "OPEN", "plan_id": plan_id}
+    assert execution.calls.count("renew") == 4
+    assert "reconcile" not in execution.calls
+    assert execution.calls[-1] == "release"
+
+
 @pytest.mark.parametrize("drift", ["unknown", "foreign"])
 def test_post_renew_drift_never_submits_start(tmp_path: Path, drift: str) -> None:
     backend = _production_backend_without_clients(tmp_path, enabled=True)
@@ -2182,6 +2358,120 @@ def test_active_plan_recovery_uses_exact_resume_api_and_releases_leader(
         "status",
         "release",
     ]
+
+
+def test_halted_unknown_active_plan_reconciles_before_exact_resume(tmp_path: Path):
+    backend = _production_backend_without_clients(tmp_path, enabled=True)
+    plan_id = "continuous-open-plan-halted-0001"
+    plan_hash = "a" * 64
+    initial = {
+        "state_version": 7,
+        "lifecycle": "HALTED_UNKNOWN_OUTCOME",
+        "plan": {"state": "ACTIVE", "plan_id": plan_id, "plan_hash": plan_hash},
+        "authority": {"state": "ENABLED"},
+        "leader": {"held": False, "epoch": 3, "fencing_token": 4},
+        "reconciliation": {"state": "UNKNOWN", "unknown_outcomes": 58},
+        "broker": {"active_order_count": 0},
+        "send_intents": [],
+        "safe_to_restart": False,
+    }
+    halted_with_leader = {
+        **initial,
+        "leader": {"held": True, "epoch": 3, "fencing_token": 4},
+    }
+    reconciled = {
+        **halted_with_leader,
+        "state_version": 8,
+        "lifecycle": "READY",
+        "reconciliation": {"state": "RECONCILED", "unknown_outcomes": 0},
+    }
+    terminal = {
+        **reconciled,
+        "state_version": 9,
+        "plan": {"state": "TERMINAL", "plan_id": plan_id, "plan_hash": plan_hash},
+        "authority": {"state": "REVOKED"},
+        "leader": {"held": False, "epoch": 3, "fencing_token": 4},
+        "send_intents": [
+            {"plan_id": plan_id, "plan_hash": plan_hash, "state": "RECONCILED"}
+        ],
+        "safe_to_restart": True,
+    }
+
+    class Execution:
+        def __init__(self):
+            self.calls: list[str] = []
+            self.statuses = [initial, halted_with_leader, reconciled, terminal]
+            self.token = SimpleNamespace(epoch=3, fencing_token=4)
+            self.snapshot_count = 0
+
+        async def status(self):
+            self.calls.append("status")
+            return SimpleNamespace(as_dict=lambda: self.statuses.pop(0))
+
+        async def acquire_leader(self, owner_id):
+            self.calls.append(f"acquire:{owner_id}")
+            return self.token
+
+        async def renew_leader(self, token):
+            assert token is self.token
+            self.calls.append("renew")
+            return token
+
+        async def reconciliation_snapshot(self):
+            self.snapshot_count += 1
+            self.calls.append(f"snapshot:{self.snapshot_count}")
+            value = {
+                "snapshot_id": f"snapshot-peek-{self.snapshot_count:064x}",
+                "generation": 17,
+                "position_snapshot_hash": "c" * 64,
+                "active_order_count": 0,
+                "active_orders_sha256": "0" * 64,
+                "account_scope": "account:windows",
+                "environment": "SIMNOW",
+                "positions": {},
+                "state_binding": {
+                    "state_version": 7,
+                    "durable_broker_generation": 17,
+                },
+            }
+            return SimpleNamespace(as_dict=lambda: value)
+
+        async def submit(self, command):
+            assert command["command"] == "reconcile"
+            self.calls.append("reconcile")
+            return {"accepted": True}
+
+        async def resume_active_plan(self, **kwargs):
+            assert kwargs["plan_id"] == plan_id
+            assert kwargs["plan_hash"] == plan_hash
+            assert kwargs["leader_token"] is self.token
+            self.calls.append("resume")
+
+        async def release_leader(self, token):
+            assert token is self.token
+            self.calls.append("release")
+
+    execution = Execution()
+    backend.execution = execution
+    result = asyncio.run(
+        backend._drive_installed_plan(
+            {
+                "plan_id": plan_id,
+                "plan_hash": plan_hash,
+                "phase": "OPEN",
+                "custody_idempotency_key": "b" * 64,
+                "start_quote_proof_state": "STARTED_MATCHED",
+                "expected_after_position_hash": "c" * 64,
+            },
+            expected_intent_count=1,
+        )
+    )
+
+    assert result == {"state": "COMPLETED", "phase": "OPEN", "plan_id": plan_id}
+    assert "reconcile" in execution.calls
+    assert execution.calls.index("reconcile") < execution.calls.index("resume")
+    assert "start" not in execution.calls
+    assert "cancel" not in execution.calls
 
 
 def test_noop_ownership_is_full_domain_zero_write(

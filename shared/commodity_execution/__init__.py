@@ -24,7 +24,11 @@ from .v1 import (
     build_trusted_keyless_target_plan_v3,
     canonical_before_position_projection,
     canonical_target_position_projection,
+    is_simnow_experimental_execution_run_id,
+    normalize_near_grid_price,
     sha256_json,
+    simnow_experimental_adverse_cushion_ticks,
+    simnow_experimental_price_contract,
     target_position_projection_hash,
     trusted_keyless_target_plan_v3_plan_id,
 )
@@ -49,7 +53,11 @@ __all__ = [
     "build_trusted_keyless_target_plan_v3",
     "canonical_before_position_projection",
     "canonical_target_position_projection",
+    "is_simnow_experimental_execution_run_id",
+    "normalize_near_grid_price",
     "sha256_json",
+    "simnow_experimental_adverse_cushion_ticks",
+    "simnow_experimental_price_contract",
     "target_position_projection_hash",
     "trusted_keyless_target_plan_v3_plan_id",
 ]

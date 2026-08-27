@@ -248,7 +248,12 @@ def _payload(command: str, value: Any) -> dict[str, Any]:
         ),
         "stop": ({"reason"}, ("reason",)),
         "reconcile": (
-            {"reconciliation_run_id", "snapshot_id", "reason"},
+            {
+                "reconciliation_run_id",
+                "snapshot_id",
+                "snapshot_fact_binding",
+                "reason",
+            },
             ("reconciliation_run_id", "snapshot_id", "reason"),
         ),
         "drain": ({"drain_id", "reason", "deadline_at"}, ("drain_id", "reason")),
@@ -294,6 +299,38 @@ def _payload(command: str, value: Any) -> dict[str, Any]:
             raw["reconciliation_run_id"], "payload.reconciliation_run_id"
         )
         validate_identifier(raw["snapshot_id"], "payload.snapshot_id")
+        if "snapshot_fact_binding" in raw:
+            binding = raw["snapshot_fact_binding"]
+            if not isinstance(binding, Mapping) or set(binding) != {
+                "generation",
+                "position_snapshot_hash",
+                "active_order_count",
+                "active_orders_sha256",
+                "state_version",
+                "durable_broker_generation",
+            }:
+                raise CommandValidationError(
+                    "payload.snapshot_fact_binding is invalid"
+                )
+            for field in (
+                "generation",
+                "active_order_count",
+                "state_version",
+                "durable_broker_generation",
+            ):
+                value = binding[field]
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise CommandValidationError(
+                        f"payload.snapshot_fact_binding.{field} is invalid"
+                    )
+            validate_sha256(
+                binding["position_snapshot_hash"],
+                "payload.snapshot_fact_binding.position_snapshot_hash",
+            )
+            validate_sha256(
+                binding["active_orders_sha256"],
+                "payload.snapshot_fact_binding.active_orders_sha256",
+            )
         _strict_string(raw["reason"], "payload.reason", min_length=8, max_length=500)
     elif command == "drain":
         validate_identifier(raw["drain_id"], "payload.drain_id")

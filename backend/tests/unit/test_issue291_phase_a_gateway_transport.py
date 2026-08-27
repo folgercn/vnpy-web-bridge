@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from copy import deepcopy
 from pathlib import Path
 from socket import AF_INET, SOCK_STREAM, socket
 from threading import Event, Thread
@@ -23,6 +24,7 @@ from app.execution.errors import (
 )
 from app.execution.gateway import ZmqRpcTransport
 from app.execution.models import sha256_json
+from shared.commodity_execution import before_position_projection_hash
 
 
 def _free_tcp_address() -> str:
@@ -580,7 +582,19 @@ def _final_validation_facts() -> dict:
         "schema_version": "windows_execution_current_facts_v1",
         "position_query_complete": True,
         "account": {"CTP.sim-account": {"gateway_name": "CTP", "available": 90}},
-        "positions": {"rb-long": {"symbol": "rb", "volume": 2}},
+        "positions": {
+            "rb-long": {
+                "gateway_name": "CTP",
+                "symbol": "rb2610",
+                "exchange": "SHFE",
+                "direction": "LONG",
+                "volume": 2,
+                "yd_volume": 1,
+                "price": 3200.0,
+                "pnl": 100.0,
+                "frozen": 0,
+            }
+        },
         "active_orders": {"CTP.1": {"symbol": "rb", "status": "NOTTRADED"}},
         "gateway": {
             "gateway_name": "CTP",
@@ -621,7 +635,16 @@ def _final_validation_gateway(transport):
     return gateway
 
 
-def _reconcile_command(snapshot_id: str, version: int) -> dict:
+def _reconcile_command(
+    snapshot_id: str, version: int, *, snapshot_fact_binding: dict | None = None
+) -> dict:
+    payload = {
+        "reconciliation_run_id": "run-transport-0001",
+        "snapshot_id": snapshot_id,
+        "reason": "verify read-only snapshot transport",
+    }
+    if snapshot_fact_binding is not None:
+        payload["snapshot_fact_binding"] = snapshot_fact_binding
     return {
         "schema_version": "web_bridge_control_execution_command_v1",
         "command_id": "command-reconcile-0001",
@@ -636,11 +659,25 @@ def _reconcile_command(snapshot_id: str, version: int) -> dict:
         },
         "command": "reconcile",
         "expected": {"state_version": version},
-        "payload": {
-            "reconciliation_run_id": "run-transport-0001",
-            "snapshot_id": snapshot_id,
-            "reason": "verify read-only snapshot transport",
-        },
+        "payload": payload,
+    }
+
+
+def _snapshot_fact_binding(
+    facts: dict, service: ExecutionOrchestrator
+) -> dict[str, object]:
+    state = service.repository.snapshot()
+    return {
+        "generation": facts["admission"]["snapshot_generation"],
+        "position_snapshot_hash": before_position_projection_hash(
+            facts["positions"],
+            account_scope="account:prod",
+            environment="SIMNOW",
+        ),
+        "active_order_count": len(facts["active_orders"]),
+        "active_orders_sha256": sha256_json(facts["active_orders"]),
+        "state_version": state["state_version"],
+        "durable_broker_generation": state["broker"]["generation"],
     }
 
 
@@ -689,6 +726,8 @@ def test_final_validation_readiness_uses_fixed_pure_peek_and_hash_binds_facts() 
     assert snapshot.account_scope == "account:prod"
     assert snapshot.environment == "SIMNOW"
     assert snapshot.fresh is True
+    assert snapshot.fence_high_water_epoch == 0
+    assert snapshot.fence_high_water_fencing_token == 0
 
 
 def test_final_validation_does_not_replace_durable_snapshot_path() -> None:
@@ -741,6 +780,110 @@ def test_final_validation_reconcile_accepts_equal_pure_peek_generation() -> None
     )
 
     assert response.result["accepted"] is True
+
+
+def test_final_validation_reconcile_accepts_equivalent_different_peek_id() -> None:
+    facts = _final_validation_facts()
+    facts["active_orders"] = {}
+    facts["execution"]["orders"] = {}
+    transport = _FinalValidationPeekTransport(facts)
+    service = _reconcile_service(_final_validation_gateway(transport))
+    requested_facts = deepcopy(facts)
+    requested_facts["admission"]["durable_state_version"] += 1
+
+    response = service.process_command(
+        _reconcile_command(
+            f"snapshot-peek-{sha256_json(requested_facts)}",
+            service.repository.state_version,
+            snapshot_fact_binding=_snapshot_fact_binding(facts, service),
+        )
+    )
+
+    assert response.result["accepted"] is True
+
+
+@pytest.mark.parametrize("field", ["pnl", "price"])
+def test_final_validation_reconcile_accepts_peek_valuation_drift(field: str) -> None:
+    requested_facts = _final_validation_facts()
+    requested_facts["active_orders"] = {}
+    requested_facts["execution"]["orders"] = {}
+    current_facts = deepcopy(requested_facts)
+    current_facts["positions"]["rb-long"][field] += 1
+    assert sha256_json(requested_facts["positions"]) != sha256_json(
+        current_facts["positions"]
+    )
+    service = _reconcile_service(
+        _final_validation_gateway(_FinalValidationPeekTransport(current_facts))
+    )
+
+    response = service.process_command(
+        _reconcile_command(
+            f"snapshot-peek-{sha256_json(requested_facts)}",
+            service.repository.state_version,
+            snapshot_fact_binding=_snapshot_fact_binding(requested_facts, service),
+        )
+    )
+
+    assert response.result["accepted"] is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("volume", 3),
+        ("direction", "SHORT"),
+        ("symbol", "ag2612"),
+        ("exchange", "INE"),
+        ("yd_volume", 0),
+    ],
+)
+def test_final_validation_reconcile_rejects_peek_position_identity_drift(
+    field: str, value: object
+) -> None:
+    requested_facts = _final_validation_facts()
+    requested_facts["active_orders"] = {}
+    requested_facts["execution"]["orders"] = {}
+    current_facts = deepcopy(requested_facts)
+    current_facts["positions"]["rb-long"][field] = value
+    service = _reconcile_service(
+        _final_validation_gateway(_FinalValidationPeekTransport(current_facts))
+    )
+
+    with pytest.raises(SnapshotRejected, match="does not match"):
+        service.process_command(
+            _reconcile_command(
+                f"snapshot-peek-{sha256_json(requested_facts)}",
+                service.repository.state_version,
+                snapshot_fact_binding=_snapshot_fact_binding(
+                    requested_facts, service
+                ),
+            )
+        )
+
+
+@pytest.mark.parametrize("drift", ["generation", "positions", "orders"])
+def test_final_validation_reconcile_rejects_peek_fact_drift(drift: str) -> None:
+    facts = _final_validation_facts()
+    facts["active_orders"] = {}
+    facts["execution"]["orders"] = {}
+    transport = _FinalValidationPeekTransport(facts)
+    service = _reconcile_service(_final_validation_gateway(transport))
+    binding = _snapshot_fact_binding(facts, service)
+    if drift == "generation":
+        binding["generation"] = int(binding["generation"]) + 1
+    elif drift == "positions":
+        binding["position_snapshot_hash"] = "f" * 64
+    else:
+        binding["active_orders_sha256"] = "f" * 64
+
+    with pytest.raises(SnapshotRejected, match="does not match"):
+        service.process_command(
+            _reconcile_command(
+                "snapshot-peek-" + "e" * 64,
+                service.repository.state_version,
+                snapshot_fact_binding=binding,
+            )
+        )
 
 
 def test_equal_pure_peek_reconcile_keeps_unknown_halted_without_new_send() -> None:
@@ -1065,12 +1208,16 @@ def test_final_validation_readiness_exposes_only_active_orders() -> None:
         lambda facts: facts["gateway"].update({"account_scope": "account:foreign"}),
         lambda facts: facts["gateway"].update({"environment": "SIMNOW"}),
         lambda facts: facts.update({"observed_at": "1970-01-01T00:00:00Z"}),
+        lambda facts: facts["admission"]["fence"].pop("high_water_epoch"),
+        lambda facts: facts["admission"]["fence"].update({"high_water_epoch": True}),
     ],
     ids=[
         "malformed",
         "foreign-gateway",
         "foreign-windows-environment",
         "stale-like-extra-fact",
+        "missing-fence-high-water",
+        "malformed-fence-high-water",
     ],
 )
 def test_final_validation_readiness_rejects_non_exact_or_foreign_facts(mutate) -> None:

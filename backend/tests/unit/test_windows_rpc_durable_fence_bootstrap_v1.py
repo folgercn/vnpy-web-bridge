@@ -5,6 +5,7 @@ import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -52,17 +53,41 @@ class SyncEventEngine:
             handler(event)
 
 
+class _FakeOrderType(Enum):
+    LIMIT = "LIMIT"
+
+
+class _FakeCtpTdApi(SimpleNamespace):
+    pass
+
+
+ORDERTYPE_VT2CTP = {_FakeOrderType.LIMIT: ("2", "3", "1")}
+OrderType = _FakeOrderType
+
+
+def test_runtime_limit_time_condition_is_bound_to_loaded_ctp_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert durable_module._runtime_limit_time_condition(_FakeCtpTdApi()) == "GFD"
+    monkeypatch.setitem(ORDERTYPE_VT2CTP, _FakeOrderType.LIMIT, ("2", "1", "1"))
+    with pytest.raises(
+        WindowsRpcDurableFenceError, match="LIMIT time condition is not GFD"
+    ):
+        durable_module._runtime_limit_time_condition(_FakeCtpTdApi())
+
+
 class FactSource:
     def __init__(self) -> None:
         self.engines = {"log": None, "oms": None}
         self.apps = {"RpcService": None}
         self.gateway = SimpleNamespace(
-            td_api=SimpleNamespace(
+            td_api=_FakeCtpTdApi(
                 reqQryInvestorPosition=lambda _request, _request_id: 0,
                 onRspQryInvestorPosition=lambda *_args: None,
                 onFrontConnected=lambda: None,
                 onFrontDisconnected=lambda _reason: None,
                 onRspUserLogin=lambda *_args: None,
+                getTradingDay=lambda: "20260827",
             )
         )
 
@@ -767,6 +792,8 @@ def test_production_launcher_uses_only_fixed_runtime_lifecycle(
         "account_scope": config.account_scope,
         "environment": config.environment,
         "connected": True,
+        "trading_day": "20260827",
+        "limit_time_condition": "GFD",
     }
     assert peek["admission"]["snapshot_generation"] == 0
     assert peek["admission"]["fence"] == {

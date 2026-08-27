@@ -29,6 +29,17 @@ class GatewaySnapshot:
     account_scope: str = ""
     environment: str = ""
     fresh: bool = True
+    # Final-validation snapshots carry the Windows durable admission
+    # high-water marks.  They are intentionally internal DTO metadata: normal
+    # gateway snapshots do not provide them and public status remains unchanged.
+    fence_high_water_epoch: int | None = None
+    fence_high_water_fencing_token: int | None = None
+    # Authoritative CTP trading day from the final-validation Windows runtime.
+    # This stays internal and is deliberately omitted from ``as_dict()``.
+    broker_trading_day: str | None = None
+    # The pinned vnpy_ctp LIMIT mapping uses THOST_FTDC_TC_GFD.  Rollover
+    # recovery requires this explicit Windows-side transport binding.
+    broker_limit_time_condition: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -43,4 +54,15 @@ class GatewaySnapshot:
             "account_scope": self.account_scope,
             "environment": self.environment,
             "fresh": self.fresh,
+            **(
+                {
+                    "fence_high_water_epoch": self.fence_high_water_epoch,
+                    "fence_high_water_fencing_token": (
+                        self.fence_high_water_fencing_token
+                    ),
+                }
+                if self.fence_high_water_epoch is not None
+                or self.fence_high_water_fencing_token is not None
+                else {}
+            ),
         }

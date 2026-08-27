@@ -57,6 +57,9 @@ from shared.trust_contracts.v1 import (  # noqa: E402
     ContractError,
     canonical_json_line,
 )
+from shared.commodity_execution import (  # noqa: E402
+    before_position_projection_hash,
+)
 
 _TERMINAL_INTENT_STATES = frozenset({"TERMINAL", "RECONCILED", "CANCELLED"})
 
@@ -174,17 +177,20 @@ async def _submit_reconcile_with_ready_snapshot(
     reconciliation_run_id: str,
     reason: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Submit reconciliation against the immediately probed Gateway snapshot."""
+    """Submit reconciliation bound to one fresh full-facts snapshot."""
 
     try:
-        readiness = await execution.ready()
+        projection = await execution.reconciliation_snapshot()
     except ExecutionClientError as exc:
-        raise ValueError("Execution readiness is unavailable; refusing reconciliation") from exc
-    if not isinstance(readiness, Mapping):
-        raise ExecutionClientError("Execution readiness response is invalid")
-    gateway_snapshot_id = readiness.get("gateway_snapshot_id")
-    if not isinstance(gateway_snapshot_id, str) or not gateway_snapshot_id:
-        raise ExecutionClientError("Execution readiness gateway snapshot id is invalid")
+        raise ValueError(
+            "Execution reconciliation snapshot is unavailable; refusing reconciliation"
+        ) from exc
+    snapshot = projection.as_dict()
+    state_binding = snapshot["state_binding"]
+    if state_binding["state_version"] != version:
+        raise ExecutionClientError(
+            "Execution durable state changed after reconciliation snapshot"
+        )
     command = _command(
         name="reconcile",
         suffix=suffix,
@@ -193,7 +199,21 @@ async def _submit_reconcile_with_ready_snapshot(
         now=now,
         payload={
             "reconciliation_run_id": reconciliation_run_id,
-            "snapshot_id": gateway_snapshot_id,
+            "snapshot_id": snapshot["snapshot_id"],
+            "snapshot_fact_binding": {
+                "generation": snapshot["generation"],
+                "position_snapshot_hash": before_position_projection_hash(
+                    snapshot["positions"],
+                    account_scope=snapshot["account_scope"],
+                    environment=snapshot["environment"],
+                ),
+                "active_order_count": snapshot["active_order_count"],
+                "active_orders_sha256": snapshot["active_orders_sha256"],
+                "state_version": state_binding["state_version"],
+                "durable_broker_generation": state_binding[
+                    "durable_broker_generation"
+                ],
+            },
             "reason": reason,
         },
     )
@@ -261,7 +281,13 @@ def _accepted_start_receipt(
     )
 
 
-def _completion_state(status: dict[str, Any], *, plan_id: str, plan_hash: str) -> str:
+def _completion_state(
+    status: dict[str, Any],
+    *,
+    plan_id: str,
+    plan_hash: str,
+    expected_intent_count: int | None = None,
+) -> str:
     reconciliation = status.get("reconciliation", {})
     broker = status.get("broker", {})
     if (
@@ -281,12 +307,20 @@ def _completion_state(status: dict[str, Any], *, plan_id: str, plan_hash: str) -
         return "missing_send_intent"
     if any(item.get("state") == "UNKNOWN_OUTCOME" for item in intents):
         return "unknown_outcome"
+    if expected_intent_count is not None and len(intents) != expected_intent_count:
+        return "incomplete_send_intents"
     if any(item.get("state") not in _TERMINAL_INTENT_STATES for item in intents):
         return "pending_intents"
     return "ready_for_final_reconcile"
 
 
-def _completed(status: dict[str, Any], *, plan_id: str, plan_hash: str) -> bool:
+def _completed(
+    status: dict[str, Any],
+    *,
+    plan_id: str,
+    plan_hash: str,
+    expected_intent_count: int | None = None,
+) -> bool:
     intents = [
         item
         for item in status.get("send_intents", [])
@@ -304,6 +338,10 @@ def _completed(status: dict[str, Any], *, plan_id: str, plan_hash: str) -> bool:
         and status.get("broker", {}).get("active_order_count") == 0
         and bool(status.get("safe_to_restart"))
         and bool(intents)
+        and (
+            expected_intent_count is None
+            or len(intents) == expected_intent_count
+        )
         and all(item.get("state") in _TERMINAL_INTENT_STATES for item in intents)
     )
 
@@ -634,6 +672,10 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     result["start_submitted"] = True
 
     deadline = asyncio.get_running_loop().time() + args.completion_timeout_seconds
+    plan_orders = handoff.target_plan.get("orders")
+    expected_intent_count = (
+        len(plan_orders) if isinstance(plan_orders, (list, tuple)) else None
+    )
     reconciled_pending_versions: set[int] = set()
     while True:
         try:
@@ -644,6 +686,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             status,
             plan_id=handoff.target_plan["plan_id"],
             plan_hash=handoff.target_plan["plan_hash"],
+            expected_intent_count=expected_intent_count,
         )
         if state == "unknown_outcome":
             return _incomplete(result, reason=state, status=status)
@@ -707,6 +750,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                         completion_status,
                         plan_id=handoff.target_plan["plan_id"],
                         plan_hash=handoff.target_plan["plan_hash"],
+                        expected_intent_count=expected_intent_count,
                     ):
                         return _incomplete(
                             result,
@@ -759,6 +803,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         final_status,
         plan_id=handoff.target_plan["plan_id"],
         plan_hash=handoff.target_plan["plan_hash"],
+        expected_intent_count=expected_intent_count,
     ):
         return _incomplete(result, reason="final_reconcile_not_completed", status=final_status)
     return {**result, "executed": True, "completed": True, "archived": True, "execution_status": final_status}

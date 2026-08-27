@@ -909,6 +909,66 @@ def test_simnow_run_once_completion_fails_closed_for_pending_unknown_and_active(
     )
 
 
+def test_simnow_run_once_does_not_finalize_from_partial_start_receipt_dispatch() -> None:
+    module = _run_once_module("issue421_partial_start_receipt_dispatch")
+    terminal_one_of_two = {
+        "lifecycle": "READY",
+        "reconciliation": {"state": "RECONCILED", "unknown_outcomes": 0},
+        "broker": {"active_order_count": 0},
+        "plan": {
+            "state": "TERMINAL",
+            "plan_id": "plan-0001",
+            "plan_hash": "a" * 64,
+        },
+        "authority": {"state": "REVOKED"},
+        "leader": {"held": False},
+        "safe_to_restart": True,
+        "send_intents": [
+            {
+                "plan_id": "plan-0001",
+                "plan_hash": "a" * 64,
+                "state": "TERMINAL",
+            }
+        ],
+    }
+
+    assert (
+        module._completion_state(
+            terminal_one_of_two,
+            plan_id="plan-0001",
+            plan_hash="a" * 64,
+            expected_intent_count=2,
+        )
+        == "incomplete_send_intents"
+    )
+    assert not module._completed(
+        terminal_one_of_two,
+        plan_id="plan-0001",
+        plan_hash="a" * 64,
+        expected_intent_count=2,
+    )
+
+    unknown_partial = {
+        **terminal_one_of_two,
+        "send_intents": [
+            {
+                "plan_id": "plan-0001",
+                "plan_hash": "a" * 64,
+                "state": "UNKNOWN_OUTCOME",
+            }
+        ],
+    }
+    assert (
+        module._completion_state(
+            unknown_partial,
+            plan_id="plan-0001",
+            plan_hash="a" * 64,
+            expected_intent_count=2,
+        )
+        == "unknown_outcome"
+    )
+
+
 def _run_once_module(name: str):
     path = Path(__file__).resolve().parents[3] / "scripts" / "simnow_run_once.py"
     spec = importlib.util.spec_from_file_location(name, path)
@@ -1168,6 +1228,25 @@ def _install_fake_runner_dependencies(
         async def ready(self):
             return {"gateway_snapshot_id": f"gateway-ready-{len(commands):04d}"}
 
+        async def reconciliation_snapshot(self):
+            version = self.latest["state_version"]
+            durable_generation = self.latest.get("broker", {}).get("generation", 0)
+            value = {
+                "snapshot_id": f"snapshot-peek-{len(commands):064x}",
+                "generation": durable_generation,
+                "position_snapshot_hash": local_position_snapshot_hash,
+                "active_order_count": 0,
+                "active_orders_sha256": "0" * 64,
+                "account_scope": "account:windows",
+                "environment": "SIMNOW",
+                "positions": {},
+                "state_binding": {
+                    "state_version": version,
+                    "durable_broker_generation": durable_generation,
+                },
+            }
+            return SimpleNamespace(as_dict=lambda: value)
+
         async def submit(self, envelope):
             calls.append(envelope["command"])
             commands.append(envelope)
@@ -1358,11 +1437,30 @@ def test_simnow_run_once_fake_e2e_final_reconcile_archives_after_terminal(
         "start",
         "reconcile",
     ]
-    assert [
-        command["payload"]["snapshot_id"]
+    reconcile_commands = [
+        command
         for command in fake.commands
         if command["command"] == "reconcile"
-    ] == ["gateway-ready-0001", "gateway-ready-0004"]
+    ]
+    reconcile_payloads = [command["payload"] for command in reconcile_commands]
+    assert [payload["snapshot_id"] for payload in reconcile_payloads] == [
+        f"snapshot-peek-{1:064x}",
+        f"snapshot-peek-{4:064x}",
+    ]
+    assert all(
+        command["payload"]["snapshot_fact_binding"]
+        == {
+            "generation": 0,
+            "position_snapshot_hash": before_position_projection_hash(
+                {}, account_scope="account:windows", environment="SIMNOW"
+            ),
+            "active_order_count": 0,
+            "active_orders_sha256": "0" * 64,
+            "state_version": command["expected"]["state_version"],
+            "durable_broker_generation": 0,
+        }
+        for command in reconcile_commands
+    )
 
 
 def test_simnow_run_once_safety_flat_uses_existing_custody_execution_lifecycle(
@@ -1525,7 +1623,9 @@ def test_simnow_run_once_query_only_reconciles_pending_intent_before_finalizatio
         )
     )
     assert completion_reconcile["payload"]["reconciliation_run_id"].endswith("-4")
-    assert completion_reconcile["payload"]["snapshot_id"] == "gateway-ready-0004"
+    assert completion_reconcile["payload"]["snapshot_id"] == (
+        f"snapshot-peek-{4:064x}"
+    )
 
 
 def test_simnow_run_once_uses_completion_reconcile_final_receipt_without_second_reconcile(

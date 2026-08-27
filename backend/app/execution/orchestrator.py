@@ -8,16 +8,18 @@ leader/fencing admission check.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import RLock
 from typing import Any
 from uuid import uuid4
 
 from shared.commodity_execution import (
     CommodityExecutionContractError,
+    before_position_projection_hash,
     target_position_projection_hash,
 )
 
@@ -326,11 +328,11 @@ class ExecutionOrchestrator:
         The HTTP adapter obtains ``snapshot`` through the bounded
         :class:`GatewayReadinessProbe`; this method independently closes the
         full position/order rows and binds them to one durable Execution state
-        snapshot.  A final-validation ``snapshot-peek-<sha256>`` id is stable
-        and therefore binds exactly.  Other transports may mint a new id/time
-        per read, so generation and both canonical fact-set hashes define
-        equivalent facts while durable time may not move into the future.  It
-        never persists the broker facts or calls a gateway.
+        snapshot.  Final-validation ``snapshot-peek-<sha256>`` ids include
+        admission metadata that may change without a portfolio change, so
+        generation and both canonical fact-set hashes define equivalent facts
+        while durable time may not move into the future.  It never persists
+        the broker facts or calls a gateway.
         """
 
         current = self._coerce_snapshot(snapshot)
@@ -397,8 +399,22 @@ class ExecutionOrchestrator:
             raise SnapshotRejected("durable full-account broker rows are invalid")
         durable_active_orders_sha256 = sha256_json(durable_active_orders)
         durable_positions_sha256 = sha256_json(durable_positions)
+        try:
+            durable_position_identity_sha256 = before_position_projection_hash(
+                durable_positions,
+                account_scope=self.scope,
+                environment=self.environment,
+            )
+            current_position_identity_sha256 = before_position_projection_hash(
+                positions,
+                account_scope=self.scope,
+                environment=self.environment,
+            )
+        except CommodityExecutionContractError as exc:
+            raise SnapshotRejected(
+                "full-account position identity is invalid"
+            ) from exc
         status = self._projection(state, observed)
-        stable_snapshot_identity = current.snapshot_id.startswith("snapshot-peek-")
         status_binding = {
             "status_schema_version": status["schema_version"],
             "state_version": status["state_version"],
@@ -408,11 +424,8 @@ class ExecutionOrchestrator:
             "broker": deepcopy(status["broker"]),
             "durable_active_orders_sha256": durable_active_orders_sha256,
             "durable_positions_sha256": durable_positions_sha256,
-            "snapshot_identity_mode": (
-                "EXACT"
-                if stable_snapshot_identity
-                else "GENERATION_FACT_HASH_EQUIVALENT"
-            ),
+            "durable_position_identity_sha256": durable_position_identity_sha256,
+            "snapshot_identity_mode": "GENERATION_FACT_HASH_EQUIVALENT",
         }
         durable_broker = status_binding["broker"]
         reconciliation = status_binding["reconciliation"]
@@ -425,15 +438,11 @@ class ExecutionOrchestrator:
             or reconciliation["unknown_outcomes"] != 0
             or durable_broker["connected"] is not True
             or durable_broker["generation"] != current.generation
-            or durable_broker["position_snapshot_hash"] != expected_position_hash
-            or durable_positions_sha256 != expected_position_hash
+            or durable_broker["position_snapshot_hash"] != durable_positions_sha256
+            or durable_position_identity_sha256 != current_position_identity_sha256
             or durable_broker["active_order_count"] != current.active_order_count
             or durable_broker["active_order_count"] != len(durable_active_orders)
             or durable_active_orders_sha256 != active_orders_sha256
-            or (
-                stable_snapshot_identity
-                and reconciliation["fresh_snapshot_id"] != current.snapshot_id
-            )
             or durable_snapshot_observed > snapshot_observed
         ):
             raise SnapshotRejected(
@@ -766,6 +775,7 @@ class ExecutionOrchestrator:
         preview_evidence: Mapping[str, Any] | None = None,
         start_evidence: Mapping[str, Any] | None = None,
         finalization_evidence: Mapping[str, Any] | None = None,
+        rollover_evidence: Mapping[str, Any] | None = None,
     ) -> CommandResponse:
         """Apply a typed Control command.
 
@@ -784,12 +794,49 @@ class ExecutionOrchestrator:
         finalization = self._validated_finalization_evidence(
             envelope, finalization_evidence
         )
+        rollover = self._validated_rollover_evidence(envelope, rollover_evidence)
         with self._command_lock:
-            return self._process_envelope(envelope, preview, start, finalization)
+            return self._process_envelope(
+                envelope, preview, start, finalization, rollover
+            )
 
     handle_command = process_command
     execute_command = process_command
     submit_command = process_command
+
+    @staticmethod
+    def _validated_rollover_evidence(
+        envelope: CommandEnvelope, evidence: Mapping[str, Any] | None
+    ) -> dict[str, Any] | None:
+        if evidence is None:
+            return None
+        if envelope.command != "reconcile" or not isinstance(evidence, Mapping):
+            raise MutationRejected(
+                "internal trading-day rollover evidence is limited to reconcile"
+            )
+        raw = deepcopy(dict(evidence))
+        if set(raw) != {
+            "schema_version",
+            "plan_id",
+            "plan_hash",
+            "intent_trading_day",
+            "time_condition",
+            "intent_ids",
+        } or raw["schema_version"] != "execution_gfd_rollover_evidence_v1":
+            raise MutationRejected("internal trading-day rollover evidence is invalid")
+        validate_identifier(raw["plan_id"], "rollover_evidence.plan_id")
+        validate_sha256(raw["plan_hash"], "rollover_evidence.plan_hash")
+        if (
+            raw["time_condition"] != "GFD"
+            or not isinstance(raw["intent_trading_day"], str)
+            or re.fullmatch(r"[0-9]{8}", raw["intent_trading_day"]) is None
+            or not isinstance(raw["intent_ids"], list)
+            or raw["intent_ids"] != sorted(set(raw["intent_ids"]))
+        ):
+            raise MutationRejected("internal trading-day rollover evidence is invalid")
+        for intent_id in raw["intent_ids"]:
+            validate_identifier(intent_id, "rollover_evidence.intent_id")
+        return raw
 
     @staticmethod
     def _validated_preview_evidence(
@@ -977,6 +1024,7 @@ class ExecutionOrchestrator:
         preview_evidence: Mapping[str, str] | None,
         start_evidence: Mapping[str, Any] | None,
         finalization_evidence: Mapping[str, Any] | None,
+        rollover_evidence: Mapping[str, Any] | None,
     ) -> CommandResponse:
         command_key = f"{envelope.actor.service}:{envelope.idempotency_key}"
         command_hash = envelope.command_hash()
@@ -1002,7 +1050,9 @@ class ExecutionOrchestrator:
         # state transaction.  A failed/uncertain read leaves no command receipt
         # and therefore cannot be mistaken for a completed reconcile.
         if envelope.command == "reconcile":
-            return self._reconcile_command(envelope, finalization_evidence)
+            return self._reconcile_command(
+                envelope, finalization_evidence, rollover_evidence
+            )
 
         if envelope.command in {"stop", "revoke", "drain"}:
             try:
@@ -1392,6 +1442,7 @@ class ExecutionOrchestrator:
         self,
         envelope: CommandEnvelope,
         finalization_evidence: Mapping[str, Any] | None = None,
+        rollover_evidence: Mapping[str, Any] | None = None,
     ) -> CommandResponse:
         # Read-only snapshot/query calls are safe without a leader token.  They
         # never construct a new send/cancel intent.  Reuse the readiness
@@ -1406,12 +1457,37 @@ class ExecutionOrchestrator:
             raise GatewayUnavailable(f"gateway snapshot failed: {exc}") from exc
         state = self.repository.snapshot()
         if snapshot.snapshot_id != envelope.payload["snapshot_id"]:
-            self._mark_reconcile_halted(
-                reason="snapshot id does not match reconcile command"
+            requested_id = envelope.payload["snapshot_id"]
+            binding = envelope.payload.get("snapshot_fact_binding")
+            try:
+                current_before_position_hash = before_position_projection_hash(
+                    snapshot.positions,
+                    account_scope=snapshot.account_scope,
+                    environment=snapshot.environment,
+                )
+            except CommodityExecutionContractError:
+                current_before_position_hash = None
+            peek_equivalent = (
+                requested_id.startswith("snapshot-peek-")
+                and snapshot.snapshot_id.startswith("snapshot-peek-")
+                and isinstance(binding, Mapping)
+                and binding["generation"] == snapshot.generation
+                and binding["position_snapshot_hash"]
+                == current_before_position_hash
+                and binding["active_order_count"] == snapshot.active_order_count
+                and binding["active_orders_sha256"] == sha256_json(snapshot.orders)
+                and binding["state_version"] == envelope.expected.state_version
+                and binding["state_version"] == state["state_version"]
+                and binding["durable_broker_generation"]
+                == state["broker"]["generation"]
             )
-            raise SnapshotRejected(
-                "broker snapshot id does not match reconcile command"
-            )
+            if not peek_equivalent:
+                self._mark_reconcile_halted(
+                    reason="snapshot id does not match reconcile command"
+                )
+                raise SnapshotRejected(
+                    "broker snapshot id does not match reconcile command"
+                )
         try:
             self._validate_reconcile_snapshot(
                 state,
@@ -1456,11 +1532,16 @@ class ExecutionOrchestrator:
                 continue
             outcomes[intent_id] = dict(outcome)
 
+        rollover_ids = self._trading_day_rollover_terminal_ids(
+            state, snapshot, outcomes, rollover_evidence
+        )
+
         expected = envelope.expected.state_version
 
         def writer(candidate: dict[str, Any]) -> dict[str, Any]:
             if int(candidate["state_version"]) != expected:
                 raise ExpectedVersionConflict(expected, int(candidate["state_version"]))
+            self._apply_remote_fence_high_water_floor(candidate, snapshot)
             self._apply_snapshot(
                 candidate, snapshot, envelope.payload["reconciliation_run_id"]
             )
@@ -1469,6 +1550,18 @@ class ExecutionOrchestrator:
                 if not isinstance(raw, dict):
                     continue
                 if _outcome_is_unknown(outcome):
+                    if intent_id in rollover_ids:
+                        self._apply_intent_result_transition(
+                            candidate,
+                            intent_id,
+                            state_name="RECONCILED",
+                            broker_order_id=raw.get("broker_order_id"),
+                        )
+                        raw["unknown_reason"] = (
+                            "RECONCILED_BY_TRADING_DAY_ROLLOVER"
+                        )
+                        candidate["unknown_outcomes"].pop(intent_id, None)
+                        continue
                     raw["state"] = "UNKNOWN_OUTCOME"
                     candidate["unknown_outcomes"][intent_id] = {
                         "reason": outcome.get("error", "outcome remains unknown")
@@ -1520,6 +1613,10 @@ class ExecutionOrchestrator:
                 "unknown_outcomes": unknown_count,
                 "lifecycle": candidate["lifecycle"],
             }
+            if rollover_ids:
+                result["trading_day_rollover_reconciled_intent_count"] = len(
+                    rollover_ids
+                )
             status = "COMPLETED" if unknown_count == 0 else "REJECTED"
             if unknown_count == 0 and finalization_evidence is not None:
                 finalization = self._apply_finalization_evidence(
@@ -1542,13 +1639,73 @@ class ExecutionOrchestrator:
             candidate["audit"].append({"kind": "command_receipt", **receipt})
             return result
 
-        result, state_after = self.repository.mutate(writer, expected_version=expected)
+        try:
+            result, state_after = self.repository.mutate(
+                writer, expected_version=expected
+            )
+        except SnapshotRejected as exc:
+            self._mark_reconcile_halted(reason=str(exc))
+            raise
         key = f"{envelope.actor.service}:{envelope.idempotency_key}"
         return CommandResponse(
             receipt=deepcopy(state_after["receipts"][key]),
             result=deepcopy(dict(result)),
             reused=False,
         )
+
+    @staticmethod
+    def _trading_day_rollover_terminal_ids(
+        state: Mapping[str, Any],
+        snapshot: GatewaySnapshot,
+        outcomes: Mapping[str, Mapping[str, Any]],
+        evidence: Mapping[str, Any] | None,
+    ) -> set[str]:
+        if evidence is None:
+            return set()
+        active = state.get("plan", {})
+        old_day = evidence["intent_trading_day"]
+        current_day = snapshot.broker_trading_day
+        if (
+            active.get("state") != "ACTIVE"
+            or active.get("plan_id") != evidence["plan_id"]
+            or active.get("plan_hash") != evidence["plan_hash"]
+            or not isinstance(current_day, str)
+            or re.fullmatch(r"[0-9]{8}", current_day) is None
+            or current_day <= old_day
+            or snapshot.broker_limit_time_condition != "GFD"
+            or snapshot.active_order_count != 0
+            or bool(snapshot.orders)
+        ):
+            return set()
+        shanghai = timezone(timedelta(hours=8))
+        eligible: set[str] = set()
+        allowed_ids = set(evidence["intent_ids"])
+        for intent_id, outcome in outcomes.items():
+            raw = state.get("send_intents", {}).get(intent_id)
+            if (
+                intent_id not in allowed_ids
+                or not isinstance(raw, Mapping)
+                or raw.get("action") != "send"
+                or raw.get("plan_id") != evidence["plan_id"]
+                or raw.get("plan_hash") != evidence["plan_hash"]
+                or not _outcome_is_unknown(outcome)
+            ):
+                continue
+            created_at = raw.get("created_at")
+            try:
+                parse_utc(created_at, field_name="intent.created_at")
+                local = datetime.fromisoformat(
+                    created_at.removesuffix("Z") + "+00:00"
+                ).astimezone(shanghai)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            minute = local.hour * 60 + local.minute
+            if (
+                local.strftime("%Y%m%d") == old_day
+                and 8 * 60 + 30 <= minute < 15 * 60
+            ):
+                eligible.add(intent_id)
+        return eligible
 
     def _apply_finalization_evidence(
         self, state: dict[str, Any], evidence: Mapping[str, Any]
@@ -1698,6 +1855,54 @@ class ExecutionOrchestrator:
                 "fresh_snapshot_id": snapshot.snapshot_id,
             }
         )
+
+    @staticmethod
+    def _apply_remote_fence_high_water_floor(
+        state: dict[str, Any], snapshot: GatewaySnapshot
+    ) -> None:
+        """Advance an idle local lease floor from verified Windows facts only.
+
+        Final-validation's read-only peek is already bound to the same account
+        and environment as reconciliation.  It may reveal a Windows durable
+        fence high-water greater than a restarted Execution repository has
+        retained.  Never lower local state, and never alter a live lease.
+        """
+
+        remote_epoch = snapshot.fence_high_water_epoch
+        remote_token = snapshot.fence_high_water_fencing_token
+        if remote_epoch is None and remote_token is None:
+            return
+        if (
+            remote_epoch is None
+            or remote_token is None
+            or isinstance(remote_epoch, bool)
+            or not isinstance(remote_epoch, int)
+            or remote_epoch < 0
+            or isinstance(remote_token, bool)
+            or not isinstance(remote_token, int)
+            or remote_token < 0
+        ):
+            raise SnapshotRejected("remote fence high-water is invalid")
+
+        lease = state.get("lease")
+        if not isinstance(lease, dict):
+            raise SnapshotRejected("durable lease is invalid")
+        try:
+            local_epoch = int(lease.get("epoch", 0))
+            local_token = int(lease.get("fencing_token", 0))
+            expires_at = _timestamp(str(lease.get("lease_expires_at", EPOCH_TIMESTAMP)))
+        except (TypeError, ValueError, CommandValidationError) as exc:
+            raise SnapshotRejected("durable lease is invalid") from exc
+        if local_epoch < 0 or local_token < 0:
+            raise SnapshotRejected("durable lease is invalid")
+        if remote_epoch <= local_epoch and remote_token <= local_token:
+            return
+        if bool(lease.get("owner_id")) and expires_at > utc_now():
+            raise SnapshotRejected(
+                "remote fence high-water conflicts with a live local leader"
+            )
+        lease["epoch"] = max(local_epoch, remote_epoch)
+        lease["fencing_token"] = max(local_token, remote_token)
 
     # ------------------------------------------------------------------
     # Order mutations (not Control commands)
@@ -2451,6 +2656,20 @@ class ExecutionOrchestrator:
             fresh = value.get("fresh", True)
             if not isinstance(fresh, bool):
                 raise TypeError("snapshot.fresh must be boolean")
+            remote_epoch = value.get("fence_high_water_epoch")
+            remote_token = value.get("fence_high_water_fencing_token")
+            if remote_epoch is not None and (
+                isinstance(remote_epoch, bool)
+                or not isinstance(remote_epoch, int)
+                or remote_epoch < 0
+            ):
+                raise TypeError("snapshot fence high-water epoch is invalid")
+            if remote_token is not None and (
+                isinstance(remote_token, bool)
+                or not isinstance(remote_token, int)
+                or remote_token < 0
+            ):
+                raise TypeError("snapshot fence high-water token is invalid")
         except (KeyError, TypeError, ValueError) as exc:
             raise GatewayUnavailable("gateway returned an invalid snapshot") from exc
         return GatewaySnapshot(
@@ -2465,6 +2684,8 @@ class ExecutionOrchestrator:
             account_scope=account_scope,
             environment=environment,
             fresh=fresh,
+            fence_high_water_epoch=remote_epoch,
+            fence_high_water_fencing_token=remote_token,
         )
 
     def _validate_reconcile_snapshot(

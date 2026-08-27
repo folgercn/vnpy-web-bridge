@@ -1758,8 +1758,15 @@ class _ProductionBackend:
         *,
         phase_key: str,
         handoff: StaticCoreEqualFullPortfolioPhaseHandoff | None,
+        recovery: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        recovery = (await self.execution.target_plan_recovery(phase_key)).as_dict()
+        if recovery is None:
+            recovery = (await self.execution.target_plan_recovery(phase_key)).as_dict()
+        elif (
+            recovery.get("state") != "BEFORE_CUSTODY"
+            and recovery.get("custody_idempotency_key") != phase_key
+        ):
+            raise ContinuousRunError("TargetPlan recovery identity mismatches phase key")
         state = recovery["state"]
         if state == "BEFORE_CUSTODY":
             if handoff is None:
@@ -1953,16 +1960,49 @@ class _ProductionBackend:
             return
         if state != "PREVIEWED":
             raise ContinuousRunError("Execution holds a foreign non-preview plan")
+        # Public status intentionally omits durable custody provenance; Execution
+        # revalidates that evidence before it starts or finalizes a plan.
         if (
             plan.get("plan_id") != f"preview-{str(plan_hash)[:16]}"
             or plan.get("plan_hash") != plan_hash
-            or plan.get("preview_mode") != "simnow_preview"
-            or plan.get("preview_receipt_id") != recovery.get("receipt_id")
-            or plan.get("preview_receipt_sha256") != recovery.get("receipt_sha256")
-            or plan.get("preview_artifact_id") != recovery.get("artifact_id")
-            or plan.get("preview_artifact_sha256") != recovery.get("artifact_sha256")
         ):
             raise ContinuousRunError("Execution preview is foreign to this plan")
+
+    def _require_active_reconcile_status(
+        self,
+        status: Mapping[str, Any],
+        recovery: Mapping[str, Any],
+        token: Any,
+    ) -> None:
+        """Permit only the exact halted ACTIVE identity to reconcile query-only."""
+
+        plan = status.get("plan", {})
+        if (
+            plan.get("state") != "ACTIVE"
+            or plan.get("plan_id") != recovery["plan_id"]
+            or plan.get("plan_hash") != recovery["plan_hash"]
+        ):
+            raise ContinuousRunError("Execution holds a foreign active plan")
+        leader = status.get("leader", {})
+        if (
+            leader.get("held") is not True
+            or leader.get("epoch") != token.epoch
+            or leader.get("fencing_token") != token.fencing_token
+        ):
+            raise ContinuousRunError("Execution leader changed after renew")
+        reconciliation = status.get("reconciliation", {})
+        if (
+            status.get("lifecycle")
+            not in {"HALTED_UNKNOWN_OUTCOME", "HALTED_RECONCILE_REQUIRED"}
+            or reconciliation.get("state") not in {"UNKNOWN", "REQUIRED"}
+            or isinstance(reconciliation.get("unknown_outcomes"), bool)
+            or not isinstance(reconciliation.get("unknown_outcomes"), int)
+            or reconciliation.get("unknown_outcomes") < 0
+            or status.get("broker", {}).get("active_order_count") != 0
+        ):
+            raise ContinuousRunError(
+                "Execution halted ACTIVE reconcile boundary is invalid"
+            )
 
     def _require_start_status(
         self, status: Mapping[str, Any], recovery: Mapping[str, Any]
@@ -1980,7 +2020,10 @@ class _ProductionBackend:
             raise ContinuousRunError("Execution authority is foreign to this plan")
 
     async def _drive_installed_plan(
-        self, recovery: Mapping[str, Any]
+        self,
+        recovery: Mapping[str, Any],
+        *,
+        expected_intent_count: int | None = None,
     ) -> dict[str, Any]:
         plan_id = str(recovery["plan_id"])
         plan_hash = str(recovery["plan_hash"])
@@ -2069,7 +2112,32 @@ class _ProductionBackend:
                 status.get("plan", {}).get("state") == "ACTIVE"
                 and status.get("plan", {}).get("plan_id") == plan_id
             ):
-                self._require_post_renew_status(status, recovery, allow_active=True)
+                if status.get("reconciliation", {}).get("state") != "RECONCILED":
+                    self._require_active_reconcile_status(status, recovery, token)
+                    await _submit_reconcile_with_ready_snapshot(
+                        self.execution,
+                        suffix=f"continuous-recovery-{phase_key[:32]}",
+                        version=status["state_version"],
+                        actor=actor,
+                        now=(
+                            datetime.now(timezone.utc)
+                            .replace(microsecond=0)
+                            .isoformat()
+                            .replace("+00:00", "Z")
+                        ),
+                        reconciliation_run_id=(
+                            f"continuous-recovery-{phase_key[:40]}"
+                        ),
+                        reason="query-only ACTIVE plan recovery reconciliation",
+                    )
+                    status = (await self.execution.status()).as_dict()
+                    self._require_post_renew_status(
+                        status, recovery, allow_active=True
+                    )
+                else:
+                    self._require_post_renew_status(
+                        status, recovery, allow_active=True
+                    )
                 snapshot = await self.execution.reconciliation_snapshot()
                 await self.execution.resume_active_plan(
                     plan_id=plan_id,
@@ -2179,7 +2247,12 @@ class _ProductionBackend:
             reconciled_versions: set[int] = set()
             while True:
                 status = (await self.execution.status()).as_dict()
-                state = _completion_state(status, plan_id=plan_id, plan_hash=plan_hash)
+                state = _completion_state(
+                    status,
+                    plan_id=plan_id,
+                    plan_hash=plan_hash,
+                    expected_intent_count=expected_intent_count,
+                )
                 if state == "unknown_outcome":
                     raise ContinuousRunError("TargetPlan has an unknown broker outcome")
                 if state == "ready_for_final_reconcile":
@@ -2218,6 +2291,16 @@ class _ProductionBackend:
                         ):
                             status = final_status
                             break
+                if state == "incomplete_send_intents":
+                    try:
+                        token = await self.execution.renew_leader(token)
+                    except ExecutionClientError:
+                        return {
+                            "state": "ACTIVE",
+                            "phase": phase,
+                            "plan_id": plan_id,
+                            "reason": "completion_leader_renew_outcome_unknown",
+                        }
                 if asyncio.get_running_loop().time() >= deadline:
                     return {
                         "state": "ACTIVE",
@@ -2227,7 +2310,12 @@ class _ProductionBackend:
                     }
                 await asyncio.sleep(float(self.config.raw["completion_poll_seconds"]))
 
-            if not _completed(status, plan_id=plan_id, plan_hash=plan_hash):
+            if not _completed(
+                status,
+                plan_id=plan_id,
+                plan_hash=plan_hash,
+                expected_intent_count=expected_intent_count,
+            ):
                 token = await self.execution.renew_leader(token)
                 command, response = await _submit_reconcile_with_ready_snapshot(
                     self.execution,
@@ -2251,7 +2339,12 @@ class _ProductionBackend:
                     ],
                     final_status=status,
                     idempotency_key=command["idempotency_key"],
-                ) or not _completed(status, plan_id=plan_id, plan_hash=plan_hash):
+                ) or not _completed(
+                    status,
+                    plan_id=plan_id,
+                    plan_hash=plan_hash,
+                    expected_intent_count=expected_intent_count,
+                ):
                     raise ContinuousRunError(
                         "TargetPlan final reconciliation did not archive"
                     )

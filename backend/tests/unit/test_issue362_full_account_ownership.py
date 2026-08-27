@@ -22,6 +22,7 @@ from app.execution.full_account_ownership import (
 from shared.commodity_execution import (
     KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
     KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
+    before_position_projection_hash,
     sha256_json,
     target_position_projection_hash,
 )
@@ -82,6 +83,7 @@ def _position_rows(
             "exchange": exchange,
             "direction": direction,
             "volume": abs(quantity),
+            "yd_volume": 0,
         }
     return result
 
@@ -336,6 +338,9 @@ def _facts(
             },
             "durable_active_orders_sha256": order_hash,
             "durable_positions_sha256": position_hash,
+            "durable_position_identity_sha256": before_position_projection_hash(
+                position_rows, account_scope=SCOPE, environment=ENVIRONMENT
+            ),
             "snapshot_identity_mode": "GENERATION_FACT_HASH_EQUIVALENT",
         },
     }
@@ -348,6 +353,71 @@ def _facts(
             "nonterminal_send_intent_count": nonterminal,
         }
     return {**preimage, "account_facts_sha256": sha256_json(preimage)}
+
+
+def _v3_send_intent() -> dict[str, Any]:
+    return {
+        "intent_id": "intent-issue421-0001",
+        "idempotency_key": "idempotency-issue421-0001",
+        "state": "RECONCILED",
+        "plan_id": "plan-issue421-0001",
+        "plan_hash": "a" * 64,
+        "leader_epoch": 1,
+        "fencing_token": 1,
+        "created_at": "2026-08-18T09:00:00Z",
+        "execution_start_quote_proof": {"opaque": True},
+        "execution_start_quote_proof_sha256": "b" * 64,
+    }
+
+
+def test_account_facts_v2_accepts_legacy_send_intent_without_start_quote_proof():
+    from app.schemas.control_execution import ExecutionAccountFactsProjectionV2
+
+    facts = _facts(send_intents={"intent-issue421-0001": _v3_send_intent()})
+    del facts["execution_binding"]["send_intents"][
+        "intent-issue421-0001"
+    ]["execution_start_quote_proof"]
+    del facts["execution_binding"]["send_intents"][
+        "intent-issue421-0001"
+    ]["execution_start_quote_proof_sha256"]
+    facts["execution_binding"]["send_intents_sha256"] = sha256_json(
+        facts["execution_binding"]["send_intents"]
+    )
+    facts["account_facts_sha256"] = sha256_json(
+        {key: value for key, value in facts.items() if key != "account_facts_sha256"}
+    )
+
+    ExecutionAccountFactsProjectionV2.from_mapping(facts)
+
+
+def test_account_facts_v2_accepts_send_intent_with_start_quote_proof():
+    from app.schemas.control_execution import ExecutionAccountFactsProjectionV2
+
+    facts = _facts(send_intents={"intent-issue421-0001": _v3_send_intent()})
+
+    ExecutionAccountFactsProjectionV2.from_mapping(facts)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda intent: intent.pop("execution_start_quote_proof"),
+        lambda intent: intent.pop("execution_start_quote_proof_sha256"),
+        lambda intent: intent.update(
+            execution_start_quote_proof_sha256="not-a-sha256"
+        ),
+        lambda intent: intent.update(unexpected_v3_field=True),
+    ],
+)
+def test_account_facts_v2_rejects_invalid_send_intent_start_quote_fields(mutation):
+    from app.schemas.control_execution import ExecutionAccountFactsProjectionV2
+
+    intent = _v3_send_intent()
+    mutation(intent)
+    facts = _facts(send_intents={"intent-issue421-0001": intent})
+
+    with pytest.raises(ValueError, match="send intents are invalid"):
+        ExecutionAccountFactsProjectionV2.from_mapping(facts)
 
 
 def _completion(

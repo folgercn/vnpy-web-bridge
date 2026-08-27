@@ -45,6 +45,7 @@ from app.phase_c.client import RemotePhaseCWorkflowClient  # noqa: E402
 from simnow_continuous_run_once import (  # noqa: E402
     ContinuousRunError,
     _ProductionBackend,
+    _command,
     _completed,
     _completion_state,
     _submit_reconcile_with_ready_snapshot,
@@ -67,6 +68,47 @@ from shared.commodity_execution import (  # noqa: E402
 
 class ExperimentalRunError(RuntimeError):
     """A fresh Execution fact does not admit a new experimental action."""
+
+
+_CUSTODY_KEY_DOMAIN = "simnow-experimental-target-v1"
+_CUSTODY_SUCCESSOR_KEY_DOMAIN = "simnow-experimental-target-v1-successor"
+_MAX_CUSTODY_SUCCESSOR_DEPTH = 32
+
+
+def _custody_phase_key(*, target_id: str, phase: str) -> str:
+    """Return the unchanged first-incarnation Custody key for one phase."""
+
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "domain": _CUSTODY_KEY_DOMAIN,
+                "target_id": target_id,
+                "phase": phase,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+
+def _custody_successor_phase_key(
+    *, target_id: str, phase: str, predecessor_plan_id: str, predecessor_plan_hash: str
+) -> str:
+    """Bind a later same-target incarnation to its exact retired predecessor."""
+
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "domain": _CUSTODY_SUCCESSOR_KEY_DOMAIN,
+                "target_id": target_id,
+                "phase": phase,
+                "predecessor_plan_id": predecessor_plan_id,
+                "predecessor_plan_hash": predecessor_plan_hash,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
 
 
 class _ExperimentalBackend(_ProductionBackend):
@@ -304,6 +346,151 @@ async def _advance_current_execution_identity(
             result["reason"] = reason
         return result
 
+    def expired_retirement_boundary(
+        current_status: Mapping[str, Any],
+        *,
+        recovery: Mapping[str, Any],
+        leader_token: Any,
+    ) -> bool:
+        """Recognize the one retired ACTIVE boundary that cannot resume.
+
+        ``authority.expires_at`` is the immutable TargetPlan expiry carried by
+        the already-enabled authority.  Status deliberately does not expose
+        custody provenance; the stop command below additionally binds the
+        exact plan/authority hashes and leader fence.
+        """
+
+        plan_state = current_status.get("plan")
+        authority = current_status.get("authority")
+        leader = current_status.get("leader")
+        reconciliation = current_status.get("reconciliation")
+        broker = current_status.get("broker")
+        intents = current_status.get("send_intents")
+        if not all(
+            isinstance(value, Mapping)
+            for value in (plan_state, authority, leader, reconciliation, broker)
+        ) or not isinstance(intents, list):
+            return False
+        try:
+            expires_at = datetime.fromisoformat(
+                str(authority["expires_at"]).removesuffix("Z") + "+00:00"
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+        terminal_intent_states = {"RECONCILED", "CANCELLED", "TERMINAL"}
+        return bool(
+            plan_state.get("state") == "ACTIVE"
+            and plan_state.get("plan_id") == recovery["plan_id"]
+            and plan_state.get("plan_hash") == recovery["plan_hash"]
+            and authority.get("state") == "REVOKED"
+            and authority.get("artifact_id") == recovery["plan_id"]
+            and authority.get("artifact_hash") == recovery["plan_hash"]
+            and expires_at <= datetime.now(timezone.utc)
+            and current_status.get("lifecycle") == "READY"
+            and reconciliation.get("state") == "RECONCILED"
+            and reconciliation.get("unknown_outcomes") == 0
+            and broker.get("active_order_count") == 0
+            and leader.get("held") is True
+            and leader.get("epoch") == leader_token.epoch
+            and leader.get("fencing_token") == leader_token.fencing_token
+            and all(
+                isinstance(intent, Mapping)
+                and intent.get("state") in terminal_intent_states
+                for intent in intents
+            )
+        )
+
+    async def retire_expired_active_plan(
+        current_status: Mapping[str, Any],
+        *,
+        recovery: Mapping[str, Any],
+        leader_token: Any,
+    ) -> dict[str, Any] | None:
+        """Retire, never resume, an expired exact ACTIVE identity.
+
+        This uses the normal fenced ``stop`` command.  It is intentionally the
+        final mutation in this invocation; a later invocation must derive a
+        new TargetPlan from fresh broker positions.
+        """
+
+        if not expired_retirement_boundary(
+            current_status, recovery=recovery, leader_token=leader_token
+        ):
+            return None
+        snapshot = (await backend.execution.reconciliation_snapshot()).as_dict()
+        binding = snapshot.get("state_binding")
+        if (
+            not isinstance(binding, Mapping)
+            or binding.get("state_version") != current_status.get("state_version")
+            or binding.get("durable_broker_generation")
+            != current_status.get("broker", {}).get("generation")
+            or snapshot.get("active_order_count") != 0
+            or snapshot.get("active_orders") != {}
+        ):
+            return None
+        authority = current_status["authority"]
+        command = _command(
+            name="stop",
+            suffix=(
+                f"experimental-expired-retire-{recovery['plan_hash'][:24]}-"
+                f"{current_status['state_version']}"
+            ),
+            version=int(current_status["state_version"]),
+            actor=backend._actor(),
+            now=datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            payload={
+                "reason": "retire expired reconciled SIMNOW ACTIVE TargetPlan",
+            },
+            fence={
+                "leader_epoch": leader_token.epoch,
+                "fencing_token": leader_token.fencing_token,
+            },
+        )
+        command["expected"].update(
+            {
+                "plan_hash": recovery["plan_hash"],
+                "authority_hash": authority["artifact_hash"],
+            }
+        )
+        try:
+            await backend.execution.submit(command)
+        except (ExecutionClientError, ValueError):
+            return blocked(
+                plan_id=str(recovery["plan_id"]),
+                plan_hash=str(recovery["plan_hash"]),
+                plan_state="ACTIVE",
+                execution_mutated=True,
+                reason="expired_retirement_outcome_unknown",
+            )
+        after_stop = (await backend.execution.status()).as_dict()
+        after_plan = after_stop.get("plan")
+        after_authority = after_stop.get("authority")
+        if (
+            isinstance(after_plan, Mapping)
+            and after_plan.get("state") == "TERMINAL"
+            and after_plan.get("plan_id") == recovery["plan_id"]
+            and after_plan.get("plan_hash") == recovery["plan_hash"]
+            and isinstance(after_authority, Mapping)
+            and after_authority.get("state") == "REVOKED"
+        ):
+            return blocked(
+                plan_id=str(recovery["plan_id"]),
+                plan_hash=str(recovery["plan_hash"]),
+                plan_state="TERMINAL",
+                execution_mutated=True,
+                reason="expired_active_plan_retired",
+            )
+        return blocked(
+            plan_id=str(recovery["plan_id"]),
+            plan_hash=str(recovery["plan_hash"]),
+            plan_state="ACTIVE",
+            execution_mutated=True,
+            reason="expired_retirement_did_not_reach_terminal",
+        )
+
     status = (await backend.execution.status()).as_dict()
     plan = status.get("plan")
     if not isinstance(plan, Mapping):
@@ -347,6 +534,34 @@ async def _advance_current_execution_identity(
             backend.config.raw["leader_owner_id"]
         )
         token = await backend.execution.renew_leader(token)
+        recovery = {"plan_id": plan_id, "plan_hash": plan_hash}
+        status = (await backend.execution.status()).as_dict()
+        if status.get("reconciliation", {}).get("state") != "RECONCILED":
+            backend._require_active_reconcile_status(status, recovery, token)
+            await _submit_reconcile_with_ready_snapshot(
+                backend.execution,
+                suffix=(
+                    f"experimental-current-recovery-{plan_hash[:24]}-"
+                    f"{status['state_version']}"
+                ),
+                version=status["state_version"],
+                actor=backend._actor(),
+                now=datetime.now(timezone.utc)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                reconciliation_run_id=(
+                    f"simnow-experimental-current-recovery-{plan_hash[:32]}"
+                ),
+                reason="query-only reconcile exact existing SIMNOW TargetPlan",
+            )
+            status = (await backend.execution.status()).as_dict()
+        backend._require_post_renew_status(status, recovery, allow_active=True)
+        retired = await retire_expired_active_plan(
+            status, recovery=recovery, leader_token=token
+        )
+        if retired is not None:
+            return retired
         snapshot = await backend.execution.reconciliation_snapshot()
         resumed = await backend.execution.resume_active_plan(
             plan_id=plan_id,
@@ -464,19 +679,15 @@ async def execute_once(
     final_target_sha256 = sha256_json(final_projection)
 
     def phase_key(phase: str) -> str:
-        return hashlib.sha256(
-            json.dumps(
-                {"domain": "simnow-experimental-target-v1", "target_id": target["target_id"], "phase": phase},
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
-        ).hexdigest()
+        return _custody_phase_key(target_id=str(target["target_id"]), phase=phase)
 
-    def require_binding(recovery: Mapping[str, Any], phase: str) -> None:
+    def require_binding(
+        recovery: Mapping[str, Any], phase: str, exact_phase_key: str
+    ) -> None:
         lineage = recovery.get("lineage")
         if (
             recovery.get("target_plan_schema_version") != KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION
-            or recovery.get("custody_idempotency_key") != phase_key(phase)
+            or recovery.get("custody_idempotency_key") != exact_phase_key
             or recovery.get("phase") != phase
             or recovery.get("execution_run_id") != run_id
             or not isinstance(lineage, Mapping)
@@ -485,6 +696,127 @@ async def execute_once(
             or lineage.get("final_target_sha256") != final_target_sha256
         ):
             raise ExperimentalRunError("existing recovery does not bind experimental target")
+
+    async def completion_matches(recovery: Mapping[str, Any]) -> bool:
+        """Read the immutable completion archive for one exact predecessor."""
+
+        completion = await backend.execution.completion(str(recovery["plan_id"]))
+        if completion is None:
+            return False
+        archived = completion.as_dict()
+        if (
+            archived.get("plan_id") != recovery.get("plan_id")
+            or archived.get("plan_hash") != recovery.get("plan_hash")
+        ):
+            raise ExperimentalRunError(
+                "completion archive does not bind custody predecessor"
+            )
+        return True
+
+    def retired_predecessor_boundary(
+        status: Mapping[str, Any], recovery: Mapping[str, Any]
+    ) -> bool:
+        """Recognize only #456's fully retired, expired, zero-work plan."""
+
+        plan = status.get("plan")
+        authority = status.get("authority")
+        if not isinstance(plan, Mapping) or not isinstance(authority, Mapping):
+            return False
+        try:
+            expires_at = datetime.fromisoformat(
+                str(recovery["expires_at"]).removesuffix("Z") + "+00:00"
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+        return bool(
+            backend._is_retired_execution_boundary(
+                status, require_leader_clear=True
+            )
+            and plan.get("plan_id") == recovery.get("plan_id")
+            and plan.get("plan_hash") == recovery.get("plan_hash")
+            and authority.get("artifact_id") == recovery.get("plan_id")
+            and authority.get("artifact_hash") == recovery.get("plan_hash")
+            and expires_at <= datetime.now(timezone.utc)
+        )
+
+    async def successor_kind(recovery: Mapping[str, Any]) -> str | None:
+        """Classify a custody incarnation without writing any state.
+
+        Completed plans can be successors only through their exact immutable
+        completion archive.  A #456 retirement has no completion archive, so
+        it additionally requires the current Execution projection to be the
+        same expired TERMINAL/REVOKED, leader-clear, zero-work boundary.
+        """
+
+        # Completion is immutable, exact, and sufficient even after a later
+        # same-target incarnation became Execution's current plan.  This is
+        # what permits NORMAL -> TEST -> restore NORMAL to traverse K0 -> K1.
+        if await completion_matches(recovery):
+            return "COMPLETED"
+        status = (await backend.execution.status()).as_dict()
+        plan = status.get("plan")
+        if (
+            isinstance(plan, Mapping)
+            and plan.get("state") == "TERMINAL"
+            and plan.get("plan_id") == recovery.get("plan_id")
+            and plan.get("plan_hash") == recovery.get("plan_hash")
+        ):
+            if retired_predecessor_boundary(status, recovery):
+                return "RETIRED"
+            raise ExperimentalRunError(
+                "terminal custody predecessor is not completed or safely retired"
+            )
+        return None
+
+    async def resolve_phase_recovery(
+        phase: str,
+    ) -> tuple[str, dict[str, Any]]:
+        """Follow K0 -> K1 -> ... until the exact live custody incarnation.
+
+        Looking up a successor is read-only.  A new key is only published
+        later, after the planner has proved a non-NOOP delta.
+        """
+
+        exact_key = phase_key(phase)
+        seen: set[str] = set()
+        for _depth in range(_MAX_CUSTODY_SUCCESSOR_DEPTH):
+            if exact_key in seen:
+                raise ExperimentalRunError("custody successor key chain cycles")
+            seen.add(exact_key)
+            recovery = (
+                await backend.execution.target_plan_recovery(exact_key)
+            ).as_dict()
+            if recovery.get("state") == "BEFORE_CUSTODY":
+                return exact_key, recovery
+            require_binding(recovery, phase, exact_key)
+            plan_id = recovery.get("plan_id")
+            plan_hash = recovery.get("plan_hash")
+            if not isinstance(plan_id, str) or not isinstance(plan_hash, str):
+                raise ExperimentalRunError("custody predecessor identity is invalid")
+            successor_key = _custody_successor_phase_key(
+                target_id=str(target["target_id"]),
+                phase=phase,
+                predecessor_plan_id=plan_id,
+                predecessor_plan_hash=plan_hash,
+            )
+            # Probe a deterministic successor before looking at current
+            # Execution state.  K0 may no longer be current once K1 was
+            # installed, so status cannot be used to rediscover an already
+            # published successor.  Its own strict binding remains required.
+            successor = (
+                await backend.execution.target_plan_recovery(successor_key)
+            ).as_dict()
+            if successor.get("state") != "BEFORE_CUSTODY":
+                exact_key = successor_key
+                continue
+            # Only a missing successor needs predecessor eligibility.  This
+            # read-only result is used later, after a fresh non-NOOP preview,
+            # to publish exactly successor_key.
+            kind = await successor_kind(recovery)
+            if kind is None:
+                return exact_key, recovery
+            return successor_key, successor
+        raise ExperimentalRunError("custody successor key chain exceeds depth limit")
 
     # Recovery of Execution's current identity always wins over fresh planning.
     # This covers a previous experimental target whose phase key is not
@@ -496,14 +828,13 @@ async def execute_once(
     # A recovered same-target TargetPlan may still have an installed custody
     # identity even when it is no longer the active Execution plan.
     for existing_phase in ("CLOSE", "OPEN"):
-        recovery = (await backend.execution.target_plan_recovery(phase_key(existing_phase))).as_dict()
+        exact_key, recovery = await resolve_phase_recovery(existing_phase)
         if recovery.get("state") == "BEFORE_CUSTODY":
             continue
-        require_binding(recovery, existing_phase)
         installed = await backend._install_or_recover_plan(
-            phase_key=phase_key(existing_phase), handoff=None
+            phase_key=exact_key, handoff=None, recovery=recovery
         )
-        require_binding(installed, existing_phase)
+        require_binding(installed, existing_phase, exact_key)
         lifecycle = await backend._drive_installed_plan(installed)
         if lifecycle.get("state") != "COMPLETED":
             return _checkpoint(target, {"status": "RECOVERY", "target_id": target["target_id"], "phase": existing_phase, "lifecycle": lifecycle})
@@ -519,8 +850,25 @@ async def execute_once(
         if handoff is None:
             raise ExperimentalRunError("existing planner has no lifecycle handoff")
         phase = str(handoff.target_plan["phase"])
-        recovery = await backend._install_or_recover_plan(phase_key=phase_key(phase), handoff=handoff)
-        lifecycle = await backend._drive_installed_plan(recovery)
+        exact_key, recovery = await resolve_phase_recovery(phase)
+        if recovery.get("state") != "BEFORE_CUSTODY":
+            # A concurrent/restarted invocation may have already published this
+            # exact incarnation.  Recover it; never jump to another successor.
+            installed = await backend._install_or_recover_plan(
+                phase_key=exact_key, handoff=None, recovery=recovery
+            )
+            require_binding(installed, phase, exact_key)
+            lifecycle = await backend._drive_installed_plan(installed)
+            return _checkpoint(
+                target, {**preview, "lifecycle": lifecycle, "recovered": True}
+            )
+        recovery = await backend._install_or_recover_plan(
+            phase_key=exact_key, handoff=handoff
+        )
+        require_binding(recovery, phase, exact_key)
+        lifecycle = await backend._drive_installed_plan(
+            recovery, expected_intent_count=len(handoff.target_plan["orders"])
+        )
         if lifecycle.get("state") != "COMPLETED" or phase != "CLOSE":
             return _checkpoint(target, {**preview, "lifecycle": lifecycle})
         # A completed CLOSE must re-enter via fresh Execution facts, formal
