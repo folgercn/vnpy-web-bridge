@@ -212,16 +212,26 @@ class FakeMainEngine:
         self.events.emit(EVENT_ORDER, submitting)
 
         def fill() -> None:
-            self.broker_positions = [
-                PositionData(
-                    symbol=request.symbol,
-                    exchange=request.exchange,
-                    direction=request.direction,
-                    volume=request.volume,
-                    yd_volume=0,
-                    gateway_name=gateway_name,
-                )
-            ]
+            net = sum(
+                row.volume if row.direction == Direction.LONG else -row.volume
+                for row in self.broker_positions
+                if row.vt_symbol == f"{request.symbol}.{request.exchange.value}"
+            )
+            net += request.volume if request.direction == Direction.LONG else -request.volume
+            self.broker_positions = (
+                [
+                    PositionData(
+                        symbol=request.symbol,
+                        exchange=request.exchange,
+                        direction=Direction.LONG if net > 0 else Direction.SHORT,
+                        volume=abs(net),
+                        yd_volume=0,
+                        gateway_name=gateway_name,
+                    )
+                ]
+                if net
+                else []
+            )
             filled = OrderData(
                 symbol=request.symbol,
                 exchange=request.exchange,
@@ -362,6 +372,21 @@ def test_same_target_is_true_noop(lab: tuple[SimNowLabExecutorV1, FakeMainEngine
     assert result["run"]["status"] == "NOOP"
     assert result["orders"] == []
     assert main.sent == 1
+
+
+def test_quantity_change_then_restore_reuses_fresh_positions(lab: tuple[SimNowLabExecutorV1, FakeMainEngine, Path]) -> None:
+    subject, main, _db_path = lab
+
+    first = subject.simnow_lab_apply_target_v1(target(rb=1))
+    changed = subject.simnow_lab_apply_target_v1(target(rb=2))
+    restored = subject.simnow_lab_apply_target_v1(target(rb=0))
+
+    assert [result["run"]["status"] for result in (first, changed, restored)] == ["DONE", "DONE", "DONE"]
+    assert [len(result["orders"]) for result in (first, changed, restored)] == [1, 1, 1]
+    assert [result["orders"][0]["quantity"] for result in (first, changed, restored)] == [1, 1, 2]
+    assert restored["orders"][0]["offset"] == "CLOSETODAY"
+    assert main.broker_positions == []
+    assert main.sent == 3
 
 
 def test_current_is_fresh_redacted_and_zero_mutation(lab: tuple[SimNowLabExecutorV1, FakeMainEngine, Path]) -> None:
