@@ -25,6 +25,18 @@ from scripts.windows_fence_foundation.final_admission_v1 import (
 SIM_ACCOUNT = "synthetic-issue291-account"
 
 
+class _FakeOrderType:
+    LIMIT = object()
+
+
+class _FakeCtpTdApi(SimpleNamespace):
+    pass
+
+
+ORDERTYPE_VT2CTP = {_FakeOrderType.LIMIT: ("2", "3", "1")}
+OrderType = _FakeOrderType
+
+
 @pytest.fixture(autouse=True)
 def _fake_tick_wire(monkeypatch: pytest.MonkeyPatch) -> None:
     """Lifecycle tests must not bind the host's fixed TCP/4103 endpoint."""
@@ -70,7 +82,7 @@ class FactSource:
     ) -> None:
         self.gateway = SimpleNamespace(
             on_tick=lambda _tick: None,
-            td_api=SimpleNamespace(
+            td_api=_FakeCtpTdApi(
                 userid=td_userid,
                 brokerid="9999",
                 reqid=0,
@@ -79,6 +91,7 @@ class FactSource:
                 login_status=False,
                 reqQryOrder=lambda _request, _request_id: 0,
                 reqQryInvestorPosition=lambda _request, _request_id: 0,
+                getTradingDay=lambda: "20260827",
                 onRspQryInvestorPosition=lambda *_args: None,
                 onFrontConnected=lambda: None,
                 onFrontDisconnected=lambda _reason: None,
