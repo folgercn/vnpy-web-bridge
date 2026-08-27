@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event, Thread
@@ -154,6 +155,23 @@ def plan(
             }
         ],
     )
+
+
+def multi_child_plan(count: int) -> dict:
+    assert count > 0
+    target = plan()
+    source = {
+        key: value
+        for key, value in target.items()
+        if key not in {"plan_hash", "order_set_sha256"}
+    }
+    orders = []
+    for index in range(1, count + 1):
+        order = deepcopy(target["orders"][0])
+        order["reference"] = f"order-ref-{index:04d}"
+        orders.append(order)
+    source["orders"] = orders
+    return build_target_plan(**source)
 
 
 def final_position_snapshot(positions: dict, *, generation: int = 2) -> GatewaySnapshot:
@@ -318,6 +336,15 @@ def reconcile_enable_start(
     )
     assert response.result["accepted"] is True
     return token
+
+
+def patch_execution_fence_clock(monkeypatch, current: list[datetime]) -> None:
+    import app.execution.fencing as fencing_module
+    import app.execution.final_runtime as final_runtime_module
+    import app.execution.orchestrator as orchestrator_module
+
+    for module in (fencing_module, final_runtime_module, orchestrator_module):
+        monkeypatch.setattr(module, "utc_now", lambda: current[0])
 
 
 @pytest.mark.parametrize(
@@ -1100,6 +1127,246 @@ def test_runner_multi_child_dispatch_survives_concurrent_same_leader_renew(
         intent["state"] == "ACKNOWLEDGED"
         for intent in repo.snapshot()["send_intents"].values()
     )
+
+
+def test_runner_dispatch_refreshes_current_lease_expiry_before_new_child(
+    monkeypatch,
+) -> None:
+    current = [datetime.now(timezone.utc)]
+    patch_execution_fence_clock(monkeypatch, current)
+    service, core, repo, gateway, _ = runtime(execute=True)
+    core.fencer.lease_seconds = 44
+    target = multi_child_plan(2)
+    original_send = gateway.send_order
+    received_tokens = []
+
+    original_submit = service.send_plan_order
+
+    def capture_current_token(plan_id, order_ref, *, token, **kwargs):
+        received_tokens.append(token)
+        return original_submit(plan_id, order_ref, token=token, **kwargs)
+
+    service.send_plan_order = capture_current_token
+
+    def renew_after_first_child(request, context):
+        result = original_send(request, context)
+        if len(gateway.send_calls) == 1:
+            current[0] += timedelta(seconds=1)
+            snapshot = core.fencer.token
+            assert snapshot is not None
+            core.renew_leader(snapshot)
+        return result
+
+    gateway.send_order = renew_after_first_child
+    start_token = reconcile_enable_start(service, core, repo, target)
+
+    assert len(gateway.send_calls) == 2
+    assert received_tokens[0].lease_expires_at == start_token.lease_expires_at
+    assert datetime.fromisoformat(
+        received_tokens[1].lease_expires_at[:-1] + "+00:00"
+    ) - datetime.fromisoformat(
+        start_token.lease_expires_at[:-1] + "+00:00"
+    ) == timedelta(seconds=1)
+
+
+def test_runner_dispatch_accepts_unchanged_current_lease_for_new_children() -> None:
+    service, _core, repo, gateway, _ = runtime(execute=True)
+    target = multi_child_plan(2)
+    received_tokens = []
+    original_submit = service.send_plan_order
+
+    def capture_current_token(plan_id, order_ref, *, token, **kwargs):
+        received_tokens.append(token)
+        return original_submit(plan_id, order_ref, token=token, **kwargs)
+
+    service.send_plan_order = capture_current_token
+    start_token = reconcile_enable_start(service, _core, repo, target)
+
+    assert len(gateway.send_calls) == 2
+    assert received_tokens == [start_token, start_token]
+
+
+def test_runner_dispatch_survives_multiple_same_identity_renews_for_100_children(
+    monkeypatch,
+) -> None:
+    current = [datetime.now(timezone.utc)]
+    patch_execution_fence_clock(monkeypatch, current)
+    service, core, repo, gateway, _ = runtime(execute=True)
+    core.fencer.lease_seconds = 10
+    target = multi_child_plan(100)
+    original_send = gateway.send_order
+    renewals = []
+
+    def renew_every_tenth_child(request, context):
+        result = original_send(request, context)
+        if len(gateway.send_calls) % 10 == 0 and len(gateway.send_calls) < 100:
+            current[0] += timedelta(milliseconds=100)
+            snapshot = core.fencer.token
+            assert snapshot is not None
+            renewals.append(core.renew_leader(snapshot))
+        return result
+
+    gateway.send_order = renew_every_tenth_child
+    start_token = reconcile_enable_start(service, core, repo, target)
+
+    assert len(renewals) == 9
+    assert len(gateway.send_calls) == 100
+    assert all(
+        token.scope == start_token.scope
+        and token.owner_id == start_token.owner_id
+        and token.epoch == start_token.epoch
+        and token.fencing_token == start_token.fencing_token
+        and token.instance_id == start_token.instance_id
+        for token in renewals
+    )
+    assert len(repo.snapshot()["send_intents"]) == 100
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("scope", "account:foreign"),
+        ("owner_id", "leader-foreign-0001"),
+        ("epoch", 2),
+        ("fencing_token", 2),
+        ("instance_id", "leader-instance-foreign0001"),
+    ],
+)
+def test_runner_dispatch_rejects_changed_current_lease_identity_before_new_child(
+    monkeypatch, field, value
+) -> None:
+    service, core, repo, gateway, _ = runtime(execute=True)
+    monkeypatch.setattr(service, "_halt_runner_after_failure", lambda _reason: None)
+    target = multi_child_plan(2)
+    original_send = gateway.send_order
+
+    def replace_cached_token_after_first_child(request, context):
+        result = original_send(request, context)
+        if len(gateway.send_calls) == 1:
+            token = core.fencer.token
+            assert token is not None
+            core.fencer._token = replace(token, **{field: value})
+        return result
+
+    gateway.send_order = replace_cached_token_after_first_child
+    with pytest.raises(MutationRejected, match="leader identity changed"):
+        reconcile_enable_start(service, core, repo, target)
+
+    assert len(gateway.send_calls) == 1
+    assert len(repo.snapshot()["send_intents"]) == 1
+
+
+def test_runner_dispatch_rejects_lease_expiry_regression_before_new_child(
+    monkeypatch,
+) -> None:
+    current = [datetime.now(timezone.utc)]
+    patch_execution_fence_clock(monkeypatch, current)
+    service, core, repo, gateway, _ = runtime(execute=True)
+    monkeypatch.setattr(service, "_halt_runner_after_failure", lambda _reason: None)
+    core.fencer.lease_seconds = 44
+    target = multi_child_plan(3)
+    original_send = gateway.send_order
+    start_token = []
+
+    def renew_then_regress_cached_expiry(request, context):
+        result = original_send(request, context)
+        if len(gateway.send_calls) == 1:
+            start_token.append(core.fencer.token)
+            current[0] += timedelta(seconds=1)
+            core.renew_leader(core.fencer.token)
+        elif len(gateway.send_calls) == 2:
+            core.fencer._token = start_token[0]
+        return result
+
+    gateway.send_order = renew_then_regress_cached_expiry
+    with pytest.raises(MutationRejected, match="lease expiry regressed"):
+        reconcile_enable_start(service, core, repo, target)
+
+    assert len(gateway.send_calls) == 2
+    assert len(repo.snapshot()["send_intents"]) == 2
+
+
+def test_runner_dispatch_rejects_expired_or_released_lease_before_new_child(
+    monkeypatch,
+) -> None:
+    current = [datetime.now(timezone.utc)]
+    patch_execution_fence_clock(monkeypatch, current)
+    service, core, repo, gateway, _ = runtime(execute=True)
+    monkeypatch.setattr(service, "_halt_runner_after_failure", lambda _reason: None)
+    core.fencer.lease_seconds = 1
+    target = multi_child_plan(2)
+    original_submit = service.send_plan_order
+
+    def expire_after_first_child(plan_id, order_ref, *, token, **kwargs):
+        result = original_submit(plan_id, order_ref, token=token, **kwargs)
+        if order_ref == "order-ref-0001":
+            current[0] += timedelta(seconds=2)
+        return result
+
+    service.send_plan_order = expire_after_first_child
+    with pytest.raises(FencingError, match="fencing lease is expired"):
+        reconcile_enable_start(service, core, repo, target)
+    assert len(gateway.send_calls) == 1
+    assert len(repo.snapshot()["send_intents"]) == 1
+
+    service, core, repo, gateway, _ = runtime(execute=True)
+    monkeypatch.setattr(service, "_halt_runner_after_failure", lambda _reason: None)
+    target = multi_child_plan(2)
+    original_submit = service.send_plan_order
+
+    def release_after_first_child(plan_id, order_ref, *, token, **kwargs):
+        result = original_submit(plan_id, order_ref, token=token, **kwargs)
+        if order_ref == "order-ref-0001":
+            token = core.fencer.token
+            assert token is not None
+            core.release_leader(token)
+        return result
+
+    service.send_plan_order = release_after_first_child
+    with pytest.raises(MutationRejected, match="lost its leader token"):
+        reconcile_enable_start(service, core, repo, target)
+    assert len(gateway.send_calls) == 1
+    assert len(repo.snapshot()["send_intents"]) == 1
+
+
+def test_runner_dispatch_allows_renew_after_current_token_refresh_race(
+    monkeypatch,
+) -> None:
+    current = [datetime.now(timezone.utc)]
+    patch_execution_fence_clock(monkeypatch, current)
+    service, core, repo, gateway, _ = runtime(execute=True)
+    core.fencer.lease_seconds = 44
+    target = multi_child_plan(2)
+    original_gateway_send = gateway.send_order
+    original_submit = service.send_plan_order
+    refreshed_tokens = []
+
+    def renew_after_first_child(request, context):
+        result = original_gateway_send(request, context)
+        if len(gateway.send_calls) == 1:
+            current[0] += timedelta(seconds=1)
+            core.renew_leader(core.fencer.token)
+        return result
+
+    def renew_after_second_child_refresh(plan_id, order_ref, *, token, **kwargs):
+        if order_ref == "order-ref-0002":
+            refreshed_tokens.append(token)
+            current[0] += timedelta(seconds=1)
+            core.renew_leader(core.fencer.token)
+        return original_submit(plan_id, order_ref, token=token, **kwargs)
+
+    gateway.send_order = renew_after_first_child
+    service.send_plan_order = renew_after_second_child_refresh
+    reconcile_enable_start(service, core, repo, target)
+
+    assert len(gateway.send_calls) == 2
+    assert len(refreshed_tokens) == 1
+    assert core.fencer.token is not None
+    assert datetime.fromisoformat(
+        core.fencer.token.lease_expires_at[:-1] + "+00:00"
+    ) - datetime.fromisoformat(
+        refreshed_tokens[0].lease_expires_at[:-1] + "+00:00"
+    ) == timedelta(seconds=1)
 
 
 def test_planned_dispatch_retries_cas_window_same_leader_renew(monkeypatch) -> None:
