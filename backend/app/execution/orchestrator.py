@@ -8,11 +8,11 @@ leader/fencing admission check.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-import re
 from threading import RLock
 from typing import Any
 from uuid import uuid4
@@ -399,6 +399,21 @@ class ExecutionOrchestrator:
             raise SnapshotRejected("durable full-account broker rows are invalid")
         durable_active_orders_sha256 = sha256_json(durable_active_orders)
         durable_positions_sha256 = sha256_json(durable_positions)
+        try:
+            durable_position_identity_sha256 = before_position_projection_hash(
+                durable_positions,
+                account_scope=self.scope,
+                environment=self.environment,
+            )
+            current_position_identity_sha256 = before_position_projection_hash(
+                positions,
+                account_scope=self.scope,
+                environment=self.environment,
+            )
+        except CommodityExecutionContractError as exc:
+            raise SnapshotRejected(
+                "full-account position identity is invalid"
+            ) from exc
         status = self._projection(state, observed)
         status_binding = {
             "status_schema_version": status["schema_version"],
@@ -409,6 +424,7 @@ class ExecutionOrchestrator:
             "broker": deepcopy(status["broker"]),
             "durable_active_orders_sha256": durable_active_orders_sha256,
             "durable_positions_sha256": durable_positions_sha256,
+            "durable_position_identity_sha256": durable_position_identity_sha256,
             "snapshot_identity_mode": "GENERATION_FACT_HASH_EQUIVALENT",
         }
         durable_broker = status_binding["broker"]
@@ -422,8 +438,8 @@ class ExecutionOrchestrator:
             or reconciliation["unknown_outcomes"] != 0
             or durable_broker["connected"] is not True
             or durable_broker["generation"] != current.generation
-            or durable_broker["position_snapshot_hash"] != expected_position_hash
-            or durable_positions_sha256 != expected_position_hash
+            or durable_broker["position_snapshot_hash"] != durable_positions_sha256
+            or durable_position_identity_sha256 != current_position_identity_sha256
             or durable_broker["active_order_count"] != current.active_order_count
             or durable_broker["active_order_count"] != len(durable_active_orders)
             or durable_active_orders_sha256 != active_orders_sha256

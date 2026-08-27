@@ -17,12 +17,6 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
-from shared.commodity_execution import (
-    KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
-    KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
-    sha256_json,
-)
-
 from app.execution.models import (
     EPOCH_TIMESTAMP,
     FUTURE_SKEW_SECONDS,
@@ -32,6 +26,13 @@ from app.execution.models import (
     UTC_RE,
     CommandEnvelope,
     parse_utc,
+)
+from shared.commodity_execution import (
+    KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+    KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
+    CommodityExecutionContractError,
+    before_position_projection_hash,
+    sha256_json,
 )
 
 _SCHEMA_PATH = (
@@ -541,6 +542,7 @@ _STATUS_BINDING_FIELDS = frozenset(
         "broker",
         "durable_active_orders_sha256",
         "durable_positions_sha256",
+        "durable_position_identity_sha256",
         "snapshot_identity_mode",
     }
 )
@@ -673,6 +675,10 @@ class ExecutionAccountFactsProjection:
             binding["durable_positions_sha256"],
             field="durable_positions_sha256",
         )
+        _strict_sha(
+            binding["durable_position_identity_sha256"],
+            field="durable_position_identity_sha256",
+        )
         reconciliation = binding["reconciliation"]
         broker = binding["broker"]
         if (
@@ -705,14 +711,23 @@ class ExecutionAccountFactsProjection:
                 candidate["snapshot_id"].removeprefix("snapshot-peek-"),
                 field="snapshot peek facts hash",
             )
+        try:
+            current_position_identity_sha256 = before_position_projection_hash(
+                positions,
+                account_scope=candidate["account_scope"],
+                environment=candidate["environment"],
+            )
+        except CommodityExecutionContractError as exc:
+            raise ValueError("execution position identity is invalid") from exc
         if (
             reconciliation["state"] != "RECONCILED"
             or reconciliation["unknown_outcomes"] != 0
             or broker["connected"] is not True
             or broker["generation"] != candidate["generation"]
-            or broker["position_snapshot_hash"] != candidate["position_snapshot_hash"]
-            or binding["durable_positions_sha256"]
-            != candidate["position_snapshot_hash"]
+            or broker["position_snapshot_hash"]
+            != binding["durable_positions_sha256"]
+            or binding["durable_position_identity_sha256"]
+            != current_position_identity_sha256
             or broker["active_order_count"] != candidate["active_order_count"]
             or binding["durable_active_orders_sha256"]
             != candidate["active_orders_sha256"]
