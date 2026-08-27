@@ -20,6 +20,18 @@ from scripts.windows_rpc_durable_fence_v1 import (
 )
 
 
+class _FakeOrderType:
+    LIMIT = object()
+
+
+class _FakeCtpTdApi(SimpleNamespace):
+    pass
+
+
+ORDERTYPE_VT2CTP = {_FakeOrderType.LIMIT: ("2", "3", "1")}
+OrderType = _FakeOrderType
+
+
 class _Facts:
     def get_all_accounts(self):
         return [
@@ -105,6 +117,11 @@ def _source(
     )
     runtime = SimpleNamespace(
         fact_source=fact_source or _Facts(),
+        main_engine=SimpleNamespace(
+            get_gateway=lambda _gateway_name: SimpleNamespace(
+                td_api=_FakeCtpTdApi(getTradingDay=lambda: "20260827")
+            )
+        ),
         config=WindowsRpcRuntimeConfigV1(
             gateway_setting={"probe": "only"},
             account_scope="account:sim",
@@ -139,6 +156,8 @@ def test_m2_peek_current_facts_is_canonical_and_never_allocates_or_writes(
         "account_scope": "account:sim",
         "environment": "simnow",
         "connected": True,
+        "trading_day": "20260827",
+        "limit_time_condition": "GFD",
     }
     assert state_path.read_bytes() == before_state
     assert ledger_path.read_bytes() == before_ledger

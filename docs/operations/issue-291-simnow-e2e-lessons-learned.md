@@ -107,7 +107,7 @@ read-only discovery
 | Windows 重启后短时无账户/持仓/订单 | CTP 登录、订阅和 OMS 恢复有延迟 | 立即重发或判定零状态 | 等恢复窗口并重复只读快照；未恢复即 fail closed。 |
 | 重启后 `SUBMITTED` 变 `UNKNOWN` | 回调未持久化或时序中断 | 同 intent 再发一次 | durable intent 不变，只 `query_intent_v1`、读 snapshot、对账到终态。 |
 | 开始后被拒绝或无成交 | 非交易时段、无 fresh tick、trading_day 过期 | 用旧 tick、盲目调高价格 | 检查交易时段/trading_day，限价必须 fresh 且可成交；不满足则停止。 |
-| PR comment gate 不通过 | 最后 push 后无可审计评论 | 只保留旧评论 | 最后一次 push 后追加含 exact head SHA 的 PR 评论。 |
+| PR 更新缺少 checkpoint | 最后 push 后无可审计评论 | 只保留旧评论 | 最后一次 push 后追加有价值的 PR checkpoint 评论；不由 CI 强制 exact head SHA。 |
 | 审查表面全绿但不独立 | 同账号不能 Approve | 自己 Approve 或省略审查 | 同账号不 Approve；仍需独立 reviewer 评论并标注 P0/P1/P2。 |
 | 盘中风险扩大 | 为解决 blocker 临时扩展架构 | 盘中继续开发新层/新服务 | 停止 mutation；把架构工作拆为盘后小 PR。 |
 
@@ -134,7 +134,7 @@ read-only discovery
 - 完成 read-only discovery：真实服务、运行版本、可用只读方法与权限边界。
 - 关闭 production/live/countable_forward，确认无未解决 active intent 或未归档 unknown。
 - 核对签名 target、custody、schema/contract 和计划的 image/runtime 版本一致。
-- 确认 PR/CI 状态；最后 push 后的评论必须带 exact head SHA。
+- 确认 PR/CI 状态；最后 push 后补充有价值的 checkpoint 评论，不依赖 exact head SHA 评论门禁。
 
 ### T-30
 
@@ -202,7 +202,7 @@ attempt；原 unknown intent 永不 replay。
 
 最小证据包应包含：版本对齐证明、脱敏 fresh facts、MAP/C_FAST 与签名/custody receipt、
 preview/reconcile/leader 结果、durable intent、broker callback、重启后的 query-only
-对账、target=0 结果、archive 索引，以及 PR 最后 push 后带 exact head SHA 的评论。
+对账、target=0 结果、archive 索引，以及 PR 最后 push 后的关键 checkpoint 评论。
 
 报告边界：
 

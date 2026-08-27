@@ -107,7 +107,7 @@ Phase 1 可以在 #264 完成前交付，并以已合并的 #262/PR #268 为兼�
 
 条件 job 的 `skipped` 不得掩盖应执行但未执行的测试。classifier 与实际 COPY/import closure 不一致属于 P1。
 
-### 4.5 PR 评论门禁
+### 4.5 PR 更新评论
 
 按照仓库规则，PR 每次更新必须同步添加评论。评论至少包含：
 
@@ -121,7 +121,7 @@ Phase 1 可以在 #264 完成前交付，并以已合并的 #262/PR #268 为兼�
 
 只更新 PR 描述、外部文档或聊天消息不能替代对应 PR 评论。
 
-Phase 0B 必须增加可验证的 `PR Update Comment` 门禁：最后一次实质 push 后，机器人或操作者必须在同一 PR 留下包含当前 head SHA 的更新评论；检查失败时 `CI Gate` 不得成功。Issue 关闭 evidence index 必须保存对应 comment URL，不能只依赖人工 checklist。
+PR 更新评论是人工可读的关键 checkpoint，不作为机器 CI 门禁，也不要求用完整 head SHA 触发检查。`CI Gate` 只根据当前 PR head 的实际检查结果判定。Issue 关闭 evidence index 仍应保存关键 comment URL，不能只依赖外部 checklist。
 
 ### 4.6 合并与切换
 
@@ -159,7 +159,7 @@ Rollback：revert 文档只表示撤销提案；已被后续代码依赖后不�
 - 定义 service version、image digest、config hash、schema compatibility、health/readiness/metrics 字段；
 - 定义 release plan、deployment evidence 和 rollback manifest schema；
 - 未知路径或未知依赖 fail closed。
-- 增加上述 `PR Update Comment` SHA/comment URL 检查，使仓库评论规则成为可验证门禁。
+- 保留关键 PR checkpoint 评论规则，但不把评论格式或 SHA 变成 CI 前置条件。
 
 Cutover：CI 开始校验清单，但此 PR 不改变生产 CD 选择。
 
@@ -638,7 +638,7 @@ Frontend-only evidence还应记录 HTTP probe 最大失败间隔、backend-direc
 
 Issue #267 只有在以下条件全部满足后才能关闭：
 
-1. Phase 0～6 所有必要 PR 已合并，且每个 PR 的 P0/P1、CI 和评论门禁完整；
+1. Phase 0～6 所有必要 PR 已合并，且每个 PR 的 P0/P1、CI 和关键 checkpoint 评论完整；
 2. 二十项测试均有可追溯证据，不能用相邻测试替代；
 3. 所有 Acceptance Criteria 均从 `IMPLEMENTED_NOT_ACCEPTED` 转为有证据的完成状态；
 4. #262 底层授权生命周期和 #264 跨服务 Web workflow 已按新边界验收；

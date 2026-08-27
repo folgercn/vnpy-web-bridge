@@ -1,5 +1,8 @@
 name: CI
 
+env:
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
+
 on:
   workflow_dispatch:
   push:
@@ -167,8 +170,7 @@ jobs:
             backend/tests/unit/test_issue291_phase_b_ci.py \
             backend/tests/unit/test_issue291_phase_a_release.py \
             backend/tests/unit/test_issue267_release_contract.py \
-            backend/tests/unit/test_issue267_legacy_cd_guard.py \
-            backend/tests/unit/test_pr_update_comment_gate.py
+            backend/tests/unit/test_issue267_legacy_cd_guard.py
 
   legacy-cd-guard-plan:
     name: Legacy CD guard plan

@@ -13,6 +13,10 @@ def test_concurrency_is_scoped_per_pr_and_preserves_main_runs() -> None:
     assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in WORKFLOW
 
 
+def test_docker_build_records_are_not_uploaded_as_artifacts() -> None:
+    assert 'DOCKER_BUILD_RECORD_UPLOAD: "false"' in WORKFLOW
+
+
 def test_ci_gate_is_stable_and_always_created() -> None:
     gate = WORKFLOW.split("  ci-gate:\n", maxsplit=1)[1]
 
