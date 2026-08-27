@@ -364,6 +364,42 @@ def test_same_target_is_true_noop(lab: tuple[SimNowLabExecutorV1, FakeMainEngine
     assert main.sent == 1
 
 
+def test_current_is_fresh_redacted_and_zero_mutation(lab: tuple[SimNowLabExecutorV1, FakeMainEngine, Path]) -> None:
+    subject, main, db_path = lab
+    main.broker_positions = [
+        PositionData(
+            symbol="rb2610",
+            exchange=Exchange.SHFE,
+            direction=Direction.LONG,
+            volume=3,
+            yd_volume=1,
+            gateway_name="CTP",
+        )
+    ]
+    active = OrderData(
+        symbol="rb2610",
+        exchange=Exchange.SHFE,
+        orderid="current-order",
+        type=OrderType.LIMIT,
+        direction=Direction.LONG,
+        volume=1,
+        status=Status.NOTTRADED,
+        gateway_name="CTP",
+    )
+    main.broker_orders[active.vt_orderid] = active
+
+    result = subject.simnow_lab_get_run_v1("CURRENT")
+
+    assert result == {
+        "status": "CURRENT",
+        "positions": [{"vt_symbol": "rb2610.SHFE", "direction": "LONG", "volume": 3, "yd_volume": 1}],
+        "active_order_count": 1,
+    }
+    assert main.sent == 0
+    with sqlite3.connect(db_path) as db:
+        assert all(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0 for table in ("runs", "orders", "trades", "snapshots"))
+
+
 def test_sync_callback_keeps_terminal_order_and_trade(lab: tuple[SimNowLabExecutorV1, FakeMainEngine, Path]) -> None:
     subject, main, _db_path = lab
     main.synchronous_fill = True

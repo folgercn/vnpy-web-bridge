@@ -813,6 +813,8 @@ class SimNowLabExecutorV1:
             self._thread_lock.release()
 
     def simnow_lab_get_run_v1(self, run_id: Any) -> dict[str, Any]:
+        if run_id == "CURRENT":
+            return self._current()
         if not isinstance(run_id, str) or re.fullmatch(r"[0-9a-f]{32}", run_id) is None:
             raise SimNowLabError("RUN_ID_INVALID")
         with self._connect() as db:
@@ -823,6 +825,46 @@ class SimNowLabExecutorV1:
             trades = [dict(row) for row in db.execute("SELECT * FROM trades WHERE run_id=? ORDER BY created_at", (run_id,))]
             snapshots = [dict(row) for row in db.execute("SELECT * FROM snapshots WHERE run_id=? ORDER BY observed_at", (run_id,))]
         return {"run": dict(run), "orders": orders, "trades": trades, "snapshots": snapshots}
+
+    def _current(self) -> dict[str, Any]:
+        if not self._thread_lock.acquire(blocking=False):
+            raise SimNowLabError("LAB_ALREADY_RUNNING")
+        try:
+            active_orders, positions = self._query_orders(), self._query_positions()
+            result: list[dict[str, Any]] = []
+            for row in positions:
+                vt_symbol = _canonical_vt_symbol(_field(row, "vt_symbol"))
+                if vt_symbol is None:
+                    vt_symbol = _canonical_vt_symbol(
+                        f"{_field(row, 'symbol')}.{_enum_text(_field(row, 'exchange'))}"
+                    )
+                direction = _enum_text(_field(row, "direction")).upper()
+                volume = _number(_field(row, "volume"))
+                yd_volume = _number(_field(row, "yd_volume"))
+                if (
+                    vt_symbol is None
+                    or direction not in {"LONG", "SHORT"}
+                    or volume < 0
+                    or yd_volume < 0
+                    or not volume.is_integer()
+                    or not yd_volume.is_integer()
+                ):
+                    raise SimNowLabError("BROKER_FACT_INVALID")
+                result.append(
+                    {
+                        "vt_symbol": vt_symbol,
+                        "direction": direction,
+                        "volume": int(volume),
+                        "yd_volume": int(yd_volume),
+                    }
+                )
+            return {
+                "status": "CURRENT",
+                "positions": sorted(result, key=lambda item: (item["vt_symbol"], item["direction"])),
+                "active_order_count": len(active_orders),
+            }
+        finally:
+            self._thread_lock.release()
 
 
 def attach_windows_simnow_lab_v1(*, runtime: Any, db_path: str | Path) -> SimNowLabExecutorV1:

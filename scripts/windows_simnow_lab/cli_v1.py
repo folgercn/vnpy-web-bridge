@@ -167,7 +167,7 @@ def build_parser() -> argparse.ArgumentParser:
     materialize = commands.add_parser("materialize")
     materialize.add_argument("--input", required=True, type=Path)
     materialize.add_argument("--output", required=True, type=Path)
-    for command in (commands.add_parser("apply"), commands.add_parser("get-run")):
+    for command in (commands.add_parser("apply"), commands.add_parser("get-run"), commands.add_parser("current")):
         command.add_argument("--request-address", default=DEFAULT_REQUEST_ADDRESS)
         command.add_argument("--publish-address", default=DEFAULT_PUBLISH_ADDRESS)
         command.add_argument("--timeout-ms", type=int, default=30_000)
@@ -187,8 +187,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "apply":
             target = read_lab_target(args.target)
             result = rpc_call(method=RPC_APPLY, args=(target,), request_address=args.request_address, publish_address=args.publish_address, timeout_ms=args.timeout_ms)
-        else:
+        elif args.command == "get-run":
             result = rpc_call(method=RPC_GET, args=(args.run_id,), request_address=args.request_address, publish_address=args.publish_address, timeout_ms=args.timeout_ms)
+        else:
+            result = rpc_call(method=RPC_GET, args=("CURRENT",), request_address=args.request_address, publish_address=args.publish_address, timeout_ms=args.timeout_ms)
     except (SimNowLabCliError, OSError, ValueError) as exc:
         print(json.dumps({"status": "ERROR", "error": str(exc)}, sort_keys=True))
         return 1

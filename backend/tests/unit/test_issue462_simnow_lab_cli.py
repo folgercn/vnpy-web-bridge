@@ -98,7 +98,9 @@ def test_apply_and_get_run_use_only_lab_rpcs(monkeypatch: pytest.MonkeyPatch, tm
 
     assert cli.main(["apply", "--target", str(target_path), "--request-address", "tcp://request", "--publish-address", "tcp://publish", "--timeout-ms", "123"]) == 0
     assert cli.main(["get-run", "--run-id", "a" * 32, "--request-address", "tcp://request", "--publish-address", "tcp://publish"]) == 0
+    assert cli.main(["current", "--request-address", "tcp://request", "--publish-address", "tcp://publish"]) == 0
     assert calls == [
         ("simnow_lab_apply_target_v1", (target,), 123),
         ("simnow_lab_get_run_v1", ("a" * 32,), 30_000),
+        ("simnow_lab_get_run_v1", ("CURRENT",), 30_000),
     ]
