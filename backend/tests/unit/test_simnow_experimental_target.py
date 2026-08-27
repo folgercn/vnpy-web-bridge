@@ -358,6 +358,71 @@ def _target_positions(target: dict) -> dict[str, dict]:
     return positions
 
 
+def _experimental_recovery(
+    target: dict,
+    bundle: dict,
+    *,
+    phase: str,
+    custody_key: str,
+    plan_id: str,
+    plan_hash: str,
+    expires_at: str = "2030-01-02T03:04:05Z",
+    state: str = "INSTALLED",
+) -> dict:
+    inputs = runner._planner_inputs(target, bundle)
+    _static_sha, static_rows, execution_day = runner._static_core_equal_outputs(
+        producer_projection=inputs["static_core_equal_projection"],
+        freeze_contract=inputs["static_core_equal_freeze_contract"],
+        target_evidence=inputs["static_core_equal_target_evidence"],
+    )
+    final_projection, _final_rows = runner._position_manager_final_projection(
+        snapshot=inputs["position_manager_snapshot"],
+        expected_sha256=sha256_json(inputs["position_manager_snapshot"]),
+        static_rows=static_rows,
+        static_execution_day=execution_day,
+    )
+    return {
+        "state": state,
+        "target_plan_schema_version": runner.KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
+        "custody_idempotency_key": custody_key,
+        "phase": phase,
+        "execution_run_id": f"simnow-experimental-{target['target_id'][:48]}",
+        "plan_id": plan_id,
+        "plan_hash": plan_hash,
+        "expires_at": expires_at,
+        "lineage": {
+            "static_core_equal_sha256": sha256_json(
+                inputs["static_core_equal_projection"]
+            ),
+            "position_manager_sha256": sha256_json(
+                inputs["position_manager_snapshot"]
+            ),
+            "final_target_sha256": sha256_json(final_projection),
+        },
+    }
+
+
+def _retired_predecessor_status(recovery: dict, *, unknown: int = 0) -> dict:
+    return {
+        "state_version": 17,
+        "lifecycle": "READY",
+        "plan": {
+            "state": "TERMINAL",
+            "plan_id": recovery["plan_id"],
+            "plan_hash": recovery["plan_hash"],
+        },
+        "authority": {
+            "state": "REVOKED",
+            "artifact_id": recovery["plan_id"],
+            "artifact_hash": recovery["plan_hash"],
+        },
+        "leader": {"held": False},
+        "reconciliation": {"state": "RECONCILED", "unknown_outcomes": unknown},
+        "broker": {"active_order_count": 0},
+        "send_intents": [{"state": "TERMINAL"}],
+    }
+
+
 def _formal_bindings(requests) -> tuple[FormalTickBinding, ...]:
     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     return tuple(FormalTickBinding(source="windows-tick-wire-v1", vt_symbol=request.vt_symbol, price_side=request.price_side, price_tick=request.price_tick, stream_generation="experimental-gen", ingest_id=f"experimental-{index}", ingest_seq=index, event_hash=sha256_json({"request": request.vt_symbol, "index": index}), received_at_utc=now, reference_price=request.price_tick * 100_000) for index, request in enumerate(requests, start=1))
@@ -747,7 +812,14 @@ def test_execute_once_allows_new_target_only_after_old_identity_is_terminal(
         async def _install_or_recover_plan(self, *, phase_key: str, handoff):
             assert handoff is not None
             events.append("install-new-target")
-            return {"phase": handoff.target_plan["phase"], "phase_key": phase_key}
+            return _experimental_recovery(
+                new_target,
+                bundle,
+                phase=handoff.target_plan["phase"],
+                custody_key=phase_key,
+                plan_id="new-plan-0001",
+                plan_hash="c" * 64,
+            )
 
         async def _drive_installed_plan(
             self, recovery, *, expected_intent_count=None
@@ -1086,19 +1158,6 @@ def test_runner_formal_quote_failure_is_fail_closed(monkeypatch: pytest.MonkeyPa
 def test_completed_open_recovery_returns_fresh_planner_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     bundle = _bundle()
     target = _target(bundle)
-    inputs = runner._planner_inputs(target, bundle)
-    run_id = f"simnow-experimental-{target['target_id'][:48]}"
-    _static_sha, static_rows, execution_day = runner._static_core_equal_outputs(
-        producer_projection=inputs["static_core_equal_projection"],
-        freeze_contract=inputs["static_core_equal_freeze_contract"],
-        target_evidence=inputs["static_core_equal_target_evidence"],
-    )
-    final_projection, _final_rows = runner._position_manager_final_projection(
-        snapshot=inputs["position_manager_snapshot"],
-        expected_sha256=sha256_json(inputs["position_manager_snapshot"]),
-        static_rows=static_rows,
-        static_execution_day=execution_day,
-    )
 
     def phase_key(phase: str) -> str:
         import hashlib
@@ -1106,11 +1165,14 @@ def test_completed_open_recovery_returns_fresh_planner_noop(monkeypatch: pytest.
 
         return hashlib.sha256(json.dumps({"domain": "simnow-experimental-target-v1", "target_id": target["target_id"], "phase": phase}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
-    open_recovery = {
-        "state": "INSTALLED", "target_plan_schema_version": runner.KEYLESS_TARGET_PLAN_V3_SCHEMA_VERSION,
-        "custody_idempotency_key": phase_key("OPEN"), "phase": "OPEN", "execution_run_id": run_id,
-        "lineage": {"static_core_equal_sha256": sha256_json(inputs["static_core_equal_projection"]), "position_manager_sha256": sha256_json(inputs["position_manager_snapshot"]), "final_target_sha256": sha256_json(final_projection)},
-    }
+    open_recovery = _experimental_recovery(
+        target,
+        bundle,
+        phase="OPEN",
+        custody_key=phase_key("OPEN"),
+        plan_id="existing-open-plan-0001",
+        plan_hash="a" * 64,
+    )
 
     class RecoveryExecution(_Execution):
         def __init__(self, facts: dict) -> None:
@@ -1129,6 +1191,9 @@ def test_completed_open_recovery_returns_fresh_planner_noop(monkeypatch: pytest.
             self.recovery_keys.append(key)
             return SimpleNamespace(as_dict=lambda: open_recovery if key == phase_key("OPEN") else {"state": "BEFORE_CUSTODY"})
 
+        async def completion(self, _plan_id: str):
+            return None
+
     class RecoveryBackend(runner._ExperimentalBackend):
         def __init__(self) -> None:
             execution = RecoveryExecution(_facts(positions=_target_positions(target)))
@@ -1146,7 +1211,470 @@ def test_completed_open_recovery_returns_fresh_planner_noop(monkeypatch: pytest.
     assert backend.recovery_execution.recovery_keys == [
         phase_key("CLOSE"),
         phase_key("OPEN"),
+        runner._custody_successor_phase_key(
+            target_id=target["target_id"],
+            phase="OPEN",
+            predecessor_plan_id="existing-open-plan-0001",
+            predecessor_plan_hash="a" * 64,
+        ),
     ]
+
+
+def test_custody_successor_key_preserves_k0_and_binds_exact_predecessor() -> None:
+    target_id = "experimental-target-0001"
+    k0 = runner._custody_phase_key(target_id=target_id, phase="OPEN")
+    assert k0 == sha256_json({
+        "domain": "simnow-experimental-target-v1",
+        "target_id": target_id,
+        "phase": "OPEN",
+    })
+    k1 = runner._custody_successor_phase_key(
+        target_id=target_id,
+        phase="OPEN",
+        predecessor_plan_id="plan-0001",
+        predecessor_plan_hash="a" * 64,
+    )
+    assert k1 == runner._custody_successor_phase_key(
+        target_id=target_id,
+        phase="OPEN",
+        predecessor_plan_id="plan-0001",
+        predecessor_plan_hash="a" * 64,
+    )
+    assert k1 != k0
+    assert k1 != runner._custody_successor_phase_key(
+        target_id=target_id,
+        phase="OPEN",
+        predecessor_plan_id="plan-0002",
+        predecessor_plan_hash="a" * 64,
+    )
+
+
+def test_retired_predecessor_uses_stable_successor_and_never_publishes_k2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _bundle()
+    target = _target(bundle)
+    k0 = runner._custody_phase_key(target_id=target["target_id"], phase="OPEN")
+    predecessor = _experimental_recovery(
+        target, bundle, phase="OPEN", custody_key=k0,
+        plan_id="retired-plan-0001", plan_hash="a" * 64,
+        expires_at="2000-01-01T00:00:00Z",
+    )
+    k1 = runner._custody_successor_phase_key(
+        target_id=target["target_id"], phase="OPEN",
+        predecessor_plan_id=predecessor["plan_id"],
+        predecessor_plan_hash=predecessor["plan_hash"],
+    )
+    k2 = runner._custody_successor_phase_key(
+        target_id=target["target_id"], phase="OPEN",
+        predecessor_plan_id="successor-plan-0001", predecessor_plan_hash="b" * 64,
+    )
+    calls: list[str] = []
+
+    class Execution:
+        def __init__(self, recoveries: dict[str, dict]) -> None:
+            self.recoveries = recoveries
+            self.status_calls = 0
+
+        async def status(self):
+            self.status_calls += 1
+            if self.status_calls == 1:
+                return SimpleNamespace(as_dict=lambda: {"plan": {"state": "IDLE"}})
+            return SimpleNamespace(as_dict=lambda: _retired_predecessor_status(predecessor))
+
+        async def target_plan_recovery(self, key: str):
+            calls.append(f"recovery:{key}")
+            return SimpleNamespace(as_dict=lambda: self.recoveries.get(key, {"state": "BEFORE_CUSTODY"}))
+
+        async def completion(self, _plan_id: str):
+            return None
+
+    class Backend:
+        _is_retired_execution_boundary = (
+            runner._ExperimentalBackend._is_retired_execution_boundary
+        )
+
+        def __init__(self, recoveries: dict[str, dict]) -> None:
+            self.execution = Execution(recoveries)
+            self.installed_keys: list[str] = []
+
+        async def _install_or_recover_plan(self, *, phase_key: str, handoff, recovery=None):
+            self.installed_keys.append(phase_key)
+            if recovery is not None:
+                return recovery
+            assert handoff is not None
+            return _experimental_recovery(
+                target, bundle, phase="OPEN", custody_key=phase_key,
+                plan_id="successor-plan-0001", plan_hash="b" * 64,
+            )
+
+        async def _drive_installed_plan(self, _recovery, *, expected_intent_count=None):
+            if expected_intent_count is None:
+                return {"state": "BLOCKED", "phase": "OPEN"}
+            assert expected_intent_count == 1
+            return {"state": "COMPLETED", "phase": "OPEN"}
+
+    handoff = SimpleNamespace(target_plan={"phase": "OPEN", "orders": [{}]})
+
+    async def non_noop(*_args, **_kwargs):
+        return (
+            {"status": "TARGET_PLAN_V3_DRY_RUN", "phase": "OPEN"},
+            SimpleNamespace(close_handoff=None, open_handoff=handoff),
+        )
+
+    monkeypatch.setattr(runner, "preview_once", non_noop)
+    backend = Backend({k0: predecessor})
+    result = asyncio.run(runner.execute_once(
+        target, bundle, backend=backend,
+        formal_state_dir=Path("/unused"), formal_projection_dir=Path("/unused"),
+        expires_at="2099-01-01T00:00:00Z",
+    ))
+    assert result["lifecycle"]["state"] == "COMPLETED"
+    assert backend.installed_keys == [k1]
+    assert f"recovery:{k2}" not in calls
+
+    # If a process dies after K1 publication/install, the next invocation
+    # recovers K1 exactly; it never derives K2 from an unfinished successor.
+    k1_recovery = _experimental_recovery(
+        target, bundle, phase="OPEN", custody_key=k1,
+        plan_id="successor-plan-0001", plan_hash="b" * 64,
+    )
+    resumed = Backend({k0: predecessor, k1: k1_recovery})
+    result = asyncio.run(runner.execute_once(
+        target, bundle, backend=resumed,
+        formal_state_dir=Path("/unused"), formal_projection_dir=Path("/unused"),
+        expires_at="2099-01-01T00:00:00Z",
+    ))
+    assert result["status"] == "RECOVERY"
+    assert resumed.installed_keys == [k1]
+    assert f"recovery:{k2}" in calls
+
+
+def test_completed_predecessor_allows_successor_only_after_non_noop_delta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _bundle()
+    target = _target(bundle)
+    k0 = runner._custody_phase_key(target_id=target["target_id"], phase="OPEN")
+    predecessor = _experimental_recovery(
+        target, bundle, phase="OPEN", custody_key=k0,
+        plan_id="completed-plan-0001", plan_hash="c" * 64,
+    )
+    k1 = runner._custody_successor_phase_key(
+        target_id=target["target_id"], phase="OPEN",
+        predecessor_plan_id=predecessor["plan_id"],
+        predecessor_plan_hash=predecessor["plan_hash"],
+    )
+    installed: list[str] = []
+
+    class Execution:
+        def __init__(self) -> None:
+            self.status_calls = 0
+
+        async def status(self):
+            self.status_calls += 1
+            if self.status_calls == 1:
+                return SimpleNamespace(as_dict=lambda: {"plan": {"state": "IDLE"}})
+            return SimpleNamespace(as_dict=lambda: {
+                **_retired_predecessor_status(predecessor),
+                "authority": {"state": "REVOKED"},
+            })
+
+        async def target_plan_recovery(self, key: str):
+            return SimpleNamespace(as_dict=lambda: predecessor if key == k0 else {"state": "BEFORE_CUSTODY"})
+
+        async def completion(self, plan_id: str):
+            assert plan_id == predecessor["plan_id"]
+            return SimpleNamespace(as_dict=lambda: {
+                "plan_id": predecessor["plan_id"], "plan_hash": predecessor["plan_hash"],
+            })
+
+    class Backend:
+        _is_retired_execution_boundary = (
+            runner._ExperimentalBackend._is_retired_execution_boundary
+        )
+
+        def __init__(self) -> None:
+            self.execution = Execution()
+
+        async def _install_or_recover_plan(self, *, phase_key: str, handoff, recovery=None):
+            assert recovery is None and handoff is not None
+            installed.append(phase_key)
+            return _experimental_recovery(
+                target, bundle, phase="OPEN", custody_key=phase_key,
+                plan_id="new-plan-0001", plan_hash="d" * 64,
+            )
+
+        async def _drive_installed_plan(self, _recovery, *, expected_intent_count=None):
+            assert expected_intent_count == 1
+            return {"state": "COMPLETED", "phase": "OPEN"}
+
+    handoff = SimpleNamespace(target_plan={"phase": "OPEN", "orders": [{}]})
+
+    async def non_noop(*_args, **_kwargs):
+        return (
+            {"status": "TARGET_PLAN_V3_DRY_RUN", "phase": "OPEN"},
+            SimpleNamespace(close_handoff=None, open_handoff=handoff),
+        )
+
+    monkeypatch.setattr(runner, "preview_once", non_noop)
+    result = asyncio.run(runner.execute_once(
+        target, bundle, backend=Backend(),
+        formal_state_dir=Path("/unused"), formal_projection_dir=Path("/unused"),
+        expires_at="2099-01-01T00:00:00Z",
+    ))
+    assert result["lifecycle"]["state"] == "COMPLETED"
+    assert installed == [k1]
+
+
+def test_existing_k1_current_terminal_completion_advances_restore_to_k2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """K0 may be retired while K1 is current; never fall back to K0."""
+
+    bundle = _bundle()
+    target = _target(bundle)
+    k0 = runner._custody_phase_key(target_id=target["target_id"], phase="OPEN")
+    k0_recovery = _experimental_recovery(
+        target, bundle, phase="OPEN", custody_key=k0,
+        plan_id="retired-normal-plan-0001", plan_hash="a" * 64,
+        expires_at="2000-01-01T00:00:00Z",
+    )
+    k1 = runner._custody_successor_phase_key(
+        target_id=target["target_id"], phase="OPEN",
+        predecessor_plan_id=k0_recovery["plan_id"],
+        predecessor_plan_hash=k0_recovery["plan_hash"],
+    )
+    k1_recovery = _experimental_recovery(
+        target, bundle, phase="OPEN", custody_key=k1,
+        plan_id="completed-normal-plan-0002", plan_hash="b" * 64,
+    )
+    k2 = runner._custody_successor_phase_key(
+        target_id=target["target_id"], phase="OPEN",
+        predecessor_plan_id=k1_recovery["plan_id"],
+        predecessor_plan_hash=k1_recovery["plan_hash"],
+    )
+    queried: list[str] = []
+    installed: list[str] = []
+
+    class Execution:
+        async def status(self):
+            return SimpleNamespace(as_dict=lambda: _retired_predecessor_status(k1_recovery))
+
+        async def target_plan_recovery(self, key: str):
+            queried.append(key)
+            return SimpleNamespace(as_dict=lambda: {
+                k0: k0_recovery,
+                k1: k1_recovery,
+            }.get(key, {"state": "BEFORE_CUSTODY"}))
+
+        async def completion(self, plan_id: str):
+            if plan_id != k1_recovery["plan_id"]:
+                return None
+            return SimpleNamespace(as_dict=lambda: {
+                "plan_id": k1_recovery["plan_id"],
+                "plan_hash": k1_recovery["plan_hash"],
+            })
+
+    class Backend:
+        _is_retired_execution_boundary = (
+            runner._ExperimentalBackend._is_retired_execution_boundary
+        )
+
+        def __init__(self) -> None:
+            self.execution = Execution()
+
+        async def _install_or_recover_plan(self, *, phase_key: str, handoff, recovery=None):
+            assert recovery is None and handoff is not None
+            installed.append(phase_key)
+            return _experimental_recovery(
+                target, bundle, phase="OPEN", custody_key=phase_key,
+                plan_id="restore-normal-plan-0003", plan_hash="c" * 64,
+            )
+
+        async def _drive_installed_plan(self, _recovery, *, expected_intent_count=None):
+            assert expected_intent_count == 1
+            return {"state": "COMPLETED", "phase": "OPEN"}
+
+    handoff = SimpleNamespace(target_plan={"phase": "OPEN", "orders": [{}]})
+
+    async def non_noop(*_args, **_kwargs):
+        return (
+            {"status": "TARGET_PLAN_V3_DRY_RUN", "phase": "OPEN"},
+            SimpleNamespace(close_handoff=None, open_handoff=handoff),
+        )
+
+    monkeypatch.setattr(runner, "preview_once", non_noop)
+    result = asyncio.run(runner.execute_once(
+        target, bundle, backend=Backend(),
+        formal_state_dir=Path("/unused"), formal_projection_dir=Path("/unused"),
+        expires_at="2099-01-01T00:00:00Z",
+    ))
+    assert result["lifecycle"]["state"] == "COMPLETED"
+    assert installed == [k2]
+    assert k0 in queried and k1 in queried and k2 in queried
+
+
+def test_completed_predecessor_same_target_noop_creates_no_successor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _bundle()
+    target = _target(bundle)
+    k0 = runner._custody_phase_key(target_id=target["target_id"], phase="OPEN")
+    predecessor = _experimental_recovery(
+        target, bundle, phase="OPEN", custody_key=k0,
+        plan_id="completed-plan-0001", plan_hash="e" * 64,
+    )
+    installs: list[str] = []
+
+    class Execution:
+        def __init__(self) -> None:
+            self.status_calls = 0
+
+        async def status(self):
+            self.status_calls += 1
+            if self.status_calls == 1:
+                return SimpleNamespace(as_dict=lambda: {"plan": {"state": "IDLE"}})
+            return SimpleNamespace(as_dict=lambda: {
+                **_retired_predecessor_status(predecessor),
+                "authority": {"state": "REVOKED"},
+            })
+
+        async def target_plan_recovery(self, key: str):
+            return SimpleNamespace(as_dict=lambda: predecessor if key == k0 else {"state": "BEFORE_CUSTODY"})
+
+        async def completion(self, _plan_id: str):
+            return SimpleNamespace(as_dict=lambda: {
+                "plan_id": predecessor["plan_id"], "plan_hash": predecessor["plan_hash"],
+            })
+
+    class Backend:
+        _is_retired_execution_boundary = (
+            runner._ExperimentalBackend._is_retired_execution_boundary
+        )
+
+        def __init__(self) -> None:
+            self.execution = Execution()
+
+        async def _install_or_recover_plan(self, *, phase_key: str, handoff, recovery=None):
+            installs.append(phase_key)
+            raise AssertionError("same NORMAL NOOP must not create a successor")
+
+        async def _drive_installed_plan(self, *_args, **_kwargs):
+            raise AssertionError("completed predecessor must not be driven")
+
+    async def noop(*_args, **_kwargs):
+        return ({"status": "NOOP", "new_intents": 0}, None)
+
+    monkeypatch.setattr(runner, "preview_once", noop)
+    result = asyncio.run(runner.execute_once(
+        target, bundle, backend=Backend(),
+        formal_state_dir=Path("/unused"), formal_projection_dir=Path("/unused"),
+        expires_at="2099-01-01T00:00:00Z",
+    ))
+    assert result["status"] == "NOOP"
+    assert installs == []
+
+
+def test_normal_test_restore_has_deterministic_separate_successor_chains() -> None:
+    bundle = _bundle()
+    normal = _target(bundle)
+    route = _route(bundle)
+    test_target = materializer.materialize_test_target(
+        planner_bundle=bundle,
+        planner_bundle_raw=_raw(bundle),
+        daily_route=route,
+        daily_route_raw=_raw(route),
+        generated_at=normal["generated_at"],
+        quantity_overrides={"ag": 2},
+    )
+    normal_k0 = runner._custody_phase_key(
+        target_id=normal["target_id"], phase="OPEN"
+    )
+    test_k0 = runner._custody_phase_key(
+        target_id=test_target["target_id"], phase="OPEN"
+    )
+    normal_k1 = runner._custody_successor_phase_key(
+        target_id=normal["target_id"], phase="OPEN",
+        predecessor_plan_id="normal-plan-0001", predecessor_plan_hash="a" * 64,
+    )
+    restore_k2 = runner._custody_successor_phase_key(
+        target_id=normal["target_id"], phase="OPEN",
+        predecessor_plan_id="normal-plan-0002", predecessor_plan_hash="b" * 64,
+    )
+    assert test_k0 != normal_k0
+    assert restore_k2 != normal_k0
+    assert restore_k2 != normal_k1
+    assert restore_k2 == runner._custody_successor_phase_key(
+        target_id=normal["target_id"], phase="OPEN",
+        predecessor_plan_id="normal-plan-0002", predecessor_plan_hash="b" * 64,
+    )
+
+
+@pytest.mark.parametrize("boundary", ("ACTIVE", "UNKNOWN", "UNEXPIRED"))
+def test_unsafe_predecessor_never_derives_successor(boundary: str) -> None:
+    bundle = _bundle()
+    target = _target(bundle)
+    k0 = runner._custody_phase_key(target_id=target["target_id"], phase="OPEN")
+    predecessor = _experimental_recovery(
+        target, bundle, phase="OPEN", custody_key=k0,
+        plan_id="unsafe-plan-0001", plan_hash="f" * 64,
+        expires_at=(
+            "2099-01-01T00:00:00Z"
+            if boundary == "UNEXPIRED" else "2000-01-01T00:00:00Z"
+        ),
+    )
+    installs: list[str] = []
+
+    class Execution:
+        async def status(self):
+            if boundary == "ACTIVE":
+                return SimpleNamespace(as_dict=lambda: {
+                    "plan": {
+                        "state": "ACTIVE", "plan_id": predecessor["plan_id"],
+                        "plan_hash": predecessor["plan_hash"],
+                    },
+                    "leader": {"held": True},
+                })
+            return SimpleNamespace(as_dict=lambda: _retired_predecessor_status(
+                predecessor, unknown=1 if boundary == "UNKNOWN" else 0
+            ))
+
+        async def target_plan_recovery(self, key: str):
+            return SimpleNamespace(
+                as_dict=lambda: predecessor if key == k0 else {"state": "BEFORE_CUSTODY"}
+            )
+
+        async def completion(self, _plan_id: str):
+            return None
+
+    class Backend:
+        _is_retired_execution_boundary = (
+            runner._ExperimentalBackend._is_retired_execution_boundary
+        )
+
+        def __init__(self) -> None:
+            self.execution = Execution()
+
+        async def _install_or_recover_plan(self, **_kwargs):
+            installs.append("install")
+            raise AssertionError("unsafe predecessor must not publish a successor")
+
+    if boundary == "UNEXPIRED":
+        with pytest.raises(runner.ExperimentalRunError, match="not completed or safely retired"):
+            asyncio.run(runner.execute_once(
+                target, bundle, backend=Backend(),
+                formal_state_dir=Path("/unused"), formal_projection_dir=Path("/unused"),
+                expires_at="2099-01-01T00:00:00Z",
+            ))
+    else:
+        result = asyncio.run(runner.execute_once(
+            target, bundle, backend=Backend(),
+            formal_state_dir=Path("/unused"), formal_projection_dir=Path("/unused"),
+            expires_at="2099-01-01T00:00:00Z",
+        ))
+        assert result["status"] == "CURRENT_IDENTITY_RECOVERY"
+    assert installs == []
 
 
 def test_execute_once_drives_close_then_fresh_open_without_deferred_reuse(
@@ -1197,7 +1725,14 @@ def test_execute_once_drives_close_then_fresh_open_without_deferred_reuse(
             assert handoff is not None
             self.handoffs.append(handoff)
             events.append(f"install-{handoff.target_plan['phase']}")
-            return {"phase": handoff.target_plan["phase"], "phase_key": phase_key}
+            return _experimental_recovery(
+                target,
+                bundle,
+                phase=handoff.target_plan["phase"],
+                custody_key=phase_key,
+                plan_id=f"new-{handoff.target_plan['phase'].lower()}-plan-0001",
+                plan_hash=("a" if handoff.target_plan["phase"] == "CLOSE" else "b") * 64,
+            )
 
         async def _drive_installed_plan(
             self, recovery, *, expected_intent_count=None
