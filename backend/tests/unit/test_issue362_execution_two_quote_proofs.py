@@ -22,6 +22,7 @@ from app.execution.formal_tick_reader import (
     FormalTickEvidenceInvalid,
     FormalTickSourceUnavailable,
 )
+from app.execution.errors import PlanRejected
 from app.execution.models import format_utc, sha256_json
 from app.execution.start_quote_proof import (
     ExecutionStartQuoteProofV1,
@@ -209,6 +210,43 @@ def test_v3_day_session_active_plan_builds_exact_gfd_rollover_evidence() -> None
     assert evidence["intent_trading_day"] == "20260826"
     assert evidence["time_condition"] == "GFD"
     assert len(evidence["intent_ids"]) == len(plan["orders"])
+
+
+def test_expired_revoked_active_plan_skips_only_automatic_finalization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rollover can reconcile expired work without weakening finalization."""
+
+    plan = _plan()
+    service, core, repo, _, custody = _runtime(plan, _Reader())
+    _token, start = _prepare(service, core, repo, custody, plan)
+    service.process_command(start)
+
+    enabled = service._finalization_evidence()
+    assert enabled is not None
+
+    def revoke_expired(state: dict) -> None:
+        state["authority"].update(
+            {"state": "REVOKED", "expires_at": "2026-08-26T06:52:14Z"}
+        )
+
+    repo.mutate(revoke_expired)
+    monkeypatch.setattr(
+        "app.execution.final_runtime.utc_now",
+        lambda: datetime(2026, 8, 27, tzinfo=timezone.utc),
+    )
+    assert service._finalization_evidence() is None
+
+    def revoke_unexpired(state: dict) -> None:
+        state["authority"].update(
+            {"state": "REVOKED", "expires_at": plan["expires_at"]}
+        )
+
+    repo.mutate(revoke_unexpired)
+    evidence = service._finalization_evidence()
+    assert evidence is not None
+    with pytest.raises(PlanRejected, match="does not bind active plan"):
+        core._apply_finalization_evidence(repo.snapshot(), evidence)
 
 
 def _prepare(service, core, repo, custody, plan: dict):

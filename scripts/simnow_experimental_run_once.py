@@ -45,6 +45,7 @@ from app.phase_c.client import RemotePhaseCWorkflowClient  # noqa: E402
 from simnow_continuous_run_once import (  # noqa: E402
     ContinuousRunError,
     _ProductionBackend,
+    _command,
     _completed,
     _completion_state,
     _submit_reconcile_with_ready_snapshot,
@@ -304,6 +305,151 @@ async def _advance_current_execution_identity(
             result["reason"] = reason
         return result
 
+    def expired_retirement_boundary(
+        current_status: Mapping[str, Any],
+        *,
+        recovery: Mapping[str, Any],
+        leader_token: Any,
+    ) -> bool:
+        """Recognize the one retired ACTIVE boundary that cannot resume.
+
+        ``authority.expires_at`` is the immutable TargetPlan expiry carried by
+        the already-enabled authority.  Status deliberately does not expose
+        custody provenance; the stop command below additionally binds the
+        exact plan/authority hashes and leader fence.
+        """
+
+        plan_state = current_status.get("plan")
+        authority = current_status.get("authority")
+        leader = current_status.get("leader")
+        reconciliation = current_status.get("reconciliation")
+        broker = current_status.get("broker")
+        intents = current_status.get("send_intents")
+        if not all(
+            isinstance(value, Mapping)
+            for value in (plan_state, authority, leader, reconciliation, broker)
+        ) or not isinstance(intents, list):
+            return False
+        try:
+            expires_at = datetime.fromisoformat(
+                str(authority["expires_at"]).removesuffix("Z") + "+00:00"
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+        terminal_intent_states = {"RECONCILED", "CANCELLED", "TERMINAL"}
+        return bool(
+            plan_state.get("state") == "ACTIVE"
+            and plan_state.get("plan_id") == recovery["plan_id"]
+            and plan_state.get("plan_hash") == recovery["plan_hash"]
+            and authority.get("state") == "REVOKED"
+            and authority.get("artifact_id") == recovery["plan_id"]
+            and authority.get("artifact_hash") == recovery["plan_hash"]
+            and expires_at <= datetime.now(timezone.utc)
+            and current_status.get("lifecycle") == "READY"
+            and reconciliation.get("state") == "RECONCILED"
+            and reconciliation.get("unknown_outcomes") == 0
+            and broker.get("active_order_count") == 0
+            and leader.get("held") is True
+            and leader.get("epoch") == leader_token.epoch
+            and leader.get("fencing_token") == leader_token.fencing_token
+            and all(
+                isinstance(intent, Mapping)
+                and intent.get("state") in terminal_intent_states
+                for intent in intents
+            )
+        )
+
+    async def retire_expired_active_plan(
+        current_status: Mapping[str, Any],
+        *,
+        recovery: Mapping[str, Any],
+        leader_token: Any,
+    ) -> dict[str, Any] | None:
+        """Retire, never resume, an expired exact ACTIVE identity.
+
+        This uses the normal fenced ``stop`` command.  It is intentionally the
+        final mutation in this invocation; a later invocation must derive a
+        new TargetPlan from fresh broker positions.
+        """
+
+        if not expired_retirement_boundary(
+            current_status, recovery=recovery, leader_token=leader_token
+        ):
+            return None
+        snapshot = (await backend.execution.reconciliation_snapshot()).as_dict()
+        binding = snapshot.get("state_binding")
+        if (
+            not isinstance(binding, Mapping)
+            or binding.get("state_version") != current_status.get("state_version")
+            or binding.get("durable_broker_generation")
+            != current_status.get("broker", {}).get("generation")
+            or snapshot.get("active_order_count") != 0
+            or snapshot.get("active_orders") != {}
+        ):
+            return None
+        authority = current_status["authority"]
+        command = _command(
+            name="stop",
+            suffix=(
+                f"experimental-expired-retire-{recovery['plan_hash'][:24]}-"
+                f"{current_status['state_version']}"
+            ),
+            version=int(current_status["state_version"]),
+            actor=backend._actor(),
+            now=datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            payload={
+                "reason": "retire expired reconciled SIMNOW ACTIVE TargetPlan",
+            },
+            fence={
+                "leader_epoch": leader_token.epoch,
+                "fencing_token": leader_token.fencing_token,
+            },
+        )
+        command["expected"].update(
+            {
+                "plan_hash": recovery["plan_hash"],
+                "authority_hash": authority["artifact_hash"],
+            }
+        )
+        try:
+            await backend.execution.submit(command)
+        except (ExecutionClientError, ValueError):
+            return blocked(
+                plan_id=str(recovery["plan_id"]),
+                plan_hash=str(recovery["plan_hash"]),
+                plan_state="ACTIVE",
+                execution_mutated=True,
+                reason="expired_retirement_outcome_unknown",
+            )
+        after_stop = (await backend.execution.status()).as_dict()
+        after_plan = after_stop.get("plan")
+        after_authority = after_stop.get("authority")
+        if (
+            isinstance(after_plan, Mapping)
+            and after_plan.get("state") == "TERMINAL"
+            and after_plan.get("plan_id") == recovery["plan_id"]
+            and after_plan.get("plan_hash") == recovery["plan_hash"]
+            and isinstance(after_authority, Mapping)
+            and after_authority.get("state") == "REVOKED"
+        ):
+            return blocked(
+                plan_id=str(recovery["plan_id"]),
+                plan_hash=str(recovery["plan_hash"]),
+                plan_state="TERMINAL",
+                execution_mutated=True,
+                reason="expired_active_plan_retired",
+            )
+        return blocked(
+            plan_id=str(recovery["plan_id"]),
+            plan_hash=str(recovery["plan_hash"]),
+            plan_state="ACTIVE",
+            execution_mutated=True,
+            reason="expired_retirement_did_not_reach_terminal",
+        )
+
     status = (await backend.execution.status()).as_dict()
     plan = status.get("plan")
     if not isinstance(plan, Mapping):
@@ -370,6 +516,11 @@ async def _advance_current_execution_identity(
             )
             status = (await backend.execution.status()).as_dict()
         backend._require_post_renew_status(status, recovery, allow_active=True)
+        retired = await retire_expired_active_plan(
+            status, recovery=recovery, leader_token=token
+        )
+        if retired is not None:
+            return retired
         snapshot = await backend.execution.reconciliation_snapshot()
         resumed = await backend.execution.resume_active_plan(
             plan_id=plan_id,

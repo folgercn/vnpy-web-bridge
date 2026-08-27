@@ -1312,6 +1312,21 @@ class FinalExecutionRuntime:
         active = state["plan"]
         if active.get("state") != "ACTIVE":
             return None
+        # An expired, revoked authority can only be reconciled query-only.  It
+        # must never be interpreted as the still-enabled completion authority
+        # for this ACTIVE identity.  The orchestrator keeps its normal
+        # finalization check strict (and therefore still rejects a revoked,
+        # unexpired authority when evidence is supplied).
+        authority = state.get("authority", {})
+        if authority.get("state") == "REVOKED":
+            try:
+                expires_at = datetime.fromisoformat(
+                    str(authority["expires_at"]).removesuffix("Z") + "+00:00"
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise PlanRejected("SIMNOW revoked authority expiry is invalid") from exc
+            if expires_at <= utc_now():
+                return None
         plan = self._plan(str(active["plan_id"]), plan_hash=str(active["plan_hash"]))
         proof = {
             field: active.get(field)

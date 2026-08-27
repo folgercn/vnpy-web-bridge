@@ -898,6 +898,184 @@ def test_execute_once_blocks_new_target_when_old_final_reconcile_is_unknown(
     ]
 
 
+def test_execute_once_retires_expired_reconciled_active_identity_without_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rollover recovery retires an expired plan before a later fresh plan."""
+
+    bundle = _bundle()
+    target = _target(bundle)
+    plan_id = "expired-active-plan-0001"
+    plan_hash = "e" * 64
+    expires_at = "2026-08-26T06:52:14Z"
+    events: list[str] = []
+
+    def status(
+        *,
+        version: int,
+        reconciled: bool,
+        leader_held: bool,
+        terminal: bool = False,
+    ) -> dict:
+        intent_state = "RECONCILED" if reconciled else "UNKNOWN_OUTCOME"
+        return {
+            "state_version": version,
+            "lifecycle": "READY" if reconciled else "HALTED_UNKNOWN_OUTCOME",
+            "plan": {
+                "state": "TERMINAL" if terminal else "ACTIVE",
+                "plan_id": plan_id,
+                "plan_hash": plan_hash,
+            },
+            "authority": {
+                "state": "REVOKED",
+                "artifact_id": plan_id,
+                "artifact_hash": plan_hash,
+                "expires_at": expires_at,
+            },
+            "leader": {"held": leader_held, "epoch": 7, "fencing_token": 8},
+            "reconciliation": {
+                "state": "RECONCILED" if reconciled else "UNKNOWN",
+                "unknown_outcomes": 0 if reconciled else 58,
+            },
+            "broker": {"generation": 17, "active_order_count": 0},
+            "send_intents": [
+                {"plan_id": plan_id, "plan_hash": plan_hash, "state": intent_state}
+                for _ in range(58)
+            ],
+            "safe_to_restart": terminal,
+        }
+
+    class Execution:
+        def __init__(self) -> None:
+            self.statuses = iter(
+                (
+                    status(version=9, reconciled=False, leader_held=False),
+                    status(version=9, reconciled=False, leader_held=True),
+                    status(version=10, reconciled=True, leader_held=True),
+                    status(
+                        version=11,
+                        reconciled=True,
+                        leader_held=True,
+                        terminal=True,
+                    ),
+                )
+            )
+
+        async def status(self):
+            events.append("status")
+            return SimpleNamespace(as_dict=lambda: next(self.statuses))
+
+        async def acquire_leader(self, _owner_id: str):
+            events.append("acquire")
+            return SimpleNamespace(epoch=7, fencing_token=8)
+
+        async def renew_leader(self, token):
+            events.append("renew")
+            return token
+
+        async def reconciliation_snapshot(self):
+            events.append("snapshot")
+            return SimpleNamespace(
+                as_dict=lambda: {
+                    "snapshot_id": f"snapshot-peek-{'1' * 64}",
+                    "generation": 17,
+                    "position_snapshot_hash": "c" * 64,
+                    "active_order_count": 0,
+                    "active_orders": {},
+                    "active_orders_sha256": "0" * 64,
+                    "account_scope": "account:windows",
+                    "environment": "SIMNOW",
+                    "positions": {},
+                    "state_binding": {
+                        "state_version": 9 if events.count("snapshot") == 1 else 10,
+                        "durable_broker_generation": 17,
+                    },
+                }
+            )
+
+        async def submit(self, command):
+            events.append(command["command"])
+            if command["command"] == "reconcile":
+                return {"accepted": True}
+            assert command["command"] == "stop"
+            assert command["expected"] == {
+                "state_version": 10,
+                "leader_epoch": 7,
+                "fencing_token": 8,
+                "plan_hash": plan_hash,
+                "authority_hash": plan_hash,
+            }
+            assert command["payload"] == {
+                "reason": "retire expired reconciled SIMNOW ACTIVE TargetPlan"
+            }
+            return {"accepted": True}
+
+        async def resume_active_plan(self, **_kwargs):
+            pytest.fail("expired ACTIVE identity must be retired, not resumed")
+
+        async def release_leader(self, _token):
+            events.append("release")
+
+        async def target_plan_recovery(self, _key: str):
+            pytest.fail("new target must wait for the next invocation")
+
+    class Backend:
+        _require_active_reconcile_status = (
+            runner._ExperimentalBackend._require_active_reconcile_status
+        )
+        _require_post_renew_status = (
+            runner._ExperimentalBackend._require_post_renew_status
+        )
+        _allows_retired_plan_replacement = (
+            runner._ExperimentalBackend._allows_retired_plan_replacement
+        )
+
+        def __init__(self) -> None:
+            self.config = SimpleNamespace(raw={"leader_owner_id": "experimental-test"})
+            self.execution = Execution()
+
+        async def _release_leader(self, token):
+            await self.execution.release_leader(token)
+
+        def _actor(self):
+            return {
+                "service": "control-api",
+                "principal": "test",
+                "operator": "test",
+                "role": "admin",
+            }
+
+    result = asyncio.run(
+        runner.execute_once(
+            target,
+            bundle,
+            backend=Backend(),
+            formal_state_dir=Path("/unused"),
+            formal_projection_dir=Path("/unused"),
+            expires_at="2099-01-01T00:00:00Z",
+        )
+    )
+
+    assert result["status"] == "CURRENT_IDENTITY_RECOVERY"
+    assert result["plan_state"] == "TERMINAL"
+    assert result["reason"] == "expired_active_plan_retired"
+    assert result["new_intents"] == 0
+    assert result["gateway_mutated"] is False
+    assert events == [
+        "status",
+        "acquire",
+        "renew",
+        "status",
+        "snapshot",
+        "reconcile",
+        "status",
+        "snapshot",
+        "stop",
+        "status",
+        "release",
+    ]
+
+
 def test_runner_formal_quote_failure_is_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     bundle = _bundle()
     monkeypatch.setattr(runner, "read_simnow_continuous_v3_formal_tick_bindings", lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("stale")))
