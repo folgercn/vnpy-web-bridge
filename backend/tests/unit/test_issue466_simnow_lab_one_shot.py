@@ -95,6 +95,7 @@ def test_dashboard_compose_is_read_only_and_auth_audit_uses_tmpfs() -> None:
     assert 'VITE_SIMNOW_LAB_DASHBOARD_ONLY: "true"' in raw
     assert "execution-orchestrator" not in raw
     assert "custody" not in raw.lower()
+    assert "/var/cache/nginx:uid=101,gid=101,mode=0755" in raw
 
 
 def test_release_accepts_exact_archive_and_retries_incomplete_release(tmp_path: Path) -> None:
