@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import hashlib
 import json
 import os
@@ -12,6 +11,11 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - import compatibility for Windows CI
+    fcntl = None  # type: ignore[assignment]
 
 from scripts import simnow_experimental_materialize_target as source_target
 
@@ -110,6 +114,9 @@ def write_json_atomic(path: Path, value: Mapping[str, Any]) -> None:
 @contextmanager
 def one_shot_lock(path: Path):
     """Take a non-blocking per-target lock for the launchd one-shot."""
+
+    if fcntl is None:
+        raise SimNowLabCliError("LAB_LOCK_UNAVAILABLE")
 
     lock_path = path.with_name(f".{path.name}.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
