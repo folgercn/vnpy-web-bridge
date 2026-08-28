@@ -9,8 +9,9 @@
 
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, watch } from 'vue'
-import { AreaSeries, ColorType, HistogramSeries, LineSeries, createChart, type IChartApi, type UTCTimestamp } from 'lightweight-charts'
+import { AreaSeries, ColorType, HistogramSeries, LineSeries, createChart, type IChartApi, type Time, type UTCTimestamp } from 'lightweight-charts'
 import { NCard, NEmpty } from 'naive-ui'
+import { formatChartTime } from '../formatters'
 import type { LabSeries } from '../types'
 
 type SeriesKey = keyof LabSeries
@@ -27,7 +28,7 @@ function render() {
   instances.forEach((chart) => chart.remove()); instances.clear()
   for (const item of charts) {
     const host = hosts.get(item.key); if (!host || !props.series[item.key].length) continue
-    const chart = createChart(host, { autoSize: true, layout: { background: { type: ColorType.Solid, color: css('--surface-card') }, textColor: css('--text-muted') }, grid: { vertLines: { color: css('--surface-border') }, horzLines: { color: css('--surface-border') } }, timeScale: { timeVisible: true, secondsVisible: false } })
+    const chart = createChart(host, { autoSize: true, layout: { background: { type: ColorType.Solid, color: css('--surface-card') }, textColor: css('--text-muted') }, grid: { vertLines: { color: css('--surface-border') }, horzLines: { color: css('--surface-border') } }, localization: { timeFormatter: (time: Time) => formatChartTime(Number(time)) }, timeScale: { timeVisible: true, secondsVisible: false, tickMarkFormatter: (time: Time) => formatChartTime(Number(time)) } })
     const color = item.key === 'equity' ? css('--color-primary') : item.key === 'drawdown' ? css('--color-error') : css('--color-success')
     const data = props.series[item.key]
       .map((point) => ({ time: Math.floor(Date.parse(point.time) / 1000) as UTCTimestamp, value: point.value }))
