@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -137,6 +138,23 @@ def ensure_venv(root: Path, release: Path) -> None:
     run([str(python), "-c", "from vnpy.rpc import RpcClient; import zmq; print('M2_RUNTIME_OK')"])
 
 
+def extract_git_archive(bundle: tarfile.TarFile, stage: Path) -> None:
+    """Apply the data-only extraction boundary on M2's Python 3.9."""
+
+    root = stage.resolve()
+    for member in bundle.getmembers():
+        if not (member.isfile() or member.isdir()):
+            raise ReleaseError("RELEASE_ARCHIVE_MEMBER_INVALID")
+        try:
+            (stage / member.name).resolve().relative_to(root)
+        except ValueError as exc:
+            raise ReleaseError("RELEASE_ARCHIVE_PATH_INVALID") from exc
+    if sys.version_info >= (3, 12):
+        bundle.extractall(stage, filter="data")
+    else:
+        bundle.extractall(stage)
+
+
 def build_release(source: Path, root: Path, sha: str, *, trusted_archive: bool = False) -> Path:
     release = root / "releases" / sha
     if release.exists():
@@ -165,7 +183,7 @@ def build_release(source: Path, root: Path, sha: str, *, trusted_archive: bool =
         with tempfile.NamedTemporaryFile(suffix=".tar") as archive:
             run(["git", "-C", str(source), "archive", "--format=tar", "--output", archive.name, sha])
             with tarfile.open(archive.name) as bundle:
-                bundle.extractall(stage, filter="data")
+                extract_git_archive(bundle, stage)
     (stage / ".source-sha").write_text(f"{sha}\n", encoding="ascii")
     os.replace(stage, release)
     releases_fd = os.open(release.parent, os.O_RDONLY)

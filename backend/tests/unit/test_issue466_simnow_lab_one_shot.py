@@ -3,10 +3,12 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -119,6 +121,29 @@ def test_release_accepts_exact_archive_and_retries_incomplete_release(tmp_path: 
     assert "[regex]::Matches($text, [regex]::Escape('{old}')).Count -ne 1" in release_source
     assert 'env["PATH"] = f"{DOCKER.parent}' in release_source
     assert release_source.count('if "m2" in areas:') == 2
+
+
+def test_release_archive_extraction_is_python39_compatible_and_path_safe(tmp_path: Path) -> None:
+    archive = tmp_path / "release.tar"
+    payload = b"exact\n"
+    with tarfile.open(archive, "w") as bundle:
+        safe = tarfile.TarInfo("safe/payload.txt")
+        safe.size = len(payload)
+        bundle.addfile(safe, io.BytesIO(payload))
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    with tarfile.open(archive) as bundle:
+        release_v1.extract_git_archive(bundle, stage)
+    assert (stage / "safe" / "payload.txt").read_bytes() == payload
+
+    with tarfile.open(archive, "w") as bundle:
+        unsafe = tarfile.TarInfo("../escape.txt")
+        unsafe.size = len(payload)
+        bundle.addfile(unsafe, io.BytesIO(payload))
+    with tarfile.open(archive) as bundle, pytest.raises(
+        release_v1.ReleaseError, match="RELEASE_ARCHIVE_PATH_INVALID"
+    ):
+        release_v1.extract_git_archive(bundle, stage)
 
 
 def test_release_lock_matches_one_shot_and_docs_only_cd_is_noop(tmp_path: Path) -> None:
