@@ -56,6 +56,7 @@ def target(*, ag: int = 0, rb: int = 0) -> dict[str, Any]:
 class FakeEventEngine:
     def __init__(self) -> None:
         self.handlers: dict[str, list[Any]] = {}
+        self.put_delay = 0.0
 
     def register(self, event_type: str, handler: Any) -> None:
         self.handlers.setdefault(event_type, []).append(handler)
@@ -63,6 +64,12 @@ class FakeEventEngine:
     def emit(self, event_type: str, data: Any) -> None:
         for handler in list(self.handlers.get(event_type, [])):
             handler(Event(event_type, data))
+
+    def put(self, event: Event) -> None:
+        if self.put_delay:
+            threading.Timer(self.put_delay, self.emit, args=(event.type, event.data)).start()
+        else:
+            self.emit(event.type, event.data)
 
 
 class FakeTracker:
@@ -456,14 +463,14 @@ def test_position_query_reject_cannot_reuse_stale_ready_after_oms_clear(lab: tup
 
 def test_position_query_waits_for_oms_position_event_after_ctp_final(lab: tuple[SimNowLabExecutorV1, FakeMainEngine, Path]) -> None:
     subject, main, _db_path = lab
-    position = PositionData(
-        symbol="rb2610", exchange=Exchange.SHFE, direction=Direction.LONG,
-        volume=1, gateway_name="CTP",
-    )
-    main.broker_positions = [position]
-    main.gateway.position_event_delayed = True
+    positions = [
+        PositionData(symbol=symbol, exchange=Exchange.SHFE, direction=Direction.LONG, volume=1, gateway_name="CTP")
+        for symbol in ("rb2610", "ru2701")
+    ]
+    main.broker_positions = positions
+    main.events.put_delay = 0.3
 
-    assert subject._query_positions() == [position]
+    assert subject._query_positions() == positions
 
 
 def test_sync_callback_keeps_terminal_order_and_trade(lab: tuple[SimNowLabExecutorV1, FakeMainEngine, Path]) -> None:

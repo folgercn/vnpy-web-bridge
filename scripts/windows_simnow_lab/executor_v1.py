@@ -39,6 +39,7 @@ _EXCHANGE_FIRST_VT_SYMBOL = re.compile(r"^(?P<exchange>SHFE|INE|DCE|CZCE|GFEX|CF
 _PRODUCT = re.compile(r"^[a-z]{1,8}$")
 _ORDER_QUERY_MARKER = "_simnow_lab_order_query_v1"
 _ATTACH_MARKER = "_simnow_lab_executor_v1"
+_POSITION_BARRIER_EVENT = "eSimNowLabPositionBarrier"
 _TERMINAL = frozenset({"FILLED", "CANCELLED", "REJECTED"})
 
 
@@ -243,6 +244,7 @@ class SimNowLabExecutorV1:
         self._condition = threading.Condition()
         self._position_condition = threading.Condition()
         self._position_events: dict[str, Any] = {}
+        self._position_barrier_generation = 0
         self._last_query_at = 0.0
         self._order_query: dict[str, Any] = {}
         self._sending: dict[str, Any] | None = None
@@ -299,6 +301,7 @@ class SimNowLabExecutorV1:
 
         self.event_engine.register(EVENT_ORDER, self._on_order)
         self.event_engine.register(EVENT_POSITION, self._on_position)
+        self.event_engine.register(_POSITION_BARRIER_EVENT, self._on_position_barrier)
         self.event_engine.register(EVENT_TRADE, self._on_trade)
         self.event_engine.register(EVENT_TICK, self._notify)
         self.event_engine.register(EVENT_ACCOUNT, self._on_account)
@@ -391,13 +394,21 @@ class SimNowLabExecutorV1:
         deadline = time.monotonic() + self.wait_seconds
         while time.monotonic() < deadline:
             if tracker.generation > generation and tracker.is_ready() is True:
-                with self._position_condition:
-                    count = len(self._position_events)
-                    self._position_condition.wait(min(0.25, max(0.0, deadline - time.monotonic())))
-                    if len(self._position_events) == count:
-                        return list(self._position_events.values())
+                break
             time.sleep(0.05)
-        raise SimNowLabError("CTP_POSITION_QUERY_TIMEOUT")
+        else:
+            raise SimNowLabError("CTP_POSITION_QUERY_TIMEOUT")
+        from vnpy.event import Event
+
+        with self._position_condition:
+            barrier_generation = self._position_barrier_generation
+            self.event_engine.put(Event(_POSITION_BARRIER_EVENT))
+            while self._position_barrier_generation == barrier_generation:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise SimNowLabError("CTP_POSITION_QUERY_TIMEOUT")
+                self._position_condition.wait(remaining)
+            return list(self._position_events.values())
 
     def _query_account(self) -> list[Any]:
         gateway = self._gateway()
@@ -779,6 +790,11 @@ class SimNowLabExecutorV1:
             with self._position_condition:
                 self._position_events[str(_field(position, "vt_positionid"))] = position
                 self._position_condition.notify_all()
+
+    def _on_position_barrier(self, _event: Any) -> None:
+        with self._position_condition:
+            self._position_barrier_generation += 1
+            self._position_condition.notify_all()
 
     def _notify(self, _event: Any) -> None:
         with self._condition:
