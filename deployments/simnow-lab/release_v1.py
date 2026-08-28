@@ -239,11 +239,13 @@ def deploy_windows(release: Path, sha: str) -> tuple[str, str]:
         for relative in files:
             remote = f"{WINDOWS_HOST}:C:/quant/runtime-{sha[:8]}.tmp/{relative}"
             run(["scp", "-q", str(release / relative), remote])
-        checks = " -and ".join(
-            f"(Test-Path '{temporary}\\{relative.replace('/', '\\')}')" for relative in files
-        )
+        checks = []
+        for relative in files:
+            windows_relative = relative.replace("/", "\\")
+            checks.append(f"(Test-Path '{temporary}\\{windows_relative}')")
+        upload_checks = " -and ".join(checks)
         powershell(
-            rf"if (-not ({checks})) {{ throw 'WINDOWS_RUNTIME_UPLOAD_INCOMPLETE' }}; "
+            rf"if (-not ({upload_checks})) {{ throw 'WINDOWS_RUNTIME_UPLOAD_INCOMPLETE' }}; "
             rf"Remove-Item -Recurse -Force -ErrorAction SilentlyContinue '{new}'; "
             rf"Move-Item -Force '{temporary}' '{new}'"
         )
