@@ -114,6 +114,8 @@ def test_release_accepts_exact_archive_and_retries_incomplete_release(tmp_path: 
     assert release_v1.WINDOWS_RUNTIME.fullmatch(r"C:\quant\runtime-646e73d4")
     release_source = (ROOT / "deployments/simnow-lab/release_v1.py").read_text()
     assert "if (Test-Path '{temporary}')" in release_source
+    assert 'windows_relative = relative.replace("/", "\\\\")' in release_source
+    assert "{relative.replace(" not in release_source
     assert "[regex]::Matches($text, [regex]::Escape('{old}')).Count -ne 1" in release_source
     assert 'env["PATH"] = f"{DOCKER.parent}' in release_source
     assert release_source.count('if "m2" in areas:') == 2
