@@ -8,6 +8,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -276,7 +277,7 @@ def deploy_windows(release: Path, sha: str) -> tuple[str, str]:
 
 
 def dashboard_smoke(root: Path, release: Path) -> None:
-    command = [
+    rpc_command = [
         str(root / ".venv" / "bin" / "python"),
         "-m",
         "scripts.windows_simnow_lab.cli_v1",
@@ -284,9 +285,16 @@ def dashboard_smoke(root: Path, release: Path) -> None:
         "--run-id",
         "DASHBOARD",
     ]
+    command = [
+        "/usr/bin/ssh",
+        "-o",
+        "BatchMode=yes",
+        "127.0.0.1",
+        f"cd {shlex.quote(str(release))} && exec {shlex.join(rpc_command)}",
+    ]
     for attempt in range(3):
         try:
-            output = run(command, cwd=release, capture=True)
+            output = run(command, capture=True)
         except subprocess.CalledProcessError as exc:
             if attempt == 2:
                 raise ReleaseError("DASHBOARD_READONLY_SMOKE_FAILED") from exc
