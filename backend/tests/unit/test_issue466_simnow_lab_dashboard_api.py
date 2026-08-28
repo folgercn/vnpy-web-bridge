@@ -174,3 +174,27 @@ def test_vnpy_rpc_is_preloaded_before_fastapi_worker_threads() -> None:
     source = inspect.getsource(simnow_lab_dashboard._call_windows_readonly_rpc)
     assert "from vnpy.rpc import RpcClient" not in source
     assert simnow_lab_dashboard.RpcClient is not None
+
+
+def test_readonly_rpc_does_not_block_http_on_subscriber_join(monkeypatch) -> None:
+    from app.services import simnow_lab_dashboard
+
+    events: list[str] = []
+
+    class FakeClient:
+        def start(self, request: str, publish: str) -> None:
+            events.append(f"start:{request}:{publish}")
+
+        def stop(self) -> None:
+            events.append("stop")
+
+        def join(self) -> None:
+            raise AssertionError("subscriber join must not block the HTTP response")
+
+        def simnow_lab_get_run_v1(self, argument: str, *, timeout: int) -> dict:
+            events.append(f"get:{argument}:{timeout}")
+            return {"status": "ok"}
+
+    monkeypatch.setattr(simnow_lab_dashboard, "RpcClient", FakeClient)
+    assert simnow_lab_dashboard._call_windows_readonly_rpc("DASHBOARD") == {"status": "ok"}
+    assert events[-1] == "stop"

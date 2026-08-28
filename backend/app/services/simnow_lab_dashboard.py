@@ -155,7 +155,8 @@ def _call_windows_readonly_rpc(argument: str) -> Any:
         return getattr(client, RPC_METHOD)(argument, timeout=RPC_TIMEOUT_MS)
     finally:
         client.stop()
-        client.join()
+        # RpcClient's subscriber poll can block join() for 30 seconds. Dashboard
+        # uses only the serialized REQ call; stop lets that thread close itself.
 
 
 simnow_lab_dashboard_service = SimNowLabDashboardService()
