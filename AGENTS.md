@@ -436,11 +436,12 @@ GitHub 只记录关键 checkpoint：
 
 SIMNOW_LAB：
 
-- 不等待 full CI；
-- 不为此重构 CI；
-- 不全局删除 required checks；
+- required CI 固定为 `Quick checks`、Linux M2/Lab focused、Windows Lab focused 和稳定名称 `CI Gate`；
+- 不运行全仓测试、Docker/OCI build、旧 Phase A/B/C、Execution/Custody/TargetPlan 或 Windows fence 全套；
+- 旧 audited CI 工具保留为历史代码，不得重新接回自动 PR CI；
+- `CI Gate` 继续作为唯一 required check，不修改 branch protection；
 - 开市 hotfix 先现场验证，后补 PR/Review；
-- docs-only / AGENTS-only 修改不触发全仓验证；
+- docs-only / AGENTS-only 修改也只走上述最小 CI；
 - 不因 Review 流程错过开市窗口。
 
 ---
