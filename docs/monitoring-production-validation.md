@@ -1,6 +1,6 @@
-# Issue #45 Production Validation
+# Issue #45 Production Validation (Retired)
 
-The final Phase 7 drill runs only through the owner-only `Issue 45 Production Monitoring Validation` workflow. It writes sanitized JSON and Markdown artifacts and never removes Docker volumes or changes the deployment `.env`.
+The owner-only GitHub Actions workflow was removed when CI converged on Issue #462 SIMNOW_LAB. This document and the local script are retained only as audited prototype history. Do not run the full drill against the retired Docker business without new explicit authorization.
 
 ## Safety gates
 
@@ -41,4 +41,4 @@ python3 scripts/monitoring_production_validation.py \
   --markdown-output artifacts/issue-45-production-validation.md
 ```
 
-The full mode must be launched through GitHub Actions after reviewing the current exposure. Use the testing-stage override only while the entire environment is explicitly operating as a test system.
+The retired full mode has no GitHub Actions entry point. It must not be restored or run without new explicit authorization.

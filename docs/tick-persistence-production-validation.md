@@ -1,10 +1,10 @@
-# Tick Persistence Production Validation
+# Tick Persistence Production Validation (Retired)
 
-This runbook closes the production-only verification tracked by Issue #79. It uses the existing Macmini self-hosted runner and the deployed `vnpy-web-bridge` / QuestDB containers.
+This historical runbook closed the production-only verification tracked by Issue #79. Its GitHub Actions workflow was removed when CI converged on Issue #462 SIMNOW_LAB. The evidence remains for audit history; the retired Docker validation must not be run without new explicit authorization.
 
 ## Safety gate
 
-The validation workflow is manual and separate from deployment. Run `issue79-production-validation.yml` from `main` and enter the exact confirmation `ISSUE79_PRODUCTION`. Without the confirmation, no production container is stopped or restarted.
+There is no longer a runnable GitHub Actions validation workflow. The safeguards below describe the historical accepted run only.
 
 The runner performs a preflight before fault injection and always starts QuestDB and Web Bridge again from a `finally` recovery path. It never deletes volumes, changes the deployment `.env`, or prints credentials, RPC addresses, database DSNs, Telegram tokens, or chat IDs.
 
@@ -18,16 +18,6 @@ The runner performs a preflight before fault injection and always starts QuestDB
 - Kill Web Bridge during replay, start it again, and require the recovered backlog to drain without drops.
 - Restart QuestDB independently and require automatic Web Bridge recovery.
 - Finish only when both containers are healthy, the writer is alive, queue/spool are empty, no corrupt spool file exists, and `dropped_total == 0`.
-
-## Trigger
-
-```bash
-gh workflow run issue79-production-validation.yml \
-  --ref main \
-  -f confirmation=ISSUE79_PRODUCTION
-```
-
-The workflow uploads a sanitized JSON record and a Markdown summary. Copy the verified summary into the Production evidence section below and attach the workflow URL to the PR and Issue #79 comments.
 
 ## Production evidence
 
