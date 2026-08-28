@@ -276,21 +276,26 @@ def deploy_windows(release: Path, sha: str) -> tuple[str, str]:
 
 
 def dashboard_smoke(root: Path, release: Path) -> None:
-    output = run(
-        [
-            str(root / ".venv" / "bin" / "python"),
-            "-m",
-            "scripts.windows_simnow_lab.cli_v1",
-            "get-run",
-            "--run-id",
-            "DASHBOARD",
-        ],
-        cwd=release,
-        capture=True,
-    )
-    value = json.loads(output.splitlines()[-1])
-    if value.get("schema_version") != "simnow_lab_dashboard_v1":
-        raise ReleaseError("DASHBOARD_READONLY_SMOKE_FAILED")
+    command = [
+        str(root / ".venv" / "bin" / "python"),
+        "-m",
+        "scripts.windows_simnow_lab.cli_v1",
+        "get-run",
+        "--run-id",
+        "DASHBOARD",
+    ]
+    for attempt in range(3):
+        try:
+            output = run(command, cwd=release, capture=True)
+        except subprocess.CalledProcessError as exc:
+            if attempt == 2:
+                raise ReleaseError("DASHBOARD_READONLY_SMOKE_FAILED") from exc
+            time.sleep(5)
+            continue
+        value = json.loads(output.splitlines()[-1])
+        if value.get("schema_version") != "simnow_lab_dashboard_v1":
+            raise ReleaseError("DASHBOARD_READONLY_SMOKE_FAILED")
+        return
 
 
 def compose_env(manifest: dict[str, Any]) -> dict[str, str]:

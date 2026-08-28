@@ -146,6 +146,28 @@ def test_release_archive_extraction_is_python39_compatible_and_path_safe(tmp_pat
         release_v1.extract_git_archive(bundle, stage)
 
 
+def test_dashboard_smoke_retries_windows_rpc_startup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = 0
+    sleeps: list[int] = []
+
+    def fake_run(*_args: object, **_kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise subprocess.CalledProcessError(1, ["get-run"])
+        return '{"schema_version":"simnow_lab_dashboard_v1"}'
+
+    monkeypatch.setattr(release_v1, "run", fake_run)
+    monkeypatch.setattr(release_v1.time, "sleep", sleeps.append)
+
+    release_v1.dashboard_smoke(tmp_path, tmp_path)
+
+    assert calls == 2
+    assert sleeps == [5]
+
+
 def test_release_lock_matches_one_shot_and_docs_only_cd_is_noop(tmp_path: Path) -> None:
     root = tmp_path / "root"
     lock_path = root / "runtime" / "simnow-lab" / ".target.json.lock"
