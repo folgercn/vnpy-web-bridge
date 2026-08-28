@@ -9,6 +9,11 @@ from threading import RLock
 from time import monotonic
 from typing import Any
 
+try:
+    from vnpy.rpc import RpcClient
+except ImportError:  # pragma: no cover - deployment dependency
+    RpcClient = None  # type: ignore[assignment,misc]
+
 from app.core.errors import AppError
 from app.schemas.simnow_lab_dashboard import (
     SimNowLabDashboardDTO,
@@ -142,10 +147,8 @@ class SimNowLabDashboardService:
 def _call_windows_readonly_rpc(argument: str) -> Any:
     """Make one isolated RPC call without importing the frozen RPC service."""
 
-    try:
-        from vnpy.rpc import RpcClient
-    except ImportError as exc:  # pragma: no cover - deployment dependency
-        raise RuntimeError("VNPY_RPC_CLIENT_UNAVAILABLE") from exc
+    if RpcClient is None:  # pragma: no cover - deployment dependency
+        raise RuntimeError("VNPY_RPC_CLIENT_UNAVAILABLE")
     client = RpcClient()
     client.start(RPC_REQUEST_ADDRESS, RPC_PUBLISH_ADDRESS)
     try:

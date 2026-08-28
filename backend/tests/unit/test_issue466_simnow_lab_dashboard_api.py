@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+
 from app.core.security import CurrentUser, create_access_token
 from app.main import app
 from app.services.simnow_lab_dashboard import SimNowLabDashboardService
@@ -164,3 +166,11 @@ def test_rpc_failure_returns_stale_last_success_without_a_second_action(monkeypa
     assert stale.json()["data"]["stale"] is True
     assert stale.json()["data"]["last_success_at"] == first.json()["data"]["last_success_at"]
     assert calls == ["DASHBOARD", "DASHBOARD"]
+
+
+def test_vnpy_rpc_is_preloaded_before_fastapi_worker_threads() -> None:
+    from app.services import simnow_lab_dashboard
+
+    source = inspect.getsource(simnow_lab_dashboard._call_windows_readonly_rpc)
+    assert "from vnpy.rpc import RpcClient" not in source
+    assert simnow_lab_dashboard.RpcClient is not None
