@@ -25,6 +25,12 @@ describe('SIMNOW_LAB dashboard presentation', () => {
     expect(calculateReturnRatio(100, 0)).toBeNull()
   })
 
+  it('shows period return as a standalone overview metric', () => {
+    const source = readFileSync(resolve('src/features/simnow-lab-dashboard/components/LabOverview.vue'), 'utf8')
+    expect(source).toContain("label: '区间收益率'")
+    expect(source).toContain('formatPercent(periodReturn)')
+  })
+
   it('keeps the dashboard-only shell off legacy Execution and WS startup', () => {
     const source = readFileSync(resolve('src/components/AppLayout.vue'), 'utf8')
     expect(source).toContain('if (dashboardOnly) return')
