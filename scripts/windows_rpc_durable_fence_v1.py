@@ -19,7 +19,7 @@ from enum import Enum
 from hashlib import sha256
 from pathlib import Path
 from threading import RLock
-from types import MappingProxyType, MethodType
+from types import MappingProxyType, MethodType, SimpleNamespace
 from typing import Any, ClassVar
 
 _FOUNDATION_ARCHIVE_NAME = "windows_fence_foundation_v1.pyz"
@@ -234,7 +234,8 @@ _SIMNOW_E2E_RPC_METHODS = frozenset(
     {
         "send_order",
         "cancel_order",
-        *_VALIDATION_TRANSIENT_RPC_METHODS,
+        "simnow_lab_apply_target_v1",
+        "simnow_lab_get_run_v1",
     }
 )
 _RECONCILIATION_ONLY_RPC_METHODS = frozenset(
@@ -1664,8 +1665,6 @@ def attach_windows_rpc_simnow_e2e_v1(
     # frozen mutation registry must never recreate an unfenced legacy route.
     server._windows_simnow_e2e_attach_v1 = object()
     try:
-        native_send_handler = functions.get("send_order")
-        native_cancel_handler = functions.get("cancel_order")
         _replace_legacy_methods_with_permanent_frozen_denials_v1(server)
         _validate_simnow_e2e_runtime_v1(main_engine)
         tick_gateway = main_engine.get_gateway(_VALIDATION_GATEWAY_NAME)
@@ -1675,12 +1674,6 @@ def attach_windows_rpc_simnow_e2e_v1(
                 "SimNow E2E tick wire was not attached before connect",
                 code="WINDOWS_SIMNOW_E2E_GATEWAY_INVALID",
             )
-        runtime_config = WindowsRpcRuntimeConfigV1(
-            gateway_setting={"simnow_e2e": True},
-            gateway_name=_VALIDATION_GATEWAY_NAME,
-            account_scope=_VALIDATION_ACCOUNT_SCOPE,
-            environment=_VALIDATION_ENVIRONMENT,
-        )
         gateway = main_engine.get_gateway(_VALIDATION_GATEWAY_NAME)
         readiness = getattr(gateway.td_api, "_vnpy_position_readiness_v1", None)
         if readiness is None or not callable(getattr(readiness, "is_ready", None)):
@@ -1688,22 +1681,20 @@ def attach_windows_rpc_simnow_e2e_v1(
                 "SimNow E2E position readiness was not attached before connect",
                 code="WINDOWS_SIMNOW_E2E_GATEWAY_INVALID",
             )
-        runtime = _WindowsRpcRuntimeV1(
+        from scripts.windows_simnow_lab import attach_windows_simnow_lab_v1
+
+        runtime = SimpleNamespace(
             event_engine=event_engine,
             main_engine=main_engine,
             rpc_engine=rpc_engine,
-            fact_source=main_engine,
-            config=runtime_config,
-            position_readiness=readiness,
+            config=SimpleNamespace(
+                gateway_name=_VALIDATION_GATEWAY_NAME,
+                environment=_VALIDATION_ENVIRONMENT,
+            ),
         )
-        _attach_fixed_typed_fenced_methods(
-            runtime,
-            runtime_config,
-            store_path.parent,
-            require_fixed_gateway=True,
-            max_order_volume=max_order_volume,
-            native_send_handler=native_send_handler,
-            native_cancel_handler=native_cancel_handler,
+        attach_windows_simnow_lab_v1(
+            runtime=runtime,
+            db_path=store_path.with_name("simnow-lab-v1.sqlite3"),
         )
         _seal_simnow_e2e_rpc_surface_v1(server)
     except BaseException:
