@@ -115,6 +115,7 @@ def test_release_accepts_exact_archive_and_retries_incomplete_release(tmp_path: 
     assert "if (Test-Path '{temporary}')" in release_source
     assert "[regex]::Matches($text, [regex]::Escape('{old}')).Count -ne 1" in release_source
     assert 'env["PATH"] = f"{DOCKER.parent}' in release_source
+    assert release_source.count('if "m2" in areas:') == 2
 
 
 def test_run_once_materializes_current_applies_and_gets_run(

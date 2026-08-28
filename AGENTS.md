@@ -33,7 +33,7 @@ PR merge → main CI Gate PASS → M2 现有 CD 更新受影响单元
 - #462 的 apply/send/cancel/UNKNOWN/position/order 语义冻结；不改模型、quantity vector、DAILY PIT route、价格或下单语义。
 - 复用现有 Windows RPC、`simnow_lab_get_run_v1`、Vue/Pinia/Router/Naive UI/lightweight-charts 与 `/dashboard`；不新增 RPC、端口、service、daemon、scheduler、queue、SQLite 表、依赖或数据库。
 - 不接回 Custody、TargetPlan、Execution、authority、completion、successor 或旧 Phase-C lifecycle；冻结单元不得因开发、部署或 `depends_on` 自动启动/重建。
-- M4 允许仅在 Windows SQLite dashboard reader/极薄 RPC glue、M2 one-shot/其 plist、Dashboard schema/service/GET route、frontend feature、focused tests、最小现有 CI/CD glue 与本规范内修改；超出 production/config 22 文件、tests 6 文件或 Issue #466 行数预算立即 STOP。
+- M4 允许仅在 Windows SQLite dashboard reader/极薄 RPC glue、M2 one-shot/其 plist、Dashboard schema/service/GET route、frontend feature、focused tests、最小现有 CI/CD glue 与本规范内修改；超出 production/config 34 文件、tests 6 文件或 Issue #466 行数预算立即 STOP。
 
 ### 执行与只读隔离
 

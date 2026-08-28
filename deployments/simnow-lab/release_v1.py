@@ -378,7 +378,8 @@ def deploy(
         if previous:
             atomic_symlink(root / "previous", previous)
         atomic_symlink(root / "current", release)
-        install_launch_agent(root, release)
+        if "m2" in areas:
+            install_launch_agent(root, release)
         if areas & WEB_AREAS:
             deploy_web(release, manifest, areas)
         if "backend" in areas:
@@ -386,6 +387,8 @@ def deploy(
     except Exception:
         if previous:
             atomic_symlink(root / "current", previous)
+            if "m2" in areas:
+                install_launch_agent(root, previous)
             if areas & WEB_AREAS and previous_manifest:
                 deploy_web(previous, previous_manifest, areas)
         else:
