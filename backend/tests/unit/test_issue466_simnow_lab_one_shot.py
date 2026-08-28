@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -116,6 +117,29 @@ def test_release_accepts_exact_archive_and_retries_incomplete_release(tmp_path: 
     assert "[regex]::Matches($text, [regex]::Escape('{old}')).Count -ne 1" in release_source
     assert 'env["PATH"] = f"{DOCKER.parent}' in release_source
     assert release_source.count('if "m2" in areas:') == 2
+
+
+def test_release_lock_matches_one_shot_and_docs_only_cd_is_noop(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    lock_path = root / "runtime" / "simnow-lab" / ".target.json.lock"
+    lock_path.parent.mkdir(parents=True)
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with (
+            pytest.raises(release_v1.ReleaseError, match="SIMNOW_LAB_ONE_SHOT_BUSY"),
+            release_v1.one_shot_deployment_lock(root, {"m2"}),
+        ):
+            pass
+        with release_v1.one_shot_deployment_lock(root, {"backend"}):
+            pass
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+    workflow = (ROOT / ".github/workflows/m2-simnow-lab-cd.yml").read_text()
+    assert 'echo "value=" >> "$GITHUB_OUTPUT"' in workflow
+    assert 'if [ -z "$DEPLOY_AREAS" ]; then' in workflow
 
 
 def test_run_once_materializes_current_applies_and_gets_run(

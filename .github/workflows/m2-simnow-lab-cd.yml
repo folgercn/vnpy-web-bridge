@@ -105,7 +105,9 @@ jobs:
             esac
           done < <(git diff --name-only "$PREVIOUS_SHA" "$EXPECTED_SHA")
           if [ "${#areas[@]}" -eq 0 ]; then
-            add_area m2
+            echo "value=" >> "$GITHUB_OUTPUT"
+            echo "No SIMNOW_LAB deployment area changed; release is a no-op."
+            exit 0
           fi
           IFS=,
           echo "value=${areas[*]}" >> "$GITHUB_OUTPUT"
@@ -115,6 +117,10 @@ jobs:
         env:
           DEPLOY_AREAS: ${{ steps.areas.outputs.value }}
         run: |
+          if [ -z "$DEPLOY_AREAS" ]; then
+            echo "No SIMNOW_LAB deployment area changed; skipping release."
+            exit 0
+          fi
           python3 deployments/simnow-lab/release_v1.py \
             --source "$GITHUB_WORKSPACE" \
             --sha "$EXPECTED_SHA" \

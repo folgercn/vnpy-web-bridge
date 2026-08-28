@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+SHANGHAI = timezone(timedelta(hours=8), name="Asia/Shanghai")
 
 
 def _connect_read_only(db_path: Path) -> sqlite3.Connection:
@@ -71,10 +73,21 @@ def _position_totals(rows: list[Any]) -> dict[str, dict[str, int | float]]:
     return result
 
 
+def _shanghai_day(value: str) -> str:
+    normalized = f"{value[:-1]}+00:00" if value.endswith("Z") else value
+    observed_at = datetime.fromisoformat(normalized)
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=timezone.utc)
+    return observed_at.astimezone(SHANGHAI).date().isoformat()
+
+
 def _series(snapshots: list[dict[str, Any]], trades: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any]]], dict[str, float | None]]:
-    equity_rows = [(row["observed_at"], _number(row["equity"])) for row in snapshots]
-    equity_rows = [(at, value) for at, value in equity_rows if value is not None]
-    equity = [{"time": at, "value": value} for at, value in equity_rows]
+    equity_rows = [
+        (row["observed_at"], _number(row["equity"]), _number(row["unrealized_pnl"]))
+        for row in snapshots
+        if _number(row["equity"]) is not None
+    ]
+    equity = [{"time": at, "value": value} for at, value, _unrealized in equity_rows]
     if not equity_rows:
         empty = {"equity": [], "cumulative_pnl": [], "drawdown": [], "daily_pnl": []}
         return empty, {"cumulative_pnl": None, "drawdown": None, "max_drawdown": None, "realized_pnl": None, "slippage": 0.0}
@@ -82,17 +95,18 @@ def _series(snapshots: list[dict[str, Any]], trades: list[dict[str, Any]]) -> tu
     cumulative: list[dict[str, Any]] = []
     drawdown: list[dict[str, Any]] = []
     daily_last: dict[str, float] = {}
-    for at, value in equity_rows:
+    for at, value, _unrealized in equity_rows:
         peak = max(peak, value)
         cumulative.append({"time": at, "value": value - baseline})
         drawdown.append({"time": at, "value": value - peak})
-        daily_last[at[:10]] = value
+        daily_last[_shanghai_day(at)] = value
     prior = baseline
     daily = []
     for day, value in sorted(daily_last.items()):
         daily.append({"time": day, "value": value - prior})
         prior = value
-    latest_unrealized = _number(snapshots[-1]["unrealized_pnl"])
+    baseline_unrealized = equity_rows[0][2]
+    latest_unrealized = equity_rows[-1][2]
     cumulative_value = cumulative[-1]["value"]
     slippage = sum((_number(row["slippage"]) or 0.0) * (_number(row["volume"]) or 0.0) for row in trades)
     return (
@@ -101,7 +115,9 @@ def _series(snapshots: list[dict[str, Any]], trades: list[dict[str, Any]]) -> tu
             "cumulative_pnl": cumulative_value,
             "drawdown": drawdown[-1]["value"],
             "max_drawdown": min(item["value"] for item in drawdown),
-            "realized_pnl": cumulative_value - latest_unrealized if latest_unrealized is not None else None,
+            "realized_pnl": cumulative_value - (latest_unrealized - baseline_unrealized)
+            if latest_unrealized is not None and baseline_unrealized is not None
+            else None,
             "slippage": slippage,
         },
     )
@@ -128,6 +144,9 @@ def read_dashboard_v1(db_path: str | Path) -> dict[str, Any]:
         orders = [dict(row) for row in db.execute("SELECT client_order_id,run_id,symbol,direction,offset,quantity,limit_price,broker_order_id,status,traded,created_at,updated_at FROM orders ORDER BY created_at DESC LIMIT 200")]
         trades = [dict(row) for row in db.execute("SELECT trade_key,run_id,client_order_id,broker_order_id,trade_id,symbol,direction,offset,price,volume,trade_time,slippage,created_at FROM trades ORDER BY created_at DESC LIMIT 500")]
         snapshots = [dict(row) for row in db.execute("SELECT * FROM (SELECT snapshot_id,run_id,phase,observed_at,positions_json,active_orders_json,account_json,equity,available,margin,unrealized_pnl FROM snapshots ORDER BY observed_at DESC LIMIT 1000) ORDER BY observed_at")]
+        sqlite_active_count = db.execute(
+            "SELECT COUNT(*) FROM orders WHERE status IN ('CREATED','SUBMITTED')"
+        ).fetchone()[0]
     latest_snapshot = snapshots[-1] if snapshots else None
     latest_run = runs[0] if runs else None
     positions = _json(latest_snapshot["positions_json"], []) if latest_snapshot else []
@@ -145,7 +164,7 @@ def read_dashboard_v1(db_path: str | Path) -> dict[str, Any]:
         portfolio.append({"product": product, "vt_symbol": displayed_symbol, "target_quantity": target_quantity, "current_quantity": current_quantity, "delta": delta, "unrealized_pnl": actual.get(symbol, {}).get("unrealized_pnl", 0.0), "status": "ALIGNED" if delta == 0 else "DEGRADED"})
     series, calculated = _series(snapshots, trades)
     latest_metrics = latest_snapshot or {}
-    active_count = len(active_orders)
+    active_count = max(len(active_orders), sqlite_active_count)
     unknown_count = sum(order["status"] == "UNKNOWN" for order in orders)
     blocker = "UNKNOWN_ORDER_PRESENT" if unknown_count else "ACTIVE_ORDERS_PRESENT" if active_count else latest_run["error"] if latest_run and latest_run["error"] else None
     state = "UNKNOWN" if unknown_count else "FAILED" if active_count else latest_run["status"] if latest_run else "NO_DATA"

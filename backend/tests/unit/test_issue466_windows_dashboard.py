@@ -94,3 +94,73 @@ def test_dashboard_uses_latest_snapshot_after_history_exceeds_limit(tmp_path: Pa
         )
 
     assert dashboard_v1.read_dashboard_v1(path)["metrics"]["equity"] == 1000.0
+
+
+def test_dashboard_counts_running_sqlite_orders_missing_from_before_snapshot(tmp_path: Path) -> None:
+    path = _db(tmp_path / "active.sqlite3")
+    run_id = "a" * 32
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "INSERT INTO runs VALUES(?,?,?,?,?,?,?)",
+            (run_id, "target", '{"targets":[]}', "2026-08-28T01:00:00Z", None, "RUNNING", None),
+        )
+        db.execute(
+            "INSERT INTO orders VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "order-active", run_id, "ag2610.SHFE", "1", "LONG", "OPEN", 1,
+                100, 1, 101, "CTP.1", "SUBMITTED", 0,
+                "2026-08-28T01:00:10Z", "2026-08-28T01:00:10Z",
+            ),
+        )
+        db.execute(
+            "INSERT INTO snapshots VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            ("before", run_id, "BEFORE", "2026-08-28T01:00:00Z", "[]", "[]", "[]", 1000, 900, 100, 0),
+        )
+
+    result = dashboard_v1.read_dashboard_v1(path)
+
+    assert result["summary"]["active_order_count"] == 1
+    assert {incident["code"] for incident in result["incidents"]} == {"ACTIVE_ORDERS"}
+
+
+def test_dashboard_realized_pnl_subtracts_only_unrealized_change(tmp_path: Path) -> None:
+    path = _db(tmp_path / "realized.sqlite3")
+    run_id = "a" * 32
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "INSERT INTO runs VALUES(?,?,?,?,?,?,?)",
+            (run_id, "target", '{"targets":[]}', "2026-08-28T01:00:00Z", None, "DONE", None),
+        )
+        db.executemany(
+            "INSERT INTO snapshots VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                ("before", run_id, "BEFORE", "2026-08-28T01:00:00Z", "[]", "[]", "[]", 1000, 900, 100, 25),
+                ("after", run_id, "AFTER", "2026-08-28T01:01:00Z", "[]", "[]", "[]", 1010, 905, 105, 30),
+            ],
+        )
+
+    assert dashboard_v1.read_dashboard_v1(path)["metrics"]["realized_pnl"] == 5.0
+
+
+def test_dashboard_daily_pnl_uses_shanghai_calendar_day(tmp_path: Path) -> None:
+    path = _db(tmp_path / "shanghai-day.sqlite3")
+    run_id = "a" * 32
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "INSERT INTO runs VALUES(?,?,?,?,?,?,?)",
+            (run_id, "target", '{"targets":[]}', "2026-08-27T15:30:00Z", None, "DONE", None),
+        )
+        db.executemany(
+            "INSERT INTO snapshots VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                ("before", run_id, "BEFORE", "2026-08-27T15:30:00Z", "[]", "[]", "[]", 100, 100, 0, 0),
+                ("after", run_id, "AFTER", "2026-08-27T16:30:00Z", "[]", "[]", "[]", 110, 110, 0, 0),
+            ],
+        )
+
+    daily = dashboard_v1.read_dashboard_v1(path)["series"]["daily_pnl"]
+
+    assert daily == [
+        {"time": "2026-08-27", "value": 0.0},
+        {"time": "2026-08-28", "value": 10.0},
+    ]

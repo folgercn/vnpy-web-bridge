@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import fcntl
 import json
 import os
 import re
@@ -12,6 +13,7 @@ import subprocess
 import tarfile
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -23,10 +25,32 @@ LABEL = "com.folgercn.simnow-lab"
 SHA = re.compile(r"^[0-9a-f]{40}$")
 WINDOWS_RUNTIME = re.compile(r"^C:\\quant\\runtime-[0-9a-f]+$")
 WEB_AREAS = frozenset({"backend", "frontend"})
+LAB_RUNTIME_AREAS = frozenset({"m2", "windows"})
 
 
 class ReleaseError(RuntimeError):
     pass
+
+
+@contextmanager
+def one_shot_deployment_lock(root: Path, areas: set[str]):
+    """Prevent M2/Windows replacement while the launchd one-shot owns Lab."""
+
+    if not areas & LAB_RUNTIME_AREAS:
+        yield
+        return
+    path = root / "runtime" / "simnow-lab" / ".target.json.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise ReleaseError("SIMNOW_LAB_ONE_SHOT_BUSY") from exc
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
 def run(
@@ -368,38 +392,39 @@ def deploy(
     }
     if not manifest["control_image"] or not manifest["frontend_image"]:
         raise ReleaseError("WEB_IMAGE_IDENTITY_MISSING")
-    old_windows = None
-    try:
-        if "windows" in areas:
-            old_windows, manifest["windows_runtime"] = deploy_windows(release, sha)
-        dashboard_smoke(root, release)
-        build_web(release, manifest, areas)
-        write_manifest(release, manifest)
-        if previous:
-            atomic_symlink(root / "previous", previous)
-        atomic_symlink(root / "current", release)
-        if "m2" in areas:
-            install_launch_agent(root, release)
-        if areas & WEB_AREAS:
-            deploy_web(release, manifest, areas)
-        if "backend" in areas:
-            dashboard_http_smoke(release, manifest)
-    except Exception:
-        if previous:
-            atomic_symlink(root / "current", previous)
+    with one_shot_deployment_lock(root, areas):
+        old_windows = None
+        try:
+            if "windows" in areas:
+                old_windows, manifest["windows_runtime"] = deploy_windows(release, sha)
+            dashboard_smoke(root, release)
+            build_web(release, manifest, areas)
+            write_manifest(release, manifest)
+            if previous:
+                atomic_symlink(root / "previous", previous)
+            atomic_symlink(root / "current", release)
             if "m2" in areas:
-                install_launch_agent(root, previous)
-            if areas & WEB_AREAS and previous_manifest:
-                deploy_web(previous, previous_manifest, areas)
-        else:
-            current = root / "current"
-            if current.is_symlink() and current.resolve() == release:
-                current.unlink()
+                install_launch_agent(root, release)
             if areas & WEB_AREAS:
-                compose(release, manifest, "down")
-        if old_windows and manifest.get("windows_runtime") != old_windows:
-            switch_windows_runtime(str(manifest["windows_runtime"]), old_windows)
-        raise
+                deploy_web(release, manifest, areas)
+            if "backend" in areas:
+                dashboard_http_smoke(release, manifest)
+        except Exception:
+            if previous:
+                atomic_symlink(root / "current", previous)
+                if "m2" in areas:
+                    install_launch_agent(root, previous)
+                if areas & WEB_AREAS and previous_manifest:
+                    deploy_web(previous, previous_manifest, areas)
+            else:
+                current = root / "current"
+                if current.is_symlink() and current.resolve() == release:
+                    current.unlink()
+                if areas & WEB_AREAS:
+                    compose(release, manifest, "down")
+            if old_windows and manifest.get("windows_runtime") != old_windows:
+                switch_windows_runtime(str(manifest["windows_runtime"]), old_windows)
+            raise
 
 
 def main() -> int:
