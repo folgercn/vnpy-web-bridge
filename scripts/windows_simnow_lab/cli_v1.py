@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
 import tempfile
 from collections.abc import Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -105,6 +107,24 @@ def write_json_atomic(path: Path, value: Mapping[str, Any]) -> None:
         raise
 
 
+@contextmanager
+def one_shot_lock(path: Path):
+    """Take a non-blocking per-target lock for the launchd one-shot."""
+
+    lock_path = path.with_name(f".{path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise SimNowLabCliError("LAB_ALREADY_RUNNING") from exc
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
 def create_rpc_client() -> Any:
     try:
         from vnpy.rpc import RpcClient
@@ -134,6 +154,12 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--request-address", default=DEFAULT_REQUEST_ADDRESS)
         command.add_argument("--publish-address", default=DEFAULT_PUBLISH_ADDRESS)
         command.add_argument("--timeout-ms", type=int, default=30_000)
+    one_shot = commands.add_parser("run-once")
+    one_shot.add_argument("--input", required=True, type=Path)
+    one_shot.add_argument("--output", required=True, type=Path)
+    one_shot.add_argument("--request-address", default=DEFAULT_REQUEST_ADDRESS)
+    one_shot.add_argument("--publish-address", default=DEFAULT_PUBLISH_ADDRESS)
+    one_shot.add_argument("--timeout-ms", type=int, default=30_000)
     apply = commands.choices["apply"]
     apply.add_argument("--target", required=True, type=Path)
     commands.choices["get-run"].add_argument("--run-id", required=True)
@@ -147,6 +173,66 @@ def main(argv: list[str] | None = None) -> int:
             target = materialize_lab_target(read_json(args.input))
             write_json_atomic(args.output, target)
             result: Any = {"status": "MATERIALIZED", "target_id": target["target_id"]}
+        elif args.command == "run-once":
+            with one_shot_lock(args.output):
+                source = read_json(args.input)
+                target = materialize_lab_target(source)
+                write_json_atomic(args.output, target)
+                current = rpc_call(
+                    method=RPC_GET,
+                    args=("CURRENT",),
+                    request_address=args.request_address,
+                    publish_address=args.publish_address,
+                    timeout_ms=args.timeout_ms,
+                )
+                if not isinstance(current, Mapping):
+                    raise SimNowLabCliError("CURRENT_INVALID")
+                active_count = current.get("active_order_count")
+                if type(active_count) is not int or active_count < 0:
+                    raise SimNowLabCliError("CURRENT_INVALID")
+                if active_count > 0:
+                    raise SimNowLabCliError("ACTIVE_ORDERS_PRESENT")
+                applied = rpc_call(
+                    method=RPC_APPLY,
+                    args=(target,),
+                    request_address=args.request_address,
+                    publish_address=args.publish_address,
+                    timeout_ms=args.timeout_ms,
+                )
+                if not isinstance(applied, Mapping):
+                    raise SimNowLabCliError("APPLY_RESULT_INVALID")
+                run = applied.get("run")
+                run_id = run.get("run_id") if isinstance(run, Mapping) else None
+                if not isinstance(run_id, str):
+                    raise SimNowLabCliError("RUN_ID_MISSING")
+                result = rpc_call(
+                    method=RPC_GET,
+                    args=(run_id,),
+                    request_address=args.request_address,
+                    publish_address=args.publish_address,
+                    timeout_ms=args.timeout_ms,
+                )
+                if not isinstance(result, Mapping) or not isinstance(result.get("run"), Mapping):
+                    raise SimNowLabCliError("RUN_RESULT_INVALID")
+                orders = result.get("orders")
+                if not isinstance(orders, list):
+                    raise SimNowLabCliError("RUN_RESULT_INVALID")
+                if any(
+                    isinstance(order, Mapping)
+                    and order.get("status") in {"CREATED", "SUBMITTED", "UNKNOWN"}
+                    for order in orders
+                ):
+                    raise SimNowLabCliError("RUN_STOP_ACTIVE_OR_UNKNOWN_ORDER")
+                status = result["run"].get("status")
+                if status in {"DONE", "NOOP"}:
+                    pass
+                elif status in {"UNKNOWN", "PARTIAL"} or result["run"].get("error") in {
+                    "UNKNOWN_ORDER_PRESENT",
+                    "ACTIVE_ORDERS_PRESENT",
+                }:
+                    raise SimNowLabCliError(f"RUN_STOP_{status or 'UNKNOWN'}")
+                else:
+                    raise SimNowLabCliError(f"RUN_FAILED_{status or 'UNKNOWN'}")
         elif args.command == "apply":
             target = read_lab_target(args.target)
             result = rpc_call(method=RPC_APPLY, args=(target,), request_address=args.request_address, publish_address=args.publish_address, timeout_ms=args.timeout_ms)

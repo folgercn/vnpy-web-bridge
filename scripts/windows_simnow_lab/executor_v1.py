@@ -844,6 +844,10 @@ class SimNowLabExecutorV1:
             self._thread_lock.release()
 
     def simnow_lab_get_run_v1(self, run_id: Any) -> dict[str, Any]:
+        if run_id == "DASHBOARD":
+            from .dashboard_v1 import read_dashboard_v1
+
+            return read_dashboard_v1(self.db_path)
         if run_id == "CURRENT":
             return self._current()
         if not isinstance(run_id, str) or re.fullmatch(r"[0-9a-f]{32}", run_id) is None:

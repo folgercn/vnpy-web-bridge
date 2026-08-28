@@ -23,6 +23,7 @@ COPY backend/app/api/routes_auth.py /app/backend/app/api/routes_auth.py
 COPY backend/app/api/routes_control_execution.py /app/backend/app/api/routes_control_execution.py
 COPY backend/app/api/routes_control_safe.py /app/backend/app/api/routes_control_safe.py
 COPY backend/app/api/routes_phase_c_workflow.py /app/backend/app/api/routes_phase_c_workflow.py
+COPY backend/app/api/routes_simnow_lab_dashboard.py /app/backend/app/api/routes_simnow_lab_dashboard.py
 COPY backend/app/phase_c /app/backend/app/phase_c
 COPY backend/app/api/control_execution.py /app/backend/app/api/control_execution.py
 COPY backend/app/core/__init__.py /app/backend/app/core/__init__.py
@@ -35,10 +36,12 @@ COPY backend/app/execution/models.py /app/backend/app/execution/models.py
 COPY backend/app/schemas/__init__.py /app/backend/app/schemas/__init__.py
 COPY backend/app/schemas/auth.py /app/backend/app/schemas/auth.py
 COPY backend/app/schemas/control_execution.py /app/backend/app/schemas/control_execution.py
+COPY backend/app/schemas/simnow_lab_dashboard.py /app/backend/app/schemas/simnow_lab_dashboard.py
 COPY backend/app/services/__init__.py /app/backend/app/services/__init__.py
 COPY backend/app/services/audit_service.py /app/backend/app/services/audit_service.py
 COPY backend/app/services/calendar_service.py /app/backend/app/services/calendar_service.py
 COPY backend/app/services/watchlist_service.py /app/backend/app/services/watchlist_service.py
+COPY backend/app/services/simnow_lab_dashboard.py /app/backend/app/services/simnow_lab_dashboard.py
 COPY backend/app/data /app/backend/app/data
 COPY shared/trading_session_profiles.json /app/shared/trading_session_profiles.json
 COPY shared/artifact_contracts /app/shared/artifact_contracts

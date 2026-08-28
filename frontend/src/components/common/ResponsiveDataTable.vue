@@ -8,7 +8,7 @@
   />
 </template>
 
-<script setup lang="ts" generic="T extends Record<string, unknown>">
+<script setup lang="ts" generic="T extends object">
 import { NDataTable, type DataTableColumns, type PaginationProps } from 'naive-ui'
 import { useMediaQuery } from '../../composables/useMediaQuery'
 

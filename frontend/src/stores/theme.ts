@@ -1,5 +1,6 @@
 import { computed, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
+import type { GlobalThemeOverrides } from 'naive-ui'
 
 export type ThemeMode = 'system' | 'light' | 'dark'
 export type EffectiveTheme = 'light' | 'dark'
@@ -53,6 +54,19 @@ export const useThemeStore = defineStore('theme', () => {
 
   return { mode, effectiveTheme, isDark, init, setMode }
 })
+
+export const appThemeOverrides: GlobalThemeOverrides = {
+  common: {
+    primaryColor: '#2563EB',
+    primaryColorHover: '#2563EB',
+    infoColor: '#0284C7',
+    successColor: '#16A34A',
+    warningColor: '#D97706',
+    errorColor: '#DC2626',
+    borderRadius: '8px',
+    heightSmall: '32px'
+  }
+}
 
 function readMode(): ThemeMode {
   if (typeof localStorage === 'undefined') return 'system'

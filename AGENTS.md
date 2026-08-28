@@ -4,19 +4,58 @@
 
 - 称呼用户为“付哥”。
 - 回答简洁、直接，先给结论和下一步。
-- 当前最高优先级是 **Issue #462：SIMNOW_LAB**。
-- 本文件的 `SIMNOW_LAB` 规则与 #462 明确覆盖旧 #412/#414/#421/#432 在模型研究阶段的冲突要求。
+- 当前最高优先级是 **Issue #466：SIMNOW_LAB M4 自动运行与只读 Dashboard**；#462 的执行面已完成并冻结。
+- #466 的 M4 规则覆盖本文件中与其冲突的 #462 研究阶段规则；未明确变更的 #462 规则继续有效。
 - 旧 Custody / TargetPlan / preview-enable-start / authority / completion archive / successor / distributed fencing 链已冻结为 **audited execution prototype**：保留代码和历史，但不再作为模型开始运行的前置条件。
 - 未经付哥新的明确授权，禁止回到旧重型链继续补 lifecycle blocker。
-- 如本文件不同章节发生冲突，以靠前章节和 #462 为准。
+- 如本文件不同章节发生冲突，以靠前章节和 #466 M4 规则为准。
 
-核心目标只有一个：
+当前 M4 完成目标：
 
 ```text
-STATIC_CORE_EQUAL SIMNOW LAB RUNNING
+SIMNOW_LAB AUTO RUNNING + READ-ONLY DASHBOARD
 ```
 
-不是继续完善平台，不是继续增加证明材料。
+Dashboard 是独立只读观测面，任何 Web、Dashboard 或 CD 故障均不得影响 Windows Lab 执行、回调或 SQLite 写入。
+
+---
+
+## 0.1 Issue #466 M4 硬边界
+
+固定闭环：
+
+```text
+PR merge → main CI Gate PASS → M2 现有 CD 更新受影响单元
+→ launchd one-shot → target → CURRENT(active=0) → apply → get-run
+→ Windows SQLite → Control API GET-only → /dashboard
+```
+
+- #462 的 apply/send/cancel/UNKNOWN/position/order 语义冻结；不改模型、quantity vector、DAILY PIT route、价格或下单语义。
+- 复用现有 Windows RPC、`simnow_lab_get_run_v1`、Vue/Pinia/Router/Naive UI/lightweight-charts 与 `/dashboard`；不新增 RPC、端口、service、daemon、scheduler、queue、SQLite 表、依赖或数据库。
+- 不接回 Custody、TargetPlan、Execution、authority、completion、successor 或旧 Phase-C lifecycle；冻结单元不得因开发、部署或 `depends_on` 自动启动/重建。
+- M4 允许仅在 Windows SQLite dashboard reader/极薄 RPC glue、M2 one-shot/其 plist、Dashboard schema/service/GET route、frontend feature、focused tests、最小现有 CI/CD glue 与本规范内修改；超出 production/config 22 文件、tests 6 文件或 Issue #466 行数预算立即 STOP。
+
+### 执行与只读隔离
+
+- Windows Lab executor 仍是唯一 send/query/cancel owner。Dashboard reader 只能 `simnow_lab_get_run_v1("DASHBOARD")` 聚合 `runs/orders/trades/snapshots`。
+- reader 必须以 SQLite URI `mode=ro` + `PRAGMA query_only=ON` 打开；不得打开 CTP、CURRENT、仓位/订单前置查询、线程/进程锁、后台线程、写表或迁移。
+- Control API 只可提供 Dashboard/runs 的 GET；浏览器不得直连 Windows RPC，route 不承载聚合/缓存/RPC，service 使用 5–10 秒 cache 与 `stale=true,last_success_at` fallback。
+- RPC 失败只保留最后成功只读结果；绝不触发 CURRENT、恢复、重启、补单、send 或 cancel。停止/重启 Web 或 Control API 不得影响 Windows Lab，恢复后必须可读回其间历史。
+
+### M2 one-shot 与 CI/CD 继承
+
+- 仅用 macOS `launchd`：随系统加载，source target 更新唤醒并以工作日 `09:05/13:35/21:05`（Asia/Shanghai）作 calendar fallback；不用 cron 和常驻调度。
+- one-shot 使用本地非阻塞锁；`DONE/NOOP` 正常退出，fresh-tick 或零订单 query rejection 等待下个窗口，`UNKNOWN` 或 active order 立即 STOP 且只查询。
+- 开发前只读确认既有 target producer 与 M2 CD job/plist/script；缺失只准确报告，不重建 Research/Custody/CD framework。
+- 保留稳定 required context `CI Gate`，只增加 Dashboard focused backend/frontend 与既有 Linux/Windows Lab focused checks；不得恢复旧 Phase A/B/C、OCI、Execution/Custody 全套 CI 或改 branch protection。
+- PR merge 后复用既有 M2 CD，拉取 exact merge SHA，按 changed area 原子部署、GET-only smoke、保留上一稳定版本独立回滚。frontend 只动 frontend-edge；Dashboard API 只动 control-api；M2 plist 只 reload 对应 job；Windows reader 只动 Windows runtime。docs 不部署。
+- Dashboard/frontend 发布不得重启 `VnpyRpcService`，Control API/frontend 不得启动旧 execution-orchestrator、Custody、QuestDB/Postgres；Windows reader 更新不得重建 Web。CD 失败保持 Lab 与上一稳定版本运行。
+
+### M4 交付门槛
+
+- 页面须显示 Web version、Windows runtime version 与数据时间；CD smoke 必须 GET/read-only。
+- 验收隔离：停止 frontend/Control API 后 Lab 与 one-shot 仍可 `DONE/NOOP` 且 SQLite 持续写入；恢复 Web 后可读回历史。纯 frontend 发布时 Windows 和 Control API PID/start time 不变。
+- Dashboard reader、one-shot、GET contract/cache/stale、frontend status/chart/portfolio/drawer/mobile/dark 与最小 contracts/lint/typecheck/Vitest/build 必须各有 focused 验证；只做 P0/P1、#466 scope 与视觉规范 review。
 
 ---
 
