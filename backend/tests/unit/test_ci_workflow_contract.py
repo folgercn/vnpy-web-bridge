@@ -65,8 +65,10 @@ def test_linux_lane_covers_only_m2_producer_and_lab() -> None:
 
     for required in (
         "test_commodity_static_core_equal_pure_producer.py",
-        "test_simnow_experimental_monthly_once.py",
-        "test_simnow_experimental_timely_daily_route.py",
+        "test_late_receipt_stops_without_route_output",
+        "test_future_shfe_main_uses_pinned_exact_expiry_outside_calendar_coverage",
+        "test_service_identity_is_required_before_private_runtime_access",
+        "test_stdout_route_mode_keeps_stop_payload_off_stdout",
         "test_issue462_simnow_lab_cli.py",
         "test_issue462_simnow_lab_m1.py",
         "test_windows_rpc_simnow_e2e_v1.py",
