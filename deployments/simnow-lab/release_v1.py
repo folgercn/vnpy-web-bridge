@@ -29,10 +29,17 @@ class ReleaseError(RuntimeError):
     pass
 
 
-def run(command: list[str], *, cwd: Path | None = None, capture: bool = False) -> str:
+def run(
+    command: list[str],
+    *,
+    cwd: Path | None = None,
+    capture: bool = False,
+    env: dict[str, str] | None = None,
+) -> str:
     completed = subprocess.run(
         command,
         cwd=cwd,
+        env=env,
         check=True,
         text=True,
         stdout=subprocess.PIPE if capture else None,
@@ -244,6 +251,7 @@ def dashboard_smoke(root: Path, release: Path) -> None:
 
 def compose_env(manifest: dict[str, Any]) -> dict[str, str]:
     env = os.environ.copy()
+    env["PATH"] = f"{DOCKER.parent}:{env.get('PATH', '')}"
     env.update(
         RELEASE_SHA=str(manifest["sha"]),
         CONTROL_API_IMAGE=str(manifest["control_image"]),
@@ -268,6 +276,7 @@ def compose_output(release: Path, manifest: dict[str, Any], *arguments: str) -> 
         [str(DOCKER), "--context", "desktop-linux", "compose", "-f", str(path), *arguments],
         cwd=release,
         capture=True,
+        env=compose_env(manifest),
     )
 
 
