@@ -19,28 +19,33 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { NCard } from 'naive-ui'
-import { formatMoney, formatNumber, shortId } from '../formatters'
+import { calculateReturnRatio, formatMoney, formatNumber, formatPercent, shortId } from '../formatters'
 import type { LabMetrics, LabSummary } from '../types'
 import LabStatusTag from './LabStatusTag.vue'
 
 const props = defineProps<{ summary: LabSummary; metrics: LabMetrics }>()
-const items = computed(() => [
-  { label: '当前权益', value: formatMoney(props.metrics.equity), tone: '' },
-  { label: '今日 PnL', value: formatMoney(props.metrics.daily_pnl), tone: props.metrics.daily_pnl >= 0 ? 'positive' : 'negative' },
-  { label: '累计 PnL', value: formatMoney(props.metrics.cumulative_pnl), tone: props.metrics.cumulative_pnl >= 0 ? 'positive' : 'negative' },
-  { label: '最大回撤', value: formatMoney(props.metrics.max_drawdown), tone: 'negative' },
-  { label: '可用资金', value: formatMoney(props.metrics.available), tone: '' },
-  { label: '保证金', value: formatMoney(props.metrics.margin), tone: '' },
-  { label: '累计滑点', value: formatNumber(props.metrics.slippage), tone: props.metrics.slippage <= 0 ? 'positive' : 'negative' },
-  { label: '成交笔数', value: formatNumber(props.metrics.trade_count), tone: '' }
-])
+const items = computed(() => {
+  const baseline = props.metrics.equity == null ? null : props.metrics.equity - props.metrics.cumulative_pnl
+  const periodReturn = calculateReturnRatio(props.metrics.equity, baseline)
+  return [
+    { label: '当前权益', value: formatMoney(props.metrics.equity), tone: '' },
+    { label: '今日 PnL', value: formatMoney(props.metrics.daily_pnl), tone: props.metrics.daily_pnl >= 0 ? 'positive' : 'negative' },
+    { label: '累计 PnL', value: formatMoney(props.metrics.cumulative_pnl), tone: props.metrics.cumulative_pnl >= 0 ? 'positive' : 'negative' },
+    { label: '区间收益率', value: formatPercent(periodReturn), tone: (periodReturn ?? 0) >= 0 ? 'positive' : 'negative' },
+    { label: '最大回撤', value: formatMoney(props.metrics.max_drawdown), tone: 'negative' },
+    { label: '可用资金', value: formatMoney(props.metrics.available), tone: '' },
+    { label: '保证金', value: formatMoney(props.metrics.margin), tone: '' },
+    { label: '累计滑点', value: formatNumber(props.metrics.slippage), tone: props.metrics.slippage <= 0 ? 'positive' : 'negative' },
+    { label: '成交笔数', value: formatNumber(props.metrics.trade_count), tone: '' }
+  ]
+})
 </script>
 
 <style scoped>
 .lab-card { border-radius: var(--card-radius); }
 .status-strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--space-4); align-items: center; }
 .status-strip > div { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
-.metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-4); }
+.metric-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--space-4); }
 .label { color: var(--text-muted); font-size: var(--font-caption-size); line-height: var(--font-caption-line); }
 .metric { display: block; margin-top: var(--space-1); font-size: var(--font-metric-size); line-height: var(--font-metric-line); font-variant-numeric: tabular-nums; }
 .positive { color: var(--color-success); }
