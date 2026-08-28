@@ -155,11 +155,13 @@ def test_dashboard_smoke_retries_windows_rpc_startup(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     calls = 0
+    commands: list[list[str]] = []
     sleeps: list[int] = []
 
-    def fake_run(*_args: object, **_kwargs: object) -> str:
+    def fake_run(command: list[str], **_kwargs: object) -> str:
         nonlocal calls
         calls += 1
+        commands.append(command)
         if calls == 1:
             raise subprocess.CalledProcessError(1, ["get-run"])
         return '{"schema_version":"simnow_lab_dashboard_v1"}'
@@ -170,6 +172,8 @@ def test_dashboard_smoke_retries_windows_rpc_startup(
     release_v1.dashboard_smoke(tmp_path, tmp_path)
 
     assert calls == 2
+    assert all(command[:4] == ["/usr/bin/ssh", "-o", "BatchMode=yes", "127.0.0.1"] for command in commands)
+    assert all("simnow_lab.cli_v1 get-run --run-id DASHBOARD" in command[4] for command in commands)
     assert sleeps == [5]
 
 
