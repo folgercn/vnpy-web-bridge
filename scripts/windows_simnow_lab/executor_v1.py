@@ -462,6 +462,51 @@ class SimNowLabExecutorV1:
         portfolio = SimNowLabExecutorV1._portfolio(positions)
         return all(portfolio.get(symbol, {}).get("long", 0) - portfolio.get(symbol, {}).get("short", 0) == quantity for symbol, quantity in target.items())
 
+    @staticmethod
+    def _roll_old_targets(target_rows: Sequence[Mapping[str, Any]], positions: Sequence[Any]) -> dict[str, int]:
+        """Find held prior contracts for products whose exact route moved."""
+
+        portfolio = SimNowLabExecutorV1._portfolio(positions)
+        target_symbols = {str(row["vt_symbol"]) for row in target_rows}
+        target_products = {str(row["product"]) for row in target_rows}
+        old: dict[str, int] = {}
+        for vt_symbol, bucket in portfolio.items():
+            match = _VT_SYMBOL.fullmatch(vt_symbol)
+            product_match = re.match(r"^[a-z]+", match.group("symbol").lower()) if match else None
+            product = product_match.group() if product_match else ""
+            if (
+                product in target_products
+                and vt_symbol not in target_symbols
+                and (bucket["long"] or bucket["short"])
+            ):
+                old[vt_symbol] = 0
+        return old
+
+    @staticmethod
+    def _roll_old_positions_remain(old: Mapping[str, int], positions: Sequence[Any]) -> bool:
+        portfolio = SimNowLabExecutorV1._portfolio(positions)
+        return any(
+            portfolio.get(vt_symbol, {}).get("long", 0)
+            or portfolio.get(vt_symbol, {}).get("short", 0)
+            for vt_symbol in old
+        )
+
+    def _roll_close_plans(self, old: Mapping[str, int], positions: Sequence[Any]) -> list[dict[str, Any]]:
+        portfolio = self._portfolio(positions)
+        plans: list[dict[str, Any]] = []
+        for vt_symbol in old:
+            current = portfolio.get(vt_symbol, {})
+            split_close = vt_symbol.rsplit(".", 1)[1] in {"SHFE", "INE"}
+            for side, yd_side, direction in (("long", "long_yd", "SHORT"), ("short", "short_yd", "LONG")):
+                quantity = current.get(side, 0)
+                yd = current.get(yd_side, 0) if split_close else quantity
+                today = quantity - yd
+                if yd:
+                    plans.append({"vt_symbol": vt_symbol, "direction": direction, "offset": "CLOSEYESTERDAY" if split_close else "CLOSE", "quantity": yd})
+                if today:
+                    plans.append({"vt_symbol": vt_symbol, "direction": direction, "offset": "CLOSETODAY" if split_close else "CLOSE", "quantity": today})
+        return plans
+
     def _plans(self, target: Mapping[str, int], positions: Sequence[Any]) -> list[dict[str, Any]]:
         portfolio = self._portfolio(positions)
         plans: list[dict[str, Any]] = []
@@ -814,13 +859,34 @@ class SimNowLabExecutorV1:
                     facts = self._fresh_facts()
                     self._snapshot(run_id, "BEFORE", facts)
                     target_map = {row["vt_symbol"]: row["quantity"] for row in target["targets"]}
+                    roll_old = self._roll_old_targets(target["targets"], facts["positions"])
                     if facts["active_orders"]:
                         self._finish_run(run_id, "PARTIAL", "ACTIVE_ORDERS_PRESENT")
                         return self.simnow_lab_get_run_v1(run_id)
-                    if self._at_target(target_map, facts["positions"]):
+                    if not roll_old and self._at_target(target_map, facts["positions"]):
                         self._finish_run(run_id, "NOOP")
                         return self.simnow_lab_get_run_v1(run_id)
                     results = []
+                    if roll_old:
+                        for plan in self._roll_close_plans(roll_old, facts["positions"]):
+                            result = self._send(run_id, plan)
+                            results.append(result)
+                            if result == "UNKNOWN":
+                                self._finish_run(run_id, "FAILED", "UNKNOWN_ORDER_PRESENT")
+                                return self.simnow_lab_get_run_v1(run_id)
+                            if result == "REJECTED":
+                                self._finish_run(run_id, "FAILED", "ROLL_CLOSE_REJECTED")
+                                return self.simnow_lab_get_run_v1(run_id)
+                        self._wait_orders(run_id)
+                        closed_facts = self._fresh_facts()
+                        self._snapshot(run_id, "ROLL_AFTER_CLOSE", closed_facts)
+                        if closed_facts["active_orders"]:
+                            self._finish_run(run_id, "PARTIAL", "ROLL_CLOSE_ACTIVE_ORDERS")
+                            return self.simnow_lab_get_run_v1(run_id)
+                        if self._roll_old_positions_remain(roll_old, closed_facts["positions"]):
+                            self._finish_run(run_id, "PARTIAL", "ROLL_OLD_POSITION_PRESENT")
+                            return self.simnow_lab_get_run_v1(run_id)
+                        facts = closed_facts
                     for plan in self._plans(target_map, facts["positions"]):
                         result = self._send(run_id, plan)
                         results.append(result)

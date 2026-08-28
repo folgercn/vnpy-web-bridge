@@ -95,7 +95,7 @@ jobs:
               scripts/windows_simnow_lab/__init__.py|scripts/windows_simnow_lab/executor_v1.py|scripts/windows_simnow_lab/dashboard_v1.py)
                 add_area windows
                 ;;
-              scripts/windows_simnow_lab/cli_v1.py|deployments/com.vnpy-web-bridge.simnow-lab.plist|deployments/simnow-lab/*)
+              scripts/windows_simnow_lab/cli_v1.py|scripts/simnow_lab_m5_run_once.py|deployments/com.vnpy-web-bridge.simnow-lab.plist|deployments/simnow-lab/*)
                 add_area m2
                 ;;
               deployments/docker-compose.simnow-lab-dashboard.yml)

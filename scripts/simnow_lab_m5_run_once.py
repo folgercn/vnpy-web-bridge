@@ -1,0 +1,124 @@
+"""Produce the fixed SIMNOW_LAB target, then reuse its existing run-once."""
+
+from __future__ import annotations
+
+import argparse
+import importlib
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
+for path in (WORKSPACE_ROOT / "backend", WORKSPACE_ROOT / "scripts"):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+
+materializer = importlib.import_module("scripts.simnow_experimental_materialize_target")
+lab_cli = importlib.import_module("scripts.windows_simnow_lab.cli_v1")
+
+SERVICE_ROOT = Path("/Users/fujun/services/vnpy-web-bridge")
+EVIDENCE = SERVICE_ROOT / "simnow_lab_evidence"
+STATIC_SOURCE = EVIDENCE / "static-core-equal-monthly-source.json"
+THERMOSTAT_SOURCE = EVIDENCE / "monthly-relative-vol-thermostat-source.json"
+DAILY_ROUTE = EVIDENCE / "daily-pit-route.json"
+MONTHLY_BUNDLES = EVIDENCE / "monthly-bundles"
+TARGET = EVIDENCE / "experimental-target.json"
+LAB_TARGET = SERVICE_ROOT / "runtime/simnow-lab/target.json"
+RESEARCH_PYTHON = Path("/usr/local/libexec/vnpyresearch/release/runtime/bin/python3.12")
+RESEARCH_VENDOR = Path("/usr/local/libexec/vnpyresearch/release/vendor")
+_MONTH = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])$")
+
+
+class SimNowLabM5Error(ValueError):
+    """M5 must stop before calling CURRENT/apply."""
+
+
+def source_month_from_input(path: Path) -> str:
+    try:
+        value, _raw = materializer.read_json_stable(path, label="monthly thermostat source")
+    except materializer.ExperimentalTargetError as exc:
+        raise SimNowLabM5Error(str(exc)) from exc
+    month = value.get("source_month")
+    if not isinstance(month, str) or _MONTH.fullmatch(month) is None:
+        raise SimNowLabM5Error("monthly thermostat source_month is invalid")
+    return month
+
+
+def run_monthly_once(
+    *, source_month: str, static_source: Path, thermostat_source: Path,
+    daily_route: Path, monthly_bundles: Path, target: Path,
+) -> dict[str, object]:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = ".:backend:scripts:" + str(RESEARCH_VENDOR)
+    command = [
+        str(RESEARCH_PYTHON), "-B", "-m", "scripts.simnow_experimental_monthly_once",
+        "--source-month", source_month, "--static-source", str(static_source),
+        "--thermostat-source", str(thermostat_source), "--monthly-bundle-directory",
+        str(monthly_bundles), "--daily-pit-route", str(daily_route), "--target-output", str(target),
+    ]
+    try:
+        completed = subprocess.run(command, cwd=WORKSPACE_ROOT, env=env, capture_output=True, text=True, check=False)
+    except OSError as exc:
+        raise SimNowLabM5Error("MONTHLY_PRODUCER_UNAVAILABLE") from exc
+    if completed.returncode:
+        raise SimNowLabM5Error("MONTHLY_PRODUCER_FAILED")
+    try:
+        value = json.loads(completed.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError) as exc:
+        raise SimNowLabM5Error("MONTHLY_PRODUCER_RESULT_INVALID") from exc
+    if not isinstance(value, dict) or value.get("status") not in {"MATERIALIZED", "NO_NEW_TARGET"}:
+        raise SimNowLabM5Error("MONTHLY_PRODUCER_RESULT_INVALID")
+    return value
+
+
+def run_once(
+    *,
+    static_source: Path = STATIC_SOURCE,
+    thermostat_source: Path = THERMOSTAT_SOURCE,
+    daily_route: Path = DAILY_ROUTE,
+    monthly_bundles: Path = MONTHLY_BUNDLES,
+    target: Path = TARGET,
+    lab_target: Path = LAB_TARGET,
+) -> int:
+    source_month = source_month_from_input(thermostat_source)
+    produced = run_monthly_once(
+        source_month=source_month, static_source=static_source,
+        thermostat_source=thermostat_source, daily_route=daily_route,
+        monthly_bundles=monthly_bundles, target=target,
+    )
+    print(json.dumps(produced, sort_keys=True))
+    return lab_cli.main(["run-once", "--input", str(target), "--output", str(lab_target)])
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--static-source", type=Path, default=STATIC_SOURCE)
+    parser.add_argument("--thermostat-source", type=Path, default=THERMOSTAT_SOURCE)
+    parser.add_argument("--daily-route", type=Path, default=DAILY_ROUTE)
+    parser.add_argument("--monthly-bundles", type=Path, default=MONTHLY_BUNDLES)
+    parser.add_argument("--target", type=Path, default=TARGET)
+    parser.add_argument("--lab-target", type=Path, default=LAB_TARGET)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        return run_once(
+            static_source=args.static_source,
+            thermostat_source=args.thermostat_source,
+            daily_route=args.daily_route,
+            monthly_bundles=args.monthly_bundles,
+            target=args.target,
+            lab_target=args.lab_target,
+        )
+    except SimNowLabM5Error as exc:
+        print(json.dumps({"status": "STOP", "error": str(exc)}, sort_keys=True))
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

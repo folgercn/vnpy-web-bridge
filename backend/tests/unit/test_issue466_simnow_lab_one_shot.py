@@ -60,10 +60,10 @@ def source_target() -> dict[str, object]:
     return value
 
 
-def test_plist_has_only_target_watch_and_three_workday_wakes() -> None:
+def test_plist_has_m5_runner_and_three_workday_wakes() -> None:
     raw = (ROOT / "deployments/com.vnpy-web-bridge.simnow-lab.plist").read_text()
     assert "com.folgercn.simnow-lab" in raw
-    assert "run-once" in raw
+    assert "scripts.simnow_lab_m5_run_once" in raw
     assert "<string>/usr/bin/ssh</string>" in raw
     assert "<string>127.0.0.1</string>" in raw
     assert "BatchMode=yes" in raw
