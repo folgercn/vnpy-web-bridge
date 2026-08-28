@@ -64,6 +64,11 @@ def test_plist_has_only_target_watch_and_three_workday_wakes() -> None:
     raw = (ROOT / "deployments/com.vnpy-web-bridge.simnow-lab.plist").read_text()
     assert "com.folgercn.simnow-lab" in raw
     assert "run-once" in raw
+    assert "<string>/usr/bin/ssh</string>" in raw
+    assert "<string>127.0.0.1</string>" in raw
+    assert "BatchMode=yes" in raw
+    assert "launchd.out.log" in raw
+    assert "launchd.err.log" in raw
     assert "RunAtLoad" not in raw
     assert raw.count("<key>Weekday</key>") == 15
     assert "simnow-experimental-run-once.sh" not in raw

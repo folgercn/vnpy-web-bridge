@@ -358,6 +358,12 @@ P1
 
 ## 9. 开市窗口 LIVE-HOTFIX
 
+开市窗口的第一原则：
+
+> **时间就是金钱。先恢复交易实验运行，后补 GitHub 流程。**
+
+只要未触发本节安全 STOP，任何 PR、CI、Review、merge 等待都不得消耗开市窗口。
+
 满足以下条件时允许现场快速 hotfix：
 
 - 修改只在 #462 允许路径内；
@@ -372,12 +378,18 @@ P1
 现场最小 patch
 → 1 个 focused reproduction/test
 → Ruff / compile
-→ exact HEAD 部署一次
+→ 直接覆盖现场 runtime / exact HEAD 部署一次
 → 立即返回原失败点验证
+→ 确认自动运行和页面读回正常
+→ 最后再补 PR / CI / Review / merge
 ```
+
+这里的顺序是硬约束：**恢复运行优先于 GitHub 流程**。HOT 修复不得先开 PR、等待 CI、等待 Review 或等待 merge 后才部署；允许先把已完成 focused 验证的最小 patch 直接覆盖到 SIMNOW_LAB 现场，恢复并完成实测后再补齐提交记录。
 
 开市期间：
 
+- 不要求先创建 PR；
+- 不等待 PR CI；
 - 不要求 pre-deploy 独立 Reviewer；
 - 不等待 PR Review；
 - 不等待 full CI；
@@ -391,6 +403,7 @@ P1
 
 ```text
 PR
+→ CI
 → 1 个 P0/P1-only Reviewer
 → merge
 ```

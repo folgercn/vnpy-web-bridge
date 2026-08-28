@@ -6,14 +6,11 @@
   <string>com.folgercn.simnow-lab</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/fujun/services/vnpy-web-bridge/.venv/bin/python</string>
-    <string>-m</string>
-    <string>scripts.windows_simnow_lab.cli_v1</string>
-    <string>run-once</string>
-    <string>--input</string>
-    <string>/Users/fujun/services/vnpy-web-bridge/simnow_lab_evidence/experimental-target.json</string>
-    <string>--output</string>
-    <string>/Users/fujun/services/vnpy-web-bridge/runtime/simnow-lab/target.json</string>
+    <string>/usr/bin/ssh</string>
+    <string>-o</string>
+    <string>BatchMode=yes</string>
+    <string>127.0.0.1</string>
+    <string>cd /Users/fujun/services/vnpy-web-bridge/current &amp;&amp; exec env PYTHONPATH=. /Users/fujun/services/vnpy-web-bridge/.venv/bin/python -m scripts.windows_simnow_lab.cli_v1 run-once --input /Users/fujun/services/vnpy-web-bridge/simnow_lab_evidence/experimental-target.json --output /Users/fujun/services/vnpy-web-bridge/runtime/simnow-lab/target.json</string>
   </array>
   <key>WorkingDirectory</key>
   <string>/Users/fujun/services/vnpy-web-bridge/current</string>
@@ -21,6 +18,10 @@
   <array>
     <string>/Users/fujun/services/vnpy-web-bridge/simnow_lab_evidence/experimental-target.json</string>
   </array>
+  <key>StandardOutPath</key>
+  <string>/Users/fujun/services/vnpy-web-bridge/runtime/simnow-lab/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/fujun/services/vnpy-web-bridge/runtime/simnow-lab/launchd.err.log</string>
   <key>StartCalendarInterval</key>
   <array>
     <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>5</integer></dict>
