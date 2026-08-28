@@ -11,17 +11,10 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from scripts.simnow_experimental_materialize_target import (
-    ExperimentalTargetError,
-)
-from scripts.simnow_experimental_materialize_target import (
-    validate_target as validate_source_target,
-)
+from scripts import simnow_experimental_materialize_target as source_target
 
-TARGET_SCHEMA = "simnow_lab_target_v1"
-STRATEGY_ID = "STATIC_CORE_EQUAL"
-RPC_APPLY = "simnow_lab_apply_target_v1"
-RPC_GET = "simnow_lab_get_run_v1"
+TARGET_SCHEMA, STRATEGY_ID = "simnow_lab_target_v1", "STATIC_CORE_EQUAL"
+RPC_APPLY, RPC_GET = "simnow_lab_apply_target_v1", "simnow_lab_get_run_v1"
 PRODUCT_EXCHANGES = {
     "ag": "SHFE", "al": "SHFE", "au": "SHFE", "bu": "SHFE", "cu": "SHFE",
     "rb": "SHFE", "ru": "SHFE", "sc": "INE", "sp": "SHFE", "zn": "SHFE",
@@ -47,8 +40,8 @@ def _target_id(value: Mapping[str, Any]) -> str:
 
 def _source_rows(value: Any) -> list[Mapping[str, Any]]:
     try:
-        source = validate_source_target(value)
-    except ExperimentalTargetError as exc:
+        source = source_target.validate_target(value)
+    except source_target.ExperimentalTargetError as exc:
         raise SimNowLabCliError("SOURCE_TARGET_INVALID") from exc
     rows = {row["product"]: row for row in source["targets"]}
     return [rows[product] for product in PRODUCTS]

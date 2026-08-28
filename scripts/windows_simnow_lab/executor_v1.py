@@ -23,10 +23,8 @@ from pathlib import Path
 from types import MethodType
 from typing import Any
 
-TARGET_SCHEMA = "simnow_lab_target_v1"
-STRATEGY_ID = "STATIC_CORE_EQUAL"
-RPC_APPLY = "simnow_lab_apply_target_v1"
-RPC_GET = "simnow_lab_get_run_v1"
+TARGET_SCHEMA, STRATEGY_ID = "simnow_lab_target_v1", "STATIC_CORE_EQUAL"
+RPC_APPLY, RPC_GET = "simnow_lab_apply_target_v1", "simnow_lab_get_run_v1"
 TARGET_COUNT = 10
 FROZEN_PRODUCTS = ("ag", "al", "au", "bu", "cu", "rb", "ru", "sc", "sp", "zn")
 TICK_CUSHION = 1
@@ -291,20 +289,14 @@ class SimNowLabExecutorV1:
             )
 
     def _register_callbacks(self) -> None:
-        from vnpy.trader.event import (
-            EVENT_ACCOUNT,
-            EVENT_ORDER,
-            EVENT_POSITION,
-            EVENT_TICK,
-            EVENT_TRADE,
-        )
+        from vnpy.trader import event as trader_event
 
-        self.event_engine.register(EVENT_ORDER, self._on_order)
-        self.event_engine.register(EVENT_POSITION, self._on_position)
+        self.event_engine.register(trader_event.EVENT_ORDER, self._on_order)
+        self.event_engine.register(trader_event.EVENT_POSITION, self._on_position)
         self.event_engine.register(_POSITION_BARRIER_EVENT, self._on_position_barrier)
-        self.event_engine.register(EVENT_TRADE, self._on_trade)
-        self.event_engine.register(EVENT_TICK, self._notify)
-        self.event_engine.register(EVENT_ACCOUNT, self._on_account)
+        self.event_engine.register(trader_event.EVENT_TRADE, self._on_trade)
+        self.event_engine.register(trader_event.EVENT_TICK, self._notify)
+        self.event_engine.register(trader_event.EVENT_ACCOUNT, self._on_account)
 
     def _gateway(self) -> Any:
         gateway = self.main_engine.get_gateway(self.gateway_name)
