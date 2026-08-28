@@ -1,6 +1,6 @@
 <template>
   <section class="charts" aria-label="收益图表">
-    <n-card v-for="chart in charts" :key="chart.key" class="lab-card" size="small" :title="chart.title">
+    <n-card v-for="chart in charts" :key="chart.key" class="lab-card" size="small" :title="chartTitle(chart)">
       <n-empty v-if="!series[chart.key].length" description="暂无数据" />
       <div v-else :ref="(element) => setHost(chart.key, element)" class="chart-host" />
     </n-card>
@@ -11,7 +11,7 @@
 import { nextTick, onBeforeUnmount, onMounted, watch } from 'vue'
 import { AreaSeries, ColorType, HistogramSeries, LineSeries, createChart, type IChartApi, type Time, type UTCTimestamp } from 'lightweight-charts'
 import { NCard, NEmpty } from 'naive-ui'
-import { formatChartTime } from '../formatters'
+import { calculateReturnRatio, formatChartTime, formatPercent } from '../formatters'
 import type { LabSeries } from '../types'
 
 type SeriesKey = keyof LabSeries
@@ -20,6 +20,12 @@ const charts: { key: SeriesKey; title: string }[] = [
   { key: 'equity', title: '权益' }, { key: 'cumulative_pnl', title: '累计 PnL' },
   { key: 'drawdown', title: '回撤' }, { key: 'daily_pnl', title: '每日 PnL' }
 ]
+function chartTitle(chart: { key: SeriesKey; title: string }) {
+  if (chart.key !== 'cumulative_pnl') return chart.title
+  const equity = props.series.equity
+  const ratio = calculateReturnRatio(equity.at(-1)?.value, equity[0]?.value)
+  return `${chart.title} · 区间收益率 ${formatPercent(ratio)}`
+}
 const hosts = new Map<SeriesKey, HTMLElement>()
 const instances = new Map<SeriesKey, IChartApi>()
 function setHost(key: SeriesKey, element: unknown) { if (element instanceof HTMLElement) hosts.set(key, element) }
@@ -45,7 +51,7 @@ onBeforeUnmount(() => instances.forEach((chart) => chart.remove()))
 </script>
 
 <style scoped>
-.charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
+.charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); margin-top: var(--section-gap); }
 .lab-card { border-radius: var(--card-radius); }
 .chart-host { width: 100%; height: var(--chart-height); }
 @media (width <= 980px) { .charts { grid-template-columns: 1fr; } }
