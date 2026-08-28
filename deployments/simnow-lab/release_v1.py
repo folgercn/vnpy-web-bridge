@@ -217,7 +217,9 @@ def deploy_windows(release: Path, sha: str) -> tuple[str, str]:
             rf"Move-Item -Force '{temporary}' '{new}'"
         )
     finally:
-        powershell(rf"Remove-Item -Recurse -Force -ErrorAction SilentlyContinue '{temporary}'")
+        powershell(
+            rf"if (Test-Path '{temporary}') {{ Remove-Item -Recurse -Force '{temporary}' }}"
+        )
     switch_windows_runtime(old, new)
     return old, new
 
