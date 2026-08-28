@@ -4,16 +4,19 @@
 
 - 称呼用户为“付哥”。
 - 回答简洁、直接，先给结论和下一步。
-- 当前最高优先级是 **Issue #466：SIMNOW_LAB M4 自动运行与只读 Dashboard**；#462 的执行面已完成并冻结。
-- #466 的 M4 规则覆盖本文件中与其冲突的 #462 研究阶段规则；未明确变更的 #462 规则继续有效。
+- 当前最高优先级是 **Issue #473：SIMNOW_LAB M5 自动目标生产与真实自动调仓**；#462 的执行面与 #466 的 Dashboard、M2 runtime/CD、单个 LaunchAgent 已完成并冻结。
+- #473 只新增现有月度 producer、DAILY PIT route 到现有 target/run-once 的最薄组合，并允许为 exact-contract roll 修补最小持仓收敛逻辑；未明确变更的 #462/#466 规则继续有效。
+- 不新增 service、daemon、常驻 worker、queue、数据库、SQLite 表、RPC、端口、容器类型或第三方依赖；不接回 Custody、TargetPlan、Execution、authority、completion、successor、signer、catalog、ledger 或旧 Phase-C lifecycle。
+- 不修改 STATIC_CORE_EQUAL 的 C/D、thermostat、allocator、产品池、权重公式或 DAILY PIT 选主算法；最终仍只使用现有 `com.folgercn.simnow-lab` LaunchAgent。
 - 旧 Custody / TargetPlan / preview-enable-start / authority / completion archive / successor / distributed fencing 链已冻结为 **audited execution prototype**：保留代码和历史，但不再作为模型开始运行的前置条件。
 - 未经付哥新的明确授权，禁止回到旧重型链继续补 lifecycle blocker。
-- 如本文件不同章节发生冲突，以靠前章节和 #466 M4 规则为准。
+- 如本文件不同章节发生冲突，以靠前章节和 #473 M5 规则为准。
 
-当前 M4 完成目标：
+当前 M5 完成目标：
 
 ```text
-SIMNOW_LAB AUTO RUNNING + READ-ONLY DASHBOARD
+STATIC_CORE_EQUAL TARGET AUTO PRODUCING
++ SIMNOW_LAB AUTO REBALANCING
 ```
 
 Dashboard 是独立只读观测面，任何 Web、Dashboard 或 CD 故障均不得影响 Windows Lab 执行、回调或 SQLite 写入。

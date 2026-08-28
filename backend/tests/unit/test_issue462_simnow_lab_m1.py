@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 from vnpy.event import Event
-from vnpy.trader.constant import Direction, Exchange, OrderType, Product, Status
+from vnpy.trader.constant import Direction, Exchange, Offset, OrderType, Product, Status
 from vnpy.trader.event import EVENT_ACCOUNT, EVENT_ORDER, EVENT_POSITION, EVENT_TRADE
 from vnpy.trader.object import (
     AccountData,
@@ -51,6 +51,27 @@ def target(*, ag: int = 0, rb: int = 0) -> dict[str, Any]:
     }
     payload["target_id"] = sha256(executor_v1._canonical(payload)).hexdigest()
     return payload
+
+
+def rolled_target(*, quantity: int) -> dict[str, Any]:
+    value = target(rb=quantity)
+    next(row for row in value["targets"] if row["product"] == "rb")["vt_symbol"] = "rb2611.SHFE"
+    value["target_id"] = sha256(
+        executor_v1._canonical({key: item for key, item in value.items() if key != "target_id"})
+    ).hexdigest()
+    return value
+
+
+def add_rb_contract(main: Any, symbol: str) -> None:
+    vt_symbol = f"{symbol}.SHFE"
+    main.contracts[vt_symbol] = ContractData(
+        symbol=symbol, exchange=Exchange.SHFE, name="rb", product=Product.FUTURES,
+        size=10, pricetick=1, gateway_name="CTP",
+    )
+    main.ticks[vt_symbol] = TickData(
+        symbol=symbol, exchange=Exchange.SHFE, datetime=datetime.now(timezone.utc),
+        bid_price_1=99, ask_price_1=100, gateway_name="CTP",
+    )
 
 
 class FakeEventEngine:
@@ -238,26 +259,44 @@ class FakeMainEngine:
         self.events.emit(EVENT_ORDER, submitting)
 
         def fill() -> None:
-            net = sum(
-                row.volume if row.direction == Direction.LONG else -row.volume
-                for row in self.broker_positions
-                if row.vt_symbol == f"{request.symbol}.{request.exchange.value}"
-            )
-            net += request.volume if request.direction == Direction.LONG else -request.volume
-            self.broker_positions = (
-                [
-                    PositionData(
-                        symbol=request.symbol,
-                        exchange=request.exchange,
-                        direction=Direction.LONG if net > 0 else Direction.SHORT,
-                        volume=abs(net),
-                        yd_volume=0,
-                        gateway_name=gateway_name,
-                    )
-                ]
-                if net
-                else []
-            )
+            vt_symbol = f"{request.symbol}.{request.exchange.value}"
+            if request.offset != Offset.OPEN:
+                closing = Direction.LONG if request.direction == Direction.SHORT else Direction.SHORT
+                remaining = request.volume
+                updated: list[PositionData] = []
+                for row in self.broker_positions:
+                    if row.vt_symbol != vt_symbol or row.direction != closing or not remaining:
+                        updated.append(row)
+                        continue
+                    used = min(row.volume, remaining)
+                    remaining -= used
+                    volume = row.volume - used
+                    if volume:
+                        yd_volume = row.yd_volume - used if request.offset == Offset.CLOSEYESTERDAY else row.yd_volume
+                        updated.append(PositionData(symbol=row.symbol, exchange=row.exchange, direction=row.direction, volume=volume, yd_volume=yd_volume, gateway_name=gateway_name))
+                self.broker_positions = updated
+            else:
+                other_positions = [row for row in self.broker_positions if row.vt_symbol != vt_symbol]
+                net = sum(
+                    row.volume if row.direction == Direction.LONG else -row.volume
+                    for row in self.broker_positions
+                    if row.vt_symbol == vt_symbol
+                )
+                net += request.volume if request.direction == Direction.LONG else -request.volume
+                self.broker_positions = (
+                    other_positions + [
+                        PositionData(
+                            symbol=request.symbol,
+                            exchange=request.exchange,
+                            direction=Direction.LONG if net > 0 else Direction.SHORT,
+                            volume=abs(net),
+                            yd_volume=0,
+                            gateway_name=gateway_name,
+                        )
+                    ]
+                    if net
+                    else other_positions
+                )
             filled = OrderData(
                 symbol=request.symbol,
                 exchange=request.exchange,
@@ -413,6 +452,73 @@ def test_quantity_change_then_restore_reuses_fresh_positions(lab: tuple[SimNowLa
     assert restored["orders"][0]["offset"] == "CLOSETODAY"
     assert main.broker_positions == []
     assert main.sent == 3
+
+
+def test_exact_contract_roll_closes_old_before_opening_new(
+    lab: tuple[SimNowLabExecutorV1, FakeMainEngine, Path]
+) -> None:
+    subject, main, _db_path = lab
+    main.broker_positions = [
+        PositionData(symbol="rb2609", exchange=Exchange.SHFE, direction=Direction.LONG, volume=2, gateway_name="CTP")
+    ]
+    add_rb_contract(main, "rb2609")
+    add_rb_contract(main, "rb2611")
+
+    result = subject.simnow_lab_apply_target_v1(rolled_target(quantity=2))
+
+    assert result["run"]["status"] == "DONE"
+    assert [(row["symbol"], row["offset"], row["direction"]) for row in result["orders"]] == [
+        ("rb2609.SHFE", "CLOSETODAY", "SHORT"),
+        ("rb2611.SHFE", "OPEN", "LONG"),
+    ]
+    assert [(row.vt_symbol, row.volume) for row in main.broker_positions] == [("rb2611.SHFE", 2)]
+
+
+@pytest.mark.parametrize(
+    ("failure", "error"),
+    [(RuntimeError("ctp rejected"), "ROLL_CLOSE_REJECTED"), (OSError(), "UNKNOWN_ORDER_PRESENT")],
+)
+def test_roll_close_failure_never_opens_new_contract(
+    lab: tuple[SimNowLabExecutorV1, FakeMainEngine, Path], failure: Exception, error: str
+) -> None:
+    subject, main, _db_path = lab
+    main.broker_positions = [
+        PositionData(symbol="rb2609", exchange=Exchange.SHFE, direction=Direction.LONG, volume=1, gateway_name="CTP")
+    ]
+    add_rb_contract(main, "rb2609")
+    add_rb_contract(main, "rb2611")
+    main.send_failure = failure
+
+    result = subject.simnow_lab_apply_target_v1(rolled_target(quantity=1))
+
+    assert result["run"]["error"] == error
+    assert [row["symbol"] for row in result["orders"]] == ["rb2609.SHFE"]
+
+
+def test_roll_closes_opposing_old_contract_buckets_before_opening_new_contract(
+    lab: tuple[SimNowLabExecutorV1, FakeMainEngine, Path]
+) -> None:
+    subject, main, _db_path = lab
+    main.broker_positions = [
+        PositionData(symbol="rb2609", exchange=Exchange.SHFE, direction=Direction.LONG, volume=2, yd_volume=1, gateway_name="CTP"),
+        PositionData(symbol="rb2609", exchange=Exchange.SHFE, direction=Direction.SHORT, volume=3, yd_volume=2, gateway_name="CTP"),
+    ]
+    add_rb_contract(main, "rb2609")
+    add_rb_contract(main, "rb2611")
+
+    result = subject.simnow_lab_apply_target_v1(rolled_target(quantity=1))
+
+    assert result["run"]["status"] == "DONE"
+    assert [(row["symbol"], row["direction"], row["offset"], row["quantity"]) for row in result["orders"]] == [
+        ("rb2609.SHFE", "SHORT", "CLOSEYESTERDAY", 1),
+        ("rb2609.SHFE", "SHORT", "CLOSETODAY", 1),
+        ("rb2609.SHFE", "LONG", "CLOSEYESTERDAY", 2),
+        ("rb2609.SHFE", "LONG", "CLOSETODAY", 1),
+        ("rb2611.SHFE", "LONG", "OPEN", 1),
+    ]
+    assert [(row.vt_symbol, row.direction, row.volume) for row in main.broker_positions] == [
+        ("rb2611.SHFE", Direction.LONG, 1)
+    ]
 
 
 def test_current_is_fresh_redacted_and_zero_mutation(lab: tuple[SimNowLabExecutorV1, FakeMainEngine, Path]) -> None:

@@ -10,14 +10,10 @@
     <string>-o</string>
     <string>BatchMode=yes</string>
     <string>127.0.0.1</string>
-    <string>cd /Users/fujun/services/vnpy-web-bridge/current &amp;&amp; exec env PYTHONPATH=. /Users/fujun/services/vnpy-web-bridge/.venv/bin/python -m scripts.windows_simnow_lab.cli_v1 run-once --input /Users/fujun/services/vnpy-web-bridge/simnow_lab_evidence/experimental-target.json --output /Users/fujun/services/vnpy-web-bridge/runtime/simnow-lab/target.json</string>
+    <string>cd /Users/fujun/services/vnpy-web-bridge/current &amp;&amp; exec env PYTHONPATH=. /Users/fujun/services/vnpy-web-bridge/.venv/bin/python -m scripts.simnow_lab_m5_run_once</string>
   </array>
   <key>WorkingDirectory</key>
   <string>/Users/fujun/services/vnpy-web-bridge/current</string>
-  <key>WatchPaths</key>
-  <array>
-    <string>/Users/fujun/services/vnpy-web-bridge/simnow_lab_evidence/experimental-target.json</string>
-  </array>
   <key>StandardOutPath</key>
   <string>/Users/fujun/services/vnpy-web-bridge/runtime/simnow-lab/launchd.out.log</string>
   <key>StandardErrorPath</key>
