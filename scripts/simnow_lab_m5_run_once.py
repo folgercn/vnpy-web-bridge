@@ -9,7 +9,9 @@ import os
 import re
 import subprocess
 import sys
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 for path in (WORKSPACE_ROOT / "backend", WORKSPACE_ROOT / "scripts"):
@@ -21,19 +23,42 @@ lab_cli = importlib.import_module("scripts.windows_simnow_lab.cli_v1")
 
 SERVICE_ROOT = Path("/Users/fujun/services/vnpy-web-bridge")
 EVIDENCE = SERVICE_ROOT / "simnow_lab_evidence"
-STATIC_SOURCE = EVIDENCE / "static-core-equal-monthly-source.json"
-THERMOSTAT_SOURCE = EVIDENCE / "monthly-relative-vol-thermostat-source.json"
-DAILY_ROUTE = EVIDENCE / "daily-pit-route.json"
+RESEARCH_INPUTS = Path("/Users/Shared/vnpy-simnow-lab-inputs")
+STATIC_SOURCE = RESEARCH_INPUTS / "static-core-equal-monthly-source.json"
+THERMOSTAT_SOURCE = RESEARCH_INPUTS / "monthly-relative-vol-thermostat-source.json"
+DAILY_ROUTE = RESEARCH_INPUTS / "daily-pit-route.json"
 MONTHLY_BUNDLES = EVIDENCE / "monthly-bundles"
 TARGET = EVIDENCE / "experimental-target.json"
 LAB_TARGET = SERVICE_ROOT / "runtime/simnow-lab/target.json"
 RESEARCH_PYTHON = Path("/usr/local/libexec/vnpyresearch/release/runtime/bin/python3.12")
 RESEARCH_VENDOR = Path("/usr/local/libexec/vnpyresearch/release/vendor")
 _MONTH = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])$")
+SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 class SimNowLabM5Error(ValueError):
     """M5 must stop before calling CURRENT/apply."""
+
+
+def require_fresh_daily_route(path: Path, *, now: datetime | None = None) -> None:
+    try:
+        route, _raw = materializer.read_json_stable(path, label="daily PIT route")
+        execution_day = date.fromisoformat(route["metadata"]["execution_day"])
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+        materializer.ExperimentalTargetError,
+    ) as exc:
+        raise SimNowLabM5Error("daily PIT route freshness is invalid") from exc
+    local = (now or datetime.now(SHANGHAI)).astimezone(SHANGHAI)
+    fresh = (
+        execution_day > local.date()
+        if local.hour >= 18
+        else execution_day == local.date()
+    )
+    if not fresh:
+        raise SimNowLabM5Error("daily PIT route is stale for this Lab window")
 
 
 def source_month_from_input(path: Path) -> str:
@@ -83,6 +108,7 @@ def run_once(
     target: Path = TARGET,
     lab_target: Path = LAB_TARGET,
 ) -> int:
+    require_fresh_daily_route(daily_route)
     source_month = source_month_from_input(thermostat_source)
     produced = run_monthly_once(
         source_month=source_month, static_source=static_source,
