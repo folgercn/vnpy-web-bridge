@@ -241,6 +241,8 @@ class SimNowLabExecutorV1:
         self._thread_lock = threading.Lock()
         self._process_lock = _ProcessLock(db_path.with_suffix(".lock"))
         self._condition = threading.Condition()
+        self._position_condition = threading.Condition()
+        self._position_events: dict[str, Any] = {}
         self._last_query_at = 0.0
         self._order_query: dict[str, Any] = {}
         self._sending: dict[str, Any] | None = None
@@ -296,7 +298,7 @@ class SimNowLabExecutorV1:
         )
 
         self.event_engine.register(EVENT_ORDER, self._on_order)
-        self.event_engine.register(EVENT_POSITION, self._notify)
+        self.event_engine.register(EVENT_POSITION, self._on_position)
         self.event_engine.register(EVENT_TRADE, self._on_trade)
         self.event_engine.register(EVENT_TICK, self._notify)
         self.event_engine.register(EVENT_ACCOUNT, self._on_account)
@@ -382,14 +384,18 @@ class SimNowLabExecutorV1:
         if type(generation) is not int:
             raise SimNowLabError("CTP_POSITION_QUERY_UNAVAILABLE")
         self._oms().positions.clear()
+        with self._position_condition:
+            self._position_events.clear()
         self._pace_query()
         gateway.query_position()
         deadline = time.monotonic() + self.wait_seconds
         while time.monotonic() < deadline:
             if tracker.generation > generation and tracker.is_ready() is True:
-                with self._condition:
-                    self._condition.wait(0.25)
-                return list(self.main_engine.get_all_positions())
+                with self._position_condition:
+                    count = len(self._position_events)
+                    self._position_condition.wait(min(0.25, max(0.0, deadline - time.monotonic())))
+                    if len(self._position_events) == count:
+                        return list(self._position_events.values())
             time.sleep(0.05)
         raise SimNowLabError("CTP_POSITION_QUERY_TIMEOUT")
 
@@ -766,6 +772,13 @@ class SimNowLabExecutorV1:
             with self._condition:
                 self._account_generation += 1
                 self._condition.notify_all()
+
+    def _on_position(self, event: Any) -> None:
+        position = event.data
+        if _field(position, "gateway_name") == self.gateway_name:
+            with self._position_condition:
+                self._position_events[str(_field(position, "vt_positionid"))] = position
+                self._position_condition.notify_all()
 
     def _notify(self, _event: Any) -> None:
         with self._condition:

@@ -134,6 +134,8 @@ class FakeGateway:
             threading.Timer(0.01, publish).start()
         else:
             self.main.oms.positions = positions
+            for position in positions.values():
+                self.main.events.emit(EVENT_POSITION, position)
             tracker.ready = True
 
     def query_account(self) -> None:
