@@ -12,6 +12,8 @@ COPY frontend/vite.config.ts ./frontend/vite.config.ts
 COPY frontend/tsconfig*.json ./frontend/
 COPY frontend/src ./frontend/src
 COPY shared ./shared
+ARG VITE_SIMNOW_LAB_DASHBOARD_ONLY=false
+ENV VITE_SIMNOW_LAB_DASHBOARD_ONLY=$VITE_SIMNOW_LAB_DASHBOARD_ONLY
 RUN cd frontend && npm run build
 
 FROM nginx:1.27-alpine AS frontend-edge

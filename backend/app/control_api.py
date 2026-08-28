@@ -16,9 +16,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import routes_auth
-from app.api.routes_control_execution import router as control_execution_router
-from app.api.routes_control_safe import router as control_safe_router
-from app.api.routes_phase_c_workflow import router as phase_c_workflow_router
+from app.api.routes_simnow_lab_dashboard import router as simnow_lab_dashboard_router
 from app.core.config import get_settings
 from app.core.errors import (
     AppError,
@@ -29,6 +27,12 @@ from app.core.errors import (
 from app.core.logging import configure_logging
 
 SERVICE_VERSION = os.getenv("CONTROL_API_VERSION", "phase-a-dev")
+DASHBOARD_ONLY = os.getenv("SIMNOW_LAB_DASHBOARD_ONLY", "false").lower() == "true"
+
+if not DASHBOARD_ONLY:
+    from app.api.routes_control_execution import router as control_execution_router
+    from app.api.routes_control_safe import router as control_safe_router
+    from app.api.routes_phase_c_workflow import router as phase_c_workflow_router
 
 
 def _require_runtime_auth_configuration() -> None:
@@ -44,7 +48,9 @@ def _require_runtime_auth_configuration() -> None:
         raise RuntimeError(
             "JWT_SECRET_KEY must be a non-default secret of at least 32 characters"
         )
-    if not execution_secret or len(execution_secret) < 32:
+    if not DASHBOARD_ONLY and (
+        not execution_secret or len(execution_secret) < 32
+    ):
         raise RuntimeError(
             "CONTROL_EXECUTION_SHARED_SECRET must be supplied for the private boundary"
         )
@@ -105,11 +111,19 @@ async def add_correlation_header(request: Request, call_next):
 
 
 app.include_router(routes_auth.router, prefix="/api")
-app.include_router(control_execution_router)
-# This must precede the legacy catch-all safe surface.  It contains only typed
-# Phase C projections/requests, never legacy Commodity/Trade endpoints.
-app.include_router(phase_c_workflow_router)
-app.include_router(control_safe_router)
+app.include_router(simnow_lab_dashboard_router)
+if not DASHBOARD_ONLY:
+    app.include_router(control_execution_router)
+    app.include_router(phase_c_workflow_router)
+    app.include_router(control_safe_router)
+
+
+if DASHBOARD_ONLY:
+
+    @app.get("/health/live", include_in_schema=False)
+    @app.get("/health/ready", include_in_schema=False)
+    async def dashboard_health() -> dict[str, str]:
+        return {"status": "ready", "service": "simnow-lab-dashboard", "version": SERVICE_VERSION}
 
 
 __all__ = ["app"]

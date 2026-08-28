@@ -3,7 +3,7 @@ import { useAuthStore } from '../stores/auth'
 import AppLayout from '../components/AppLayout.vue'
 import PhaseBUnavailable from '../components/PhaseBUnavailable.vue'
 import Login from '../pages/Login.vue'
-import Dashboard from '../pages/Dashboard.vue'
+import SimNowLabDashboardPage from '../features/simnow-lab-dashboard/pages/SimNowLabDashboardPage.vue'
 import Market from '../pages/Market.vue'
 import Trading from '../pages/Trading.vue'
 import Positions from '../pages/Positions.vue'
@@ -23,7 +23,7 @@ const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true },
     children: [
       { path: '', redirect: '/dashboard' },
-      { path: 'dashboard', component: Dashboard, meta: { title: 'Dashboard' } },
+      { path: 'dashboard', component: SimNowLabDashboardPage, meta: { title: 'SIMNOW_LAB' } },
       { path: 'market', component: Market, meta: { title: '行情' } },
       { path: 'trading', component: Trading, meta: { title: '交易' } },
       { path: 'positions', component: Positions, meta: { title: '持仓' } },

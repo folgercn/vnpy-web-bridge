@@ -1,0 +1,59 @@
+name: vnpy-web-bridge-simnow-lab-dashboard
+
+services:
+  control-api:
+    image: ${CONTROL_API_IMAGE:?CONTROL_API_IMAGE must be exact-SHA tagged}
+    build:
+      context: ..
+      dockerfile: deployments/phase-a/Containerfile.control-api
+    env_file:
+      - /Users/fujun/services/vnpy-web-bridge/.env
+    environment:
+      APP_ENV: simnow-lab-dashboard
+      SIMNOW_LAB_DASHBOARD_ONLY: "true"
+      SIMNOW_LAB_RPC_REQ_ADDRESS: tcp://192.168.100.187:2014
+      SIMNOW_LAB_RPC_PUB_ADDRESS: tcp://192.168.100.187:4102
+      CONTROL_AUDIT_LOG_PATH: /tmp/audit.log
+      CONTROL_API_VERSION: ${RELEASE_SHA:?RELEASE_SHA is required}
+      PRODUCTION: "false"
+      LIVE_TRADING_AUTHORIZED: "false"
+      COUNTABLE_FORWARD: "false"
+    networks: [dashboard-private]
+    read_only: true
+    tmpfs: [/tmp]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import json,urllib.request; d=json.load(urllib.request.urlopen(\"http://127.0.0.1:8081/health/ready\", timeout=2)); raise SystemExit(0 if d.get(\"status\")==\"ready\" else 1)'"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  frontend-edge:
+    image: ${FRONTEND_IMAGE:?FRONTEND_IMAGE must be exact-SHA tagged}
+    build:
+      context: ..
+      dockerfile: frontend/Containerfile
+      args:
+        VITE_SIMNOW_LAB_DASHBOARD_ONLY: "true"
+    ports: ["8080:8080"]
+    environment:
+      PRODUCTION: "false"
+      LIVE_TRADING_AUTHORIZED: "false"
+      COUNTABLE_FORWARD: "false"
+    depends_on:
+      control-api:
+        condition: service_healthy
+    networks: [dashboard-private]
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+      - /var/cache/nginx:uid=101,gid=101,mode=0755
+      - /var/run:uid=101,gid=101,mode=0755
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/health/ready >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+networks:
+  dashboard-private:
+    internal: false

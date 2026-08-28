@@ -5,6 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 WORKFLOW = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+CD_WORKFLOW = (ROOT / ".github/workflows/m2-simnow-lab-cd.yml").read_text(encoding="utf-8")
 
 
 def _job(name: str, next_name: str | None = None) -> str:
@@ -25,6 +26,7 @@ def test_only_minimal_simnow_lab_jobs_remain() -> None:
         "quick-checks",
         "simnow-lab-linux",
         "simnow-lab-windows",
+        "simnow-lab-dashboard",
         "ci-gate",
     ]
     for retired in (
@@ -85,7 +87,7 @@ def test_linux_lane_covers_only_m2_producer_and_lab() -> None:
 
 
 def test_windows_lane_is_focused_and_non_mutating() -> None:
-    job = _job("simnow-lab-windows", "ci-gate")
+    job = _job("simnow-lab-windows", "simnow-lab-dashboard")
 
     assert "runs-on: windows-latest" in job
     assert "pywin32==306 pyzmq==27.1.0 vnpy==4.4.0 --no-deps" in job
@@ -105,6 +107,17 @@ def test_windows_lane_is_focused_and_non_mutating() -> None:
         assert forbidden.lower() not in job.lower()
 
 
+def test_dashboard_lane_is_read_only_and_focused() -> None:
+    job = _job("simnow-lab-dashboard", "ci-gate")
+
+    assert "test_issue466_windows_dashboard.py" in job
+    assert "test_issue466_simnow_lab_dashboard_api.py" in job
+    assert "test_issue466_simnow_lab_one_shot.py" in job
+    assert "npm run check" in job
+    for forbidden in ("docker", "ssh ", "scp ", "apply_target", "send_order", "cancel_order"):
+        assert forbidden not in job.lower()
+
+
 def test_ci_gate_keeps_the_required_context_stable() -> None:
     gate = _job("ci-gate")
 
@@ -113,6 +126,7 @@ def test_ci_gate_keeps_the_required_context_stable() -> None:
     assert "- quick-checks" in gate
     assert "- simnow-lab-linux" in gate
     assert "- simnow-lab-windows" in gate
+    assert "- simnow-lab-dashboard" in gate
     assert 'details["result"] != "success"' in gate
 
 
@@ -137,3 +151,15 @@ def test_workflow_has_no_build_deploy_or_artifact_lane() -> None:
         "Execution",
     ):
         assert forbidden not in WORKFLOW
+
+
+def test_m2_cd_uses_successful_main_exact_sha_and_one_release_entrypoint() -> None:
+    assert "workflow_run:" in CD_WORKFLOW
+    assert "github.event.workflow_run.conclusion == 'success'" in CD_WORKFLOW
+    assert "github.event.workflow_run.head_branch == 'main'" in CD_WORKFLOW
+    assert "EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}" in CD_WORKFLOW
+    assert 'test "$actual_sha" = "$EXPECTED_SHA"' in CD_WORKFLOW
+    assert "deployments/simnow-lab/release_v1.py" in CD_WORKFLOW
+    assert "--channel main" in CD_WORKFLOW
+    for forbidden in ("secrets.", "ssh ", "scp ", "upload-artifact", "Custody", "Execution"):
+        assert forbidden.lower() not in CD_WORKFLOW.lower()

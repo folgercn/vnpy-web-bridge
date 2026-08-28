@@ -11,4 +11,47 @@
   --card-radius: 8px;
   --breakpoint-mobile: 640px;
   --breakpoint-tablet: 980px;
+  --color-primary: #2563eb;
+  --color-info: #0284c7;
+  --color-success: #16a34a;
+  --color-warning: #d97706;
+  --color-error: #dc2626;
+  --color-neutral: #64748b;
+  --surface-page: #f5f7fa;
+  --surface-card: #fff;
+  --surface-subtle: #f8fafc;
+  --surface-border: #e2e8f0;
+  --text-primary: #0f172a;
+  --text-muted: #64748b;
+  --font-title-size: 20px;
+  --font-title-line: 28px;
+  --font-section-size: 16px;
+  --font-section-line: 24px;
+  --font-body-size: 14px;
+  --font-body-line: 22px;
+  --font-caption-size: 12px;
+  --font-caption-line: 18px;
+  --font-metric-size: 24px;
+  --font-metric-line: 32px;
+  --table-row-height: 40px;
+  --chart-height: 280px;
+  --drawer-width: 720px;
+  --control-height: 32px;
+  --control-text-min-width: 72px;
+}
+
+:root[data-theme='dark'] {
+  --surface-page: #0b1118;
+  --surface-card: #111827;
+  --surface-subtle: #172033;
+  --surface-border: #263244;
+  --text-primary: #e5e7eb;
+  --text-muted: #94a3b8;
+}
+
+@media (width <= 640px) {
+  :root {
+    --page-padding: 10px;
+    --chart-height: 220px;
+  }
 }

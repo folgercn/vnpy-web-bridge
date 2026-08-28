@@ -1,0 +1,128 @@
+name: M2 SIMNOW_LAB CD
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: m2-simnow-lab-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: [self-hosted, macOS, ARM64, MacminiM2, vnpy-web-bridge]
+    env:
+      RELEASE_ROOT: /Users/fujun/services/vnpy-web-bridge
+      EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - name: Checkout the successful CI SHA
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact checked-out SHA
+        shell: bash
+        run: |
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          actual_sha="$(git rev-parse HEAD)"
+          test "$actual_sha" = "$EXPECTED_SHA"
+
+      - name: Read current release identity
+        id: previous
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          root = Path(os.environ["RELEASE_ROOT"])
+          path = root / "current" / ".release.json"
+          previous_sha = ""
+          try:
+              manifest = json.loads(path.read_text(encoding="utf-8"))
+          except (OSError, json.JSONDecodeError):
+              manifest = {}
+          if isinstance(manifest, dict) and manifest.get("channel") == "main":
+              candidate = manifest.get("sha")
+              if isinstance(candidate, str) and re.fullmatch(r"[0-9a-f]{40}", candidate):
+                  previous_sha = candidate
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"sha={previous_sha}\n")
+              output.write(f"mode={'diff' if previous_sha else 'all'}\n")
+          PY
+
+      - name: Resolve affected SIMNOW_LAB areas
+        id: areas
+        shell: bash
+        env:
+          PREVIOUS_SHA: ${{ steps.previous.outputs.sha }}
+          PREVIOUS_MODE: ${{ steps.previous.outputs.mode }}
+        run: |
+          if [ "$PREVIOUS_MODE" = "all" ]; then
+            echo "value=backend,frontend,windows,m2" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git cat-file -e "$PREVIOUS_SHA^{commit}"
+          areas=()
+          add_area() {
+            local candidate="$1"
+            local present
+            for present in "${areas[@]}"; do
+              [ "$present" = "$candidate" ] && return
+            done
+            areas+=("$candidate")
+          }
+          while IFS= read -r file_path; do
+            case "$file_path" in
+              backend/*|deployments/phase-a/Containerfile.control-api)
+                add_area backend
+                ;;
+              frontend/*)
+                add_area frontend
+                ;;
+              scripts/windows_simnow_lab/__init__.py|scripts/windows_simnow_lab/executor_v1.py|scripts/windows_simnow_lab/dashboard_v1.py)
+                add_area windows
+                ;;
+              scripts/windows_simnow_lab/cli_v1.py|deployments/com.vnpy-web-bridge.simnow-lab.plist|deployments/simnow-lab/*)
+                add_area m2
+                ;;
+              deployments/docker-compose.simnow-lab-dashboard.yml)
+                add_area backend
+                add_area frontend
+                ;;
+            esac
+          done < <(git diff --name-only "$PREVIOUS_SHA" "$EXPECTED_SHA")
+          if [ "${#areas[@]}" -eq 0 ]; then
+            echo "value=" >> "$GITHUB_OUTPUT"
+            echo "No SIMNOW_LAB deployment area changed; release is a no-op."
+            exit 0
+          fi
+          IFS=,
+          echo "value=${areas[*]}" >> "$GITHUB_OUTPUT"
+
+      - name: Release the exact CI SHA
+        shell: bash
+        env:
+          DEPLOY_AREAS: ${{ steps.areas.outputs.value }}
+        run: |
+          if [ -z "$DEPLOY_AREAS" ]; then
+            echo "No SIMNOW_LAB deployment area changed; skipping release."
+            exit 0
+          fi
+          python3 deployments/simnow-lab/release_v1.py \
+            --source "$GITHUB_WORKSPACE" \
+            --sha "$EXPECTED_SHA" \
+            --channel main \
+            --areas "$DEPLOY_AREAS"

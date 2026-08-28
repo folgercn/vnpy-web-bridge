@@ -127,6 +127,45 @@ jobs:
           backend/tests/unit/test_issue462_simnow_lab_m1.py
           backend/tests/unit/test_windows_rpc_simnow_e2e_v1.py
 
+  simnow-lab-dashboard:
+    name: SIMNOW_LAB read-only Dashboard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Run read-only Dashboard focused tests
+        env:
+          PYTHONPATH: backend:scripts:.
+        run: >-
+          python -m pytest -q
+          backend/tests/unit/test_issue466_windows_dashboard.py
+          backend/tests/unit/test_issue466_simnow_lab_dashboard_api.py
+          backend/tests/unit/test_issue466_simnow_lab_one_shot.py
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Run frontend contracts and build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run check
+
   ci-gate:
     name: CI Gate
     if: always()
@@ -134,6 +173,7 @@ jobs:
       - quick-checks
       - simnow-lab-linux
       - simnow-lab-windows
+      - simnow-lab-dashboard
     runs-on: ubuntu-latest
     steps:
       - name: Require the minimal CI lane

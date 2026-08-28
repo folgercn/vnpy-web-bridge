@@ -15,9 +15,11 @@
           <div v-if="isMobile" class="mobile-title">VnPy Bridge</div>
         </div>
         <div class="topbar-status">
-          <status-badge label="RPC" :active="Boolean(terminal.rpcStatus.connected)" />
-          <status-badge label="WS" :active="eventSocket.status.value === 'connected'" />
-          <status-badge label="Trade" :active="terminal.webTradeEnabled" />
+          <template v-if="!dashboardOnly">
+            <status-badge label="RPC" :active="Boolean(terminal.rpcStatus.connected)" />
+            <status-badge label="WS" :active="eventSocket.status.value === 'connected'" />
+            <status-badge label="Trade" :active="terminal.webTradeEnabled" />
+          </template>
           <n-tag type="info">{{ auth.user?.role }}</n-tag>
         </div>
         <div class="topbar-actions">
@@ -33,10 +35,10 @@
         </div>
       </n-layout-header>
       <n-layout-content class="content">
-        <n-alert v-if="terminal.executionUnavailable" type="error" title="Execution projection unavailable" class="surface-alert">
+        <n-alert v-if="!dashboardOnly && terminal.executionUnavailable" type="error" title="Execution projection unavailable" class="surface-alert">
           {{ terminal.executionError }}
         </n-alert>
-        <n-alert v-if="terminal.phaseBUnavailable" type="warning" title="Phase A control-only mode" class="surface-alert">
+        <n-alert v-if="!dashboardOnly && terminal.phaseBUnavailable" type="warning" title="Phase A control-only mode" class="surface-alert">
           账户、行情、策略及订单写入等 Phase B 业务面当前不可用；页面会明确返回 CONTROL_SURFACE_UNAVAILABLE（503）。
         </n-alert>
         <router-view />
@@ -95,8 +97,9 @@ const terminal = useTerminalStore()
 const theme = useThemeStore()
 const isMobile = useMediaQuery('(max-width: 760px)')
 const mobileMenuOpen = ref(false)
+const dashboardOnly = import.meta.env.VITE_SIMNOW_LAB_DASHBOARD_ONLY === 'true'
 
-const menuOptions = [
+const fullMenuOptions = [
   item('Dashboard', '/dashboard', DashboardOutlined),
   item('行情', '/market', LineChartOutlined),
   item('交易', '/trading', SwapOutlined),
@@ -110,6 +113,7 @@ const menuOptions = [
   item('数据管理', '/data', DatabaseOutlined),
   item('日志', '/logs', FileTextOutlined)
 ]
+const menuOptions = dashboardOnly ? [fullMenuOptions[0]] : fullMenuOptions
 const themeOptions = [
   themeItem('跟随系统', 'system', DesktopOutlined),
   themeItem('亮色', 'light', BulbOutlined),
@@ -122,6 +126,7 @@ const themeLabel = computed(() => {
 })
 
 onMounted(async () => {
+  if (dashboardOnly) return
   await terminal.refreshStatus().catch(() => undefined)
   await terminal.refreshSnapshots().catch(() => undefined)
   void eventSocket.connect()
