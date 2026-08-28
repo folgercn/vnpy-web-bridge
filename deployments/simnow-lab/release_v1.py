@@ -170,7 +170,7 @@ def switch_windows_runtime(old: str, new: str) -> None:
     script = rf"""
 $path = 'C:\quant\run_rpc_server.py'
 $text = [IO.File]::ReadAllText($path)
-if (($text.Split('{old}').Count - 1) -ne 1) {{ throw 'WINDOWS_RUNTIME_SWITCH_SOURCE_MISMATCH' }}
+if ([regex]::Matches($text, [regex]::Escape('{old}')).Count -ne 1) {{ throw 'WINDOWS_RUNTIME_SWITCH_SOURCE_MISMATCH' }}
 $temp = "$path.issue466.tmp"
 [IO.File]::WriteAllText($temp, $text.Replace('{old}', '{new}'), (New-Object Text.UTF8Encoding($false)))
 Move-Item -Force $temp $path
