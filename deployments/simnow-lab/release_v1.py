@@ -12,7 +12,6 @@ import subprocess
 import tarfile
 import tempfile
 import time
-import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +21,7 @@ DOCKER = Path("/Applications/Docker.app/Contents/Resources/bin/docker")
 WINDOWS_HOST = "wxuser@192.168.100.187"
 LABEL = "com.folgercn.simnow-lab"
 SHA = re.compile(r"^[0-9a-f]{40}$")
+WINDOWS_RUNTIME = re.compile(r"^C:\\quant\\runtime-[0-9a-f]+$")
 WEB_AREAS = frozenset({"backend", "frontend"})
 
 
@@ -106,7 +106,7 @@ def ensure_venv(root: Path, release: Path) -> None:
     run([str(python), "-c", "from vnpy.rpc import RpcClient; import zmq; print('M2_RUNTIME_OK')"])
 
 
-def build_release(source: Path, root: Path, sha: str) -> Path:
+def build_release(source: Path, root: Path, sha: str, *, trusted_archive: bool = False) -> Path:
     release = root / "releases" / sha
     if release.exists():
         try:
@@ -122,7 +122,7 @@ def build_release(source: Path, root: Path, sha: str) -> Path:
         shutil.rmtree(stage)
     stage.mkdir(parents=True)
     source_marker = source / ".source-sha"
-    if source_marker.is_file() and source_marker.read_text(encoding="ascii").strip() == sha:
+    if trusted_archive and source_marker.is_file() and source_marker.read_text(encoding="ascii").strip() == sha:
         shutil.copytree(source, stage, dirs_exist_ok=True)
     else:
         commit = run(
@@ -137,6 +137,11 @@ def build_release(source: Path, root: Path, sha: str) -> Path:
                 bundle.extractall(stage, filter="data")
     (stage / ".source-sha").write_text(f"{sha}\n", encoding="ascii")
     os.replace(stage, release)
+    releases_fd = os.open(release.parent, os.O_RDONLY)
+    try:
+        os.fsync(releases_fd)
+    finally:
+        os.close(releases_fd)
     return release
 
 
@@ -156,7 +161,7 @@ if (-not $match.Success) { throw 'WINDOWS_RUNTIME_ROOT_NOT_FOUND' }
 $match.Groups['root'].Value
 """
     value = powershell(script, capture=True).splitlines()[-1].strip()
-    if not re.fullmatch(r"C:\quant\runtime-[0-9a-f]+", value):
+    if WINDOWS_RUNTIME.fullmatch(value) is None:
         raise ReleaseError("WINDOWS_RUNTIME_ROOT_INVALID")
     return value
 
@@ -199,13 +204,20 @@ def deploy_windows(release: Path, sha: str) -> tuple[str, str]:
         "scripts/windows_simnow_lab/executor_v1.py",
         "scripts/windows_simnow_lab/dashboard_v1.py",
     )
-    for relative in files:
-        remote = f"{WINDOWS_HOST}:C:/quant/runtime-{sha[:8]}.tmp/{relative}"
-        run(["scp", "-q", str(release / relative), remote])
-    powershell(
-        rf"Remove-Item -Recurse -Force -ErrorAction SilentlyContinue '{new}'; "
-        rf"Move-Item -Force '{temporary}' '{new}'"
-    )
+    try:
+        for relative in files:
+            remote = f"{WINDOWS_HOST}:C:/quant/runtime-{sha[:8]}.tmp/{relative}"
+            run(["scp", "-q", str(release / relative), remote])
+        checks = " -and ".join(
+            f"(Test-Path '{temporary}\\{relative.replace('/', '\\')}')" for relative in files
+        )
+        powershell(
+            rf"if (-not ({checks})) {{ throw 'WINDOWS_RUNTIME_UPLOAD_INCOMPLETE' }}; "
+            rf"Remove-Item -Recurse -Force -ErrorAction SilentlyContinue '{new}'; "
+            rf"Move-Item -Force '{temporary}' '{new}'"
+        )
+    finally:
+        powershell(rf"Remove-Item -Recurse -Force -ErrorAction SilentlyContinue '{temporary}'")
     switch_windows_runtime(old, new)
     return old, new
 
@@ -248,6 +260,15 @@ def compose(release: Path, manifest: dict[str, Any], *arguments: str) -> None:
     )
 
 
+def compose_output(release: Path, manifest: dict[str, Any], *arguments: str) -> str:
+    path = release / "deployments" / "docker-compose.simnow-lab-dashboard.yml"
+    return run(
+        [str(DOCKER), "--context", "desktop-linux", "compose", "-f", str(path), *arguments],
+        cwd=release,
+        capture=True,
+    )
+
+
 def build_web(release: Path, manifest: dict[str, Any], areas: set[str]) -> None:
     services = []
     if "backend" in areas:
@@ -268,14 +289,27 @@ def deploy_web(release: Path, manifest: dict[str, Any], areas: set[str]) -> None
         return
     compose(release, manifest, "up", "-d", "--no-build", "--no-deps", *services)
     deadline = time.monotonic() + 90
-    while time.monotonic() < deadline:
-        try:
-            with urllib.request.urlopen("http://127.0.0.1:8080/health/ready", timeout=3) as response:
-                if response.status == 200:
-                    return
-        except OSError:
+    pending = set(services)
+    while pending and time.monotonic() < deadline:
+        for service in tuple(pending):
+            container_id = compose_output(release, manifest, "ps", "-q", service)
+            if container_id and run([str(DOCKER), "inspect", "-f", "{{.State.Health.Status}}", container_id], capture=True) == "healthy":
+                pending.remove(service)
+        if pending:
             time.sleep(2)
-    raise ReleaseError("WEB_READONLY_HEALTH_FAILED")
+    if pending:
+        raise ReleaseError(f"WEB_READONLY_HEALTH_FAILED:{','.join(sorted(pending))}")
+
+
+def dashboard_http_smoke(release: Path, manifest: dict[str, Any]) -> None:
+    code = """import json,urllib.request
+from app.core.security import CurrentUser,create_access_token
+token=create_access_token(CurrentUser('cd-smoke','viewer'))
+request=urllib.request.Request('http://127.0.0.1:8081/api/v1/simnow-lab/dashboard',headers={'Authorization':f'Bearer {token}'})
+value=json.load(urllib.request.urlopen(request,timeout=12))
+assert value['data']['dashboard']['schema_version']=='simnow_lab_dashboard_v1'
+"""
+    compose(release, manifest, "exec", "-T", "control-api", "python", "-c", code)
 
 
 def install_launch_agent(root: Path, release: Path) -> None:
@@ -294,7 +328,15 @@ def write_manifest(release: Path, manifest: dict[str, Any]) -> None:
     os.replace(temporary, release / ".release.json")
 
 
-def deploy(source: Path, root: Path, sha: str, channel: str, areas: set[str]) -> None:
+def deploy(
+    source: Path,
+    root: Path,
+    sha: str,
+    channel: str,
+    areas: set[str],
+    *,
+    trusted_archive: bool = False,
+) -> None:
     if SHA.fullmatch(sha) is None or channel not in {"candidate", "main"}:
         raise ReleaseError("RELEASE_ARGUMENT_INVALID")
     previous = current_release(root)
@@ -302,7 +344,7 @@ def deploy(source: Path, root: Path, sha: str, channel: str, areas: set[str]) ->
     all_areas = {"backend", "frontend", "windows", "m2"}
     if (not previous_manifest or previous_manifest.get("channel") != "main") and areas != all_areas:
         raise ReleaseError("INITIAL_RELEASE_REQUIRES_ALL_AREAS")
-    release = build_release(source, root, sha)
+    release = build_release(source, root, sha, trusted_archive=trusted_archive)
     ensure_env(root)
     ensure_venv(root, release)
     manifest = {
@@ -328,6 +370,8 @@ def deploy(source: Path, root: Path, sha: str, channel: str, areas: set[str]) ->
         install_launch_agent(root, release)
         if areas & WEB_AREAS:
             deploy_web(release, manifest, areas)
+        if "backend" in areas:
+            dashboard_http_smoke(release, manifest)
     except Exception:
         if previous:
             atomic_symlink(root / "current", previous)
@@ -351,8 +395,16 @@ def main() -> int:
     parser.add_argument("--sha", required=True)
     parser.add_argument("--channel", choices=("candidate", "main"), required=True)
     parser.add_argument("--areas", default="backend,frontend,windows,m2")
+    parser.add_argument("--trusted-archive", action="store_true")
     args = parser.parse_args()
-    deploy(args.source.resolve(), args.root.resolve(), args.sha, args.channel, {item for item in args.areas.split(",") if item})
+    deploy(
+        args.source.resolve(),
+        args.root.resolve(),
+        args.sha,
+        args.channel,
+        {item for item in args.areas.split(",") if item},
+        trusted_archive=args.trusted_archive,
+    )
     print(json.dumps({"status": "DEPLOYED", "sha": args.sha, "channel": args.channel}, sort_keys=True))
     return 0
 

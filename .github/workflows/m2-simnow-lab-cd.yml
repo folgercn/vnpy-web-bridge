@@ -104,6 +104,9 @@ jobs:
                 ;;
             esac
           done < <(git diff --name-only "$PREVIOUS_SHA" "$EXPECTED_SHA")
+          if [ "${#areas[@]}" -eq 0 ]; then
+            add_area m2
+          fi
           IFS=,
           echo "value=${areas[*]}" >> "$GITHUB_OUTPUT"
 

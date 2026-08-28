@@ -104,11 +104,12 @@ def test_release_accepts_exact_archive_and_retries_incomplete_release(tmp_path: 
     source.mkdir()
     (source / ".source-sha").write_text(f"{sha}\n", encoding="ascii")
     (source / "payload.txt").write_text("exact\n", encoding="utf-8")
-    first = release_v1.build_release(source, root, sha)
+    first = release_v1.build_release(source, root, sha, trusted_archive=True)
     assert (first / "payload.txt").read_text() == "exact\n"
-    assert release_v1.build_release(source, root, sha) == first
+    assert release_v1.build_release(source, root, sha, trusted_archive=True) == first
     release_v1.atomic_symlink(root / "current", first)
     assert (root / "current").resolve() == first
+    assert release_v1.WINDOWS_RUNTIME.fullmatch(r"C:\quant\runtime-646e73d4")
 
 
 def test_run_once_materializes_current_applies_and_gets_run(
