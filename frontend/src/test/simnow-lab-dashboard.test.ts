@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { formatChartTime, formatNumber, shortId, statusTagType } from '../features/simnow-lab-dashboard/formatters'
+import { calculateReturnRatio, formatChartTime, formatNumber, shortId, statusTagType } from '../features/simnow-lab-dashboard/formatters'
 
 describe('SIMNOW_LAB dashboard presentation', () => {
   it.each([
@@ -20,6 +20,11 @@ describe('SIMNOW_LAB dashboard presentation', () => {
     expect(formatChartTime(Date.parse('2026-08-28T06:09:00Z') / 1000)).toContain('14:09')
   })
 
+  it('calculates the visible period return from starting equity', () => {
+    expect(calculateReturnRatio(19_948_712.81, 19_942_777.86)).toBeCloseTo(0.0002976, 7)
+    expect(calculateReturnRatio(100, 0)).toBeNull()
+  })
+
   it('keeps the dashboard-only shell off legacy Execution and WS startup', () => {
     const source = readFileSync(resolve('src/components/AppLayout.vue'), 'utf8')
     expect(source).toContain('if (dashboardOnly) return')
@@ -31,6 +36,8 @@ describe('SIMNOW_LAB dashboard presentation', () => {
     expect(source).toContain('Date.parse(point.time) / 1000')
     expect(source).toContain('tickMarkFormatter')
     expect(source).toContain('timeFormatter')
+    expect(source).toContain('区间收益率')
+    expect(source).toContain('margin-top: var(--section-gap)')
     expect(source).not.toContain("point.time.slice(0, 10)")
   })
 })

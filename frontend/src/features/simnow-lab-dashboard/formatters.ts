@@ -12,6 +12,8 @@ const chartTime = new Intl.DateTimeFormat('zh-CN', {
 export const formatNumber = (value: number | null | undefined) => value == null ? '—' : number.format(value)
 export const formatMoney = (value: number | null | undefined) => value == null ? '—' : money.format(value)
 export const formatPercent = (value: number | null | undefined) => value == null ? '—' : `${number.format(value * 100)}%`
+export const calculateReturnRatio = (current: number | null | undefined, baseline: number | null | undefined) =>
+  current == null || baseline == null || baseline === 0 ? null : (current - baseline) / baseline
 export const formatTime = (value: string | null | undefined) => value ? shanghai.format(new Date(value)).replaceAll('/', '-') : '—'
 export const formatChartTime = (unixSeconds: number) => chartTime.format(new Date(unixSeconds * 1000)).replaceAll('/', '-')
 export const shortId = (value: string | null | undefined) => value ? `${value.slice(0, 8)}…${value.slice(-6)}` : '—'
