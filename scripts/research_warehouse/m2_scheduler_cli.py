@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import os
 import stat
 import sys
@@ -11,21 +10,20 @@ import tempfile
 from datetime import date, datetime, timezone
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 
-import commodity_relative_vol_snapshot_producer as thermostat_producer
-import commodity_static_core_equal_pure_producer as static_producer
-from simnow_experimental_timely_daily_route import (
-    build_timely_experimental_route,
-)
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from simnow_experimental_materialize_target import NOT_OFFICIAL_STRATEGY_OUTPUT
+from simnow_experimental_timely_daily_route import ROUTE_MODE, _timely_cutoff
 
 from .acquisition import acquire_daily
-from .canonical import canonical_json_line, parse_json_strict
-from .daily_roll_predecessor_catalog import _read_private_protected_evidence
+from .canonical import canonical_json_line, sha256
+from .daily_pit_main_roll_source import _following_official_days
 from .errors import RegistryError
 from .file_integrity import fsync_dir, read_regular_strict, write_all
+from .history_backfill_receipts import load_backfill_receipt
 from .m2_acl_custody import require_acl_free_path
 from .m2_daily_scheduler import run_daily
-from .m2_genesis_predecessor_cli import _config_raw, _projection_from_config
 from .m2_history_backfill import (
     DEFAULT_HISTORY_DAYS,
     RequestGate,
@@ -39,120 +37,307 @@ from .m2_operator_defaults import (
     DEFAULT_OPERATOR_STATE,
 )
 from .m2_operator_state import load_operator_state, operator_state_lock
+from .m2_receipts import load_run_receipt
 from .m2_request_gate import PersistentRequestGate
-from .m2_runtime_input import DEFAULT_RUNTIME_INPUT, require_root_managed
+from .m2_runtime_input import DEFAULT_RUNTIME_INPUT
 from .m2_runtime_loader import load_runtime_context
-
-SIMNOW_LAB_EXPORT_INPUT = Path(
-    "/usr/local/etc/vnpyresearch/simnow-lab-export-input-v1.json"
+from .pit_source_view import (
+    _official_month_boundary,
+    _safe_relative_path,
+    build_source_view,
 )
+from .shfe_contract_parameters import evidence_from_pinned_raw
+from .static_core_baseline import _registry, build_historical_baseline
+from .timeutil import format_utc
+from .verified_daily_pit_main_roll_source import _mains
+
 SIMNOW_LAB_INPUT_DIRECTORY = Path("/Users/Shared/vnpy-simnow-lab-inputs")
-SIMNOW_LAB_EXPORT_SCHEMA = "simnow_lab_research_export_input_v1"
-SIMNOW_LAB_EXPORT_MAX_BYTES = 16 * 1024
 SIMNOW_LAB_SOURCE_MAX_BYTES = 4 * 1024 * 1024
 SIMNOW_LAB_EXPORT_NAMES = (
     "static-core-equal-monthly-source.json",
     "monthly-relative-vol-thermostat-source.json",
     "daily-pit-route.json",
 )
-_CONFIG_KEYS = {
-    "schema_version",
-    "monthly_static_source_path",
-    "monthly_thermostat_source_path",
-    "daily_pit_continuous_config_path",
-}
+SIMNOW_LAB_CONTRACT_PARAMETERS = Path(
+    "/Users/Shared/vnpy-research/custody/raw/shfe/2026-08-28/"
+    "shfe-contract-parameters-v1/"
+    "b46f8fcb29cae52997017aa80c58f274abb7e6028c67b0f9647e45a4ede4d57b.raw"
+)
+SIMNOW_LAB_CONTRACT_PARAMETERS_SHA256 = (
+    "b46f8fcb29cae52997017aa80c58f274abb7e6028c67b0f9647e45a4ede4d57b"
+)
+SIMNOW_LAB_CONTRACT_PARAMETERS_BYTES = 80997
+SIMNOW_LAB_CONTRACT_PARAMETERS_OBSERVED_AT = "2026-08-29T04:55:44.297413Z"
 
 
-def _export_config() -> dict[str, Path]:
-    require_root_managed(SIMNOW_LAB_EXPORT_INPUT)
-    info = SIMNOW_LAB_EXPORT_INPUT.lstat()
-    if info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o444:
-        raise RegistryError("SIMNOW_LAB export input must be root-managed")
-    raw = read_regular_strict(
-        SIMNOW_LAB_EXPORT_INPUT,
-        "SIMNOW_LAB export input",
-        private=False,
-        limit=SIMNOW_LAB_EXPORT_MAX_BYTES,
-    )
-    value = parse_json_strict(raw, "SIMNOW_LAB export input")
-    if (
-        not isinstance(value, dict)
-        or set(value) != _CONFIG_KEYS
-        or value.get("schema_version") != SIMNOW_LAB_EXPORT_SCHEMA
-        or canonical_json_line(value) != raw
-    ):
-        raise RegistryError("SIMNOW_LAB export input contract is invalid")
-    paths = {key: Path(value[key]) for key in _CONFIG_KEYS - {"schema_version"}}
-    if any(not path.is_absolute() for path in paths.values()):
-        raise RegistryError("SIMNOW_LAB export input path is invalid")
-    return paths
-
-
-def _source_month(static_result, thermostat_result) -> str:
-    target = parse_json_strict(
-        static_result.artifacts["target_evidence"], "STATIC_CORE_EQUAL target"
-    )
-    snapshot = parse_json_strict(
-        thermostat_result.snapshot_draft, "monthly thermostat snapshot"
-    )
-    execution = date.fromisoformat(target["execution_day"])
-    prior = execution.replace(day=1).toordinal() - 1
-    static_month = date.fromordinal(prior).strftime("%Y-%m")
-    thermostat_month = snapshot.get("source_month")
-    if thermostat_month != static_month:
-        raise RegistryError("monthly source_month values differ")
-    return static_month
-
-
-def _precompute_exports(context, trade_day: str) -> tuple[bytes, bytes, bytes]:
-    config = _export_config()
+def _source_month_for_completed_day(context, trade_day: str) -> str:
     try:
-        static_raw = _read_private_protected_evidence(
-            config["monthly_static_source_path"],
-            "monthly static source",
-            uid=context.policy.uid,
-            limit=SIMNOW_LAB_SOURCE_MAX_BYTES,
+        current = date.fromisoformat(trade_day)
+    except ValueError as exc:
+        raise RegistryError("completed official day is invalid") from exc
+    if current.isoformat() != trade_day:
+        raise RegistryError("completed official day is invalid")
+    months = sorted(
+        {
+            f"{day.year:04d}-{day.month:02d}"
+            for day in context.calendar.days
+            if day < current.replace(day=1)
+        }
+    )
+    eligible = []
+    for source_month in months:
+        _research, execution_day, _cutoff = _official_month_boundary(
+            context.calendar, source_month=source_month
         )
-        thermostat_raw = _read_private_protected_evidence(
-            config["monthly_thermostat_source_path"],
-            "monthly thermostat source",
-            uid=context.policy.uid,
-            limit=SIMNOW_LAB_SOURCE_MAX_BYTES,
+        if execution_day <= current:
+            eligible.append(source_month)
+    if not eligible:
+        raise RegistryError("SIMNOW_LAB has no completed monthly source")
+    return eligible[-1]
+
+
+def _frozen_contract_registry_raw() -> bytes:
+    """Use the immutable PRODUCT_SPECS facts; this creates no registry file."""
+
+    from commodity_c_fast_pure_producer_kernel import PRODUCT_SPECS, PRODUCTS
+
+    from .m2_isolation_contracts import false_authority
+
+    products = []
+    for product in PRODUCTS:
+        spec = PRODUCT_SPECS[product]
+        products.append(
+            {
+                "product": product,
+                "exchange": spec["exchange"],
+                "multiplier": spec["multiplier"],
+                "price_tick": spec["price_tick"],
+                "last_trading_day_rule": (
+                    "INE_SC_PREVIOUS_MONTH_LAST_OFFICIAL_V1"
+                    if product == "sc"
+                    else "SHFE_DELIVERY_MONTH_15TH_NEXT_OFFICIAL_V1"
+                ),
+                "source_id": "frozen-product-specs-v1",
+            }
         )
-        static_result = static_producer.produce_research_artifacts(static_raw)
-        thermostat_result = thermostat_producer.produce_snapshot(thermostat_raw)
-        _source_month(static_result, thermostat_result)
-        static_output = static_result.source_view_canonical
-        thermostat_output = thermostat_producer.canonical_json(
-            parse_json_strict(thermostat_raw, "monthly thermostat source")
+    return canonical_json_line(
+        {
+            "schema_version": "vnpy_research_static_core_contract_registry_v1",
+            "registry_id": "frozen-product-specs-v1",
+            "generated_at": "2026-08-29T00:00:00Z",
+            "sources": [{"source_id": "frozen-product-specs-v1"}],
+            "products": products,
+            "authority": false_authority(),
+        }
+    )
+
+
+def _simnow_replay_state(history_raw: bytes) -> SimpleNamespace:
+    names = (
+        "operator_state_raw_sha256",
+        "manifest_genesis_seal_sha256",
+        "manifest_head_seal_sha256",
+        "manifest_head_commit_seal_sha256",
+        "commit_anchor_ledger_raw_sha256",
+    )
+    payload = {
+        name: sha256(canonical_json_line({"name": name, "history": sha256(history_raw)}))
+        for name in names
+    }
+    return SimpleNamespace(
+        raw_sha256=payload["operator_state_raw_sha256"], payload=payload
+    )
+
+
+def _one_186_day_backfill(context, path: Path):
+    receipt = load_backfill_receipt(path, expected_owner_uid=context.policy.uid)
+    if (
+        receipt["required_official_days"] != DEFAULT_HISTORY_DAYS
+        or receipt["calendar_raw_sha256"] != context.calendar.raw_sha256
+        or receipt["calendar_availability_anchor_raw_sha256"]
+        != context.availability.raw_sha256
+        or receipt["registry_raw_sha256"] != context.registry.raw_sha256
+    ):
+        raise RegistryError("SIMNOW_LAB 186-day backfill receipt does not match runtime")
+    return receipt, read_regular_strict(path, "M2 history backfill receipt")
+
+
+def _completed_daily_raw(context, trade_day: str) -> tuple[dict, bytes, dict[str, bytes]]:
+    receipt_path = context.runtime.run_receipts / f"{trade_day}.json"
+    receipt_raw = read_regular_strict(receipt_path, "SIMNOW_LAB daily run receipt")
+    receipt = load_run_receipt(receipt_path)
+    if receipt["trade_day"] != trade_day:
+        raise RegistryError("SIMNOW_LAB daily run receipt day differs")
+    raws: dict[str, bytes] = {}
+    for source in receipt["sources"]:
+        raw = read_regular_strict(
+            context.paths.root / source["raw_relative_path"],
+            "SIMNOW_LAB daily raw",
+            limit=16 * 1024 * 1024,
         )
-        if (
-            hashlib.sha256(thermostat_output).hexdigest()
-            != thermostat_result.source_view_canonical_sha256
-        ):
-            raise RegistryError("monthly thermostat source replay drifted")
-        projection = _projection_from_config(
-            _config_raw(
-                config["daily_pit_continuous_config_path"], uid=context.policy.uid
+        if len(raw) != source["raw_bytes"] or sha256(raw) != source["raw_sha256"]:
+            raise RegistryError("SIMNOW_LAB daily raw binding drifted")
+        raws[source["exchange"]] = raw
+    if set(raws) != {"SHFE", "INE"}:
+        raise RegistryError("SIMNOW_LAB daily raw exchange set is invalid")
+    return receipt, receipt_raw, raws
+
+
+def _backfill_daily_raw(context, history: dict) -> dict[str, dict[str, bytes]]:
+    result: dict[str, dict[str, bytes]] = {}
+    for expected in history["daily_receipts"]:
+        receipt_path = _safe_relative_path(
+            context.runtime.root,
+            expected["run_receipt_relative_path"],
+            "SIMNOW_LAB history receipt",
+        )
+        receipt_raw = read_regular_strict(receipt_path, "SIMNOW_LAB history receipt")
+        if sha256(receipt_raw) != expected["run_receipt_raw_sha256"]:
+            raise RegistryError("SIMNOW_LAB history receipt SHA256 drifted")
+        receipt = load_run_receipt(receipt_path)
+        if receipt["trade_day"] != expected["trade_day"]:
+            raise RegistryError("SIMNOW_LAB history receipt day differs")
+        sources: dict[str, bytes] = {}
+        for index, source in enumerate(receipt["sources"]):
+            raw = read_regular_strict(
+                _safe_relative_path(
+                    context.paths.root, source["raw_relative_path"], "SIMNOW_LAB history raw"
+                ),
+                "SIMNOW_LAB history raw",
+                limit=16 * 1024 * 1024,
             )
-        )
-        route = build_timely_experimental_route(
-            context=context,
-            official_day=trade_day,
-            contract_registry_path=projection.contract_registry_path,
-            expected_contract_registry_raw_sha256=projection.contract_registry_raw_sha256,
-            shfe_contract_parameters_path=projection.shfe_contract_parameters_path,
-            expected_shfe_contract_parameters_raw_sha256=(
-                projection.shfe_contract_parameters_raw_sha256
+            if (
+                len(raw) != expected["source_raw_bytes"][index]
+                or sha256(raw) != expected["source_raw_sha256"][index]
+                or len(raw) != source["raw_bytes"]
+                or sha256(raw) != source["raw_sha256"]
+            ):
+                raise RegistryError("SIMNOW_LAB history raw binding drifted")
+            sources[source["exchange"]] = raw
+        if set(sources) != {"SHFE", "INE"}:
+            raise RegistryError("SIMNOW_LAB history raw exchange set is invalid")
+        result[receipt["trade_day"]] = sources
+    if set(result) != set(history["official_days"]):
+        raise RegistryError("SIMNOW_LAB history raw days are incomplete")
+    return result
+
+
+def _daily_route(*, context, trade_day: str, receipt: dict, receipt_raw: bytes,
+                 daily_raw: dict[str, bytes], registry_raw: bytes, parameters) -> dict:
+    day = date.fromisoformat(trade_day)
+    execution_day, following_day = _following_official_days(context.calendar, day)
+    registry, registry_sha = _registry(registry_raw)
+    mains, _lineage = _mains(
+        context=context,
+        official_day=day,
+        execution_day=execution_day,
+        following_day=following_day,
+        daily_source_raw=daily_raw,
+        contract_registry=registry,
+        predecessor={product: "" for product in registry},
+        shfe_contract_parameters=parameters,
+    )
+    cutoff = _timely_cutoff(execution_day.isoformat())
+    return {
+        "schema_version": "daily-pit-route-v1",
+        "mains": [
+            {key: row[key] for key in ("product", "exchange", "exact_contract")}
+            for row in mains
+        ],
+        "metadata": {
+            "route_mode": ROUTE_MODE,
+            "strategy_output_claim": NOT_OFFICIAL_STRATEGY_OUTPUT,
+            "official_day": trade_day,
+            "execution_day": execution_day.isoformat(),
+            "execution_cutoff_utc": format_utc(cutoff, "SIMNOW route cutoff"),
+            "run_receipt_id": receipt["receipt_id"],
+            "run_receipt_raw_sha256": sha256(receipt_raw),
+            "contract_registry_raw_sha256": registry_sha,
+            "shfe_contract_parameters_raw_sha256": parameters.raw_sha256,
+            "shfe_contract_parameters_observed_at": format_utc(
+                parameters.observed_at, "SIMNOW ContractBaseInfo observed_at"
             ),
-            shfe_contract_parameters_observed_at=(
-                projection.shfe_contract_parameters_observed_at
-            ),
+            "production": False,
+            "live_trading_authorized": False,
+            "countable_forward": False,
+            "official_forward_claimed": False,
+        },
+    }
+
+
+def _precompute_exports(
+    context, trade_day: str, history_receipt_path: Path
+) -> tuple[bytes, bytes, bytes]:
+    try:
+        history, history_raw = _one_186_day_backfill(context, history_receipt_path)
+        source_month = _source_month_for_completed_day(context, trade_day)
+        daily_raw = _backfill_daily_raw(context, history)
+        state = _simnow_replay_state(history_raw)
+        operator_pins = {
+            "operator_state_raw_sha256": state.raw_sha256,
+            **{
+                field: state.payload[field]
+                for field in (
+                    "manifest_genesis_seal_sha256",
+                    "manifest_head_seal_sha256",
+                    "manifest_head_commit_seal_sha256",
+                    "commit_anchor_ledger_raw_sha256",
+                )
+            },
+        }
+        registry_raw = _frozen_contract_registry_raw()
+        static = build_historical_baseline(
+            calendar=context.calendar,
+            calendar_anchor_raw_sha256=context.availability.raw_sha256,
+            warehouse_registry_raw_sha256=context.registry.raw_sha256,
+            history_receipt=history,
+            history_receipt_raw_sha256=sha256(history_raw),
+            operator_pins=operator_pins,
+            daily_source_raw=daily_raw,
+            contract_registry_raw=registry_raw,
+            source_month=source_month,
+            signer_key_id="simnow-lab-placeholder",
+            execution_lane="simnow_shakedown",
         )
-        return static_output, thermostat_output, canonical_json_line(route)
+        thermostat = build_source_view(
+            calendar=context.calendar,
+            calendar_anchor=context.availability,
+            history_receipt=history,
+            history_receipt_sha256=sha256(history_raw),
+            operator_state=state,
+            daily_source_raw=daily_raw,
+            baseline_batch=__import__("json").loads(static.unsigned_batch_raw),
+            business_public_key=Ed25519PublicKey.from_public_bytes(bytes(32)),
+            expected_business_signer_key_id="simnow-lab-placeholder",
+            source_month=source_month,
+            previous_snapshot=None,
+            allow_simnow_placeholder_baseline=True,
+        )
+        daily_receipt, daily_receipt_raw, current_daily_raw = _completed_daily_raw(
+            context, trade_day
+        )
+        parameters_raw = read_regular_strict(
+            SIMNOW_LAB_CONTRACT_PARAMETERS,
+            "SIMNOW_LAB ContractBaseInfo evidence",
+            private=False,
+            limit=SIMNOW_LAB_SOURCE_MAX_BYTES,
+        )
+        if len(parameters_raw) != SIMNOW_LAB_CONTRACT_PARAMETERS_BYTES:
+            raise RegistryError("SIMNOW_LAB ContractBaseInfo byte count drifted")
+        parameters = evidence_from_pinned_raw(
+            observed_at=SIMNOW_LAB_CONTRACT_PARAMETERS_OBSERVED_AT,
+            raw=parameters_raw,
+            expected_raw_sha256=SIMNOW_LAB_CONTRACT_PARAMETERS_SHA256,
+        )
+        route = _daily_route(
+            context=context, trade_day=trade_day, receipt=daily_receipt,
+            receipt_raw=daily_receipt_raw, daily_raw=current_daily_raw,
+            registry_raw=registry_raw, parameters=parameters,
+        )
+        return static.source_view_raw, thermostat.source_view_raw, canonical_json_line(route)
     except RegistryError:
         raise
-    except (KeyError, TypeError, ValueError) as exc:
+    except (KeyError, TypeError, ValueError, OSError) as exc:
         raise RegistryError("SIMNOW_LAB export precompute failed") from exc
 
 
@@ -218,13 +403,15 @@ def _replace(path: Path, raw: bytes) -> None:
             pass
 
 
-def export_simnow_lab_inputs(*, context, daily_result: dict) -> None:
+def export_simnow_lab_inputs(
+    *, context, daily_result: dict, history_receipt_path: Path
+) -> None:
     if daily_result.get("status") not in {"OFFICIAL_DAY_COMPLETE", "ALREADY_COMPLETE"}:
         return
     trade_day = daily_result.get("trade_day")
     if not isinstance(trade_day, str):
         raise RegistryError("completed official day is invalid")
-    outputs = _precompute_exports(context, trade_day)
+    outputs = _precompute_exports(context, trade_day, history_receipt_path)
     root = _export_root()
     paths = tuple(root / name for name in SIMNOW_LAB_EXPORT_NAMES)
     current = tuple(_existing(path) for path in paths)
@@ -330,7 +517,29 @@ def main(argv: list[str] | None = None) -> int:
                 utc_clock=lambda: datetime.now(timezone.utc),
                 clock_provider=query_trusted_clock,
             )
-            export_simnow_lab_inputs(context=context, daily_result=result)
+            with operator_state_lock(args.operator_state, exclusive=False):
+                state = load_operator_state(args.operator_state)
+                history_result = run_history_backfill(
+                    paths=context.paths,
+                    runtime=context.runtime,
+                    registry=context.registry,
+                    calendar=context.calendar,
+                    availability=context.availability,
+                    through_trade_day=date.fromisoformat(result["trade_day"]),
+                    required_official_days=DEFAULT_HISTORY_DAYS,
+                    collector_version=context.runtime_input.payload[
+                        "collector_version"
+                    ],
+                    operator_state=state,
+                    clock_provider=query_trusted_clock,
+                    acquire=gated_acquire,
+                    utc_clock=lambda: datetime.now(timezone.utc),
+                )
+            export_simnow_lab_inputs(
+                context=context,
+                daily_result=result,
+                history_receipt_path=Path(history_result["backfill_receipt"]),
+            )
         else:
             request_gate = PersistentRequestGate(
                 context.runtime.root,

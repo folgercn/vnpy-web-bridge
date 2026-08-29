@@ -7,12 +7,14 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(ROOT / "scripts"))
 m5 = importlib.import_module("simnow_lab_m5_run_once")
 research_job = importlib.import_module("research_warehouse.m2_scheduler_cli")
+pit_source = importlib.import_module("research_warehouse.pit_source_view")
 
 
 def test_m5_produces_before_reusing_existing_run_once(
@@ -104,7 +106,10 @@ def test_research_export_atomic_write_is_idempotent_and_public_read_only(
     )
     monkeypatch.setattr(research_job, "_precompute_exports", lambda *_args: outputs)
     result = {"status": "OFFICIAL_DAY_COMPLETE", "trade_day": "2030-01-31"}
-    research_job.export_simnow_lab_inputs(context=object(), daily_result=result)
+    history = tmp_path / "history.json"
+    research_job.export_simnow_lab_inputs(
+        context=object(), daily_result=result, history_receipt_path=history
+    )
     paths = [
         research_job.SIMNOW_LAB_INPUT_DIRECTORY / name
         for name in research_job.SIMNOW_LAB_EXPORT_NAMES
@@ -113,12 +118,15 @@ def test_research_export_atomic_write_is_idempotent_and_public_read_only(
     assert [path.read_bytes() for path in paths] == list(outputs)
     assert all(stat.S_IMODE(path.stat().st_mode) == 0o644 for path in paths)
 
-    research_job.export_simnow_lab_inputs(context=object(), daily_result=result)
+    research_job.export_simnow_lab_inputs(
+        context=object(), daily_result=result, history_receipt_path=history
+    )
     assert [path.stat().st_mtime_ns for path in paths] == before
 
 
+@pytest.mark.parametrize("failure", ("history receipt failed", "route metadata failed"))
 def test_research_export_precomputes_all_inputs_before_replacing_old_files(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str
 ) -> None:
     export_root = tmp_path / "exports"
     export_root.mkdir(mode=0o755)
@@ -134,20 +142,39 @@ def test_research_export_precomputes_all_inputs_before_replacing_old_files(
         research_job,
         "_precompute_exports",
         lambda *_args: (_ for _ in ()).throw(
-            research_job.RegistryError("route failed")
+            research_job.RegistryError(failure)
         ),
     )
 
-    with pytest.raises(research_job.RegistryError, match="route failed"):
+    with pytest.raises(research_job.RegistryError, match=failure):
         research_job.export_simnow_lab_inputs(
             context=object(),
             daily_result={"status": "OFFICIAL_DAY_COMPLETE", "trade_day": "2030-01-31"},
+            history_receipt_path=tmp_path / "history.json",
         )
 
     assert {
         name: (export_root / name).read_bytes()
         for name in research_job.SIMNOW_LAB_EXPORT_NAMES
     } == old
+
+
+def test_placeholder_bypass_cannot_admit_official_forward_baseline() -> None:
+    with pytest.raises(pit_source.PitSourceViewError, match="placeholder baseline"):
+        pit_source.build_source_view(
+            calendar=None,
+            calendar_anchor=None,
+            history_receipt={},
+            history_receipt_sha256="a" * 64,
+            operator_state=None,
+            daily_source_raw={},
+            baseline_batch={"execution_lane": "official_forward"},
+            business_public_key=Ed25519PublicKey.from_public_bytes(bytes(32)),
+            expected_business_signer_key_id="simnow-lab-placeholder",
+            source_month="2030-01",
+            previous_snapshot=None,
+            allow_simnow_placeholder_baseline=True,
+        )
 
 
 def test_m5_rejects_stale_route_before_current_or_apply(tmp_path: Path) -> None:
