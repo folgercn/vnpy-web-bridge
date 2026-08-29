@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import stat
 import sys
 from datetime import datetime
@@ -15,6 +16,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 m5 = importlib.import_module("simnow_lab_m5_run_once")
 research_job = importlib.import_module("research_warehouse.m2_scheduler_cli")
 pit_source = importlib.import_module("research_warehouse.pit_source_view")
+pit_fixture = importlib.import_module("test_research_warehouse_pit_source_view")
+route_fixture = importlib.import_module("test_simnow_experimental_timely_daily_route")
+daily_fixture = importlib.import_module("test_research_warehouse_daily_pit_main_roll_source")
 
 
 def test_m5_produces_before_reusing_existing_run_once(
@@ -108,7 +112,8 @@ def test_research_export_atomic_write_is_idempotent_and_public_read_only(
     result = {"status": "OFFICIAL_DAY_COMPLETE", "trade_day": "2030-01-31"}
     history = tmp_path / "history.json"
     research_job.export_simnow_lab_inputs(
-        context=object(), daily_result=result, history_receipt_path=history
+        context=object(), daily_result=result, history_receipt_path=history,
+        operator_state=object(),
     )
     paths = [
         research_job.SIMNOW_LAB_INPUT_DIRECTORY / name
@@ -119,7 +124,8 @@ def test_research_export_atomic_write_is_idempotent_and_public_read_only(
     assert all(stat.S_IMODE(path.stat().st_mode) == 0o644 for path in paths)
 
     research_job.export_simnow_lab_inputs(
-        context=object(), daily_result=result, history_receipt_path=history
+        context=object(), daily_result=result, history_receipt_path=history,
+        operator_state=object(),
     )
     assert [path.stat().st_mtime_ns for path in paths] == before
 
@@ -151,6 +157,7 @@ def test_research_export_precomputes_all_inputs_before_replacing_old_files(
             context=object(),
             daily_result={"status": "OFFICIAL_DAY_COMPLETE", "trade_day": "2030-01-31"},
             history_receipt_path=tmp_path / "history.json",
+            operator_state=object(),
         )
 
     assert {
@@ -175,6 +182,71 @@ def test_placeholder_bypass_cannot_admit_official_forward_baseline() -> None:
             previous_snapshot=None,
             allow_simnow_placeholder_baseline=True,
         )
+
+
+def test_shakedown_placeholder_baseline_builds_thermostat_source() -> None:
+    calendar, history, daily_raw, key = pit_fixture._inputs()
+    baseline = pit_fixture._signed_baseline(key)
+    baseline["signature"] = pit_source.base64.b64encode(bytes(64)).decode("ascii")
+    built = pit_source.build_source_view(
+        calendar=calendar,
+        calendar_anchor=pit_fixture._TestAnchor(),
+        history_receipt=history,
+        history_receipt_sha256="3" * 64,
+        operator_state=pit_fixture._operator_state(),
+        daily_source_raw=daily_raw,
+        baseline_batch=baseline,
+        business_public_key=key.public_key(),
+        expected_business_signer_key_id=pit_fixture.SIGNER_KEY_ID,
+        source_month="2026-07",
+        previous_snapshot=None,
+        allow_simnow_placeholder_baseline=True,
+    )
+    assert json.loads(built.source_view_raw)["baseline_batch"]["execution_lane"] == "simnow_shakedown"
+
+
+def test_official_forward_bad_signature_still_uses_default_rejection() -> None:
+    calendar, history, daily_raw, key = pit_fixture._inputs()
+    baseline = pit_fixture._signed_baseline(key)
+    baseline["execution_lane"] = "official_forward"
+    with pytest.raises(pit_source.PitSourceViewError, match="signature is invalid"):
+        pit_source.build_source_view(
+            calendar=calendar,
+            calendar_anchor=pit_fixture._TestAnchor(),
+            history_receipt=history,
+            history_receipt_sha256="3" * 64,
+            operator_state=pit_fixture._operator_state(),
+            daily_source_raw=daily_raw,
+            baseline_batch=baseline,
+            business_public_key=key.public_key(),
+            expected_business_signer_key_id=pit_fixture.SIGNER_KEY_ID,
+            source_month="2026-07",
+            previous_snapshot=None,
+        )
+
+
+def test_daily_route_contains_exactly_ten_contracts(tmp_path: Path) -> None:
+    inputs = daily_fixture._inputs()
+    receipt = json.loads(inputs["run_receipt_raw"])
+    parameter_raw = route_fixture._shfe_parameter_raw(
+        query_day="2026-08-18", delivery="2610"
+    )
+    parameters = research_job.evidence_from_pinned_raw(
+        observed_at="2026-08-19T01:00:00.000000Z",
+        raw=parameter_raw,
+        expected_raw_sha256=research_job.sha256(parameter_raw),
+    )
+    route = research_job._daily_route(
+        context=route_fixture._context(tmp_path, inputs["calendar"]),
+        trade_day="2026-08-18",
+        receipt=receipt,
+        receipt_raw=inputs["run_receipt_raw"],
+        daily_raw=inputs["daily_source_raw"],
+        registry_raw=inputs["contract_registry_raw"],
+        parameters=parameters,
+    )
+    assert len(route["mains"]) == 10
+    assert all(row["exact_contract"] for row in route["mains"])
 
 
 def test_m5_rejects_stale_route_before_current_or_apply(tmp_path: Path) -> None:

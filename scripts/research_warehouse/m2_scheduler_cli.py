@@ -10,10 +10,12 @@ import tempfile
 from datetime import date, datetime, timezone
 from functools import partial
 from pathlib import Path
-from types import SimpleNamespace
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from simnow_experimental_materialize_target import NOT_OFFICIAL_STRATEGY_OUTPUT
+from simnow_experimental_materialize_target import (
+    NOT_OFFICIAL_STRATEGY_OUTPUT,
+    _daily_routes,
+)
 from simnow_experimental_timely_daily_route import ROUTE_MODE, _timely_cutoff
 
 from .acquisition import acquire_daily
@@ -129,23 +131,6 @@ def _frozen_contract_registry_raw() -> bytes:
             "products": products,
             "authority": false_authority(),
         }
-    )
-
-
-def _simnow_replay_state(history_raw: bytes) -> SimpleNamespace:
-    names = (
-        "operator_state_raw_sha256",
-        "manifest_genesis_seal_sha256",
-        "manifest_head_seal_sha256",
-        "manifest_head_commit_seal_sha256",
-        "commit_anchor_ledger_raw_sha256",
-    )
-    payload = {
-        name: sha256(canonical_json_line({"name": name, "history": sha256(history_raw)}))
-        for name in names
-    }
-    return SimpleNamespace(
-        raw_sha256=payload["operator_state_raw_sha256"], payload=payload
     )
 
 
@@ -266,13 +251,13 @@ def _daily_route(*, context, trade_day: str, receipt: dict, receipt_raw: bytes,
 
 
 def _precompute_exports(
-    context, trade_day: str, history_receipt_path: Path
+    context, trade_day: str, history_receipt_path: Path, operator_state
 ) -> tuple[bytes, bytes, bytes]:
     try:
         history, history_raw = _one_186_day_backfill(context, history_receipt_path)
         source_month = _source_month_for_completed_day(context, trade_day)
         daily_raw = _backfill_daily_raw(context, history)
-        state = _simnow_replay_state(history_raw)
+        state = operator_state
         operator_pins = {
             "operator_state_raw_sha256": state.raw_sha256,
             **{
@@ -334,6 +319,7 @@ def _precompute_exports(
             receipt_raw=daily_receipt_raw, daily_raw=current_daily_raw,
             registry_raw=registry_raw, parameters=parameters,
         )
+        _daily_routes(route)
         return static.source_view_raw, thermostat.source_view_raw, canonical_json_line(route)
     except RegistryError:
         raise
@@ -404,14 +390,16 @@ def _replace(path: Path, raw: bytes) -> None:
 
 
 def export_simnow_lab_inputs(
-    *, context, daily_result: dict, history_receipt_path: Path
+    *, context, daily_result: dict, history_receipt_path: Path, operator_state
 ) -> None:
     if daily_result.get("status") not in {"OFFICIAL_DAY_COMPLETE", "ALREADY_COMPLETE"}:
         return
     trade_day = daily_result.get("trade_day")
     if not isinstance(trade_day, str):
         raise RegistryError("completed official day is invalid")
-    outputs = _precompute_exports(context, trade_day, history_receipt_path)
+    outputs = _precompute_exports(
+        context, trade_day, history_receipt_path, operator_state
+    )
     root = _export_root()
     paths = tuple(root / name for name in SIMNOW_LAB_EXPORT_NAMES)
     current = tuple(_existing(path) for path in paths)
@@ -519,6 +507,14 @@ def main(argv: list[str] | None = None) -> int:
             )
             with operator_state_lock(args.operator_state, exclusive=False):
                 state = load_operator_state(args.operator_state)
+                history_gate = RequestGate(args.minimum_request_interval_seconds)
+                history_acquire = retrying_acquirer(
+                    gated_acquire,
+                    clock_provider=query_trusted_clock,
+                    request_gate=history_gate,
+                    maximum_attempts=args.maximum_attempts,
+                    initial_backoff_seconds=args.initial_backoff_seconds,
+                )
                 history_result = run_history_backfill(
                     paths=context.paths,
                     runtime=context.runtime,
@@ -532,13 +528,14 @@ def main(argv: list[str] | None = None) -> int:
                     ],
                     operator_state=state,
                     clock_provider=query_trusted_clock,
-                    acquire=gated_acquire,
+                    acquire=history_acquire,
                     utc_clock=lambda: datetime.now(timezone.utc),
                 )
             export_simnow_lab_inputs(
                 context=context,
                 daily_result=result,
                 history_receipt_path=Path(history_result["backfill_receipt"]),
+                operator_state=state,
             )
         else:
             request_gate = PersistentRequestGate(
