@@ -66,9 +66,15 @@ def source_month_from_input(path: Path) -> str:
         value, _raw = materializer.read_json_stable(path, label="monthly thermostat source")
     except materializer.ExperimentalTargetError as exc:
         raise SimNowLabM5Error(str(exc)) from exc
-    month = value.get("source_month")
+    baseline = value.get("baseline_batch")
+    if not isinstance(baseline, dict):
+        raise SimNowLabM5Error("monthly thermostat baseline_batch is invalid")
+    month = baseline.get("source_month")
     if not isinstance(month, str) or _MONTH.fullmatch(month) is None:
         raise SimNowLabM5Error("monthly thermostat source_month is invalid")
+    top_level = value.get("source_month")
+    if top_level is not None and top_level != month:
+        raise SimNowLabM5Error("monthly thermostat source_month differs")
     return month
 
 

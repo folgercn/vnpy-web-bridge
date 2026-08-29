@@ -26,7 +26,9 @@ def test_m5_produces_before_reusing_existing_run_once(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     thermostat = tmp_path / "thermostat.json"
-    thermostat.write_text('{"source_month":"2030-01"}\n', encoding="utf-8")
+    thermostat.write_text(
+        '{"baseline_batch":{"source_month":"2030-01"}}\n', encoding="utf-8"
+    )
     calls: list[object] = []
 
     def produce(**kwargs: object) -> dict[str, object]:
@@ -82,6 +84,24 @@ def test_m5_invalid_producer_input_stops_before_materialize_or_apply(
     )
     assert calls == []
     assert target.read_bytes() == b"last-valid-target\n"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {},
+        {"baseline_batch": {}},
+        {"source_month": "2030-02", "baseline_batch": {"source_month": "2030-01"}},
+    ),
+)
+def test_m5_rejects_missing_or_inconsistent_thermostat_source_month(
+    tmp_path: Path, payload: dict[str, object]
+) -> None:
+    source = tmp_path / "thermostat.json"
+    source.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(m5.SimNowLabM5Error):
+        m5.source_month_from_input(source)
 
 
 def test_m5_launch_agent_has_one_calendar_runner_without_target_watch() -> None:
