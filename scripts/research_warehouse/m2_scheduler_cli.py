@@ -72,6 +72,22 @@ SIMNOW_LAB_CONTRACT_PARAMETERS_BYTES = 80997
 SIMNOW_LAB_CONTRACT_PARAMETERS_OBSERVED_AT = "2026-08-29T04:55:44.297413Z"
 
 
+def _completed_trade_day(result: object) -> str | None:
+    if not isinstance(result, dict) or result.get("status") not in {
+        "OFFICIAL_DAY_COMPLETE",
+        "ALREADY_COMPLETE",
+    }:
+        return None
+    value = result.get("trade_day")
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        return None
+    return value if parsed.isoformat() == value else None
+
+
 def _source_month_for_completed_day(context, trade_day: str) -> str:
     try:
         current = date.fromisoformat(trade_day)
@@ -505,38 +521,40 @@ def main(argv: list[str] | None = None) -> int:
                 utc_clock=lambda: datetime.now(timezone.utc),
                 clock_provider=query_trusted_clock,
             )
-            with operator_state_lock(args.operator_state, exclusive=False):
-                state = load_operator_state(args.operator_state)
-                history_gate = RequestGate(args.minimum_request_interval_seconds)
-                history_acquire = retrying_acquirer(
-                    gated_acquire,
-                    clock_provider=query_trusted_clock,
-                    request_gate=history_gate,
-                    maximum_attempts=args.maximum_attempts,
-                    initial_backoff_seconds=args.initial_backoff_seconds,
-                )
-                history_result = run_history_backfill(
-                    paths=context.paths,
-                    runtime=context.runtime,
-                    registry=context.registry,
-                    calendar=context.calendar,
-                    availability=context.availability,
-                    through_trade_day=date.fromisoformat(result["trade_day"]),
-                    required_official_days=DEFAULT_HISTORY_DAYS,
-                    collector_version=context.runtime_input.payload[
-                        "collector_version"
-                    ],
+            trade_day = _completed_trade_day(result)
+            if trade_day is not None:
+                with operator_state_lock(args.operator_state, exclusive=False):
+                    state = load_operator_state(args.operator_state)
+                    history_gate = RequestGate(args.minimum_request_interval_seconds)
+                    history_acquire = retrying_acquirer(
+                        gated_acquire,
+                        clock_provider=query_trusted_clock,
+                        request_gate=history_gate,
+                        maximum_attempts=args.maximum_attempts,
+                        initial_backoff_seconds=args.initial_backoff_seconds,
+                    )
+                    history_result = run_history_backfill(
+                        paths=context.paths,
+                        runtime=context.runtime,
+                        registry=context.registry,
+                        calendar=context.calendar,
+                        availability=context.availability,
+                        through_trade_day=date.fromisoformat(trade_day),
+                        required_official_days=DEFAULT_HISTORY_DAYS,
+                        collector_version=context.runtime_input.payload[
+                            "collector_version"
+                        ],
+                        operator_state=state,
+                        clock_provider=query_trusted_clock,
+                        acquire=history_acquire,
+                        utc_clock=lambda: datetime.now(timezone.utc),
+                    )
+                export_simnow_lab_inputs(
+                    context=context,
+                    daily_result=result,
+                    history_receipt_path=Path(history_result["backfill_receipt"]),
                     operator_state=state,
-                    clock_provider=query_trusted_clock,
-                    acquire=history_acquire,
-                    utc_clock=lambda: datetime.now(timezone.utc),
                 )
-            export_simnow_lab_inputs(
-                context=context,
-                daily_result=result,
-                history_receipt_path=Path(history_result["backfill_receipt"]),
-                operator_state=state,
-            )
         else:
             request_gate = PersistentRequestGate(
                 context.runtime.root,

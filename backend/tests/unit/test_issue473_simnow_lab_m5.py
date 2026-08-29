@@ -6,6 +6,7 @@ import stat
 import sys
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -128,6 +129,40 @@ def test_research_export_atomic_write_is_idempotent_and_public_read_only(
         operator_state=object(),
     )
     assert [path.stat().st_mtime_ns for path in paths] == before
+
+
+def test_noncompleted_daily_result_does_not_roll_history_or_export(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    context = SimpleNamespace(
+        runtime=SimpleNamespace(root=Path("/unused")),
+        paths=object(), registry=object(), calendar=object(),
+        availability=object(), runtime_input=SimpleNamespace(
+            payload={"collector_version": "test"}
+        ),
+    )
+    monkeypatch.setattr(research_job, "load_runtime_context", lambda _path: context)
+    monkeypatch.setattr(
+        research_job,
+        "PersistentRequestGate",
+        lambda *_args, **_kwargs: SimpleNamespace(request=lambda **_kwargs: None),
+    )
+    monkeypatch.setattr(
+        research_job, "query_trusted_clock", lambda: SimpleNamespace()
+    )
+    monkeypatch.setattr(
+        research_job, "run_daily", lambda **_kwargs: {"status": "NO_OFFICIAL_DAY"}
+    )
+    monkeypatch.setattr(
+        research_job, "run_history_backfill", lambda **_kwargs: calls.append("history")
+    )
+    monkeypatch.setattr(
+        research_job, "export_simnow_lab_inputs", lambda **_kwargs: calls.append("export")
+    )
+
+    assert research_job.main([]) == 0
+    assert calls == []
 
 
 @pytest.mark.parametrize("failure", ("history receipt failed", "route metadata failed"))
