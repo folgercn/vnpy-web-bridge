@@ -105,6 +105,41 @@ def run_monthly_once(
     return value
 
 
+def require_candidate_bindings(
+    *, source_month: str, monthly_bundles: Path, daily_route: Path, target: Path
+) -> None:
+    """Reject a candidate whose recorded input bytes are no longer current."""
+
+    try:
+        candidate, candidate_raw = materializer.read_json_stable(
+            target, label="candidate experimental target"
+        )
+        candidate = materializer.validate_target(candidate, raw=candidate_raw)
+        bundle, bundle_raw = materializer.read_json_stable(
+            monthly_bundles / f"{source_month}.json", label="monthly planner bundle"
+        )
+        if bundle_raw != materializer.canonical_json_line(bundle):
+            raise SimNowLabM5Error("monthly planner bundle is not canonical")
+        bundle = materializer.validate_planner_bundle(bundle)
+        route, route_raw = materializer.read_json_stable(
+            daily_route, label="daily PIT route"
+        )
+        if route_raw != materializer.canonical_json_line(route):
+            raise SimNowLabM5Error("daily PIT route is not canonical")
+        materializer._daily_routes(route)
+    except SimNowLabM5Error:
+        raise
+    except (KeyError, TypeError, ValueError, materializer.ExperimentalTargetError) as exc:
+        raise SimNowLabM5Error("candidate target binding is invalid") from exc
+    if (
+        candidate["source_month"] != source_month
+        or bundle["source_month"] != source_month
+        or candidate["monthly_quantity_sha256"] != materializer._sha256(bundle_raw)
+        or candidate["daily_route_sha256"] != materializer._sha256(route_raw)
+    ):
+        raise SimNowLabM5Error("candidate target does not bind current inputs")
+
+
 def run_once(
     *,
     static_source: Path = STATIC_SOURCE,
@@ -120,6 +155,12 @@ def run_once(
         source_month=source_month, static_source=static_source,
         thermostat_source=thermostat_source, daily_route=daily_route,
         monthly_bundles=monthly_bundles, target=target,
+    )
+    require_candidate_bindings(
+        source_month=source_month,
+        monthly_bundles=monthly_bundles,
+        daily_route=daily_route,
+        target=target,
     )
     print(json.dumps(produced, sort_keys=True))
     return lab_cli.main(["run-once", "--input", str(target), "--output", str(lab_target)])

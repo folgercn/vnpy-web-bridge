@@ -20,6 +20,7 @@ pit_source = importlib.import_module("research_warehouse.pit_source_view")
 pit_fixture = importlib.import_module("test_research_warehouse_pit_source_view")
 route_fixture = importlib.import_module("test_simnow_experimental_timely_daily_route")
 daily_fixture = importlib.import_module("test_research_warehouse_daily_pit_main_roll_source")
+target_fixture = importlib.import_module("test_simnow_experimental_target")
 
 
 def test_m5_produces_before_reusing_existing_run_once(
@@ -38,6 +39,9 @@ def test_m5_produces_before_reusing_existing_run_once(
     monkeypatch.setattr(m5, "run_monthly_once", produce)
     monkeypatch.setattr(m5.lab_cli, "main", lambda args: calls.append(args) or 0)
     monkeypatch.setattr(m5, "require_fresh_daily_route", lambda _path: None)
+    monkeypatch.setattr(
+        m5, "require_candidate_bindings", lambda **_kwargs: calls.append("binding")
+    )
 
     assert (
         m5.run_once(
@@ -51,13 +55,69 @@ def test_m5_produces_before_reusing_existing_run_once(
         == 0
     )
     assert calls[0]["source_month"] == "2030-01"
-    assert calls[1] == [
+    assert calls[1] == "binding"
+    assert calls[2] == [
         "run-once",
         "--input",
         str(tmp_path / "target.json"),
         "--output",
         str(tmp_path / "lab-target.json"),
     ]
+
+
+def _binding_paths(tmp_path: Path) -> tuple[Path, Path, Path, str]:
+    bundle = target_fixture._bundle()
+    route = target_fixture._route(bundle)
+    source_month = bundle["source_month"]
+    bundle_raw = m5.materializer.canonical_json_line(bundle)
+    route_raw = m5.materializer.canonical_json_line(route)
+    target = m5.materializer.materialize_target(
+        planner_bundle=bundle,
+        planner_bundle_raw=bundle_raw,
+        daily_route=route,
+        daily_route_raw=route_raw,
+        generated_at="2030-01-01T00:00:00Z",
+    )
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / f"{source_month}.json").write_bytes(bundle_raw)
+    route_path = tmp_path / "route.json"
+    route_path.write_bytes(route_raw)
+    target_path = tmp_path / "target.json"
+    target_path.write_bytes(m5.materializer.canonical_json_line(target))
+    return bundles, route_path, target_path, source_month
+
+
+def test_m5_candidate_binding_accepts_current_monthly_bundle_and_route(
+    tmp_path: Path,
+) -> None:
+    bundles, route, target, source_month = _binding_paths(tmp_path)
+
+    m5.require_candidate_bindings(
+        source_month=source_month,
+        monthly_bundles=bundles,
+        daily_route=route,
+        target=target,
+    )
+
+
+@pytest.mark.parametrize("field", ("monthly_quantity_sha256", "daily_route_sha256"))
+def test_m5_candidate_binding_rejects_coherent_hash_tamper_before_cli(
+    tmp_path: Path, field: str
+) -> None:
+    bundles, route, target_path, source_month = _binding_paths(tmp_path)
+    tampered = json.loads(target_path.read_bytes())
+    tampered[field] = "0" * 64
+    tampered["target_id"] = m5.materializer._target_id(tampered)
+    target_path.write_bytes(m5.materializer.canonical_json_line(tampered))
+
+    with pytest.raises(m5.SimNowLabM5Error, match="does not bind"):
+        m5.require_candidate_bindings(
+            source_month=source_month,
+            monthly_bundles=bundles,
+            daily_route=route,
+            target=target_path,
+        )
 
 
 def test_m5_invalid_producer_input_stops_before_materialize_or_apply(
