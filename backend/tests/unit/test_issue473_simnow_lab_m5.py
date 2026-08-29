@@ -165,6 +165,42 @@ def test_noncompleted_daily_result_does_not_roll_history_or_export(
     assert calls == []
 
 
+def test_completed_daily_result_without_trade_day_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    context = SimpleNamespace(
+        runtime=SimpleNamespace(root=Path("/unused")),
+        paths=object(), registry=object(), calendar=object(),
+        availability=object(), runtime_input=SimpleNamespace(
+            payload={"collector_version": "test"}
+        ),
+    )
+    monkeypatch.setattr(research_job, "load_runtime_context", lambda _path: context)
+    monkeypatch.setattr(
+        research_job,
+        "PersistentRequestGate",
+        lambda *_args, **_kwargs: SimpleNamespace(request=lambda **_kwargs: None),
+    )
+    monkeypatch.setattr(
+        research_job, "query_trusted_clock", lambda: SimpleNamespace()
+    )
+    monkeypatch.setattr(
+        research_job,
+        "run_daily",
+        lambda **_kwargs: {"status": "OFFICIAL_DAY_COMPLETE"},
+    )
+    monkeypatch.setattr(
+        research_job, "run_history_backfill", lambda **_kwargs: calls.append("history")
+    )
+    monkeypatch.setattr(
+        research_job, "export_simnow_lab_inputs", lambda **_kwargs: calls.append("export")
+    )
+
+    assert research_job.main([]) == 2
+    assert calls == []
+
+
 @pytest.mark.parametrize("failure", ("history receipt failed", "route metadata failed"))
 def test_research_export_precomputes_all_inputs_before_replacing_old_files(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str

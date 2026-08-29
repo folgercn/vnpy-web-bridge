@@ -80,12 +80,14 @@ def _completed_trade_day(result: object) -> str | None:
         return None
     value = result.get("trade_day")
     if not isinstance(value, str):
-        return None
+        raise RegistryError("completed official day is missing")
     try:
         parsed = date.fromisoformat(value)
-    except ValueError:
-        return None
-    return value if parsed.isoformat() == value else None
+    except ValueError as exc:
+        raise RegistryError("completed official day is invalid") from exc
+    if parsed.isoformat() != value:
+        raise RegistryError("completed official day is invalid")
+    return value
 
 
 def _source_month_for_completed_day(context, trade_day: str) -> str:
