@@ -49,7 +49,10 @@ from .pit_source_view import (
     _safe_relative_path,
     build_source_view,
 )
-from .shfe_contract_parameters import evidence_from_pinned_raw
+from .shfe_contract_parameters import (
+    ShfeContractParameterEvidence,
+    evidence_from_pinned_raw,
+)
 from .simnow_lab_monthly_preopen import (
     STATIC_SCHEMA as SIMNOW_LAB_PREOPEN_STATIC_SCHEMA,
 )
@@ -212,6 +215,22 @@ def _frozen_contract_registry_raw() -> bytes:
     )
 
 
+def _simnow_lab_contract_parameter_evidence() -> ShfeContractParameterEvidence:
+    parameters_raw = read_regular_strict(
+        SIMNOW_LAB_CONTRACT_PARAMETERS,
+        "SIMNOW_LAB ContractBaseInfo evidence",
+        private=False,
+        limit=SIMNOW_LAB_SOURCE_MAX_BYTES,
+    )
+    if len(parameters_raw) != SIMNOW_LAB_CONTRACT_PARAMETERS_BYTES:
+        raise RegistryError("SIMNOW_LAB ContractBaseInfo byte count drifted")
+    return evidence_from_pinned_raw(
+        observed_at=SIMNOW_LAB_CONTRACT_PARAMETERS_OBSERVED_AT,
+        raw=parameters_raw,
+        expected_raw_sha256=SIMNOW_LAB_CONTRACT_PARAMETERS_SHA256,
+    )
+
+
 def _one_186_day_backfill(context, path: Path):
     receipt = load_backfill_receipt(path, expected_owner_uid=context.policy.uid)
     if (
@@ -336,19 +355,7 @@ def _precompute_daily_route_export(context, trade_day: str) -> bytes:
             context, trade_day
         )
         registry_raw = _frozen_contract_registry_raw()
-        parameters_raw = read_regular_strict(
-            SIMNOW_LAB_CONTRACT_PARAMETERS,
-            "SIMNOW_LAB ContractBaseInfo evidence",
-            private=False,
-            limit=SIMNOW_LAB_SOURCE_MAX_BYTES,
-        )
-        if len(parameters_raw) != SIMNOW_LAB_CONTRACT_PARAMETERS_BYTES:
-            raise RegistryError("SIMNOW_LAB ContractBaseInfo byte count drifted")
-        parameters = evidence_from_pinned_raw(
-            observed_at=SIMNOW_LAB_CONTRACT_PARAMETERS_OBSERVED_AT,
-            raw=parameters_raw,
-            expected_raw_sha256=SIMNOW_LAB_CONTRACT_PARAMETERS_SHA256,
-        )
+        parameters = _simnow_lab_contract_parameter_evidence()
         route = _daily_route(
             context=context,
             trade_day=trade_day,
@@ -377,6 +384,7 @@ def _precompute_monthly_preopen_exports(
             raise RegistryError("SIMNOW_LAB preopen is only valid at a source-month close")
         history, history_raw = _one_186_day_backfill(context, history_receipt_path)
         daily_raw = _backfill_daily_raw(context, history)
+        parameters = _simnow_lab_contract_parameter_evidence()
         state = operator_state
         operator_pins = {
             "operator_state_raw_sha256": state.raw_sha256,
@@ -400,6 +408,7 @@ def _precompute_monthly_preopen_exports(
             daily_source_raw=daily_raw,
             contract_registry_raw=_frozen_contract_registry_raw(),
             source_month=source_month,
+            shfe_contract_parameters=parameters,
         )
         return built.static_raw, built.thermostat_raw
     except RegistryError:
@@ -459,19 +468,7 @@ def _precompute_exports(
         daily_receipt, daily_receipt_raw, current_daily_raw = _completed_daily_raw(
             context, trade_day
         )
-        parameters_raw = read_regular_strict(
-            SIMNOW_LAB_CONTRACT_PARAMETERS,
-            "SIMNOW_LAB ContractBaseInfo evidence",
-            private=False,
-            limit=SIMNOW_LAB_SOURCE_MAX_BYTES,
-        )
-        if len(parameters_raw) != SIMNOW_LAB_CONTRACT_PARAMETERS_BYTES:
-            raise RegistryError("SIMNOW_LAB ContractBaseInfo byte count drifted")
-        parameters = evidence_from_pinned_raw(
-            observed_at=SIMNOW_LAB_CONTRACT_PARAMETERS_OBSERVED_AT,
-            raw=parameters_raw,
-            expected_raw_sha256=SIMNOW_LAB_CONTRACT_PARAMETERS_SHA256,
-        )
+        parameters = _simnow_lab_contract_parameter_evidence()
         route = _daily_route(
             context=context, trade_day=trade_day, receipt=daily_receipt,
             receipt_raw=daily_receipt_raw, daily_raw=current_daily_raw,

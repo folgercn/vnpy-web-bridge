@@ -85,6 +85,7 @@ jobs:
       - name: Install focused dependencies
         run: |
           pip install -r scripts/ci/requirements-quick.txt
+          pip install fastapi==0.115.6 pydantic-settings==2.7.1 python-dotenv==1.0.1 httpx==0.28.1
           pip install pyzmq==27.1.0 vnpy==4.4.0 --no-deps
 
       - name: Run M2 producer and SIMNOW_LAB focused tests
@@ -99,6 +100,7 @@ jobs:
             backend/tests/unit/test_simnow_experimental_timely_daily_route.py::test_stdout_route_mode_keeps_stop_payload_off_stdout \
             backend/tests/unit/test_issue462_simnow_lab_cli.py \
             backend/tests/unit/test_issue462_simnow_lab_m1.py \
+            backend/tests/unit/test_issue473_simnow_lab_m5.py \
             backend/tests/unit/test_windows_rpc_simnow_e2e_v1.py
 
   simnow-lab-windows:

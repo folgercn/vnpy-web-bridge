@@ -20,6 +20,9 @@ m5 = importlib.import_module("simnow_lab_m5_run_once")
 research_job = importlib.import_module("research_warehouse.m2_scheduler_cli")
 pit_source = importlib.import_module("research_warehouse.pit_source_view")
 preopen = importlib.import_module("research_warehouse.simnow_lab_monthly_preopen")
+shfe_parameters = importlib.import_module(
+    "research_warehouse.shfe_contract_parameters"
+)
 pit_fixture = importlib.import_module("test_research_warehouse_pit_source_view")
 route_fixture = importlib.import_module("test_simnow_experimental_timely_daily_route")
 daily_fixture = importlib.import_module("test_research_warehouse_daily_pit_main_roll_source")
@@ -550,6 +553,60 @@ def test_research_export_atomic_write_is_idempotent_and_public_read_only(
     assert paths[2].stat().st_mtime_ns == before
 
 
+def test_monthly_preopen_scheduler_passes_pinned_shfe_expiry_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    evidence = object()
+    captured: dict[str, object] = {}
+    state = SimpleNamespace(
+        raw_sha256="4" * 64,
+        payload={
+            "manifest_genesis_seal_sha256": "5" * 64,
+            "manifest_head_seal_sha256": "6" * 64,
+            "manifest_head_commit_seal_sha256": "7" * 64,
+            "commit_anchor_ledger_raw_sha256": "8" * 64,
+        },
+    )
+    monkeypatch.setattr(
+        research_job,
+        "_preopen_source_month_for_completed_day",
+        lambda *_args: "2026-08",
+    )
+    monkeypatch.setattr(
+        research_job,
+        "_one_186_day_backfill",
+        lambda *_args: ({"official_days": []}, b"history"),
+    )
+    monkeypatch.setattr(research_job, "_backfill_daily_raw", lambda *_args: {})
+    monkeypatch.setattr(
+        research_job,
+        "_simnow_lab_contract_parameter_evidence",
+        lambda: evidence,
+    )
+    monkeypatch.setattr(
+        research_job,
+        "_frozen_contract_registry_raw",
+        lambda: b"registry",
+    )
+
+    def build(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return SimpleNamespace(static_raw=b"static", thermostat_raw=b"thermostat")
+
+    monkeypatch.setattr(research_job, "build_monthly_preopen", build)
+    context = SimpleNamespace(
+        calendar=object(),
+        availability=SimpleNamespace(raw_sha256="2" * 64),
+        registry=SimpleNamespace(raw_sha256="1" * 64),
+    )
+    assert research_job._precompute_monthly_preopen_exports(
+        context, "2026-08-31", tmp_path / "history.json", state
+    ) == (b"static", b"thermostat")
+    assert captured["source_month"] == "2026-08"
+    assert captured["shfe_contract_parameters"] is evidence
+
+
 def _monthly_preopen_inputs() -> tuple[object, dict, dict, bytes]:
     calendar, history, daily_raw, _key = pit_fixture._inputs()
     rows = dict(calendar.days)
@@ -586,6 +643,147 @@ def _monthly_preopen_inputs() -> tuple[object, dict, dict, bytes]:
             adjusted_daily_raw[raw_day][exchange] = preopen.canonical_json(payload)
     daily_raw = adjusted_daily_raw
     return calendar, history, daily_raw, research_job._frozen_contract_registry_raw()
+
+
+def _extend_calendar(calendar, extended_to: date):
+    rows = dict(calendar.days)
+    current = calendar.valid_to + timedelta(days=1)
+    while current <= extended_to:
+        rows[current] = calendar_models.CalendarDay(
+            day=current,
+            status="OFFICIAL_DAY" if current.weekday() < 5 else "CLOSED",
+            evening_session_natural_date=None,
+        )
+        current += timedelta(days=1)
+    return calendar_models.OfficialCalendar.create(
+        calendar_id=calendar.calendar_id,
+        raw_sha256=calendar.raw_sha256,
+        valid_from=calendar.valid_from,
+        valid_to=extended_to,
+        issued_at=calendar.issued_at,
+        exchanges=calendar.exchanges,
+        days=rows,
+        source_evidence=calendar.source_evidence,
+        source_evidence_root=calendar.source_evidence_root,
+    )
+
+
+def _shfe_parameter_evidence(
+    *,
+    report_day: date,
+    expiry_by_instrument: dict[str, str],
+):
+    raw = preopen.canonical_json(
+        {
+            "ContractBaseInfo": [
+                {
+                    "INSTRUMENTID": instrument,
+                    "EXCHANGEID": "SHFE",
+                    "COMMODITYID": instrument[:-4],
+                    "TRADINGDAY": report_day.strftime("%Y%m%d"),
+                    "EXPIREDATE": expiry,
+                }
+                for instrument, expiry in sorted(expiry_by_instrument.items())
+            ],
+            "report_date": report_day.strftime("%Y%m%d"),
+            "update_date": f"{report_day:%Y%m%d} 16:20:09",
+        }
+    )
+    return shfe_parameters.evidence_from_raw(
+        query_day=report_day,
+        observed_at=(report_day + timedelta(days=1)).strftime(
+            "%Y-%m-%dT01:00:00.000000Z"
+        ),
+        raw=raw,
+        expected_raw_sha256=preopen.sha256(raw),
+    )
+
+
+def test_monthly_preopen_bridges_january_delivery_beyond_calendar_horizon() -> None:
+    calendar, history, daily_raw, registry_raw = _monthly_preopen_inputs()
+    calendar = _extend_calendar(calendar, date(2026, 12, 31))
+    remapped: dict[str, dict[str, bytes]] = {}
+    delivery_map = {"2608": "2701", "2701": "2702", "2702": "2703"}
+    for raw_day, sources in daily_raw.items():
+        remapped[raw_day] = {}
+        for exchange, raw in sources.items():
+            payload = json.loads(raw)
+            if exchange == "SHFE":
+                for row in payload["o_curinstrument"]:
+                    row["DELIVERYMONTH"] = delivery_map.get(
+                        row["DELIVERYMONTH"], row["DELIVERYMONTH"]
+                    )
+            remapped[raw_day][exchange] = preopen.canonical_json(payload)
+    shfe_products = [
+        product
+        for product in m5.preopen_join.cfast.PRODUCTS
+        if m5.preopen_join.cfast.PRODUCT_SPECS[product]["exchange"] == "SHFE"
+    ]
+    evidence = _shfe_parameter_evidence(
+        report_day=date(2026, 7, 31),
+        expiry_by_instrument={
+            f"{product}{delivery}": expiry
+            for product in shfe_products
+            for delivery, expiry in (
+                ("2701", "20270115"),
+                ("2702", "20270215"),
+                ("2703", "20270315"),
+            )
+        },
+    )
+    kwargs = {
+        "calendar": calendar,
+        "calendar_anchor_raw_sha256": "2" * 64,
+        "warehouse_registry_raw_sha256": "1" * 64,
+        "history_receipt": history,
+        "history_receipt_raw_sha256": "3" * 64,
+        "operator_pins": {"operator_state_raw_sha256": "4" * 64},
+        "daily_source_raw": remapped,
+        "contract_registry_raw": registry_raw,
+        "source_month": "2026-07",
+    }
+    with pytest.raises(
+        pit_source.PitSourceViewError,
+        match="expiry evidence is required outside calendar coverage",
+    ):
+        preopen.build_monthly_preopen(**kwargs)
+
+    built = preopen.build_monthly_preopen(
+        **kwargs,
+        shfe_contract_parameters=evidence,
+    )
+    static, thermostat = preopen.validate_preopen_pair(
+        built.static_raw, built.thermostat_raw
+    )
+    assert static["pair_id"] == thermostat["pair_id"]
+    assert static["lineage"] == thermostat["lineage"]
+    assert len(static["lineage"]["shfe_contract_parameter_expiries"]) == len(
+        shfe_products
+    )
+    for product in ("rb", "ru"):
+        row = next(item for item in static["products"] if item["product"] == product)
+        assert row["pit_main"]["exact_contract"] == f"SHFE.{product}2701"
+        assert row["contract_spec"]["official_last_trading_day"] == "2027-01-15"
+
+
+def test_monthly_preopen_rejects_calendar_and_shfe_expiry_disagreement() -> None:
+    calendar, _history, _daily_raw, _registry_raw = _monthly_preopen_inputs()
+    calendar = _extend_calendar(calendar, date(2027, 1, 31))
+    evidence = _shfe_parameter_evidence(
+        report_day=date(2026, 7, 31),
+        expiry_by_instrument={"rb2701": "20270118"},
+    )
+    with pytest.raises(
+        pit_source.PitSourceViewError,
+        match="calendar/EXPIREDATE disagreement",
+    ):
+        preopen._official_last_trading_day(
+            calendar=calendar,
+            delivery_yyyymm=202701,
+            rule=preopen.SHFE_LAST_DAY_RULE,
+            exact_contract="SHFE.rb2701",
+            shfe_contract_parameters=evidence,
+        )
 
 
 def _monthly_preopen_pair() -> tuple[bytes, bytes]:
