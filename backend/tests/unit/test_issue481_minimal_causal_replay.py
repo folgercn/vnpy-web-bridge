@@ -53,16 +53,16 @@ def add_same_open_exit_roll_collision(root: Path) -> None:
     events = list(csv.DictReader(event_path.open()))
     events.extend(
         [
-            {"event_id": "bad-new-exit", "path_id": "CANDIDATE", "candidate_id": replay_module.CANDIDATE_ID, "product": "ag", "exact_contract": "SHFE.ag2308", "event_type": "CANDIDATE_CHANNEL_EXIT", "side": "SELL", "official_trading_day": "2023-01-04", "eligibility_time": "2023-01-04T01:15:00+00:00"},
-            {"event_id": "old-roll-close", "path_id": "CANDIDATE", "candidate_id": replay_module.CANDIDATE_ID, "product": "ag", "exact_contract": "SHFE.ag2306", "event_type": "ROLL_CLOSE", "side": "SELL", "official_trading_day": "2023-01-04", "eligibility_time": "2023-01-04T01:15:00+00:00"},
-            {"event_id": "new-roll-open", "path_id": "CANDIDATE", "candidate_id": replay_module.CANDIDATE_ID, "product": "ag", "exact_contract": "SHFE.ag2308", "event_type": "ROLL_OPEN", "side": "BUY", "official_trading_day": "2023-01-04", "eligibility_time": "2023-01-04T01:15:00+00:00"},
+            {"event_id": "zzz-new-exit", "path_id": "CANDIDATE", "candidate_id": replay_module.CANDIDATE_ID, "product": "ag", "exact_contract": "SHFE.ag2308", "event_type": "CANDIDATE_CHANNEL_EXIT", "side": "SELL", "official_trading_day": "2023-01-04", "eligibility_time": "2023-01-04T01:15:00+00:00"},
+            {"event_id": "aaa-roll-close", "path_id": "CANDIDATE", "candidate_id": replay_module.CANDIDATE_ID, "product": "ag", "exact_contract": "SHFE.ag2306", "event_type": "ROLL_CLOSE", "side": "SELL", "official_trading_day": "2023-01-04", "eligibility_time": "2023-01-04T01:15:00+00:00"},
+            {"event_id": "bbb-roll-open", "path_id": "CANDIDATE", "candidate_id": replay_module.CANDIDATE_ID, "product": "ag", "exact_contract": "SHFE.ag2308", "event_type": "ROLL_OPEN", "side": "BUY", "official_trading_day": "2023-01-04", "eligibility_time": "2023-01-04T01:15:00+00:00"},
         ]
     )
     events = [event for event in events if event["event_id"] != "close"]
     write_csv(event_path, list(events[0]), events)
     quote_path = root / replay_module.BBO_FILE
     quotes = list(csv.DictReader(quote_path.open()))
-    for event_id in ("bad-new-exit", "old-roll-close", "new-roll-open"):
+    for event_id in ("zzz-new-exit", "aaa-roll-close", "bbb-roll-open"):
         for scenario, stamp in ((replay_module.PRIMARY, "01:15:02"), (replay_module.STRESS, "01:15:05")):
             quotes.append({"event_id": event_id, "scenario": scenario, "threshold_time": f"2023-01-04T{stamp}+00:00", "qualified": "True", "event_time": f"2023-01-04T{stamp}+00:00", "received_time_simulated": f"2023-01-04T{stamp}.050000+00:00", "bid_price_1": "100", "bid_volume_1": "1", "ask_price_1": "101", "ask_volume_1": "1", "limit_down_simulated": "80", "limit_up_simulated": "120", "received_time_model": "fixed-test"})
     write_csv(quote_path, list(quotes[0]), quotes)
@@ -109,9 +109,9 @@ def test_same_open_exit_roll_collision_uses_held_contract_bbo_and_drops_roll_ope
     assert summary["events_input"] == 4
     assert summary["events_after_causal_correction"] == 2
     correction = summary["event_path"]["corrections"][0]
-    assert correction["bbo_source_event_id"] == "old-roll-close"
-    assert correction["dropped_roll_open_event_id"] == "new-roll-open"
+    assert correction["bbo_source_event_id"] == "aaa-roll-close"
+    assert correction["dropped_roll_open_event_id"] == "bbb-roll-open"
     corrected_rows = [row for row in rows if row["event_id"] == correction["corrected_event_id"]]
     assert len(corrected_rows) == 2
     assert {row["exact_contract"] for row in corrected_rows} == {"SHFE.ag2306"}
-    assert {row["bbo_source_event_id"] for row in corrected_rows} == {"old-roll-close"}
+    assert {row["bbo_source_event_id"] for row in corrected_rows} == {"aaa-roll-close"}

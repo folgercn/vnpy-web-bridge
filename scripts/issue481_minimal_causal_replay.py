@@ -103,7 +103,12 @@ def is_open(event_type: str) -> bool:
 
 
 def priority(event_type: str) -> int:
-    return 1 if is_open(event_type) else 0
+    # On one legal open a slow/target exit must settle the held contract before
+    # a mapping-roll close is considered. Both close classes precede all opens.
+    # Do not let opaque event ids decide this economic ordering.
+    if event_type.endswith("ROLL_CLOSE"):
+        return 1
+    return 2 if is_open(event_type) else 0
 
 
 def canonical_json(value: Any) -> str:
