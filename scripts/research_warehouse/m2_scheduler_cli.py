@@ -7,9 +7,10 @@ import os
 import stat
 import sys
 import tempfile
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from functools import partial
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from simnow_experimental_materialize_target import (
@@ -19,7 +20,7 @@ from simnow_experimental_materialize_target import (
 from simnow_experimental_timely_daily_route import ROUTE_MODE, _timely_cutoff
 
 from .acquisition import acquire_daily
-from .canonical import canonical_json_line, sha256
+from .canonical import canonical_json_line, parse_json_strict, sha256
 from .daily_pit_main_roll_source import _following_official_days
 from .errors import RegistryError
 from .file_integrity import fsync_dir, read_regular_strict, write_all
@@ -49,6 +50,19 @@ from .pit_source_view import (
     build_source_view,
 )
 from .shfe_contract_parameters import evidence_from_pinned_raw
+from .simnow_lab_monthly_preopen import (
+    STATIC_SCHEMA as SIMNOW_LAB_PREOPEN_STATIC_SCHEMA,
+)
+from .simnow_lab_monthly_preopen import (
+    STATUS as SIMNOW_LAB_PREOPEN_STATUS,
+)
+from .simnow_lab_monthly_preopen import (
+    THERMOSTAT_SCHEMA as SIMNOW_LAB_PREOPEN_THERMOSTAT_SCHEMA,
+)
+from .simnow_lab_monthly_preopen import (
+    build_monthly_preopen,
+    validate_preopen_pair,
+)
 from .static_core_baseline import _registry, build_historical_baseline
 from .timeutil import format_utc
 from .verified_daily_pit_main_roll_source import _mains
@@ -70,6 +84,8 @@ SIMNOW_LAB_CONTRACT_PARAMETERS_SHA256 = (
 )
 SIMNOW_LAB_CONTRACT_PARAMETERS_BYTES = 80997
 SIMNOW_LAB_CONTRACT_PARAMETERS_OBSERVED_AT = "2026-08-29T04:55:44.297413Z"
+SHANGHAI = ZoneInfo("Asia/Shanghai")
+PREOPEN_PUBLICATION_DEADLINE = time(20, 0)
 
 
 def _completed_trade_day(result: object) -> str | None:
@@ -114,6 +130,50 @@ def _source_month_for_completed_day(context, trade_day: str) -> str:
     if not eligible:
         raise RegistryError("SIMNOW_LAB has no completed monthly source")
     return eligible[-1]
+
+
+def _preopen_source_month_for_completed_day(context, trade_day: str) -> str | None:
+    """Return only the month whose final official close completed just now.
+
+    A month-end preopen is a one-shot input to the following execution open.
+    It is never rebuilt after that close from later official daily data.
+    """
+
+    try:
+        current = date.fromisoformat(trade_day)
+    except ValueError as exc:
+        raise RegistryError("completed official day is invalid") from exc
+    if current.isoformat() != trade_day:
+        raise RegistryError("completed official day is invalid")
+    source_month = f"{current.year:04d}-{current.month:02d}"
+    research_day, execution_day, _cutoff = _official_month_boundary(
+        context.calendar, source_month=source_month
+    )
+    if research_day != current:
+        return None
+    if execution_day <= current:
+        raise RegistryError("SIMNOW_LAB preopen execution day is invalid")
+    return source_month
+
+
+def _preopen_publication_allowed(
+    trade_day: str, *, now: datetime | None = None
+) -> bool:
+    """Allow a new month-end preopen only before that natural night's open."""
+
+    try:
+        completed = date.fromisoformat(trade_day)
+    except ValueError as exc:
+        raise RegistryError("completed official day is invalid") from exc
+    if completed.isoformat() != trade_day:
+        raise RegistryError("completed official day is invalid")
+    observed = now or datetime.now(timezone.utc)
+    if observed.tzinfo is None or observed.utcoffset() is None:
+        raise RegistryError("SIMNOW_LAB preopen clock must be timezone-aware")
+    local = observed.astimezone(SHANGHAI)
+    return local.date() == completed and local.timetz().replace(tzinfo=None) < (
+        PREOPEN_PUBLICATION_DEADLINE
+    )
 
 
 def _frozen_contract_registry_raw() -> bytes:
@@ -268,6 +328,86 @@ def _daily_route(*, context, trade_day: str, receipt: dict, receipt_raw: bytes,
     }
 
 
+def _precompute_daily_route_export(context, trade_day: str) -> bytes:
+    """Build the third, daily-owned export without depending on monthly inputs."""
+
+    try:
+        daily_receipt, daily_receipt_raw, current_daily_raw = _completed_daily_raw(
+            context, trade_day
+        )
+        registry_raw = _frozen_contract_registry_raw()
+        parameters_raw = read_regular_strict(
+            SIMNOW_LAB_CONTRACT_PARAMETERS,
+            "SIMNOW_LAB ContractBaseInfo evidence",
+            private=False,
+            limit=SIMNOW_LAB_SOURCE_MAX_BYTES,
+        )
+        if len(parameters_raw) != SIMNOW_LAB_CONTRACT_PARAMETERS_BYTES:
+            raise RegistryError("SIMNOW_LAB ContractBaseInfo byte count drifted")
+        parameters = evidence_from_pinned_raw(
+            observed_at=SIMNOW_LAB_CONTRACT_PARAMETERS_OBSERVED_AT,
+            raw=parameters_raw,
+            expected_raw_sha256=SIMNOW_LAB_CONTRACT_PARAMETERS_SHA256,
+        )
+        route = _daily_route(
+            context=context,
+            trade_day=trade_day,
+            receipt=daily_receipt,
+            receipt_raw=daily_receipt_raw,
+            daily_raw=current_daily_raw,
+            registry_raw=registry_raw,
+            parameters=parameters,
+        )
+        _daily_routes(route)
+        return canonical_json_line(route)
+    except RegistryError:
+        raise
+    except (KeyError, TypeError, ValueError, OSError) as exc:
+        raise RegistryError("SIMNOW_LAB daily route precompute failed") from exc
+
+
+def _precompute_monthly_preopen_exports(
+    context, trade_day: str, history_receipt_path: Path, operator_state
+) -> tuple[bytes, bytes]:
+    """Prepare only a just-completed source month; never catch it up later."""
+
+    try:
+        source_month = _preopen_source_month_for_completed_day(context, trade_day)
+        if source_month is None:
+            raise RegistryError("SIMNOW_LAB preopen is only valid at a source-month close")
+        history, history_raw = _one_186_day_backfill(context, history_receipt_path)
+        daily_raw = _backfill_daily_raw(context, history)
+        state = operator_state
+        operator_pins = {
+            "operator_state_raw_sha256": state.raw_sha256,
+            **{
+                field: state.payload[field]
+                for field in (
+                    "manifest_genesis_seal_sha256",
+                    "manifest_head_seal_sha256",
+                    "manifest_head_commit_seal_sha256",
+                    "commit_anchor_ledger_raw_sha256",
+                )
+            },
+        }
+        built = build_monthly_preopen(
+            calendar=context.calendar,
+            calendar_anchor_raw_sha256=context.availability.raw_sha256,
+            warehouse_registry_raw_sha256=context.registry.raw_sha256,
+            history_receipt=history,
+            history_receipt_raw_sha256=sha256(history_raw),
+            operator_pins=operator_pins,
+            daily_source_raw=daily_raw,
+            contract_registry_raw=_frozen_contract_registry_raw(),
+            source_month=source_month,
+        )
+        return built.static_raw, built.thermostat_raw
+    except RegistryError:
+        raise
+    except (KeyError, TypeError, ValueError, OSError) as exc:
+        raise RegistryError("SIMNOW_LAB monthly preopen precompute failed") from exc
+
+
 def _precompute_exports(
     context, trade_day: str, history_receipt_path: Path, operator_state
 ) -> tuple[bytes, bytes, bytes]:
@@ -407,23 +547,239 @@ def _replace(path: Path, raw: bytes) -> None:
             pass
 
 
+def _is_preopen_document(raw: bytes | None, schema: str) -> bool:
+    if raw is None:
+        return False
+    try:
+        payload = parse_json_strict(raw, "existing SIMNOW_LAB monthly export")
+    except RegistryError:
+        return False
+    return (
+        isinstance(payload, dict)
+        and payload.get("schema_version") == schema
+        and payload.get("status") == SIMNOW_LAB_PREOPEN_STATUS
+    )
+
+
+def _replace_if_changed(path: Path, before: bytes | None, raw: bytes) -> None:
+    if before != raw:
+        _replace(path, raw)
+
+
+def _preopen_pending_paths(root: Path) -> tuple[Path, Path, Path]:
+    static, thermostat, _route = SIMNOW_LAB_EXPORT_NAMES
+    return (
+        root / f".{static}.preopen-pending",
+        root / f".{thermostat}.preopen-pending",
+        root / ".monthly-preopen-pending-ready.json",
+    )
+
+
+def _pending_raw(path: Path) -> bytes | None:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    return read_regular_strict(
+        path,
+        "SIMNOW_LAB private monthly preopen pending",
+        private=True,
+        limit=SIMNOW_LAB_SOURCE_MAX_BYTES,
+    )
+
+
+def _write_private_pending(path: Path, raw: bytes) -> None:
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        os.fchmod(descriptor, 0o600)
+        write_all(descriptor, raw)
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        os.replace(temporary, path)
+        fsync_dir(path.parent)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def _unlink_pending(paths: tuple[Path, Path, Path]) -> None:
+    changed = False
+    for path in paths:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        changed = True
+    if changed:
+        fsync_dir(paths[0].parent)
+
+
+def _publish_pending_preopen_pair(
+    *,
+    root: Path,
+    monthly_paths: tuple[Path, Path],
+    current: tuple[bytes | None, bytes | None],
+    allow_discard_unready: bool,
+) -> None:
+    pending_static, pending_thermostat, ready = _preopen_pending_paths(root)
+    static_raw = _pending_raw(pending_static)
+    thermostat_raw = _pending_raw(pending_thermostat)
+    ready_raw = _pending_raw(ready)
+    if static_raw is None and thermostat_raw is None and ready_raw is None:
+        return
+    if static_raw is None or thermostat_raw is None or ready_raw is None:
+        # If publication never began, incomplete private staging is harmless.
+        # If it did begin, do not risk a late/reconstructed monthly source.
+        public_static = _is_preopen_document(
+            current[0], SIMNOW_LAB_PREOPEN_STATIC_SCHEMA
+        )
+        public_thermostat = _is_preopen_document(
+            current[1], SIMNOW_LAB_PREOPEN_THERMOSTAT_SCHEMA
+        )
+        if public_static and public_thermostat:
+            validate_preopen_pair(current[0], current[1])
+            _unlink_pending((pending_static, pending_thermostat, ready))
+            return
+        if public_static or public_thermostat:
+            raise RegistryError("SIMNOW_LAB monthly preopen recovery is incomplete")
+        if not allow_discard_unready:
+            raise RegistryError("SIMNOW_LAB MISSED_EXECUTION_OPEN: unready preopen")
+        _unlink_pending((pending_static, pending_thermostat, ready))
+        return
+    static, thermostat = validate_preopen_pair(static_raw, thermostat_raw)
+    ready_payload = parse_json_strict(
+        ready_raw, "SIMNOW_LAB monthly preopen pending ready"
+    )
+    if (
+        not isinstance(ready_payload, dict)
+        or set(ready_payload) != {"pair_id", "static_preopen_sha256"}
+        or ready_payload["pair_id"] != static["pair_id"]
+        or ready_payload["static_preopen_sha256"] != thermostat["static_preopen_sha256"]
+    ):
+        raise RegistryError("SIMNOW_LAB monthly preopen pending ready is invalid")
+    _replace_if_changed(monthly_paths[0], current[0], static_raw)
+    _replace_if_changed(monthly_paths[1], current[1], thermostat_raw)
+    _unlink_pending((pending_static, pending_thermostat, ready))
+
+
+def _stage_and_publish_preopen_pair(
+    *,
+    root: Path,
+    monthly_paths: tuple[Path, Path],
+    current: tuple[bytes | None, bytes | None],
+    static_raw: bytes,
+    thermostat_raw: bytes,
+) -> None:
+    """Durably retain a verified pair before the first public rename."""
+
+    static, thermostat = validate_preopen_pair(static_raw, thermostat_raw)
+    pending_static, pending_thermostat, ready = _preopen_pending_paths(root)
+    _write_private_pending(pending_static, static_raw)
+    _write_private_pending(pending_thermostat, thermostat_raw)
+    _write_private_pending(
+        ready,
+        canonical_json_line(
+            {
+                "pair_id": static["pair_id"],
+                "static_preopen_sha256": thermostat["static_preopen_sha256"],
+            }
+        ),
+    )
+    _publish_pending_preopen_pair(
+        root=root,
+        monthly_paths=monthly_paths,
+        current=current,
+        allow_discard_unready=True,
+    )
+
+
 def export_simnow_lab_inputs(
-    *, context, daily_result: dict, history_receipt_path: Path, operator_state
+    *,
+    context,
+    daily_result: dict,
+    history_receipt_path: Path,
+    operator_state,
+    now: datetime | None = None,
 ) -> None:
     if daily_result.get("status") not in {"OFFICIAL_DAY_COMPLETE", "ALREADY_COMPLETE"}:
         return
     trade_day = daily_result.get("trade_day")
     if not isinstance(trade_day, str):
         raise RegistryError("completed official day is invalid")
-    outputs = _precompute_exports(
-        context, trade_day, history_receipt_path, operator_state
-    )
     root = _export_root()
     paths = tuple(root / name for name in SIMNOW_LAB_EXPORT_NAMES)
     current = tuple(_existing(path) for path in paths)
-    for path, before, raw in zip(paths, current, outputs, strict=True):
-        if before != raw:
-            _replace(path, raw)
+    monthly_paths = (paths[0], paths[1])
+    source_month = _preopen_source_month_for_completed_day(context, trade_day)
+    may_precompute = source_month is not None and _preopen_publication_allowed(
+        trade_day, now=now
+    )
+    _publish_pending_preopen_pair(
+        root=root,
+        monthly_paths=monthly_paths,
+        current=(current[0], current[1]),
+        allow_discard_unready=may_precompute,
+    )
+    current = tuple(_existing(path) for path in paths)
+    # The route is intentionally independent: a failed/non-applicable monthly
+    # preopen must not make the completed day's CTP route stale.
+    route_raw = _precompute_daily_route_export(context, trade_day)
+    _replace_if_changed(paths[2], current[2], route_raw)
+
+    if source_month is not None:
+        if not may_precompute:
+            if (
+                _is_preopen_document(current[0], SIMNOW_LAB_PREOPEN_STATIC_SCHEMA)
+                and _is_preopen_document(
+                    current[1], SIMNOW_LAB_PREOPEN_THERMOSTAT_SCHEMA
+            )
+            ):
+                static, thermostat = validate_preopen_pair(current[0], current[1])
+                if static["source_month"] == thermostat["source_month"] == source_month:
+                    return
+            raise RegistryError(
+                "SIMNOW_LAB MISSED_EXECUTION_OPEN: preopen publication window elapsed"
+            )
+        # Compute both counterparts before replacing either monthly filename.
+        static_raw, thermostat_raw = _precompute_monthly_preopen_exports(
+            context, trade_day, history_receipt_path, operator_state
+        )
+        _stage_and_publish_preopen_pair(
+            root=root,
+            monthly_paths=monthly_paths,
+            current=(current[0], current[1]),
+            static_raw=static_raw,
+            thermostat_raw=thermostat_raw,
+        )
+        return
+
+    # A preopen is a time-bounded one-shot source.  Preserve a valid one for
+    # the M5 execution-open runner; a broken half fails closed rather than
+    # allowing a later post-close replay to become a late rebalance.
+    static_preopen = _is_preopen_document(current[0], SIMNOW_LAB_PREOPEN_STATIC_SCHEMA)
+    thermostat_preopen = _is_preopen_document(
+        current[1], SIMNOW_LAB_PREOPEN_THERMOSTAT_SCHEMA
+    )
+    if static_preopen or thermostat_preopen:
+        if not (static_preopen and thermostat_preopen):
+            raise RegistryError("SIMNOW_LAB monthly preopen pair is incomplete")
+        try:
+            validate_preopen_pair(current[0], current[1])
+        except RegistryError as exc:
+            raise RegistryError("SIMNOW_LAB monthly preopen pair is invalid") from exc
+        return
+
+    # Non-month-end runs retain whatever final source is already present (the
+    # pre-A pair remains compatible) and never manufacture a delayed source
+    # month from post-close raw.  A fresh install therefore has only a route
+    # until the next completed source-month close, which is intentionally
+    # safer than a late monthly rebalance.
+    return
 
 
 def parser() -> argparse.ArgumentParser:

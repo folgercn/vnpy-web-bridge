@@ -19,7 +19,10 @@ for path in (WORKSPACE_ROOT / "backend", WORKSPACE_ROOT / "scripts"):
         sys.path.insert(0, str(path))
 
 materializer = importlib.import_module("scripts.simnow_experimental_materialize_target")
+monthly_once = importlib.import_module("scripts.simnow_experimental_monthly_once")
 lab_cli = importlib.import_module("scripts.windows_simnow_lab.cli_v1")
+preopen = importlib.import_module("research_warehouse.simnow_lab_monthly_preopen")
+preopen_join = importlib.import_module("scripts.simnow_lab_monthly_preopen_join")
 
 SERVICE_ROOT = Path("/Users/fujun/services/vnpy-web-bridge")
 EVIDENCE = SERVICE_ROOT / "simnow_lab_evidence"
@@ -40,7 +43,57 @@ class SimNowLabM5Error(ValueError):
     """M5 must stop before calling CURRENT/apply."""
 
 
-def require_fresh_daily_route(path: Path, *, now: datetime | None = None) -> None:
+def _preopen_inputs(static_source: Path, thermostat_source: Path) -> tuple[bytes, bytes] | None:
+    """Return the verified new source pair, or preserve the legacy source path."""
+
+    try:
+        thermostat, thermostat_raw = materializer.read_json_stable(
+            thermostat_source, label="monthly thermostat source", limit=4 * 1024 * 1024
+        )
+        static, static_raw = materializer.read_json_stable(
+            static_source, label="monthly static source", limit=4 * 1024 * 1024
+        )
+    except materializer.ExperimentalTargetError as exc:
+        raise SimNowLabM5Error("monthly source pair is invalid") from exc
+    thermostat_preopen = thermostat.get("schema_version") == preopen.THERMOSTAT_SCHEMA
+    static_preopen = static.get("schema_version") == preopen.STATIC_SCHEMA
+    if thermostat_preopen != static_preopen:
+        raise SimNowLabM5Error("monthly preopen pair is mixed")
+    if not thermostat_preopen:
+        return None
+    try:
+        preopen.validate_preopen_pair(static_raw, thermostat_raw)
+    except (
+        materializer.ExperimentalTargetError,
+        preopen.PitSourceViewError,
+        ValueError,
+    ) as exc:
+        raise SimNowLabM5Error("monthly preopen pair is invalid") from exc
+    return static_raw, thermostat_raw
+
+
+def _expected_legacy_source_month(execution_day: date) -> str:
+    """Return the prior calendar month owned by an execution TradingDay."""
+
+    if execution_day.month == 1:
+        return f"{execution_day.year - 1:04d}-12"
+    return f"{execution_day.year:04d}-{execution_day.month - 1:02d}"
+
+
+def _market_snapshot(*, request_address: str, publish_address: str, timeout_ms: int) -> object:
+    try:
+        return lab_cli.rpc_call(
+            method=lab_cli.RPC_GET,
+            args=("MARKET",),
+            request_address=request_address,
+            publish_address=publish_address,
+            timeout_ms=timeout_ms,
+        )
+    except Exception as exc:
+        raise SimNowLabM5Error("MARKET_RPC_UNAVAILABLE") from exc
+
+
+def require_fresh_daily_route(path: Path, *, now: datetime | None = None) -> date:
     try:
         route, _raw = materializer.read_json_stable(path, label="daily PIT route")
         execution_day = date.fromisoformat(route["metadata"]["execution_day"])
@@ -59,6 +112,7 @@ def require_fresh_daily_route(path: Path, *, now: datetime | None = None) -> Non
     )
     if not fresh:
         raise SimNowLabM5Error("daily PIT route is stale for this Lab window")
+    return execution_day
 
 
 def source_month_from_input(path: Path) -> str:
@@ -148,14 +202,63 @@ def run_once(
     monthly_bundles: Path = MONTHLY_BUNDLES,
     target: Path = TARGET,
     lab_target: Path = LAB_TARGET,
+    request_address: str = lab_cli.DEFAULT_REQUEST_ADDRESS,
+    publish_address: str = lab_cli.DEFAULT_PUBLISH_ADDRESS,
+    timeout_ms: int = 30_000,
+    now: datetime | None = None,
 ) -> int:
-    require_fresh_daily_route(daily_route)
-    source_month = source_month_from_input(thermostat_source)
-    produced = run_monthly_once(
-        source_month=source_month, static_source=static_source,
-        thermostat_source=thermostat_source, daily_route=daily_route,
-        monthly_bundles=monthly_bundles, target=target,
-    )
+    local_now = (now or datetime.now(SHANGHAI)).astimezone(SHANGHAI)
+    route_execution_day = require_fresh_daily_route(daily_route, now=local_now)
+    preopen_inputs = _preopen_inputs(static_source, thermostat_source)
+    if preopen_inputs is None:
+        source_month = source_month_from_input(thermostat_source)
+        if source_month != _expected_legacy_source_month(route_execution_day):
+            raise SimNowLabM5Error("LEGACY_SOURCE_MONTH_STALE")
+        produced = run_monthly_once(
+            source_month=source_month, static_source=static_source,
+            thermostat_source=thermostat_source, daily_route=daily_route,
+            monthly_bundles=monthly_bundles, target=target,
+        )
+    else:
+        static_preopen = json.loads(preopen_inputs[0])
+        source_month = static_preopen["source_month"]
+        preopen_execution_day = date.fromisoformat(static_preopen["execution_day"])
+        if route_execution_day < preopen_execution_day:
+            raise SimNowLabM5Error("PREOPEN_ROUTE_MISMATCH")
+        if route_execution_day > preopen_execution_day:
+            # After the one execution-open join, the shared pair remains as the
+            # source-month identity.  Reuse only its already-created bundle on
+            # the route's civil execution day; the preceding night window must
+            # stop rather than interpreting stale preopen content as a new join.
+            if local_now.date() != route_execution_day:
+                raise SimNowLabM5Error("PREOPEN_EXECUTION_WINDOW_MISMATCH")
+            try:
+                produced = monthly_once.materialize_monthly_once(
+                    source_month=source_month,
+                    monthly_bundle_directory=monthly_bundles,
+                    daily_pit_route_path=daily_route,
+                    target_path=target,
+                )
+            except monthly_once.ExperimentalMonthlyError as exc:
+                raise SimNowLabM5Error("MONTHLY_BUNDLE_REUSE_FAILED") from exc
+        else:
+            market = _market_snapshot(
+                request_address=request_address,
+                publish_address=publish_address,
+                timeout_ms=timeout_ms,
+            )
+            try:
+                produced = preopen_join.complete_and_materialize(
+                    static_preopen_raw=preopen_inputs[0],
+                    thermostat_preopen_raw=preopen_inputs[1],
+                    daily_route_path=daily_route,
+                    market_snapshot=market,
+                    monthly_bundle_directory=monthly_bundles,
+                    target_path=target,
+                    now=now,
+                )
+            except preopen_join.MonthlyPreopenJoinError as exc:
+                raise SimNowLabM5Error(str(exc)) from exc
     require_candidate_bindings(
         source_month=source_month,
         monthly_bundles=monthly_bundles,
@@ -163,7 +266,21 @@ def run_once(
         target=target,
     )
     print(json.dumps(produced, sort_keys=True))
-    return lab_cli.main(["run-once", "--input", str(target), "--output", str(lab_target)])
+    return lab_cli.main(
+        [
+            "run-once",
+            "--input",
+            str(target),
+            "--output",
+            str(lab_target),
+            "--request-address",
+            request_address,
+            "--publish-address",
+            publish_address,
+            "--timeout-ms",
+            str(timeout_ms),
+        ]
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -174,6 +291,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--monthly-bundles", type=Path, default=MONTHLY_BUNDLES)
     parser.add_argument("--target", type=Path, default=TARGET)
     parser.add_argument("--lab-target", type=Path, default=LAB_TARGET)
+    parser.add_argument("--request-address", default=lab_cli.DEFAULT_REQUEST_ADDRESS)
+    parser.add_argument("--publish-address", default=lab_cli.DEFAULT_PUBLISH_ADDRESS)
+    parser.add_argument("--timeout-ms", type=int, default=30_000)
     return parser
 
 
@@ -187,6 +307,9 @@ def main(argv: list[str] | None = None) -> int:
             monthly_bundles=args.monthly_bundles,
             target=args.target,
             lab_target=args.lab_target,
+            request_address=args.request_address,
+            publish_address=args.publish_address,
+            timeout_ms=args.timeout_ms,
         )
     except SimNowLabM5Error as exc:
         print(json.dumps({"status": "STOP", "error": str(exc)}, sort_keys=True))

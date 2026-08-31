@@ -16,7 +16,7 @@ import time
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import Enum
 from hashlib import sha256
 from pathlib import Path
@@ -27,6 +27,8 @@ TARGET_SCHEMA, STRATEGY_ID = "simnow_lab_target_v1", "STATIC_CORE_EQUAL"
 RPC_APPLY, RPC_GET = "simnow_lab_apply_target_v1", "simnow_lab_get_run_v1"
 TARGET_COUNT = 10
 FROZEN_PRODUCTS = ("ag", "al", "au", "bu", "cu", "rb", "ru", "sc", "sp", "zn")
+MARKET_SNAPSHOT_SCHEMA = "simnow_lab_market_snapshot_v1"
+MARKET_SNAPSHOT_MAX_ROWS = 100
 TICK_CUSHION = 1
 TICK_MAX_AGE_SECONDS = 10.0
 QUERY_INTERVAL_SECONDS = 1.05
@@ -39,6 +41,18 @@ _ORDER_QUERY_MARKER = "_simnow_lab_order_query_v1"
 _ATTACH_MARKER = "_simnow_lab_executor_v1"
 _POSITION_BARRIER_EVENT = "eSimNowLabPositionBarrier"
 _TERMINAL = frozenset({"FILLED", "CANCELLED", "REJECTED"})
+_FROZEN_PRODUCT_EXCHANGES = {
+    "ag": "SHFE",
+    "al": "SHFE",
+    "au": "SHFE",
+    "bu": "SHFE",
+    "cu": "SHFE",
+    "rb": "SHFE",
+    "ru": "SHFE",
+    "sc": "INE",
+    "sp": "SHFE",
+    "zn": "SHFE",
+}
 
 
 class SimNowLabError(RuntimeError):
@@ -115,6 +129,24 @@ def _canonical_vt_symbol(value: Any) -> str | None:
     if match is None:
         return None
     return f"{match.group('symbol').lower()}.{match.group('exchange')}"
+
+
+def _utc_timestamp(value: Any, *, code: str) -> str:
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise SimNowLabError(code)
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _trading_day(value: Any) -> str:
+    if not isinstance(value, str):
+        raise SimNowLabError("MARKET_TICK_INVALID")
+    text = value.strip()
+    if re.fullmatch(r"[0-9]{8}", text):
+        text = f"{text[:4]}-{text[4:6]}-{text[6:]}"
+    try:
+        return date.fromisoformat(text).isoformat()
+    except ValueError as exc:
+        raise SimNowLabError("MARKET_TICK_INVALID") from exc
 
 
 def validate_target_v1(value: Any) -> dict[str, Any]:
@@ -918,6 +950,8 @@ class SimNowLabExecutorV1:
             self._thread_lock.release()
 
     def simnow_lab_get_run_v1(self, run_id: Any) -> dict[str, Any]:
+        if run_id == "MARKET":
+            return self._market_snapshot()
         if run_id == "DASHBOARD":
             from .dashboard_v1 import read_dashboard_v1
 
@@ -934,6 +968,84 @@ class SimNowLabExecutorV1:
             trades = [dict(row) for row in db.execute("SELECT * FROM trades WHERE run_id=? ORDER BY created_at", (run_id,))]
             snapshots = [dict(row) for row in db.execute("SELECT * FROM snapshots WHERE run_id=? ORDER BY observed_at", (run_id,))]
         return {"run": dict(run), "orders": orders, "trades": trades, "snapshots": snapshots}
+
+    def _market_snapshot(self) -> dict[str, Any]:
+        """Return a bounded CTP tick snapshot without touching execution state.
+
+        This reads the in-memory tick collection plus CTP MD's local TradingDay
+        accessor: no process/thread lock, request, order/position read, or SQLite
+        access is permitted.  The M5 caller chooses its pinned exact contracts.
+        """
+
+        getter = getattr(self.main_engine, "get_all_ticks", None)
+        if not callable(getter):
+            raise SimNowLabError("MARKET_TICKS_UNAVAILABLE")
+        gateway_getter = getattr(self.main_engine, "get_gateway", None)
+        gateway = gateway_getter(self.gateway_name) if callable(gateway_getter) else None
+        md_api = getattr(gateway, "md_api", None)
+        trading_day_getter = getattr(md_api, "getTradingDay", None)
+        if not callable(trading_day_getter):
+            raise SimNowLabError("MARKET_TRADING_DAY_UNAVAILABLE")
+        try:
+            trading_day = _trading_day(trading_day_getter())
+        except (SimNowLabError, TypeError, ValueError) as exc:
+            raise SimNowLabError("MARKET_TRADING_DAY_UNAVAILABLE") from exc
+        source = getter()
+        if not isinstance(source, Sequence) or isinstance(source, (str, bytes, bytearray)):
+            raise SimNowLabError("MARKET_TICKS_UNAVAILABLE")
+
+        selected: dict[str, dict[str, Any]] = {}
+        for tick in source:
+            vt_symbol = _canonical_vt_symbol(_field(tick, "vt_symbol"))
+            if vt_symbol is None:
+                vt_symbol = _canonical_vt_symbol(
+                    f"{_field(tick, 'symbol')}.{_enum_text(_field(tick, 'exchange'))}"
+                )
+            match = _VT_SYMBOL.fullmatch(vt_symbol) if vt_symbol is not None else None
+            if match is None:
+                continue
+            symbol = match.group("symbol").lower()
+            product_match = re.fullmatch(r"([a-z]{1,8})[0-9]+", symbol)
+            product = product_match.group(1) if product_match is not None else ""
+            if product not in _FROZEN_PRODUCT_EXCHANGES:
+                continue
+            exchange = match.group("exchange")
+            if (
+                exchange != _FROZEN_PRODUCT_EXCHANGES[product]
+                or _enum_text(_field(tick, "exchange")) != exchange
+            ):
+                continue
+            try:
+                open_price = _number(_field(tick, "open_price"))
+                tick_datetime = _utc_timestamp(_field(tick, "datetime"), code="MARKET_TICK_INVALID")
+            except SimNowLabError:
+                continue
+            if open_price <= 0 or _field(tick, "gateway_name") != "CTP":
+                continue
+            exact_contract = f"{exchange}.{symbol}"
+            if exact_contract in selected:
+                raise SimNowLabError("MARKET_TICK_DUPLICATE")
+            selected[exact_contract] = {
+                "vt_symbol": vt_symbol,
+                "exact_contract": exact_contract,
+                "exchange": exchange,
+                "open_price": open_price,
+                "tick_datetime": tick_datetime,
+                "trading_day": trading_day,
+                "gateway_name": "CTP",
+            }
+            if len(selected) > MARKET_SNAPSHOT_MAX_ROWS:
+                raise SimNowLabError("MARKET_TICK_COUNT_INVALID")
+        rows = [selected[key] for key in sorted(selected)]
+        observed_at = _utc_now()
+        payload: dict[str, Any] = {
+            "schema_version": MARKET_SNAPSHOT_SCHEMA,
+            "status": "MARKET",
+            "observed_at": observed_at,
+            "rows": rows,
+        }
+        payload["snapshot_sha256"] = sha256(_canonical(payload)).hexdigest()
+        return payload
 
     def _current(self) -> dict[str, Any]:
         if not self._thread_lock.acquire(blocking=False):
