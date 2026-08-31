@@ -1,0 +1,261 @@
+{
+  "schema_version": "intraday_swing_trend_exact_design_contract_v1",
+  "contract_id": "intraday-swing-trend-exact-v1-p0-20260831",
+  "candidate_id": "INTRADAY_SWING_TREND_EXACT_V1",
+  "created_at_utc": "2026-08-31T08:36:54Z",
+  "status": "PROPOSED_FREEZE_RESULT_BLIND_RESEARCH_ONLY",
+  "freeze": {
+    "effective_condition": "exact manifest merged into main before this candidate's economic results are read",
+    "canonicalization": "UTF-8 JSON; ensure_ascii=false; sort_keys=true; separators=(',', ':'); allow_nan=false",
+    "post_result_parameter_change_forbidden": true,
+    "identity_change_policy": "any strategy, universe, sample, cost, or gate change requires a new candidate_id and Owner approval"
+  },
+  "authority": {
+    "research_only": true,
+    "no_order": true,
+    "economic_claim_authorized": false,
+    "shadow_authorized": false,
+    "simnow_authorized": false,
+    "production_authorized": false,
+    "execution_permit_authorized": false
+  },
+  "isolation": {
+    "inherits_static_core_equal_identity": false,
+    "inherits_static_core_equal_universe": false,
+    "inherits_c_or_d_formula": false,
+    "inherits_static_core_equal_returns": false,
+    "touches_existing_simnow_lab": false,
+    "continuous_main_price_or_pnl_authority": false,
+    "synthetic_execution_evidence_authority": false
+  },
+  "universe": {
+    "ordered_vt_symbols": [
+      "ag.SHFE",
+      "au.SHFE",
+      "cu.SHFE",
+      "rb.SHFE",
+      "ru.SHFE",
+      "sc.INE"
+    ],
+    "selection_basis": "fixed ex-ante multi-sector SHFE/INE day-session universe with existing product-spec contract fields; no economic result was used",
+    "scientific_unit": "one standalone account per instrument",
+    "portfolio_rescue_forbidden": true
+  },
+  "account_and_target": {
+    "initial_cash_cny_per_instrument": 1000000,
+    "target_lots": [
+      -1,
+      0,
+      1
+    ],
+    "allocation_or_optimization": "none",
+    "margin_breach_policy": "HOLD_CASH and retain the rejected opportunity in the frozen denominator",
+    "integer_zero_policy": "retain in the frozen denominator"
+  },
+  "time_contract": {
+    "timezone": "Asia/Shanghai",
+    "official_trading_day_source": "authoritative exchange calendar only",
+    "natural_date_inference_forbidden": true,
+    "night_session_assignment": "the exchange-assigned next official TradingDay, even though this candidate does not trade night sessions",
+    "decision_day_sessions": [
+      {
+        "start": "09:00:00",
+        "end": "10:15:00"
+      },
+      {
+        "start": "10:30:00",
+        "end": "11:30:00"
+      },
+      {
+        "start": "13:30:00",
+        "end": "15:00:00"
+      }
+    ],
+    "night_trading": false,
+    "signal_ordering_invariant": "visible_max_event_time <= signal_time < eligible_fill_time <= fill_time"
+  },
+  "pit_contract_mapping": {
+    "mapping_id": "DAILY_PIT_OI_MAIN",
+    "decision_source": "completed official day D all-contract settlement and open interest panel",
+    "eligibility": "delivery month later than D calendar month; finite positive settlement and open interest; valid exact-contract LTD and spec",
+    "ranking": "open_interest descending, delivery_month ascending, exact_contract ascending",
+    "selected_contract": "M_D",
+    "effective_time": "next official TradingDay after D at 09:00:00 Asia/Shanghai",
+    "future_mapping_lookup_forbidden": true
+  },
+  "slow_state": {
+    "availability": "formed only after official day D settlement inputs are complete; first usable at the next official TradingDay day open",
+    "roll_safe_index": {
+      "initial_value": 1.0,
+      "no_roll_return": "log(settlement_D(M_D) / settlement_previous_official_day(M_D))",
+      "roll_day_return": "log(settlement_D(M_previous) / settlement_previous_official_day(M_previous)); settlement_D(M_D) only anchors the next interval",
+      "missing_or_non_finite_policy": "slow_direction=0; no skipped day and no forward fill"
+    },
+    "trend": {
+      "r21": "log(I_D / I_D_minus_21_official_days)",
+      "r63": "log(I_D / I_D_minus_63_official_days)",
+      "exact_consecutive_official_days_required": true
+    },
+    "carry": {
+      "far_contract": "F_D is the eligible exact contract with the earliest delivery month strictly later than M_D",
+      "daily_formula": "log(settlement_D(M_D) / settlement_D(F_D)) * 365 / calendar_days(LTD(F_D) - LTD(M_D))",
+      "c20": "arithmetic mean of the 20 consecutive official-day daily carry values ending at D",
+      "positive_meaning": "backwardation and long carry direction",
+      "missing_or_non_positive_tenor_policy": "slow_direction=0; no substitution"
+    },
+    "direction": {
+      "long": "r21 > 0 and r63 > 0 and c20 > 0",
+      "short": "r21 < 0 and r63 < 0 and c20 < 0",
+      "flat": "all other cases, including zero, missing, stale, or non-finite input"
+    }
+  },
+  "bar_contract": {
+    "period_minutes": 15,
+    "source": "exact-contract 1-minute bars derived from real exact-contract events",
+    "interval": "half-open [start, end), labeled by end",
+    "alignment": "each official day-session segment is partitioned independently from its published start",
+    "cross_break_bar_forbidden": true,
+    "cross_contract_bar_forbidden": true,
+    "completeness": "all 15 scheduled one-minute components must exist and be final; otherwise the scheduled 15-minute bar is missing",
+    "missing_bar_policy": "no signal decision; no forward fill and no lookback skipping",
+    "ohlc_authority": "exact-contract only; continuous-main and synthetic bars are diagnostics only"
+  },
+  "candidate_rule": {
+    "entry": {
+      "long": "slow_direction=+1, flat, and completed 15-minute close is strictly greater than the maximum high of the immediately preceding 20 scheduled complete bars of the same exact contract",
+      "short": "slow_direction=-1, flat, and completed 15-minute close is strictly less than the minimum low of the immediately preceding 20 scheduled complete bars of the same exact contract",
+      "minimum_same_contract_warmup_bars": 20,
+      "same_bar_high_or_low_fill_forbidden": true
+    },
+    "exit": {
+      "long": "completed 15-minute close is strictly less than the minimum low of the immediately preceding 10 scheduled complete bars of the same exact contract",
+      "short": "completed 15-minute close is strictly greater than the maximum high of the immediately preceding 10 scheduled complete bars of the same exact contract",
+      "slow_state": "exit when the next effective slow_direction is flat or opposite",
+      "maximum_holding": "exit after the final eligible bar of the fifth official TradingDay, counting the fill TradingDay as day one"
+    },
+    "same_trading_day_reentry_after_exit": false,
+    "same_trading_day_reversal": false,
+    "earliest_reentry": "first eligible signal on the next official TradingDay",
+    "opposite_state_transition": "close first; a new opposite entry is eligible no earlier than the next official TradingDay",
+    "terminal_unfilled_exit": "remain an explicit open exposure and retry only at the next real eligible quote; never invent a terminal fill"
+  },
+  "roll_semantics": {
+    "trigger": "effective M_D differs from the exact contract currently held",
+    "action": "close the old exact contract before opening the new exact contract in the unchanged target direction",
+    "execution": "each leg uses its own real side-aware BBO, fee, tick, multiplier, latency, and impact",
+    "holding_age": "continues across roll",
+    "failed_close": "do not open the new leg",
+    "filled_close_failed_open": "remain flat with an explicit unfilled target opportunity",
+    "new_contract_entry_warmup": "20 scheduled complete 15-minute bars are required for a non-roll fresh entry",
+    "post_hoc_continuous_roll_pnl_forbidden": true
+  },
+  "paired_next_open_baseline": {
+    "baseline_id": "INTRADAY_SWING_TREND_EXACT_V1_PAIRED_NEXT_OPEN",
+    "same_as_candidate": [
+      "universe",
+      "standalone account and one-lot target",
+      "PIT slow state",
+      "exact-contract mapping and roll",
+      "BBO and quote qualification",
+      "fee, latency, spread, and impact model",
+      "missing and unfilled opportunity denominator"
+    ],
+    "entry_and_transition": "when the slow target changes, submit at the first legal day-session BBO after the next official TradingDay 09:00 eligibility time",
+    "holding": "hold the slow target until it becomes flat or opposite; no 15-minute trigger, exit, or re-entry rule",
+    "purpose": "measure only the incremental after-cost effect of the intraday timing layer"
+  },
+  "quote_and_fill": {
+    "required_fields": [
+      "exact_contract",
+      "exchange",
+      "event_time",
+      "bid_price_1",
+      "bid_volume_1",
+      "ask_price_1",
+      "ask_volume_1",
+      "limit_up",
+      "limit_down"
+    ],
+    "qualification": "finite non-crossed positive BBO for the exact contract, required side volume >= 1, within exchange limits, and event_time at or after eligibility time",
+    "normal_bar_search_window_seconds": 300,
+    "session_end_search_window": "first 300 seconds of the next legal day-session segment",
+    "buy_reference": "ask_price_1",
+    "sell_reference": "bid_price_1",
+    "partial_fill_model": "none because target size is one lot; insufficient side depth is UNFILLED",
+    "missing_or_stale_policy": "UNFILLED and retained in the frozen denominator; never use bar close, next bar open, mid, synthetic quote, or forward fill"
+  },
+  "cost_scenarios": {
+    "fee_requirement": "historically effective exact-contract fee schedule keyed by exchange, product, effective TradingDay, and OPEN/CLOSE/CLOSE_TODAY offset; unknown or zero-assumed fee is forbidden",
+    "primary": {
+      "latency_seconds": 2,
+      "fill_price_buy": "qualified ask_price_1 + 1 * price_tick",
+      "fill_price_sell": "qualified bid_price_1 - 1 * price_tick",
+      "fee_multiplier": 1.0
+    },
+    "stress": {
+      "latency_seconds": 5,
+      "fill_price_buy": "qualified ask_price_1 + 3 * price_tick",
+      "fill_price_sell": "qualified bid_price_1 - 3 * price_tick",
+      "fee_multiplier": 1.25
+    },
+    "limit_price_violation": "UNFILLED",
+    "roll_cost": "two separately charged and impacted legs"
+  },
+  "sample_contract": {
+    "development_folds": [
+      {
+        "fold_id": "DEV_2023",
+        "start_trading_day": "2023-01-01",
+        "end_trading_day": "2023-12-31"
+      },
+      {
+        "fold_id": "DEV_2024",
+        "start_trading_day": "2024-01-01",
+        "end_trading_day": "2024-12-31"
+      }
+    ],
+    "excluded_known_history": {
+      "start_trading_day": "2025-01-01",
+      "end_trading_day": "2026-08-31",
+      "use": "coverage diagnostics only; economic scoring forbidden because related-family history may already have been observed"
+    },
+    "strict_unopened_holdout": {
+      "start_trading_day": "2026-09-01",
+      "end_trading_day": "2027-02-26",
+      "access": "sealed until development results and independent causal review are final",
+      "interim_read_forbidden": true
+    },
+    "parameter_search_or_winner_selection": false,
+    "all_products_directions_opportunities_and_unfilled_events_reported": true
+  },
+  "data_sufficiency_gate": {
+    "per_product_per_development_fold_required": true,
+    "daily_pit_calendar_ltd_spec_fee_completeness": 1.0,
+    "scheduled_15_minute_bar_completeness_min": 0.99,
+    "maximum_consecutive_missing_scheduled_bars_within_session": 0,
+    "qualifying_bbo_for_target_events_min": 0.99,
+    "critical_missing_effect": "BLOCKED_EXECUTION_DATA",
+    "collector_or_platform_build_authorized": false
+  },
+  "correctness_and_stop_gates": {
+    "any_future_leak_time_reversal_cross_session_bar_post_hoc_main_mapping_or_invented_fill": "STOP",
+    "non_deterministic_restart_replay_or_trade_pnl_mtm_identity_failure": "STOP",
+    "rule_unworkable_without_continuous_main_ideal_bar_fill_or_synthetic_execution": "STOP",
+    "result_based_product_direction_window_cost_or_rule_change": "STOP_AND_REQUIRE_NEW_CANDIDATE_ID"
+  },
+  "future_economic_gates_not_authorized_by_this_stage": {
+    "all_opportunities_denominator": true,
+    "each_standalone_instrument_primary_net_return": "> 0",
+    "each_standalone_instrument_stress_net_return": ">= 0",
+    "each_standalone_instrument_primary_net_profit_to_abs_max_drawdown": "> 1",
+    "paired_increment": "for each instrument, candidate primary after-cost net profit / abs max drawdown must exceed its paired baseline; higher turnover alone is a failure",
+    "temporal_reporting": "each development fold, long, short, roll, top-day removal, and every frozen opportunity",
+    "holdout_and_forward": "require separate Owner authorization; passing does not grant shadow or SimNow authority"
+  },
+  "stage_boundary": {
+    "current_stage": "P0 design freeze plus P1 data sufficiency only",
+    "strategy_code_change_authorized": false,
+    "replay_implementation_authorized_before_merge": false,
+    "automatic_progress_to_historical_replay_holdout_forward_shadow_or_simnow": false
+  }
+}
