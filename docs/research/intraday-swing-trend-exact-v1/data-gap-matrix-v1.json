@@ -1,0 +1,212 @@
+{
+  "schema_version": "intraday_swing_trend_exact_data_gap_matrix_v1",
+  "candidate_id": "INTRADAY_SWING_TREND_EXACT_V1",
+  "assessed_at_utc": "2026-08-31T08:36:54Z",
+  "assessment_scope": "origin/main repository evidence only; no economic result, private warehouse, live QuestDB, broker account, or order interface was read",
+  "status_vocabulary": {
+    "AVAILABLE": "required contract and bounded coverage evidence are present",
+    "PARTIAL": "some schema or implementation exists but the required contract or coverage is incomplete",
+    "UNVERIFIED": "the repository does not prove the required historical coverage",
+    "MISSING": "the required contract or data is absent from the assessed scope"
+  },
+  "overall_decision": "BLOCKED_EXECUTION_DATA",
+  "decision_reason": "repository schemas and validators do not bind the required historical exact-contract bars, BBO, PIT curve inputs, official calendar, roll continuity, and effective fee coverage",
+  "items": [
+    {
+      "data_id": "EXACT_CONTRACT_1MIN",
+      "purpose": "construct the sole 15-minute signal bars",
+      "contract_status": "PARTIAL",
+      "coverage_status": "UNVERIFIED",
+      "required_fields": [
+        "exact_contract",
+        "exchange",
+        "official_trading_day",
+        "bar_start",
+        "bar_end",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "source_event_count"
+      ],
+      "required_coverage": "all scheduled one-minute components for each candidate day-session bar and frozen sample cell",
+      "repository_evidence": [
+        "backend/app/services/market_data_service.py:255",
+        "backend/app/schemas/market.py:15",
+        "deployments/final/questdb-market-ticks.sql:1"
+      ],
+      "gap": "QuestDB can aggregate ticks, but no immutable exact-contract 1-minute history, coverage receipt, or gap inventory is bound in the repository",
+      "blocking_effect": "BLOCKED_EXECUTION_DATA"
+    },
+    {
+      "data_id": "EXACT_CONTRACT_TICK_BBO",
+      "purpose": "causal side-aware primary/stress fills and executable spread",
+      "contract_status": "PARTIAL",
+      "coverage_status": "UNVERIFIED",
+      "required_fields": [
+        "exact_contract",
+        "exchange",
+        "event_time",
+        "received_time",
+        "bid_price_1",
+        "bid_volume_1",
+        "ask_price_1",
+        "ask_volume_1",
+        "limit_up",
+        "limit_down",
+        "provider",
+        "acquired_at",
+        "raw_sha256"
+      ],
+      "required_coverage": "a qualifying real BBO for at least 99% of all candidate, roll, exit, and paired-baseline target events in every product/fold",
+      "repository_evidence": [
+        "deployments/final/questdb-market-ticks.sql:2",
+        "backend/app/schemas/market.py:84",
+        "scripts/phase_b_workers/contracts.py:397"
+      ],
+      "gap": "tick/BBO fields exist, but no immutable historical coverage, freshness, restart continuity, or exact-contract alignment receipt is present; VerifiedTick contains only level one",
+      "blocking_effect": "BLOCKED_EXECUTION_DATA"
+    },
+    {
+      "data_id": "PIT_ALL_CONTRACT_DAILY_CURVE",
+      "purpose": "DAILY_PIT_OI_MAIN, roll-safe index, 21/63-day trend, and 20-day carry",
+      "contract_status": "PARTIAL",
+      "coverage_status": "UNVERIFIED",
+      "required_fields": [
+        "official_trading_day",
+        "product",
+        "exact_contract",
+        "exchange",
+        "settlement",
+        "open_interest",
+        "delivery_month",
+        "last_trading_day",
+        "provider",
+        "acquired_at",
+        "raw_sha256",
+        "revision_id"
+      ],
+      "required_coverage": "100% of consecutive official-day inputs required by every frozen sample cell and warmup",
+      "repository_evidence": [
+        "docs/schemas/commodity-static-core-equal-pit-ohlc-source-view-v1.schema.json:121",
+        "docs/schemas/commodity-c-fast-pit-frozen-source-view-v1.schema.json:121",
+        "scripts/research_warehouse/daily_pit_main_roll_source.py:347"
+      ],
+      "gap": "schemas and roll code exist, but the source view is explicitly unverified input and no raw all-contract history or coverage receipt is stored in the repository",
+      "blocking_effect": "BLOCKED_EXECUTION_DATA"
+    },
+    {
+      "data_id": "OFFICIAL_CALENDAR_AND_SESSIONS",
+      "purpose": "official TradingDay attribution, scheduled 15-minute bars, holidays, recesses, and next legal quote",
+      "contract_status": "PARTIAL",
+      "coverage_status": "UNVERIFIED",
+      "required_fields": [
+        "exchange",
+        "product",
+        "official_trading_day",
+        "session_segments",
+        "holiday_or_closure",
+        "temporary_halt",
+        "source_id",
+        "published_at",
+        "raw_sha256",
+        "revision_id"
+      ],
+      "required_coverage": "100% of frozen sample days and warmup, including revisions and exceptional sessions",
+      "repository_evidence": [
+        "deployments/research-warehouse/official-calendar-v1.schema.json:7",
+        "scripts/research_warehouse/official_calendar.py:103",
+        "docs/architecture/research-warehouse-calendar-quality-v1.md:30"
+      ],
+      "gap": "calendar schema and validation code exist, but no signed historical calendar/session source artifact covering the candidate sample is present",
+      "blocking_effect": "BLOCKED_EXECUTION_DATA"
+    },
+    {
+      "data_id": "EXACT_CONTRACT_SPECS_AND_ROLL",
+      "purpose": "tick value, multiplier, LTD, delivery ordering, exact mapping, and two-leg roll",
+      "contract_status": "PARTIAL",
+      "coverage_status": "UNVERIFIED",
+      "required_fields": [
+        "product",
+        "exact_contract",
+        "exchange",
+        "effective_trading_day",
+        "price_tick",
+        "multiplier",
+        "delivery_month",
+        "last_trading_day",
+        "limit_rule",
+        "source_id",
+        "raw_sha256"
+      ],
+      "required_coverage": "100% of exact contracts selected or held in every frozen sample cell",
+      "repository_evidence": [
+        "deployments/research-warehouse/static-core-contract-registry-v1.json:17",
+        "docs/schemas/commodity-static-core-equal-pit-ohlc-source-view-v1.schema.json:208",
+        "scripts/research_warehouse/shfe_contract_parameters.py:165",
+        "scripts/research_warehouse/daily_pit_main_roll_source.py:347"
+      ],
+      "gap": "static product specs and selection logic exist, but exact-contract effective-history, exceptional changes, and roll continuity receipts are not bound",
+      "blocking_effect": "BLOCKED_EXECUTION_DATA"
+    },
+    {
+      "data_id": "HISTORICAL_EFFECTIVE_FEES",
+      "purpose": "OPEN, CLOSE, and CLOSE_TODAY all-in cost for candidate and paired baseline",
+      "contract_status": "PARTIAL",
+      "coverage_status": "UNVERIFIED",
+      "required_fields": [
+        "exchange",
+        "product",
+        "exact_contract_or_product_scope",
+        "effective_from_trading_day",
+        "effective_to_trading_day",
+        "offset",
+        "fixed_cny_per_lot",
+        "notional_rate",
+        "source_id",
+        "raw_sha256"
+      ],
+      "required_coverage": "100% of candidate, exit, roll, and paired-baseline simulated fills",
+      "repository_evidence": [
+        "docs/commodity-c-fast-four-layer-pnl-ledger.md:97",
+        "docs/commodity-c-fast-fee-statement.md:54",
+        "docs/commodity-c-fast-simnow-shakedown.md:116"
+      ],
+      "gap": "fee semantics are documented as fail-closed, but the historically effective fee statements and complete close-today binding are not present",
+      "blocking_effect": "BLOCKED_EXECUTION_DATA"
+    },
+    {
+      "data_id": "PROVENANCE_AND_REVISIONS",
+      "purpose": "prove provider, acquisition time, immutable bytes, PIT visibility, gaps, and revisions",
+      "contract_status": "PARTIAL",
+      "coverage_status": "UNVERIFIED",
+      "required_fields": [
+        "provider",
+        "source_uri_or_receipt_id",
+        "acquired_at",
+        "available_at",
+        "raw_sha256",
+        "revision_id",
+        "gap_reason"
+      ],
+      "required_coverage": "every daily, calendar, spec, fee, bar, and quote source used by the replay",
+      "repository_evidence": [
+        "scripts/research_warehouse/canonical.py:1",
+        "scripts/research_warehouse/manifest_contracts.py:1",
+        "scripts/research_warehouse/observation_contracts.py:1"
+      ],
+      "gap": "generic manifest primitives exist, but no candidate-specific immutable source manifest or revision/gap inventory has been bound",
+      "blocking_effect": "BLOCKED_EXECUTION_DATA"
+    }
+  ],
+  "forbidden_gap_substitutions": [
+    "continuous-main prices as executable prices or PnL authority",
+    "bar close or next bar open as an ideal fill",
+    "synthetic 1-second or tick paths as economic evidence",
+    "zero or guessed fees",
+    "forward-filled missing bars, quotes, sessions, specs, or PIT values",
+    "post-hoc main-contract mapping"
+  ],
+  "allowed_next_action": "bounded read-only binding of already existing data and coverage receipts to the frozen requirements; no collector, service, queue, database, or platform build"
+}
