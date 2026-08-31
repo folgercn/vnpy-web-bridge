@@ -141,7 +141,10 @@ class FakeGateway:
     def __init__(self, main: FakeMainEngine) -> None:
         self.main = main
         self.td_api = FakeTdApi(main)
-        self.md_api = SimpleNamespace(login_status=True)
+        self.md_api = SimpleNamespace(
+            login_status=True,
+            getTradingDay=lambda: "20260901",
+        )
         self.position_query_rejected = False
         self.position_event_delayed = False
 
@@ -234,6 +237,9 @@ class FakeMainEngine:
 
     def get_tick(self, vt_symbol: str) -> Any:
         return self.ticks.get(vt_symbol)
+
+    def get_all_ticks(self) -> list[Any]:
+        return list(self.ticks.values())
 
     def subscribe(self, _request: Any, _gateway_name: str) -> None:
         return None
@@ -611,6 +617,148 @@ def test_current_is_fresh_redacted_and_zero_mutation(lab: tuple[SimNowLabExecuto
     assert main.sent == 0
     with sqlite3.connect(db_path) as db:
         assert all(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0 for table in ("runs", "orders", "trades", "snapshots"))
+
+
+def test_market_snapshot_is_canonical_bounded_ctp_memory_only(
+    lab: tuple[SimNowLabExecutorV1, FakeMainEngine, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subject, main, db_path = lab
+    main.ticks = {}
+    for symbol, exchange, price in (
+        ("ag2610", Exchange.SHFE, 7_001),
+        ("ag2612", Exchange.SHFE, 7_101),
+        ("sc2610", Exchange.INE, 501),
+    ):
+        tick = TickData(
+            symbol=symbol,
+            exchange=exchange,
+            datetime=datetime(2026, 8, 31, 13, 5, tzinfo=timezone.utc),
+            gateway_name="CTP",
+        )
+        tick.open_price = price
+        tick.trading_day = "20260901"
+        main.ticks[tick.vt_symbol] = tick
+    monkeypatch.setattr(executor_v1, "_utc_now", lambda: "2026-08-31T13:05:01Z")
+    main.get_tick = lambda _symbol: (_ for _ in ()).throw(AssertionError("single tick lookup is forbidden"))
+    main.get_engine = lambda _name: (_ for _ in ()).throw(AssertionError("OMS lookup is forbidden"))
+    subject._process_lock = SimpleNamespace(
+        hold=lambda: (_ for _ in ()).throw(AssertionError("execution process lock is forbidden"))
+    )
+    assert subject._thread_lock.acquire(blocking=False)
+    try:
+        result = subject.simnow_lab_get_run_v1("MARKET")
+    finally:
+        subject._thread_lock.release()
+
+    assert result == {
+        "schema_version": "simnow_lab_market_snapshot_v1",
+        "status": "MARKET",
+        "observed_at": "2026-08-31T13:05:01Z",
+        "rows": [
+            {
+                "vt_symbol": "sc2610.INE",
+                "exact_contract": "INE.sc2610",
+                "exchange": "INE",
+                "open_price": 501.0,
+                "tick_datetime": "2026-08-31T13:05:00Z",
+                "trading_day": "2026-09-01",
+                "gateway_name": "CTP",
+            },
+            {
+                "vt_symbol": "ag2610.SHFE",
+                "exact_contract": "SHFE.ag2610",
+                "exchange": "SHFE",
+                "open_price": 7001.0,
+                "tick_datetime": "2026-08-31T13:05:00Z",
+                "trading_day": "2026-09-01",
+                "gateway_name": "CTP",
+            },
+            {
+                "vt_symbol": "ag2612.SHFE",
+                "exact_contract": "SHFE.ag2612",
+                "exchange": "SHFE",
+                "open_price": 7101.0,
+                "tick_datetime": "2026-08-31T13:05:00Z",
+                "trading_day": "2026-09-01",
+                "gateway_name": "CTP",
+            },
+        ],
+        "snapshot_sha256": "e87719e91fa485ffecefa34a3d224697bd0e2316bcafb3e9ed07218f166cea6a",
+    }
+    assert main.sent == 0
+    with sqlite3.connect(db_path) as db:
+        assert all(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0 for table in ("runs", "orders", "trades", "snapshots"))
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value"),
+    (
+        ("open_price", float("nan")),
+        ("gateway_name", "OTHER"),
+        ("exchange", Exchange.INE),
+    ),
+)
+def test_market_snapshot_filters_invalid_frozen_tick_without_losing_legal_rows(
+    lab: tuple[SimNowLabExecutorV1, FakeMainEngine, Path], attribute: str, value: object
+) -> None:
+    subject, main, _db_path = lab
+    main.ticks = {}
+    bad_tick = TickData(
+        symbol="rb2610", exchange=Exchange.SHFE, datetime=datetime.now(timezone.utc), gateway_name="CTP"
+    )
+    bad_tick.open_price = 3_001
+    bad_tick.trading_day = "20260901"
+    setattr(bad_tick, attribute, value)
+    good_tick = TickData(
+        symbol="ag2610", exchange=Exchange.SHFE, datetime=datetime.now(timezone.utc), gateway_name="CTP"
+    )
+    good_tick.open_price = 7_001
+    good_tick.trading_day = "20260901"
+    main.ticks = {bad_tick.vt_symbol: bad_tick, good_tick.vt_symbol: good_tick}
+
+    result = subject.simnow_lab_get_run_v1("MARKET")
+
+    assert result["rows"] == [
+        {
+            "vt_symbol": "ag2610.SHFE",
+            "exact_contract": "SHFE.ag2610",
+            "exchange": "SHFE",
+            "open_price": 7001.0,
+            "tick_datetime": good_tick.datetime.isoformat().replace("+00:00", "Z"),
+            "trading_day": "2026-09-01",
+            "gateway_name": "CTP",
+        }
+    ]
+
+
+def test_market_snapshot_rejects_more_than_bounded_frozen_rows(
+    lab: tuple[SimNowLabExecutorV1, FakeMainEngine, Path]
+) -> None:
+    subject, main, _db_path = lab
+    main.ticks = {
+        f"ag{2600 + index:04d}.SHFE": SimpleNamespace(
+            vt_symbol=f"ag{2600 + index:04d}.SHFE",
+            exchange=Exchange.SHFE,
+            open_price=7_000 + index,
+            datetime=datetime.now(timezone.utc),
+            trading_day="20260901",
+            gateway_name="CTP",
+        )
+        for index in range(executor_v1.MARKET_SNAPSHOT_MAX_ROWS + 1)
+    }
+
+    with pytest.raises(SimNowLabError, match="MARKET_TICK_COUNT_INVALID"):
+        subject.simnow_lab_get_run_v1("MARKET")
+
+
+def test_market_snapshot_requires_ctp_md_trading_day(
+    lab: tuple[SimNowLabExecutorV1, FakeMainEngine, Path]
+) -> None:
+    subject, main, _db_path = lab
+    main.gateway.md_api.getTradingDay = lambda: ""
+
+    with pytest.raises(SimNowLabError, match="MARKET_TRADING_DAY_UNAVAILABLE"):
+        subject.simnow_lab_get_run_v1("MARKET")
 
 
 def test_position_query_reject_cannot_reuse_stale_ready_after_oms_clear(lab: tuple[SimNowLabExecutorV1, FakeMainEngine, Path]) -> None:
