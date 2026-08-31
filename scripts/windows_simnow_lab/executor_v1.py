@@ -423,6 +423,14 @@ class SimNowLabExecutorV1:
         accounts = self._query_account()
         return {"positions": positions, "active_orders": active_orders, "accounts": accounts}
 
+    def _final_facts(self) -> dict[str, Any]:
+        try:
+            return self._fresh_facts()
+        except SimNowLabError as exc:
+            if exc.code != "CTP_ORDER_QUERY_REJECTED":
+                raise
+            return self._fresh_facts()
+
     @staticmethod
     def _portfolio(positions: Sequence[Any]) -> dict[str, dict[str, int]]:
         result: dict[str, dict[str, int]] = {}
@@ -894,7 +902,7 @@ class SimNowLabExecutorV1:
                             self._finish_run(run_id, "FAILED", "UNKNOWN_ORDER_PRESENT")
                             return self.simnow_lab_get_run_v1(run_id)
                     self._wait_orders(run_id)
-                    final_facts = self._fresh_facts()
+                    final_facts = self._final_facts()
                     self._snapshot(run_id, "AFTER", final_facts)
                     if self._at_target(target_map, final_facts["positions"]):
                         self._finish_run(run_id, "DONE")
