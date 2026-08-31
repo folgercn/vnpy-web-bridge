@@ -9,7 +9,9 @@ import os
 import re
 import subprocess
 import sys
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 for path in (WORKSPACE_ROOT / "backend", WORKSPACE_ROOT / "scripts"):
@@ -21,19 +23,42 @@ lab_cli = importlib.import_module("scripts.windows_simnow_lab.cli_v1")
 
 SERVICE_ROOT = Path("/Users/fujun/services/vnpy-web-bridge")
 EVIDENCE = SERVICE_ROOT / "simnow_lab_evidence"
-STATIC_SOURCE = EVIDENCE / "static-core-equal-monthly-source.json"
-THERMOSTAT_SOURCE = EVIDENCE / "monthly-relative-vol-thermostat-source.json"
-DAILY_ROUTE = EVIDENCE / "daily-pit-route.json"
+RESEARCH_INPUTS = Path("/Users/Shared/vnpy-simnow-lab-inputs")
+STATIC_SOURCE = RESEARCH_INPUTS / "static-core-equal-monthly-source.json"
+THERMOSTAT_SOURCE = RESEARCH_INPUTS / "monthly-relative-vol-thermostat-source.json"
+DAILY_ROUTE = RESEARCH_INPUTS / "daily-pit-route.json"
 MONTHLY_BUNDLES = EVIDENCE / "monthly-bundles"
 TARGET = EVIDENCE / "experimental-target.json"
 LAB_TARGET = SERVICE_ROOT / "runtime/simnow-lab/target.json"
 RESEARCH_PYTHON = Path("/usr/local/libexec/vnpyresearch/release/runtime/bin/python3.12")
 RESEARCH_VENDOR = Path("/usr/local/libexec/vnpyresearch/release/vendor")
 _MONTH = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])$")
+SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 class SimNowLabM5Error(ValueError):
     """M5 must stop before calling CURRENT/apply."""
+
+
+def require_fresh_daily_route(path: Path, *, now: datetime | None = None) -> None:
+    try:
+        route, _raw = materializer.read_json_stable(path, label="daily PIT route")
+        execution_day = date.fromisoformat(route["metadata"]["execution_day"])
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+        materializer.ExperimentalTargetError,
+    ) as exc:
+        raise SimNowLabM5Error("daily PIT route freshness is invalid") from exc
+    local = (now or datetime.now(SHANGHAI)).astimezone(SHANGHAI)
+    fresh = (
+        execution_day > local.date()
+        if local.hour >= 18
+        else execution_day == local.date()
+    )
+    if not fresh:
+        raise SimNowLabM5Error("daily PIT route is stale for this Lab window")
 
 
 def source_month_from_input(path: Path) -> str:
@@ -41,9 +66,15 @@ def source_month_from_input(path: Path) -> str:
         value, _raw = materializer.read_json_stable(path, label="monthly thermostat source")
     except materializer.ExperimentalTargetError as exc:
         raise SimNowLabM5Error(str(exc)) from exc
-    month = value.get("source_month")
+    baseline = value.get("baseline_batch")
+    if not isinstance(baseline, dict):
+        raise SimNowLabM5Error("monthly thermostat baseline_batch is invalid")
+    month = baseline.get("source_month")
     if not isinstance(month, str) or _MONTH.fullmatch(month) is None:
         raise SimNowLabM5Error("monthly thermostat source_month is invalid")
+    top_level = value.get("source_month")
+    if top_level is not None and top_level != month:
+        raise SimNowLabM5Error("monthly thermostat source_month differs")
     return month
 
 
@@ -74,6 +105,41 @@ def run_monthly_once(
     return value
 
 
+def require_candidate_bindings(
+    *, source_month: str, monthly_bundles: Path, daily_route: Path, target: Path
+) -> None:
+    """Reject a candidate whose recorded input bytes are no longer current."""
+
+    try:
+        candidate, candidate_raw = materializer.read_json_stable(
+            target, label="candidate experimental target"
+        )
+        candidate = materializer.validate_target(candidate, raw=candidate_raw)
+        bundle, bundle_raw = materializer.read_json_stable(
+            monthly_bundles / f"{source_month}.json", label="monthly planner bundle"
+        )
+        if bundle_raw != materializer.canonical_json_line(bundle):
+            raise SimNowLabM5Error("monthly planner bundle is not canonical")
+        bundle = materializer.validate_planner_bundle(bundle)
+        route, route_raw = materializer.read_json_stable(
+            daily_route, label="daily PIT route"
+        )
+        if route_raw != materializer.canonical_json_line(route):
+            raise SimNowLabM5Error("daily PIT route is not canonical")
+        materializer._daily_routes(route)
+    except SimNowLabM5Error:
+        raise
+    except (KeyError, TypeError, ValueError, materializer.ExperimentalTargetError) as exc:
+        raise SimNowLabM5Error("candidate target binding is invalid") from exc
+    if (
+        candidate["source_month"] != source_month
+        or bundle["source_month"] != source_month
+        or candidate["monthly_quantity_sha256"] != materializer._sha256(bundle_raw)
+        or candidate["daily_route_sha256"] != materializer._sha256(route_raw)
+    ):
+        raise SimNowLabM5Error("candidate target does not bind current inputs")
+
+
 def run_once(
     *,
     static_source: Path = STATIC_SOURCE,
@@ -83,11 +149,18 @@ def run_once(
     target: Path = TARGET,
     lab_target: Path = LAB_TARGET,
 ) -> int:
+    require_fresh_daily_route(daily_route)
     source_month = source_month_from_input(thermostat_source)
     produced = run_monthly_once(
         source_month=source_month, static_source=static_source,
         thermostat_source=thermostat_source, daily_route=daily_route,
         monthly_bundles=monthly_bundles, target=target,
+    )
+    require_candidate_bindings(
+        source_month=source_month,
+        monthly_bundles=monthly_bundles,
+        daily_route=daily_route,
+        target=target,
     )
     print(json.dumps(produced, sort_keys=True))
     return lab_cli.main(["run-once", "--input", str(target), "--output", str(lab_target)])

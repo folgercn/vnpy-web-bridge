@@ -458,15 +458,26 @@ def build_source_view(
     expected_business_signer_key_id: str,
     source_month: str,
     previous_snapshot: dict[str, Any] | None,
+    allow_simnow_placeholder_baseline: bool = False,
 ) -> BuiltSourceView:
     """Build and independently replay one deterministic canonical source view."""
 
-    _verify_business_signature(
-        baseline_batch,
-        public_key=business_public_key,
-        expected_signer_key_id=expected_business_signer_key_id,
-        label="baseline batch",
-    )
+    if allow_simnow_placeholder_baseline:
+        placeholder = base64.b64encode(bytes(64)).decode("ascii")
+        if (
+            baseline_batch.get("execution_lane") != "simnow_shakedown"
+            or baseline_batch.get("signer_key_id") != expected_business_signer_key_id
+            or baseline_batch.get("signature") != placeholder
+            or previous_snapshot is not None
+        ):
+            raise PitSourceViewError("SIMNOW placeholder baseline is invalid")
+    else:
+        _verify_business_signature(
+            baseline_batch,
+            public_key=business_public_key,
+            expected_signer_key_id=expected_business_signer_key_id,
+            label="baseline batch",
+        )
     research_as_of, execution_day, cutoff_day = _official_month_boundary(
         calendar,
         source_month=source_month,
