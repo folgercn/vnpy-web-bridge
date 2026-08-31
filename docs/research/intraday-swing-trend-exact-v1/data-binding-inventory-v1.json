@@ -1,14 +1,14 @@
 {
   "schema_version": "intraday_swing_trend_exact_data_binding_inventory_v1",
   "candidate_id": "INTRADAY_SWING_TREND_EXACT_V1",
-  "assessed_at_utc": "2026-08-31T08:56:00Z",
+  "assessed_at_utc": "2026-08-31T14:47:00Z",
   "contract_binding": {
     "main_merge_commit": "1735402ce3e79dc6d24db727c0f2f78f1d2230de",
     "design_contract_raw_sha256": "cc42fa3b3e3495916c3d675324de93d2049c0e5d5657f2356ff47716fb85ae85",
     "data_gap_matrix_raw_sha256": "96b82af6005f6cdf298525c6dd262dacad42a2d19180ffa677097108ac1927c0"
   },
   "assessment_boundary": {
-    "mode": "bounded read-only existing-data inventory",
+    "mode": "bounded immutable custody binding and target-only causal replay feasibility",
     "development_folds": [
       "DEV_2023",
       "DEV_2024"
@@ -22,10 +22,39 @@
       "sc.INE"
     ],
     "economic_results_read": false,
+    "target_only_replay_run": true,
     "holdout_read": false,
     "collector_or_platform_built": false,
     "custody_acl_changed": false,
     "simnow_or_order_accessed": false
+  },
+  "external_custody_binding": {
+    "host": "192.168.100.89",
+    "path": "/Users/fujun/vnpy-research-upload/issue-481/20260831-local-research-custody",
+    "archives": [
+      {
+        "name": "issue481_local_research_custody_20260831.tar.gz",
+        "sha256": "c5282f9167b93eeea10979cdb0f1bf299703c51aa6c1d2e6c7820792ee95d695"
+      },
+      {
+        "name": "issue481_tqsdk_supplement_20260831.tar.gz",
+        "sha256": "72649e941337e14fdacc580a1a97dc70494ebbd471981c96d4b5dd3b1771144a"
+      },
+      {
+        "name": "issue481_gap_resolution_supplement_20260831.tar.gz",
+        "sha256": "3371dc9feb55808885105dd62b7dc596855a85fe5a10e7a775d36e748a04e176"
+      },
+      {
+        "name": "issue481_close_today_fee_model_20260831.tar.gz",
+        "sha256": "ec6dbfef2c3320dd5576db0aa531a2da9be0ac9fe4eebf58077dd1dfe33abf20"
+      },
+      {
+        "name": "issue481_event_bbo_supplement_20260831.tar.gz",
+        "sha256": "9166f29030aec9a8d54708f2a0a8c424660e67c3fa43ee50c5a45458e86fbc8e"
+      }
+    ],
+    "archive_sha256_rechecked": true,
+    "archive_integrity_checked": true
   },
   "observed_existing_evidence": [
     {
@@ -93,52 +122,70 @@
   "coverage": [
     {
       "data_id": "EXACT_CONTRACT_1MIN",
-      "development_fold_status": "MISSING",
-      "bound_row_count": 0,
-      "reason": "no immutable 2023-2024 exact-contract one-minute dataset or receipt was found on the local workspace or accessible M2 runtime"
+      "development_fold_status": "AVAILABLE",
+      "bound_row_count": 2904,
+      "reason": "all 2,904 frozen PIT-mapped product-days have complete day-session exact-contract one-minute coverage; the final two gaps were rebuilt from retained real TQSDK ticks"
     },
     {
       "data_id": "EXACT_CONTRACT_TICK_BBO",
-      "development_fold_status": "MISSING",
-      "bound_row_count": 0,
-      "reason": "no immutable 2023-2024 exact-contract event/received-time BBO dataset or receipt was found; no QuestDB service containing this history is running on the inspected local or M2 Docker contexts"
+      "development_fold_status": "MODELED_PASS_RESEARCH_ONLY",
+      "bound_row_count": 603,
+      "reason": "all 603 corrected causal target events bind real TQSDK event-time BBO in both PRIMARY_2S and STRESS_5S; collector received time and exchange limit fields remain explicitly modeled"
     },
     {
       "data_id": "PIT_ALL_CONTRACT_DAILY_CURVE",
-      "development_fold_status": "UNVERIFIED",
-      "bound_row_count": 0,
-      "reason": "the current daily warehouse and its public anchors are real but do not bind the required 2023-2024 all-contract development-fold coverage"
+      "development_fold_status": "AVAILABLE",
+      "bound_row_count": 117306,
+      "reason": "official all-listed-contract daily settlement and open-interest history is bound from 2022-09-01 through the frozen development folds with next-official-day availability"
     },
     {
       "data_id": "OFFICIAL_CALENDAR_AND_SESSIONS",
-      "development_fold_status": "UNVERIFIED",
-      "bound_row_count": 0,
-      "reason": "a current official-calendar hash is pinned, but no readable receipt binds 100 percent of the 2023-2024 exchange calendar, exceptional sessions, revisions, and warmup"
+      "development_fold_status": "AVAILABLE_WITH_EVENT_REVIEW",
+      "bound_row_count": 565,
+      "reason": "565 official TradingDays and day-session segments cover 2022-2024; any temporary suspension remains an event-specific fail-closed review"
     },
     {
       "data_id": "EXACT_CONTRACT_SPECS_AND_ROLL",
-      "development_fold_status": "UNVERIFIED",
-      "bound_row_count": 0,
-      "reason": "one real 2026 daily-roll artifact is bound, but no 2023-2024 effective-history and roll-continuity receipt is bound"
+      "development_fold_status": "AVAILABLE",
+      "bound_row_count": 233,
+      "reason": "233 exact-contract specs plus official LTD history are bound; causal replay validates held-contract close before roll open"
     },
     {
       "data_id": "HISTORICAL_EFFECTIVE_FEES",
-      "development_fold_status": "MISSING",
-      "bound_row_count": 0,
-      "reason": "no historically effective 2023-2024 OPEN/CLOSE/CLOSE_TODAY fee dataset or receipt was found"
+      "development_fold_status": "MODELED_PASS_RESEARCH_ONLY",
+      "bound_row_count": 2904,
+      "reason": "ordinary historical fee coverage is complete; 660 mappings use explicit close-today parameters and 2,244 use the Owner-approved ordinary-fee-times-0.5 research model"
     },
     {
       "data_id": "PROVENANCE_AND_REVISIONS",
-      "development_fold_status": "PARTIAL",
-      "bound_row_count": 5,
-      "reason": "five current warehouse control artifacts are hash-bound above, but none supplies the missing frozen development-fold bar, BBO, PIT, calendar, spec, or fee source bytes"
+      "development_fold_status": "AVAILABLE",
+      "bound_row_count": 10,
+      "reason": "five existing warehouse controls and five immutable custody archives are SHA-bound; raw, normalized, coverage, receipt, and gap artifacts remain separate"
     }
   ],
+  "minimal_causal_replay": {
+    "implementation": "scripts/issue481_minimal_causal_replay.py",
+    "source_events": 607,
+    "corrected_events": 603,
+    "primary_filled": 603,
+    "stress_filled": 603,
+    "unfilled": 0,
+    "corrections": 2,
+    "corrected_event_canonical_sha256": "74915208177e188f65074290d68590eec7b4c4d811a8648c1d92a331d2cbd71c",
+    "correction_reason": "on two CU opens a slow-target exit and mapping roll collided; the causal path closes the actually held old contract and does not open the new roll leg",
+    "economic_pnl_evaluated": false,
+    "outputs": [
+      "replay-summary.json",
+      "target-changes.jsonl",
+      "paired-baseline-comparison.json"
+    ]
+  },
   "decision": {
-    "status": "BLOCKED_EXECUTION_DATA",
-    "reason": "the frozen 2023-2024 development folds cannot meet the 100 percent PIT/calendar/spec/fee gates or the 99 percent bar/BBO gates from existing bound data",
-    "replay_authorized": false,
-    "minimum_external_input": "an already-existing create-only read-only export for the six products and frozen development folds, with per-source raw SHA256, event and received timestamps, TradingDay/session, PIT/roll/spec history, and effective OPEN/CLOSE/CLOSE_TODAY fees",
+    "status": "MODELED_PASS_RESEARCH_ONLY",
+    "reason": "the bounded custody export clears the target-only causal replay feasibility gate under the Owner-approved received-time, limit-envelope, and close-today fee research models",
+    "replay_authorized": true,
+    "economic_gate_evaluation_authorized": false,
+    "minimum_external_input": "satisfied for this modeled research-only feasibility stage",
     "forbidden_response": "do not synthesize the missing history, infer fees as zero, use continuous-main fills, relax custody ACLs, or build a collector/platform under issue 481"
   }
 }

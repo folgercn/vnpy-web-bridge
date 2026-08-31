@@ -39,20 +39,33 @@ and tick/BBO fields, but it does not contain or bind coverage receipts for the
 required historical exact-contract bars, quotes, PIT curve inputs, calendar,
 roll facts, and fee schedules.
 
-Therefore the current repository-evidence-only status is:
+The later bounded M2 custody export now binds the six frozen products across
+DEV_2023, DEV_2024, and warmup. It contains complete PIT-mapped day-session
+one-minute coverage, official daily curves/calendar/LTD/specs, modeled historical
+fees, and real event-time BBO for the frozen target events. The immutable archive
+digests and current coverage are recorded in `data-binding-inventory-v1.json`.
+
+The target-only runner in `scripts/issue481_minimal_causal_replay.py` validates
+the held exact contract, close-before-open ordering, real BBO qualification,
+price impact, and fee provenance. It writes only the three evidence files allowed
+by the freeze. It does not calculate PnL or read the sealed holdout.
+
+The current research-only feasibility status is:
 
 ```text
-BLOCKED_EXECUTION_DATA
+MODELED_PASS_RESEARCH_ONLY
 ```
 
-This is not a request to build a collector or data platform. A later bounded
-inventory may clear the block only by binding existing data to the frozen
-requirements. Continuous-main prices, synthetic paths, ideal bar fills, zero
-fees, or forward-filled gaps cannot clear it.
+The observed quote `event_time` and bid/ask remain real. Collector receive time,
+the historical limit envelope, and missing explicit close-today fees are clearly
+marked research models accepted by the Owner; they are not historical execution
+evidence. Two CU same-open slow-exit/roll collisions are corrected causally by
+closing the actually held old contract and suppressing the new roll leg. The
+corrected 603-event path is SHA-bound in the inventory.
 
 ## Stage boundary
 
-This PR completes only the A-side design/data contract. It does not authorize
-PR-B, a historical economic read, holdout access, no-order forward, shadow, or
-SimNow integration. The Owner must make the next decision after the independent
-minimal replay-feasibility inventory is reported.
+This stage authorizes only the minimal target-transition feasibility replay. It
+does not authorize historical economic gate evaluation, holdout access, no-order
+forward, shadow, SimNow, production, or order integration. The Owner must make
+the next decision after this result is independently reviewed.
