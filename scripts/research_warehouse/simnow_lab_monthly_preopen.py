@@ -16,7 +16,15 @@ from .pit_source_view import (
     _official_month_boundary,
     contract_rows_from_daily_raw,
 )
+from .shfe_contract_parameters import (
+    ShfeContractParameterError,
+    ShfeContractParameterEvidence,
+)
+from .shfe_contract_parameters import (
+    lineage_for_exact_contract as shfe_contract_parameters_lineage,
+)
 from .static_core_baseline import (
+    SHFE_LAST_DAY_RULE,
     _aggregate_raw_identity,
     _binding,
     _last_trading_day,
@@ -93,6 +101,69 @@ def _history_receipt_projection(history_receipt: dict[str, Any], raw_sha256: str
     }
 
 
+def _official_last_trading_day(
+    *,
+    calendar,
+    delivery_yyyymm: int,
+    rule: str,
+    exact_contract: str,
+    shfe_contract_parameters: ShfeContractParameterEvidence | None,
+) -> tuple[date, dict[str, object] | None]:
+    """Resolve SHFE delivery dates across the signed calendar horizon.
+
+    The exchange-published exact-contract evidence is already admitted by the
+    daily PIT route for this same purpose.  It may bridge a partial or future
+    SHFE delivery month, but it never replaces a calendar value that can be
+    resolved: those two facts must agree.
+    """
+
+    if rule != SHFE_LAST_DAY_RULE:
+        return (
+            _last_trading_day(
+                calendar,
+                delivery_yyyymm=delivery_yyyymm,
+                rule=rule,
+            ),
+            None,
+        )
+    delivery_year, delivery_month = divmod(delivery_yyyymm, 100)
+    threshold = date(delivery_year, delivery_month, 15)
+    calendar_last_day = None
+    if threshold <= calendar.valid_to:
+        try:
+            calendar_last_day = _last_trading_day(
+                calendar,
+                delivery_yyyymm=delivery_yyyymm,
+                rule=rule,
+            )
+        except PitSourceViewError:
+            # A partial delivery month cannot prove a post-15th official day.
+            calendar_last_day = None
+    if shfe_contract_parameters is None:
+        if calendar_last_day is None:
+            raise PitSourceViewError(
+                "SIMNOW preopen SHFE expiry evidence is required outside "
+                "calendar coverage"
+            )
+        return calendar_last_day, None
+    try:
+        expiry = shfe_contract_parameters_lineage(
+            shfe_contract_parameters,
+            exact_contract=exact_contract,
+        )
+    except ShfeContractParameterError as exc:
+        raise PitSourceViewError(str(exc)) from exc
+    parameter_last_day = date.fromisoformat(str(expiry["expire_date"]))
+    if (
+        calendar_last_day is not None
+        and parameter_last_day != calendar_last_day
+    ):
+        raise PitSourceViewError(
+            "SIMNOW preopen SHFE calendar/EXPIREDATE disagreement"
+        )
+    return calendar_last_day or parameter_last_day, expiry
+
+
 def build_monthly_preopen(
     *,
     calendar,
@@ -104,6 +175,7 @@ def build_monthly_preopen(
     daily_source_raw: dict[str, dict[str, bytes]],
     contract_registry_raw: bytes,
     source_month: str,
+    shfe_contract_parameters: ShfeContractParameterEvidence | None = None,
 ) -> BuiltMonthlyPreopen:
     """Build the two M2-only month-end halves before the execution open exists.
 
@@ -168,27 +240,12 @@ def build_monthly_preopen(
         },
         history_receipt_sha256=history_receipt_raw_sha256,
     )
-    spec_bindings = {
-        exchange: _binding(
-            binding_id=f"contract-spec-{exchange.lower()}-{registry_sha[:20]}",
-            source_class="CONTRACT_SPEC",
-            scope=exchange,
-            source_identity=f"static-core-{exchange.lower()}-contract-registry-v1",
-            query_start=research_day.isoformat(),
-            query_end=research_day.isoformat(),
-            logical_at=logical_at,
-            raw_sha256=registry_sha,
-            lineage={
-                "contract_registry_raw_sha256": registry_sha,
-                "calendar_raw_sha256": calendar.raw_sha256,
-                "warehouse_registry_raw_sha256": warehouse_registry_raw_sha256,
-                "exchange": exchange,
-            },
-            history_receipt_sha256=history_receipt_raw_sha256,
-        )
+    spec_binding_ids = {
+        exchange: f"contract-spec-{exchange.lower()}-{registry_sha[:20]}"
         for exchange in ("SHFE", "INE")
     }
     products: list[dict[str, Any]] = []
+    shfe_expiry_lineage: list[dict[str, object]] = []
     for product in frozen.PRODUCTS:
         spec = frozen.PRODUCT_SPECS[product]
         daily = daily_by_day[history_days[-1]][product]
@@ -197,6 +254,15 @@ def build_monthly_preopen(
         except frozen.ProducerKernelError as exc:
             raise PitSourceViewError(str(exc)) from exc
         delivery = int(main["delivery_yyyymm"])
+        last_trading_day, expiry = _official_last_trading_day(
+            calendar=calendar,
+            delivery_yyyymm=delivery,
+            rule=registry[product]["last_trading_day_rule"],
+            exact_contract=main["exact_contract"],
+            shfe_contract_parameters=shfe_contract_parameters,
+        )
+        if expiry is not None:
+            shfe_expiry_lineage.append(expiry)
         products.append(
             {
                 "product": product,
@@ -214,18 +280,38 @@ def build_monthly_preopen(
                     "delivery_yyyymm": delivery,
                 },
                 "contract_spec": {
-                    "source_binding_id": spec_bindings[spec["exchange"]]["binding_id"],
+                    "source_binding_id": spec_binding_ids[spec["exchange"]],
                     "exact_contract": main["exact_contract"],
-                    "official_last_trading_day": _last_trading_day(
-                        calendar,
-                        delivery_yyyymm=delivery,
-                        rule=registry[product]["last_trading_day_rule"],
-                    ).isoformat(),
+                    "official_last_trading_day": last_trading_day.isoformat(),
                     "multiplier": spec["multiplier"],
                     "price_tick": spec["price_tick"],
                     "raw_sha256": registry_sha,
                 },
             }
+        )
+
+    shfe_expiry_lineage.sort(key=lambda item: str(item["exact_contract"]))
+    spec_bindings = {}
+    for exchange in ("SHFE", "INE"):
+        spec_lineage: dict[str, Any] = {
+            "contract_registry_raw_sha256": registry_sha,
+            "calendar_raw_sha256": calendar.raw_sha256,
+            "warehouse_registry_raw_sha256": warehouse_registry_raw_sha256,
+            "exchange": exchange,
+        }
+        if exchange == "SHFE" and shfe_expiry_lineage:
+            spec_lineage["contract_parameter_expiries"] = shfe_expiry_lineage
+        spec_bindings[exchange] = _binding(
+            binding_id=spec_binding_ids[exchange],
+            source_class="CONTRACT_SPEC",
+            scope=exchange,
+            source_identity=f"static-core-{exchange.lower()}-contract-registry-v1",
+            query_start=research_day.isoformat(),
+            query_end=research_day.isoformat(),
+            logical_at=logical_at,
+            raw_sha256=registry_sha,
+            lineage=spec_lineage,
+            history_receipt_sha256=history_receipt_raw_sha256,
         )
 
     calendar_context, selected_days = _calendar_binding(
@@ -245,21 +331,24 @@ def build_monthly_preopen(
         "operator_pins": operator_pins,
         "history_days": history_days,
     }
+    if shfe_expiry_lineage:
+        lineage["shfe_contract_parameter_expiries"] = shfe_expiry_lineage
+    pair_identity = {
+        "source_month": source_month,
+        "research_as_of_official_day": research_day.isoformat(),
+        "execution_day": execution_day.isoformat(),
+        "following_official_day": following[0].isoformat(),
+        "history_receipt_raw_sha256": history_receipt_raw_sha256,
+        "calendar_raw_sha256": calendar.raw_sha256,
+        "calendar_anchor_raw_sha256": calendar_anchor_raw_sha256,
+        "warehouse_registry_raw_sha256": warehouse_registry_raw_sha256,
+        "contract_registry_raw_sha256": registry_sha,
+        "operator_pins": operator_pins,
+    }
+    if shfe_expiry_lineage:
+        pair_identity["shfe_contract_parameter_expiries"] = shfe_expiry_lineage
     pair_id = "simnow-monthly-preopen-" + sha256(
-        canonical_json(
-            {
-                "source_month": source_month,
-                "research_as_of_official_day": research_day.isoformat(),
-                "execution_day": execution_day.isoformat(),
-                "following_official_day": following[0].isoformat(),
-                "history_receipt_raw_sha256": history_receipt_raw_sha256,
-                "calendar_raw_sha256": calendar.raw_sha256,
-                "calendar_anchor_raw_sha256": calendar_anchor_raw_sha256,
-                "warehouse_registry_raw_sha256": warehouse_registry_raw_sha256,
-                "contract_registry_raw_sha256": registry_sha,
-                "operator_pins": operator_pins,
-            }
-        )
+        canonical_json(pair_identity)
     )[:32]
     static = {
         "schema_version": STATIC_SCHEMA,
