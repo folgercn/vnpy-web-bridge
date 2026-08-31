@@ -1,0 +1,144 @@
+{
+  "schema_version": "intraday_swing_trend_exact_data_binding_inventory_v1",
+  "candidate_id": "INTRADAY_SWING_TREND_EXACT_V1",
+  "assessed_at_utc": "2026-08-31T08:56:00Z",
+  "contract_binding": {
+    "main_merge_commit": "1735402ce3e79dc6d24db727c0f2f78f1d2230de",
+    "design_contract_raw_sha256": "cc42fa3b3e3495916c3d675324de93d2049c0e5d5657f2356ff47716fb85ae85",
+    "data_gap_matrix_raw_sha256": "96b82af6005f6cdf298525c6dd262dacad42a2d19180ffa677097108ac1927c0"
+  },
+  "assessment_boundary": {
+    "mode": "bounded read-only existing-data inventory",
+    "development_folds": [
+      "DEV_2023",
+      "DEV_2024"
+    ],
+    "ordered_products": [
+      "ag.SHFE",
+      "au.SHFE",
+      "cu.SHFE",
+      "rb.SHFE",
+      "ru.SHFE",
+      "sc.INE"
+    ],
+    "economic_results_read": false,
+    "holdout_read": false,
+    "collector_or_platform_built": false,
+    "custody_acl_changed": false,
+    "simnow_or_order_accessed": false
+  },
+  "observed_existing_evidence": [
+    {
+      "evidence_id": "M2_RUNTIME_INPUT",
+      "host": "192.168.100.89",
+      "path": "/usr/local/libexec/vnpyresearch/runtime-input-v1.json",
+      "raw_sha256": "9ce4f550e428125be3c9b3f70535de1f678721f644823511a6592d758a080f6a",
+      "bound_facts": {
+        "collector_version": "m2-daily-scheduler-v1",
+        "monitor_from_day": "2026-07-30",
+        "official_calendar_raw_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+        "calendar_availability_anchor_raw_sha256": "8d428abc0e3681c59ebe3614a9feb75c763564d3c8a340342b8573b6c27860bc"
+      }
+    },
+    {
+      "evidence_id": "M2_OPERATOR_STATE",
+      "host": "192.168.100.89",
+      "path": "/usr/local/libexec/vnpyresearch/operator-state-v1.json",
+      "raw_sha256": "d91a3e696965e49b7175c54b87e8a14f6db51225d04cdf7686de0937da984fe6",
+      "bound_facts": {
+        "last_trade_day": "2026-08-28",
+        "manifest_sequence": 200,
+        "commit_anchor_ledger_raw_sha256": "9c2f5badf49f21be37b734d95739165ab99968aceeae5451baa38434270ad689"
+      }
+    },
+    {
+      "evidence_id": "M2_COMMIT_ANCHOR_LEDGER",
+      "host": "192.168.100.89",
+      "path": "/usr/local/libexec/vnpyresearch/commit-anchor-ledgers/commit-anchor-ledger-9c2f5badf49f21be37b734d95739165ab99968aceeae5451baa38434270ad689.json",
+      "raw_sha256": "9c2f5badf49f21be37b734d95739165ab99968aceeae5451baa38434270ad689",
+      "bound_facts": {
+        "entry_count": 200,
+        "first_available_at": "2026-07-30T11:27:24.006882Z",
+        "last_available_at": "2026-08-28T10:40:22.085658Z"
+      }
+    },
+    {
+      "evidence_id": "M2_VERIFIED_DAILY_ROLL_EXAMPLE",
+      "host": "192.168.100.89",
+      "path": "/usr/local/libexec/vnpyresearch/daily-roll-predecessor-catalog-v1/artifacts/verified-daily-roll-13d111b50324390c7bfba9be21deac694cdc3172ff537817f4557c3cbe6fc7be.json",
+      "raw_sha256": "84fd5332418a8cc2a3240d477e82f61f04245d630700d06510b97aceb4b9c0e7",
+      "bound_facts": {
+        "official_day": "2026-08-19",
+        "execution_day": "2026-08-20",
+        "covers_all_six_candidate_products": true,
+        "inside_development_folds": false
+      }
+    },
+    {
+      "evidence_id": "M2_VERIFIED_DAILY_ROLL_RECEIPT",
+      "host": "192.168.100.89",
+      "path": "/usr/local/libexec/vnpyresearch/daily-roll-predecessor-catalog-v1/receipts/2026-08-19.json",
+      "raw_sha256": "d8660821e090beb7314dc1612b2df9b458f854b74196a2d35676c48e3dcae859"
+    }
+  ],
+  "custody_observation": {
+    "host": "192.168.100.89",
+    "path": "/Users/Shared/vnpy-research",
+    "owner": "vnpyresearch",
+    "group": "vnpyresearch",
+    "mode": "0700",
+    "current_fujun_session_can_enumerate": false,
+    "interpretation": "the private custody boundary is working; directory existence is not evidence of frozen-sample coverage"
+  },
+  "coverage": [
+    {
+      "data_id": "EXACT_CONTRACT_1MIN",
+      "development_fold_status": "MISSING",
+      "bound_row_count": 0,
+      "reason": "no immutable 2023-2024 exact-contract one-minute dataset or receipt was found on the local workspace or accessible M2 runtime"
+    },
+    {
+      "data_id": "EXACT_CONTRACT_TICK_BBO",
+      "development_fold_status": "MISSING",
+      "bound_row_count": 0,
+      "reason": "no immutable 2023-2024 exact-contract event/received-time BBO dataset or receipt was found; no QuestDB service containing this history is running on the inspected local or M2 Docker contexts"
+    },
+    {
+      "data_id": "PIT_ALL_CONTRACT_DAILY_CURVE",
+      "development_fold_status": "UNVERIFIED",
+      "bound_row_count": 0,
+      "reason": "the current daily warehouse and its public anchors are real but do not bind the required 2023-2024 all-contract development-fold coverage"
+    },
+    {
+      "data_id": "OFFICIAL_CALENDAR_AND_SESSIONS",
+      "development_fold_status": "UNVERIFIED",
+      "bound_row_count": 0,
+      "reason": "a current official-calendar hash is pinned, but no readable receipt binds 100 percent of the 2023-2024 exchange calendar, exceptional sessions, revisions, and warmup"
+    },
+    {
+      "data_id": "EXACT_CONTRACT_SPECS_AND_ROLL",
+      "development_fold_status": "UNVERIFIED",
+      "bound_row_count": 0,
+      "reason": "one real 2026 daily-roll artifact is bound, but no 2023-2024 effective-history and roll-continuity receipt is bound"
+    },
+    {
+      "data_id": "HISTORICAL_EFFECTIVE_FEES",
+      "development_fold_status": "MISSING",
+      "bound_row_count": 0,
+      "reason": "no historically effective 2023-2024 OPEN/CLOSE/CLOSE_TODAY fee dataset or receipt was found"
+    },
+    {
+      "data_id": "PROVENANCE_AND_REVISIONS",
+      "development_fold_status": "PARTIAL",
+      "bound_row_count": 5,
+      "reason": "five current warehouse control artifacts are hash-bound above, but none supplies the missing frozen development-fold bar, BBO, PIT, calendar, spec, or fee source bytes"
+    }
+  ],
+  "decision": {
+    "status": "BLOCKED_EXECUTION_DATA",
+    "reason": "the frozen 2023-2024 development folds cannot meet the 100 percent PIT/calendar/spec/fee gates or the 99 percent bar/BBO gates from existing bound data",
+    "replay_authorized": false,
+    "minimum_external_input": "an already-existing create-only read-only export for the six products and frozen development folds, with per-source raw SHA256, event and received timestamps, TradingDay/session, PIT/roll/spec history, and effective OPEN/CLOSE/CLOSE_TODAY fees",
+    "forbidden_response": "do not synthesize the missing history, infer fees as zero, use continuous-main fills, relax custody ACLs, or build a collector/platform under issue 481"
+  }
+}
