@@ -73,6 +73,7 @@ def test_linux_lane_covers_only_m2_producer_and_lab() -> None:
         "test_stdout_route_mode_keeps_stop_payload_off_stdout",
         "test_issue462_simnow_lab_cli.py",
         "test_issue462_simnow_lab_m1.py",
+        "test_issue473_simnow_lab_m5.py",
         "test_windows_rpc_simnow_e2e_v1.py",
     ):
         assert required in job
