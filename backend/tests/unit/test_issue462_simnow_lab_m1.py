@@ -112,6 +112,7 @@ class FakeTdApi:
         self.order_ref = 0
         self.order_query_failure = False
         self.order_query_fail_after: int | None = None
+        self.order_query_fail_once_at: int | None = None
         self.order_query_count = 0
         self._vnpy_position_readiness_v1 = FakeTracker()
         self._vnpy_current_day_order_recovery_v1 = True
@@ -124,7 +125,7 @@ class FakeTdApi:
         if self.order_query_failure or (
             self.order_query_fail_after is not None
             and self.order_query_count >= self.order_query_fail_after
-        ):
+        ) or self.order_query_count == self.order_query_fail_once_at:
             return 1
         self.main.oms.orders = dict(self.main.broker_orders)
         self.main.oms.active_orders = {
@@ -459,7 +460,13 @@ def test_exact_contract_roll_closes_old_before_opening_new(
 ) -> None:
     subject, main, _db_path = lab
     main.broker_positions = [
-        PositionData(symbol="rb2609", exchange=Exchange.SHFE, direction=Direction.LONG, volume=2, gateway_name="CTP")
+        PositionData(
+            symbol="rb2609",
+            exchange=Exchange.SHFE,
+            direction=Direction.LONG,
+            volume=2,
+            gateway_name="CTP",
+        )
     ]
     add_rb_contract(main, "rb2609")
     add_rb_contract(main, "rb2611")
@@ -472,6 +479,55 @@ def test_exact_contract_roll_closes_old_before_opening_new(
         ("rb2611.SHFE", "OPEN", "LONG"),
     ]
     assert [(row.vt_symbol, row.volume) for row in main.broker_positions] == [("rb2611.SHFE", 2)]
+
+
+def test_roll_finishes_when_final_order_query_rejected_after_all_fills(
+    lab: tuple[SimNowLabExecutorV1, FakeMainEngine, Path]
+) -> None:
+    subject, main, _db_path = lab
+    main.broker_positions = [
+        PositionData(
+            symbol="rb2609",
+            exchange=Exchange.SHFE,
+            direction=Direction.LONG,
+            volume=2,
+            gateway_name="CTP",
+        )
+    ]
+    add_rb_contract(main, "rb2609")
+    add_rb_contract(main, "rb2611")
+    main.gateway.td_api.order_query_fail_once_at = 3
+
+    result = subject.simnow_lab_apply_target_v1(rolled_target(quantity=2))
+
+    assert result["run"]["status"] == "DONE"
+    assert [row["status"] for row in result["orders"]] == ["FILLED", "FILLED"]
+    assert [row["phase"] for row in result["snapshots"]] == ["BEFORE", "ROLL_AFTER_CLOSE", "AFTER"]
+    assert [(row.vt_symbol, row.volume) for row in main.broker_positions] == [("rb2611.SHFE", 2)]
+
+
+def test_roll_final_order_query_rejection_fails_closed_when_retry_rejected(
+    lab: tuple[SimNowLabExecutorV1, FakeMainEngine, Path]
+) -> None:
+    subject, main, _db_path = lab
+    main.broker_positions = [
+        PositionData(
+            symbol="rb2609",
+            exchange=Exchange.SHFE,
+            direction=Direction.LONG,
+            volume=2,
+            gateway_name="CTP",
+        )
+    ]
+    add_rb_contract(main, "rb2609")
+    add_rb_contract(main, "rb2611")
+    main.gateway.td_api.order_query_fail_after = 3
+
+    result = subject.simnow_lab_apply_target_v1(rolled_target(quantity=2))
+
+    assert result["run"]["status"] == "FAILED"
+    assert result["run"]["error"] == "CTP_ORDER_QUERY_REJECTED"
+    assert [row["status"] for row in result["orders"]] == ["FILLED", "FILLED"]
 
 
 @pytest.mark.parametrize(
