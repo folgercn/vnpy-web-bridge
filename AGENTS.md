@@ -22,7 +22,9 @@
 
 - `docs/research/collector-ordered-l1-bbo-change-v1/**`
 - `scripts/collector_ordered_l1_bbo_change_v1.py`
+- `scripts/collector_ordered_l1_bbo_change_accounting_v1.py`
 - `backend/tests/unit/test_issue488_hft_bbo_change_offline.py`
+- `backend/tests/unit/test_issue488_hft_bbo_change_accounting_offline.py`
 - `AGENTS.md`
 
 固定边界：
@@ -35,7 +37,7 @@
   runtime、STATIC_CORE_EQUAL 或已有策略；
 - 只实现 collector-observed BBO change 的纯函数、离线合同与 focused tests；
   不得声称 exchange-native OFI、queue、passive fill 或 capacity；
-- 最多 5 个 production/docs 文件、3 个 test 文件，完成 focused test、compile
+- 最多 6 个 production/docs 文件、3 个 test 文件，完成 focused test、compile
   与 diff check 后停止。任何采集、经济结果、forward、shadow、SimNow 或下单
   均需新的明确授权。
 

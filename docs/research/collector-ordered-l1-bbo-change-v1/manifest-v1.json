@@ -3,34 +3,45 @@
   "manifest_id": "cn-futures-collector-ordered-l1-bbo-change-p0-p1-20260901",
   "research_line_id": "CN_COMMODITY_HFT_BBO_CHANGE_LAB_V1",
   "candidate_id": "COLLECTOR_ORDERED_L1_BBO_CHANGE_IMBALANCE_V1",
-  "created_at_utc": "2026-09-01T03:29:07Z",
+  "created_at_utc": "2026-09-01T04:30:59Z",
   "freeze_effective_condition": "this exact manifest and referenced bytes are merged into main before any candidate economic result is read",
   "canonicalization": "UTF-8 JSON; ensure_ascii=false; sort_keys=true; separators=(',', ':'); allow_nan=false",
   "files": [
     {
       "path": "docs/research/collector-ordered-l1-bbo-change-v1/README.md",
-      "bytes": 3490,
-      "sha256": "33ebfbe2aea4036bc77acf3b11d65cf719987390edae66fc231effbf06905494"
+      "bytes": 6405,
+      "sha256": "80e4a93a0890c09ef6eebf230dea1e70bec7d1c6cb347a42afc83d4b5b105377"
     },
     {
       "path": "docs/research/collector-ordered-l1-bbo-change-v1/design-contract-v1.json",
-      "bytes": 17454,
-      "sha256": "1ab8bbbd148da60d31e6e319eb0ee841d83681338404e28215f0b1d9de589060",
-      "canonical_bytes": 15345,
-      "canonical_sha256": "ff2b0c3d5c581018dbd718687839063393fa72fd6148336e282b9b0157600e16"
+      "bytes": 22959,
+      "sha256": "1ae5c3c33960bb55f2b35744d21d43cde9d176776cdd1a690d07aec7233e90a1",
+      "canonical_bytes": 20514,
+      "canonical_sha256": "45baf5b915fb5c7863df33ef9e0c107ca43a43ae44466ebed23077d038612c1a"
     },
     {
       "path": "scripts/collector_ordered_l1_bbo_change_v1.py",
-      "bytes": 31606,
-      "sha256": "6786234c5e210939970d1c1487be3bed4350ab3381f3a6daafd7e6a621cc4b41"
+      "bytes": 80336,
+      "sha256": "91fe4a38dce4fc759279a0a3ceb53167eb6a251bf1c9bb349f3fe50a94d1213f"
+    },
+    {
+      "path": "scripts/collector_ordered_l1_bbo_change_accounting_v1.py",
+      "bytes": 48672,
+      "sha256": "f62fb83a92d8a2cf2e529ba634505c278acb2b7c2ddf3a418ef6694c9eaa1603"
     }
   ],
   "verification_files": [
     {
       "path": "backend/tests/unit/test_issue488_hft_bbo_change_offline.py",
-      "bytes": 22258,
-      "sha256": "54668c54dc6d7c2e2ee59256e5bffa21c0cfbdd3d5fa7fec1c52acf8b2cb50dc",
-      "focused_cases": 39
+      "bytes": 47841,
+      "sha256": "386ac0292787c3ce37e38847bbb9afd50c40836d261b5f69a8818ce778bfe2f3",
+      "focused_cases": 59
+    },
+    {
+      "path": "backend/tests/unit/test_issue488_hft_bbo_change_accounting_offline.py",
+      "bytes": 21743,
+      "sha256": "56e0ffa442b5bd385d1ae25b373208561416d182c92649c3f9797984f187596b",
+      "focused_cases": 19
     }
   ],
   "authority": {
@@ -50,8 +61,9 @@
   "stage_decision": {
     "p0_identity_and_offline_contract": "READY_TO_FREEZE_ON_MERGE",
     "p1_feature_and_single_round_trip_kernel": "IMPLEMENTED_OFFLINE",
-    "p1_raw_journal_and_partition_custody": "PENDING",
-    "p1_position_fee_and_pnl_ledger": "PENDING",
+    "p1_raw_journal_and_partition_custody": "IMPLEMENTED_OFFLINE_POSIX_RELATIVE_TO_EXTERNAL_ANCHORS",
+    "p1_position_fee_and_pnl_ledger": "IMPLEMENTED_OFFLINE_COMPONENT_NOT_FULLY_INTEGRATED",
+    "full_p1": "PARTIAL",
     "p1_5_provider_capability_probe": "BLOCKED_PENDING_EXPLICIT_DATA_ONLY_AUTHORIZATION",
     "p2_calibration": "NOT_AUTHORIZED",
     "economic_result": "NOT_COMPUTED"
