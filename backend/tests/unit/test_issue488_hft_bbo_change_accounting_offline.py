@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import ast
+from dataclasses import replace
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,11 +27,13 @@ from collector_ordered_l1_bbo_change_accounting_v1 import (  # noqa: E402
     PRIMARY,
     STRESS,
     ScenarioAdmissionLedger,
+    TradeLedgerRow,
     aggregate_fixed_20_day_grid,
     attempt_round_trip,
     bootstrap_parameters_gate,
     calculate_fee,
     liquidation_side_mtm,
+    make_execution_leg,
     primary_best3_removal,
     require_frozen_scenario,
     resolve_close_offset,
@@ -320,6 +324,57 @@ def test_admission_locks_run_generation_and_never_reuses_admitted_id() -> None:
                 "PRIMARY", "LONG", "ELIGIBLE", 2, "cross-t1", "fresh-trade",
             )
         )
+
+
+def test_same_crossing_is_independently_admitted_by_primary_and_stress() -> None:
+    ledger = ScenarioAdmissionLedger()
+    primary = candidate("primary")
+    stress = AdmissionCandidate(
+        primary.run_id,
+        primary.collector_generation,
+        primary.clock_epoch,
+        primary.segment_id,
+        primary.official_day,
+        primary.exact_contract,
+        "STRESS",
+        primary.direction,
+        primary.eligibility,
+        primary.callback_seq,
+        primary.threshold_crossing_id,
+        "stress",
+    )
+
+    assert ledger.admit(primary).decision == "ADMITTED"
+    assert ledger.admit(stress).decision == "ADMITTED"
+    ledger.transition(
+        "PRIMARY",
+        CONTRACT,
+        "IDLE",
+        2,
+        "primary",
+        run_id="run-1",
+        collector_generation="gen-1",
+        clock_epoch="epoch-1",
+        segment_id="day-1",
+        official_day=D1,
+    )
+    with pytest.raises(AccountingContractError, match="threshold_crossing_id"):
+        ledger.admit(
+            AdmissionCandidate(
+                primary.run_id,
+                primary.collector_generation,
+                primary.clock_epoch,
+                primary.segment_id,
+                primary.official_day,
+                primary.exact_contract,
+                "PRIMARY",
+                primary.direction,
+                primary.eligibility,
+                2,
+                primary.threshold_crossing_id,
+                "primary-reused-crossing",
+            )
+        )
     with pytest.raises(AccountingContractError, match="one run/generation"):
         ledger.admit(
             AdmissionCandidate(
@@ -498,6 +553,68 @@ def test_exit_pricing_failure_preserves_successful_entry_leg() -> None:
     assert partial.status == "FAILED" and partial.entry is not None and partial.exit is None
 
 
+def test_failed_partial_trade_revalidates_entry_and_forbids_exit_without_entry() -> None:
+    term_rows, fee_rows, markup_rows = bindings()
+    entry = make_execution_leg(
+        CONTRACT,
+        PRIMARY,
+        "LONG",
+        "OPEN",
+        quote(1),
+        term_rows,
+        fee_rows,
+        markup_rows,
+    )
+    partial = TradeLedgerRow(
+        "partial-validated",
+        CONTRACT,
+        "PRIMARY",
+        "LONG",
+        "FAILED",
+        "no later usable quote",
+        entry,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    partial.__post_init__()
+    object.__setattr__(entry, "exact_contract", OTHER)
+    with pytest.raises(AccountingContractError, match="quote contract mismatch"):
+        partial.__post_init__()
+
+    closed = attempt_round_trip(
+        "closed-for-exit",
+        CONTRACT,
+        PRIMARY,
+        "LONG",
+        quote(1),
+        quote(2, bid="105", ask="106"),
+        term_rows,
+        fee_rows,
+        markup_rows,
+    )
+    assert closed.exit is not None
+    with pytest.raises(AccountingContractError, match="requires an entry"):
+        TradeLedgerRow(
+            "exit-only",
+            CONTRACT,
+            "PRIMARY",
+            "LONG",
+            "FAILED",
+            "forged",
+            None,
+            closed.exit,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+
 def test_forged_closed_trade_with_unusable_execution_side_is_rejected() -> None:
     term_rows, fee_rows, markup_rows = bindings()
     closed = attempt_round_trip(
@@ -559,6 +676,15 @@ def test_liquidation_marks_long_bid_short_ask() -> None:
 
 def test_daily_grid_nonprimary_mapping_and_bad_rows_fail_closed() -> None:
     grid = tuple(D1 + timedelta(days=i) for i in range(20))
+    trusted_terms = [terms(day=grid[0])]
+    trusted_fees = [
+        fee(day=grid[0], offset=o)
+        for o in ("OPEN", "CLOSE_TODAY", "CLOSE_YESTERDAY")
+    ]
+    trusted_markups = [
+        markup(day=grid[0], offset=o)
+        for o in ("OPEN", "CLOSE_TODAY", "CLOSE_YESTERDAY")
+    ]
     closed = attempt_round_trip(
         "x",
         CONTRACT,
@@ -566,46 +692,54 @@ def test_daily_grid_nonprimary_mapping_and_bad_rows_fail_closed() -> None:
         "LONG",
         quote(1, day=grid[0]),
         quote(2, day=grid[0], bid="102", ask="103"),
-        *(
-            [terms(day=grid[0])],
-            [
-                fee(day=grid[0], offset=o)
-                for o in ("OPEN", "CLOSE_TODAY", "CLOSE_YESTERDAY")
-            ],
-            [
-                markup(day=grid[0], offset=o)
-                for o in ("OPEN", "CLOSE_TODAY", "CLOSE_YESTERDAY")
-            ],
-        ),
+        trusted_terms,
+        trusted_fees,
+        trusted_markups,
     )
+    assert closed.entry is not None and closed.exit is not None
+    trusted_quotes = {
+        closed.entry.quote.raw_record_hash: closed.entry.quote,
+        closed.exit.quote.raw_record_hash: closed.exit.quote,
+    }
+
+    def aggregate(
+        rows: list[TradeLedgerRow],
+        mapping: dict[str, str],
+        evidence: tuple[DailyCoverageEvidence, ...],
+        scenario: ExecutionScenarioSpec = PRIMARY,
+    ) -> tuple[DailyAggregateRow, ...]:
+        return aggregate_fixed_20_day_grid(
+            rows,
+            mapping,
+            grid,
+            evidence,
+            scenario,
+            terms_bindings=trusted_terms,
+            fees=trusted_fees,
+            markups=trusted_markups,
+            trusted_quotes_by_raw_record_hash=trusted_quotes,
+        )
+
     coverage = full_coverage(grid, {("rb", CONTRACT, grid[0]): 1})
     with pytest.raises(AccountingContractError, match="one exact"):
-        aggregate_fixed_20_day_grid(
-            [closed], {CONTRACT: "rb", OTHER: "rb"}, grid, coverage
-        )
+        aggregate([closed], {CONTRACT: "rb", OTHER: "rb"}, coverage)
     with pytest.raises(AccountingContractError, match="PRIMARY-only"):
-        aggregate_fixed_20_day_grid(
+        aggregate(
             [closed],
             {CONTRACT: "rb", OTHER: "i"},
-            grid,
             coverage,
             scenario=STRESS,
         )
-    daily = aggregate_fixed_20_day_grid(
-        [closed], {CONTRACT: "rb", OTHER: "i"}, grid, coverage
-    )
+    daily = aggregate([closed], {CONTRACT: "rb", OTHER: "i"}, coverage)
     assert len(daily) == 40 and daily[1].trade_count == 0
     with pytest.raises(AccountingContractError, match="attempt_id"):
-        aggregate_fixed_20_day_grid(
+        aggregate(
             [closed, closed],
             {CONTRACT: "rb", OTHER: "i"},
-            grid,
             full_coverage(grid, {("rb", CONTRACT, grid[0]): 2}),
         )
     with pytest.raises(AccountingContractError, match="attempt_count"):
-        aggregate_fixed_20_day_grid(
-            [], {CONTRACT: "rb", OTHER: "i"}, grid, coverage
-        )
+        aggregate([], {CONTRACT: "rb", OTHER: "i"}, coverage)
     failed = attempt_round_trip(
         "failed-coverage",
         CONTRACT,
@@ -618,27 +752,22 @@ def test_daily_grid_nonprimary_mapping_and_bad_rows_fail_closed() -> None:
         [markup(day=grid[0], offset="OPEN")],
     )
     with pytest.raises(AccountingContractError, match="bad or unpriced"):
-        aggregate_fixed_20_day_grid(
+        aggregate(
             [failed],
             {CONTRACT: "rb", OTHER: "i"},
-            grid,
             full_coverage(grid, {("rb", CONTRACT, grid[0]): 1}),
         )
     with pytest.raises(AccountingContractError, match="complete"):
-        aggregate_fixed_20_day_grid(
-            [closed], {CONTRACT: "rb", OTHER: "i"}, grid, coverage[:-1]
-        )
+        aggregate([closed], {CONTRACT: "rb", OTHER: "i"}, coverage[:-1])
     with pytest.raises(AccountingContractError, match="sealed"):
-        aggregate_fixed_20_day_grid(
-            [closed], {CONTRACT: "rb", OTHER: "i"}, grid,
+        aggregate(
+            [closed], {CONTRACT: "rb", OTHER: "i"},
             coverage[:-1]
             + (DailyCoverageEvidence("i", OTHER, "PRIMARY", grid[-1], False, True, 0),),
         )
     object.__setattr__(closed, "net_cny", Decimal("999"))
     with pytest.raises(AccountingContractError, match="economics"):
-        aggregate_fixed_20_day_grid(
-            [closed], {CONTRACT: "rb", OTHER: "i"}, grid, coverage
-        )
+        aggregate([closed], {CONTRACT: "rb", OTHER: "i"}, coverage)
     with pytest.raises(AccountingContractError, match="unpriced"):
         primary_best3_removal(
             [
@@ -647,6 +776,180 @@ def test_daily_grid_nonprimary_mapping_and_bad_rows_fail_closed() -> None:
             ],
             grid,
         )
+
+
+def test_daily_aggregation_rebuilds_legs_from_trusted_pit_bindings() -> None:
+    grid = tuple(D1 + timedelta(days=i) for i in range(20))
+    trusted = bindings(days=(D1,))
+    closed = attempt_round_trip(
+        "forgery",
+        CONTRACT,
+        PRIMARY,
+        "LONG",
+        quote(1),
+        quote(2, bid="105", ask="106"),
+        *trusted,
+    )
+    assert closed.entry is not None and closed.exit is not None
+    forged_entry = replace(
+        closed.entry,
+        instrument_terms_binding_id="forged-terms",
+        fee_schedule_binding_id="forged-fee",
+        broker_markup_binding_id="forged-markup",
+        exchange_fee_cny=Decimal(0),
+        broker_fee_cny=Decimal(0),
+    )
+    exchange_fee = forged_entry.exchange_fee_cny + closed.exit.exchange_fee_cny
+    broker_fee = forged_entry.broker_fee_cny + closed.exit.broker_fee_cny
+    forged = replace(
+        closed,
+        entry=forged_entry,
+        exchange_fee_cny=exchange_fee,
+        broker_fee_cny=broker_fee,
+        net_cny=closed.gross_cny - exchange_fee - broker_fee,
+    )
+
+    with pytest.raises(AccountingContractError, match="trusted PIT bindings"):
+        aggregate_fixed_20_day_grid(
+            [forged],
+            {CONTRACT: "rb", OTHER: "i"},
+            grid,
+            full_coverage(grid, {("rb", CONTRACT, D1): 1}),
+            terms_bindings=trusted[0],
+            fees=trusted[1],
+            markups=trusted[2],
+            trusted_quotes_by_raw_record_hash={
+                closed.entry.quote.raw_record_hash: closed.entry.quote,
+                closed.exit.quote.raw_record_hash: closed.exit.quote,
+            },
+        )
+
+
+def test_public_binding_resolution_rejects_structural_impostors() -> None:
+    trusted = bindings()
+    fake_terms = SimpleNamespace(**vars(trusted[0][0]))
+
+    with pytest.raises(AccountingContractError, match="exact InstrumentTermsBinding"):
+        make_execution_leg(
+            CONTRACT,
+            PRIMARY,
+            "LONG",
+            "OPEN",
+            quote(1),
+            [fake_terms],
+            trusted[1],
+            trusted[2],
+        )
+
+
+def test_daily_aggregation_requires_exact_rows_and_trusted_raw_quotes() -> None:
+    grid = tuple(D1 + timedelta(days=i) for i in range(20))
+    trusted = bindings(days=(D1,))
+    entry_quote = quote(1)
+    exit_quote = quote(2, bid="105", ask="106")
+    closed = attempt_round_trip(
+        "trusted-raw",
+        CONTRACT,
+        PRIMARY,
+        "LONG",
+        entry_quote,
+        exit_quote,
+        *trusted,
+    )
+    assert closed.entry is not None and closed.exit is not None
+    coverage = full_coverage(grid, {("rb", CONTRACT, D1): 1})
+    quote_map = {
+        entry_quote.raw_record_hash: entry_quote,
+        exit_quote.raw_record_hash: exit_quote,
+    }
+
+    def aggregate(
+        rows: object,
+        evidence: object = coverage,
+    ) -> tuple[DailyAggregateRow, ...]:
+        return aggregate_fixed_20_day_grid(
+            rows,  # type: ignore[arg-type]
+            {CONTRACT: "rb", OTHER: "i"},
+            grid,
+            evidence,  # type: ignore[arg-type]
+            terms_bindings=trusted[0],
+            fees=trusted[1],
+            markups=trusted[2],
+            trusted_quotes_by_raw_record_hash=quote_map,
+        )
+
+    fake_trade = SimpleNamespace(
+        __post_init__=lambda: None,
+        attempt_id="fake",
+        exact_contract=CONTRACT,
+        scenario_id="PRIMARY",
+        direction="LONG",
+        status="CLOSED",
+        entry=closed.entry,
+        exit=closed.exit,
+        net_cny=Decimal("999999"),
+    )
+    with pytest.raises(AccountingContractError, match="exact TradeLedgerRow"):
+        aggregate([fake_trade])
+
+    fake_coverage = tuple(
+        SimpleNamespace(
+            product=product,
+            exact_contract=contract,
+            official_day=day,
+            sealed="false",
+            priced="false",
+            attempt_count=0,
+        )
+        for product, contract in (("rb", CONTRACT), ("i", OTHER))
+        for day in grid
+    )
+    with pytest.raises(AccountingContractError, match="exact DailyCoverageEvidence"):
+        aggregate([], fake_coverage)
+
+    forged_entry_quote = replace(
+        entry_quote,
+        bid=Decimal("49"),
+        ask=Decimal("50"),
+    )
+    forged = attempt_round_trip(
+        "forged-raw",
+        CONTRACT,
+        PRIMARY,
+        "LONG",
+        forged_entry_quote,
+        exit_quote,
+        *trusted,
+    )
+    with pytest.raises(AccountingContractError, match="trusted raw quote"):
+        aggregate([forged])
+
+
+def test_nested_quote_and_best3_rows_are_revalidated() -> None:
+    trusted = bindings()
+    entry_quote = quote(1)
+    closed = attempt_round_trip(
+        "nested-mutation",
+        CONTRACT,
+        PRIMARY,
+        "LONG",
+        entry_quote,
+        quote(2, bid="105", ask="106"),
+        *trusted,
+    )
+    object.__setattr__(entry_quote, "raw_record_hash", "BAD")
+    with pytest.raises(AccountingContractError, match="raw_record_hash"):
+        closed.__post_init__()
+
+    grid = tuple(D1 + timedelta(days=i) for i in range(20))
+    rows = [
+        DailyAggregateRow(product, "PRIMARY", day, 0, Decimal(0), True)
+        for product in ("rb", "i")
+        for day in grid
+    ]
+    object.__setattr__(rows[0], "net_cny", Decimal("100"))
+    with pytest.raises(AccountingContractError, match="zero-trade"):
+        primary_best3_removal(rows, grid)
 
 
 def test_pooled_best3_removes_same_days_for_two_products_with_offset_peaks() -> None:

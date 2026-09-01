@@ -3,45 +3,56 @@
   "manifest_id": "cn-futures-collector-ordered-l1-bbo-change-p0-p1-20260901",
   "research_line_id": "CN_COMMODITY_HFT_BBO_CHANGE_LAB_V1",
   "candidate_id": "COLLECTOR_ORDERED_L1_BBO_CHANGE_IMBALANCE_V1",
-  "created_at_utc": "2026-09-01T04:30:59Z",
+  "created_at_utc": "2026-09-01T07:46:54Z",
   "freeze_effective_condition": "this exact manifest and referenced bytes are merged into main before any candidate economic result is read",
   "canonicalization": "UTF-8 JSON; ensure_ascii=false; sort_keys=true; separators=(',', ':'); allow_nan=false",
   "files": [
     {
       "path": "docs/research/collector-ordered-l1-bbo-change-v1/README.md",
-      "bytes": 6405,
-      "sha256": "80e4a93a0890c09ef6eebf230dea1e70bec7d1c6cb347a42afc83d4b5b105377"
+      "bytes": 10120,
+      "sha256": "f498e4a807280f796bccd72eb106beb5f1d282608a76250fbd9a02c979849758"
     },
     {
       "path": "docs/research/collector-ordered-l1-bbo-change-v1/design-contract-v1.json",
-      "bytes": 22959,
-      "sha256": "1ae5c3c33960bb55f2b35744d21d43cde9d176776cdd1a690d07aec7233e90a1",
-      "canonical_bytes": 20514,
-      "canonical_sha256": "45baf5b915fb5c7863df33ef9e0c107ca43a43ae44466ebed23077d038612c1a"
+      "bytes": 30113,
+      "sha256": "c36f4d07cb407fa416f062a2519212223acbbbbd50271efbca57a49df171aad6",
+      "canonical_bytes": 27386,
+      "canonical_sha256": "a7c991d21fa1d270cbe5df4076bf17cf93abf50c996aa1fe7859a326d80e9d22"
     },
     {
       "path": "scripts/collector_ordered_l1_bbo_change_v1.py",
-      "bytes": 80336,
-      "sha256": "91fe4a38dce4fc759279a0a3ceb53167eb6a251bf1c9bb349f3fe50a94d1213f"
+      "bytes": 194444,
+      "sha256": "94ed99ba568aae4f987b932f41bc3c21241d5adcaae3916b6c97981b14afdf5f"
     },
     {
       "path": "scripts/collector_ordered_l1_bbo_change_accounting_v1.py",
-      "bytes": 48672,
-      "sha256": "f62fb83a92d8a2cf2e529ba634505c278acb2b7c2ddf3a418ef6694c9eaa1603"
+      "bytes": 54853,
+      "sha256": "1773ad04e610a39c88a729815511f91e1df917faa53f6fe6844b55c1232ded72"
+    },
+    {
+      "path": "scripts/collector_ordered_l1_bbo_change_auditor_v1.py",
+      "bytes": 140384,
+      "sha256": "fb0a45c1553b4e2ba89e4a15e257c57e4d7ac8eaab9e86d617491bf94470d97c"
     }
   ],
   "verification_files": [
     {
       "path": "backend/tests/unit/test_issue488_hft_bbo_change_offline.py",
-      "bytes": 47841,
-      "sha256": "386ac0292787c3ce37e38847bbb9afd50c40836d261b5f69a8818ce778bfe2f3",
-      "focused_cases": 59
+      "bytes": 58279,
+      "sha256": "2d8628591f9cbe803082253abc60cfbda2111ec6d67a2b30553d074e011d4bca",
+      "focused_cases": 72
     },
     {
       "path": "backend/tests/unit/test_issue488_hft_bbo_change_accounting_offline.py",
-      "bytes": 21743,
-      "sha256": "56e0ffa442b5bd385d1ae25b373208561416d182c92649c3f9797984f187596b",
-      "focused_cases": 19
+      "bytes": 30635,
+      "sha256": "bd232095f01f446b25455f1608970f5696d26c83b106c17a0b64bed80e69ff3b",
+      "focused_cases": 25
+    },
+    {
+      "path": "backend/tests/unit/test_issue488_hft_bbo_change_auditor_offline.py",
+      "bytes": 62703,
+      "sha256": "cf169f043284367232c0ffc716cd84bf4bdfa7389ae175d6553cfebd59a62c9d",
+      "focused_cases": 63
     }
   ],
   "authority": {
@@ -60,10 +71,11 @@
   },
   "stage_decision": {
     "p0_identity_and_offline_contract": "READY_TO_FREEZE_ON_MERGE",
-    "p1_feature_and_single_round_trip_kernel": "IMPLEMENTED_OFFLINE",
+    "p1_feature_and_multi_signal_replay_kernel": "OFFLINE_FIXTURE_COMPLETE_REAL_BINDINGS_UNBOUND",
     "p1_raw_journal_and_partition_custody": "IMPLEMENTED_OFFLINE_POSIX_RELATIVE_TO_EXTERNAL_ANCHORS",
-    "p1_position_fee_and_pnl_ledger": "IMPLEMENTED_OFFLINE_COMPONENT_NOT_FULLY_INTEGRATED",
-    "full_p1": "PARTIAL",
+    "p1_accounting_component": "IMPLEMENTED_AND_INTEGRATED_OFFLINE",
+    "p1_independent_raw_to_pnl_auditor": "IMPLEMENTED_OFFLINE",
+    "generic_offline_p1": "OFFLINE_FIXTURE_COMPLETE_REAL_BINDINGS_UNBOUND",
     "p1_5_provider_capability_probe": "BLOCKED_PENDING_EXPLICIT_DATA_ONLY_AUTHORIZATION",
     "p2_calibration": "NOT_AUTHORIZED",
     "economic_result": "NOT_COMPUTED"

@@ -113,6 +113,11 @@
       "duplicate_status",
       "source_status"
     ],
+    "required_control_fields": [
+      "event_type",
+      "reason",
+      "scope"
+    ],
     "required_control_events": [
       "COLLECTOR_START",
       "DISCONNECT",
@@ -124,6 +129,9 @@
       "SINK_FAILURE_ABORT",
       "COLLECTOR_STOP"
     ],
+    "control_scope_policy": "COLLECTOR_START, DISCONNECT, RECONNECT, CLOCK_EPOCH_CHANGE, BACKPRESSURE_ABORT, SINK_FAILURE_ABORT, and COLLECTOR_STOP are GENERATION_GLOBAL; SESSION_SEGMENT_START and SESSION_SEGMENT_END are EXACT_CONTRACT_SEGMENT and bind exact_contract + session_family + segment_id + official_trading_day + collector_generation + clock_epoch",
+    "canonical_raw_policy": "all CONTROL identity/reason/scope text is nonempty canonical text, official_trading_day is canonical ISO date text, callback_entry_receive_monotonic_ns is positive, and all eight retained provider numeric fields are string, integer, or null but never bool/float",
+    "complete_stream_preflight": "before economic state, scan every row including any future STOP suffix; reject a row after COLLECTOR_STOP/BACKPRESSURE_ABORT/SINK_FAILURE_ABORT in that generation and validate every run-wide PROVEN_UNIQUE provider-id duplicate/conflict/explicit-marker relation",
     "provider_update_id_policy": "nullable and never synthesized; its uniqueness semantics must be proven in P1.5 before it can classify a duplicate",
     "mutable_provider_object_policy": "copy the provider state at callback or poll-cycle entry after paired UTC/monotonic capture and sequence allocation, before any queue or downstream work",
     "poll_cycle_policy": "if the provider exposes a mutable poll-cycle snapshot rather than events, retain provider_batch_id and within_batch_rank and limit claims to collector-enumerated per-contract state changes",
@@ -154,6 +162,7 @@
       "last_record_hash",
       "partition_hash",
       "previous_partition_hash",
+      "previous_partition_seal_id",
       "seal_id",
       "closed_at_utc",
       "schema_version",
@@ -164,6 +173,9 @@
     "partial_tail_policy": "fail closed and quarantine the generation; never truncate and continue silently",
     "tamper_delete_reorder_policy": "verification failure",
     "code_sha_policy": "required lowercase 40- or 64-character hexadecimal revision identity",
+    "read_only_replay_policy": "reader takes external root pins plus terminal partition hash/seal, performs no explicit write, lock, quarantine, repair, content, or namespace mutation, requires exact 0600 owner-only regular files and, if a writer lock exists, requires it to be empty, rejects orphan/unsealed files, and recursively re-verifies all raw and manifest bytes before replay",
+    "recursive_terminal_seal_policy": "each manifest seal binds previous_partition_hash and previous_partition_seal_id so the terminal seal recursively commits all prior manifest metadata",
+    "manifest_input_policy": "manifest JSON is canonical UTF-8 object-plus-newline no larger than 1048576 bytes; closed_at_utc and code_sha are canonical text and the latter is an exact lowercase 40/64 hex identity",
     "current_status": "IMPLEMENTED_OFFLINE_POSIX_FOCUSED_TEST"
   },
   "ordering_and_reset": {
@@ -174,7 +186,7 @@
     "same_source_timestamp_policy": "retain and process each callback in collector_seq order",
     "same_bbo_distinct_callback_policy": "retain, qualify, and contribute zero",
     "no_provider_unique_id_policy": "never deduplicate",
-    "proven_unique_id_same_payload_policy": "retain raw row, mark explicit duplicate, exclude only that row from the feature",
+    "proven_unique_id_same_payload_policy": "retain every raw row; after P1.5 proves global uniqueness, compare the full provider payload against a run-wide provider-id map across all collector generations and exclude an exact repeated payload from feature/replay even when nonadjacent",
     "proven_unique_id_different_payload_policy": "corruption and generation abort",
     "monotonic_comparability": "only inside one collector_generation and clock_epoch",
     "process_restart_policy": "new collector_generation and clock_epoch; collector_seq restarts at one; all feature state resets; a terminated collector_generation identifier is never reusable",
@@ -207,6 +219,8 @@
     "negative_corrected_lag_allowed": false,
     "max_source_receive_p99_ns": 250000000,
     "p99_estimator": "nearest rank sorted[ceil(0.99*n)-1]",
+    "row_level_replay_precondition": "before creating economic state, reject any raw quote that is not SYNCED, exceeds offset/uncertainty/precision limits, or has negative corrected lag",
+    "aggregate_fixture_policy": "at 1000 or more replay quotes enforce p99 <= 250ms before economic state; a smaller synthetic mechanism fixture may be recalculated but remains holdout BLOCKED for insufficient clock evidence",
     "failure_effect": "descriptive feature evidence only; price-taker markout, PnL, and economic claims forbidden"
   },
   "feature_contract": {
@@ -253,22 +267,26 @@
     "primary_latency_ns_each_decision": 500000000,
     "latency_boundary": "receive_monotonic_ns >= decision_receive_monotonic_ns + latency_ns",
     "entry": "first qualified same-lane BBO after latency; long buys ask and short sells bid",
-    "exit": "after entry plus 30 active seconds, recognize the horizon on the first same-lane observation, wait 500ms, then use the first qualified BBO; long sells bid and short buys ask",
+    "exit": "after entry plus 30 active seconds, recognize the horizon on the first same-lane observation, wait 500ms, then use the first qualified BBO whose source_event_utc_ns is at least the per-attempt accepted-source high-water; a source-time regression is retained but skipped and cannot begin or satisfy exit; long sells bid and short buys ask",
     "quantity_lots": 1,
     "required_execution_side_size_lots": 1,
     "same_contract_max_open_positions": 1,
+    "new_entry_min_remaining_segment_ns": 60000000000,
+    "new_entry_remaining_boundary": "a signal quote is PIT-eligible only when frozen segment_end_utc_ns - callback_entry_receive_utc_ns >= new_entry_min_remaining_segment_ns",
     "overlapping_level_signals": "suppress while a position is open and report every suppression",
     "cross_segment_or_epoch_fill": false,
     "quote_optimization_or_future_best_quote": false,
     "primary_cost": "observed bid/ask plus point-in-time exchange fee, close-today treatment, and frozen broker markup",
     "stress": "one second latency per decision plus one extra tick per leg",
     "terminal_exit_timeout": "if no qualified exit within five seconds after the horizon, take the next qualified same-segment side BBO, retain the trade, and fail that contract-day data gate",
-    "terminal_unpriced": "if no later qualified same-segment quote exists, retain an UNPRICED_TERMINAL exposure and STOP the holdout; never drop or invent a fill",
-    "current_offline_implementation": "single-signal primary entry/exit quote selection over one complete gapless run-global QUOTE/CONTROL stream only; the separate accounting component is not yet integrated with complete multi-signal raw replay, terminal timeout/unpriced handling, or end-to-end PnL"
+    "terminal_unpriced": "if no later execution-usable same-segment quote exists, retain an UNPRICED_TERMINAL exposure with signed terminal_position_lots, STOP replay globally, mark later coverage incomplete, and never drop or invent a fill",
+    "accounting_failure_after_exit": "if an execution-usable exit quote exists but trusted PIT accounting fails, retain the exit raw hash, record an ACCOUNTING-prefixed terminal reason, preserve signed terminal_position_lots, emit no CLOSED trade, and STOP replay globally",
+    "terminal_evidence": "each attempt records terminal boundary kind, callback sequence/raw hash when a callback exists, entry/exit raw hashes, and signed terminal_position_lots; SEALED_STREAM_END never invents callback evidence",
+    "current_offline_implementation": "complete generic offline PRIMARY/STRESS multi-signal replay over externally anchored sealed QUOTE/CONTROL custody, including generation-scoped admission, provider semantics, PIT accounting, terminal handling, exact reconciliation, and fail-closed coverage; real provider/schedule/PIT/holdout bindings remain unbound"
   },
   "offline_accounting_component": {
     "implementation_scope": "standard-library deterministic offline component only; no network, credential, vn.py, RPC, order, or position authority",
-    "full_replay_integration": "NOT_IMPLEMENTED",
+    "full_replay_integration": "IMPLEMENTED_GENERIC_OFFLINE_FIXTURES",
     "primary_scenario": {
       "entry_delay_ns": 500000000,
       "exit_delay_ns": 500000000,
@@ -292,16 +310,38 @@
     "pit_binding": "InstrumentTermsBinding, FeeScheduleBinding, and BrokerMarkupBinding require exact-one exact_contract + official_day + callback receive UTC matching plus authority/source/version/source_sha256 provenance",
     "fee": "each leg is Decimal fixed_cny + price * multiplier * ratio_per_mille / 1000, exchange and broker components separately rounded to 0.01 with ROUND_HALF_UP; explicit zero is valid but missing is fail-closed",
     "current_close_policy": "current candidate accounting permits one lane and one official trading day only, so exit is CLOSE_TODAY; CLOSE_YESTERDAY resolution is retained for a future separately authorized identity",
-    "row_validation": "deserialized execution legs and CLOSED/FAILED trade rows are revalidated for quote usability, frozen scenario, lane, contract, side, position, PIT bindings, price, fee rounding, and PnL arithmetic before aggregation",
+    "row_validation": "deserialized execution quotes/legs and CLOSED/FAILED trade rows require exact types and are revalidated for raw hash shape, quote usability, frozen scenario, lane, contract, side, position, price, fee rounding, and PnL arithmetic; fixed-grid aggregation additionally requires externally trusted PIT terms/fee/markup bindings plus an independently supplied raw_record_hash-to-ExecutionQuote map derived from verified custody, exact-compares each submitted quote to that map, reconstructs every present leg, and exact-compares the leg before accepting provenance",
     "liquidation_mtm": "PRIMARY and STRESS use the actual liquidation side; STRESS applies one adverse tick to the exit execution price before PIT fees",
     "daily_coverage": "PRIMARY aggregation requires exactly one sealed and priced evidence row for each of two product x exact-contract x 20 official-day cells and reconciles every CLOSED or FAILED attempt count; only a reconciled zero permits a zero-trade day",
-    "daily_aggregation": "PRIMARY-only fixed 20 ascending official-day grid; select exactly three official days by pooled cross-product net descending then official-day ascending tie break, remove those same dates from each product, and still require every product to pass without pooled rescue",
-    "still_pending": [
-      "terminal timeout and unpriced exposure integration",
-      "complete multi-signal raw replay integration",
-      "independent raw-to-PnL auditor",
-      "bootstrap parameters remain BLOCKED and are not selected"
+    "daily_aggregation": "PRIMARY-only fixed 20 ascending official-day grid; select exactly three official days by pooled cross-product net descending then official-day ascending tie break, remove those same dates from each product, and still require every product to pass without pooled rescue; producer daily/best3 remain empty until an authorized complete real holdout passes every coverage gate",
+    "still_pending_real_bindings": [
+      "authorized provider capability proof and exact-contract selection",
+      "authoritative session schedules and active-clock coverage plan",
+      "authoritative point-in-time terms, fees, and broker markups",
+      "complete sealed real 20-day holdout and clock-quality evidence",
+      "bootstrap parameters remain BLOCKED for a later separately authorized holdout decision"
     ]
+  },
+  "independent_raw_to_pnl_auditor": {
+    "implementation_scope": "standard-library-only offline module with no project-local producer/accounting imports and JSON-primitive inputs only",
+    "trusted_inputs": "sealed partition manifest/raw byte envelopes plus external terminal partition hash, terminal seal id, and freeze SHA-256",
+    "producer_is_not_an_input_to_recalculation": true,
+    "recalculated_collections": [
+      "callback_trace",
+      "admissions",
+      "attempts",
+      "trades",
+      "coverage",
+      "daily",
+      "best3"
+    ],
+    "audit_statuses": [
+      "MATCH",
+      "MISMATCH",
+      "INVALID_INPUT"
+    ],
+    "holdout_gate_independent_of_match": true,
+    "current_status": "IMPLEMENTED_OFFLINE_SYNTHETIC_MATCH_MISMATCH_INVALID_INPUT"
   },
   "data_gate_denominators": {
     "quote_record_denominator": "all raw QUOTE rows, including invalid and explicit duplicates; CONTROL rows excluded",
@@ -314,6 +354,12 @@
     "state_changing_observations_per_contract_day_min": 5000,
     "mid_changes_per_contract_day_min": 500,
     "applicable_session_family_required_individually": true,
+    "quality_gate_policy": "legal BBO rate, distinct positive side sizes, mirrored-size rate, crossed-or-locked rate, state-changing count, and mid-change count are recomputed from raw quotes; crossed-or-locked numerator examines every parseable positive price pair before size validity or duplicate exclusion; quality_gate_passed is independent of lifecycle_gate_passed",
+    "coverage_plan_authority_policy": "every exact coverage row includes nonempty canonical authority/source/version/source_sha256; these are externally frozen provenance claims, not self-authentication",
+    "explicit_cell_gates": "data_gate_passed requires replay_complete, one generation and clock epoch, lifecycle, raw quality, eligible plan with days_to_ltd > 10, every quote inside the plan interval, at least one quote with >=60000000000ns remaining, exact contract/session Q95, provider semantics in PROVEN_NO_USABLE_ID or PROVEN_UNIQUE, exactly one full-interval PIT terms binding and one fee/markup binding per offset with no partially overlapping competitor, exact admission/attempt/trade reconciliation, and only CLOSED_NORMAL or FAILED_NO_ENTRY attempts",
+    "replay_complete_policy": "every raw quote and exact-segment lifecycle record for the frozen cell must have been processed before any global unpriced STOP; planned suffix cells after the cutoff fail",
+    "lifecycle_policy": "exactly one collector start/stop and one segment start/end; every cell quote must lie strictly inside the segment bounds; DISCONNECT, RECONNECT, CLOCK_EPOCH_CHANGE, or abort inside the segment fails while an event after segment end does not retroactively taint it",
+    "reconciliation_policy": "ADMITTED accepted_trade_id must biject exactly to terminal attempt_id, and CLOSED attempt_id must biject exactly to trade attempt_id, including a valid zero-attempt cell",
     "custody_schema_partition_or_clock_failure": "STOP"
   },
   "p1_offline_acceptance": {
@@ -322,30 +368,29 @@
       "simultaneous two-sided contribution",
       "same source timestamp collector ordering",
       "distinct identical BBO zero contribution",
-      "explicit adjacent provider duplicate exclusion and conflict rejection",
+      "global PROVEN_UNIQUE provider-id exact-payload duplicate exclusion and conflicting-payload rejection",
       "run-global gapless QUOTE/CONTROL lifecycle sequencing and generation abort",
       "generation, clock epoch, reconnect, invalid BBO, source-time regression, and active-time long-gap reset",
       "exact (t-10s,t] edge behavior and 10-second warmup",
       "deterministic feature-only nearest-rank Q95",
       "clock precision, uncertainty, offset, and 250ms p99 gates",
-      "500ms first-eligible entry and 30-second plus 500ms exit quote selection over the complete run-global stream",
-      "POSIX raw QUOTE/CONTROL append-only custody, resume, crash-tail quarantine, record/partition hash chains, external root/head anchors, seal, and tamper verification",
-      "PRIMARY/STRESS scenario admission ledger with one position per scenario and exact contract",
+      "PRIMARY/STRESS first-eligible entry and 30-second horizon/latency exit over the complete run-global stream",
+      "POSIX raw QUOTE/CONTROL append-only custody plus application-level non-mutating anchored reader with no explicit content/namespace mutation, recursive manifest/partition seal chains, resume, crash-tail quarantine, and bounded tamper verification",
+      "generation-scoped PRIMARY/STRESS admission ledgers with one position per scenario and exact contract",
       "point-in-time terms, exchange fee, broker markup, close-today, exact execution legs, liquidation-side MTM, and self-validating trade PnL rows",
+      "complete multi-signal terminal timeout, residual unpriced exposure, global replay STOP, and exact coverage reconciliation",
+      "independent standard-library raw-to-PnL MATCH/MISMATCH/INVALID_INPUT auditor",
       "two-product fixed 20-day sealed/priced coverage reconciliation and pooled best-three official-day removal",
       "offline import guards for network, credential, RPC, order, and position authority"
     ],
-    "still_required": [
-      "complete multi-signal raw replay integration of the implemented POSIX QUOTE/CONTROL custody",
-      "terminal timeout and unpriced exposure integration",
-      "provider id semantics validator beyond adjacent explicit duplicates",
-      "backpressure and sink-failure generation abort",
-      "session schedule to active-clock derivation",
-      "end-to-end multi-signal position, fee, and PnL integration",
-      "independent raw-to-PnL auditor",
-      "bootstrap parameter freeze after separate authorization"
+    "still_required_real_bindings": [
+      "authorized provider id/delivery semantics proof",
+      "authoritative session schedule to active-clock derivation",
+      "point-in-time exact-contract, terms, exchange-fee, and broker-markup bindings",
+      "complete sealed 20-day real holdout and clock-quality evidence",
+      "bootstrap parameter freeze only after separate holdout authorization"
     ],
-    "full_p1_status": "PARTIAL"
+    "generic_offline_p1_status": "OFFLINE_FIXTURE_COMPLETE_REAL_BINDINGS_UNBOUND"
   },
   "p1_5_capability_probe": {
     "reason": "provider callback/coalescing, timestamp precision, reconnect behavior, latency, and actual exact-contract feasibility cannot be proven with offline fixtures",
@@ -378,7 +423,7 @@
     "automatic_progression": false
   },
   "data_readiness": {
-    "overall_decision": "P1_PARTIAL_P1_5_BLOCKED_NO_DATA_OR_ECONOMIC_AUTHORITY",
+    "overall_decision": "GENERIC_OFFLINE_P1_COMPLETE_REAL_BINDINGS_UNBOUND_P1_5_BLOCKED_NO_DATA_OR_ECONOMIC_AUTHORITY",
     "dedicated_lossless_raw_collector": "MISSING",
     "provider_callback_and_coalescing_semantics": "UNVERIFIED",
     "provider_unique_update_id_semantics": "UNVERIFIED",
@@ -386,9 +431,10 @@
     "continuous_non_event_non_degenerate_exact_l1": "MISSING",
     "two_products_and_fixed_exact_contracts": "PENDING_P1_5",
     "point_in_time_fee_close_today_and_broker_markup": "UNBOUND",
-    "candidate_raw_partition_custody": "IMPLEMENTED_OFFLINE_POSIX_NO_DATA",
-    "offline_accounting_component": "IMPLEMENTED_OFFLINE_NOT_FULLY_INTEGRATED",
-    "offline_feature_and_single_round_trip_kernel": "IMPLEMENTED_FOCUSED_TEST",
+    "candidate_raw_partition_custody": "IMPLEMENTED_OFFLINE_POSIX_ANCHORED_READ_WRITE_NO_REAL_DATA",
+    "offline_accounting_component": "IMPLEMENTED_AND_INTEGRATED_FOCUSED_TEST",
+    "offline_feature_and_multi_signal_replay_kernel": "OFFLINE_FIXTURE_COMPLETE_REAL_BINDINGS_UNBOUND",
+    "independent_raw_to_pnl_auditor": "IMPLEMENTED_OFFLINE_SYNTHETIC_FIXTURES",
     "credentials_accessed": false,
     "network_accessed": false,
     "economic_result_computed": false

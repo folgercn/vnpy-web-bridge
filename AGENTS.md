@@ -23,8 +23,10 @@
 - `docs/research/collector-ordered-l1-bbo-change-v1/**`
 - `scripts/collector_ordered_l1_bbo_change_v1.py`
 - `scripts/collector_ordered_l1_bbo_change_accounting_v1.py`
+- `scripts/collector_ordered_l1_bbo_change_auditor_v1.py`
 - `backend/tests/unit/test_issue488_hft_bbo_change_offline.py`
 - `backend/tests/unit/test_issue488_hft_bbo_change_accounting_offline.py`
+- `backend/tests/unit/test_issue488_hft_bbo_change_auditor_offline.py`
 - `AGENTS.md`
 
 固定边界：

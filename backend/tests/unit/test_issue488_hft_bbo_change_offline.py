@@ -25,9 +25,12 @@ from collector_ordered_l1_bbo_change_v1 import (  # noqa: E402
     FrozenThreshold,
     ObservedBBO,
     SignalDecision,
+    VerifiedCustodyStream,
     bbo_change_contribution,
     evaluate_clock_gate,
     freeze_feature_only_thresholds,
+    read_verified_custody_stream_v1,
+    replay_multi_signal_raw_v1,
     replay_primary_round_trip,
     pin_custody_root,
     signal_from_threshold,
@@ -153,7 +156,11 @@ def custody_record(
             source_status="OBSERVED",
         )
     else:
-        row.update(event_type="COLLECTOR_START", reason="fixture")
+        row.update(
+            event_type="COLLECTOR_START",
+            reason="fixture",
+            scope="GENERATION_GLOBAL",
+        )
     return row
 
 
@@ -536,6 +543,35 @@ def test_feature_only_q95_rejects_degenerate_zero_threshold() -> None:
 
     with pytest.raises(BBOChangeContractError, match="degenerate"):
         freeze_feature_only_thresholds(points)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("quantile", "0.90"),
+        ("sample_count", 999),
+        ("threshold", "0"),
+        ("threshold", "-0.1"),
+    ],
+)
+def test_replay_freeze_rejects_non_candidate_thresholds_eagerly(
+    field: str,
+    value: object,
+) -> None:
+    row: dict[str, object] = {
+        "exact_contract": "SHFE.rb2701",
+        "session_family": "DAY",
+        "quantile": "0.95",
+        "sample_count": 1000,
+        "threshold": "0.1",
+    }
+    row[field] = value
+
+    with pytest.raises(
+        BBOChangeContractError,
+        match="threshold is not a frozen candidate Q95",
+    ):
+        bbo_change_module._freeze_thresholds({"thresholds": [row]})
 
 
 def clock_observations(lag_ns: int) -> list[ObservedBBO]:
@@ -1387,4 +1423,297 @@ def test_custody_imports_but_fails_closed_without_posix_capabilities(
             partition_id="p-1",
             collector_generation="generation-1",
             code_sha=CODE_SHA,
+        )
+
+
+def test_exact_contract_segment_control_resets_only_its_lane() -> None:
+    engine = BBOChangeEngine()
+    rb = observation(1, receive_monotonic_ns=1)
+    iron = replace(
+        observation(2, active_ns=2, receive_monotonic_ns=2),
+        exact_contract="DCE.i2701",
+        bid_price="700",
+        ask_price="701",
+    )
+    engine.process(rb)
+    assert engine.process(iron).status == "BASELINE_ONLY"
+
+    point = engine.process_control(
+        CollectorControl(
+            collector_generation="generation-1",
+            clock_epoch="clock-1",
+            collector_seq=3,
+            receive_utc_ns=BASE_UTC_NS + 3,
+            receive_monotonic_ns=3,
+            event_type="SESSION_SEGMENT_END",
+            reason="scheduled-boundary",
+            scope="EXACT_CONTRACT_SEGMENT",
+            exact_contract="SHFE.rb2701",
+            session_family="DAY",
+            segment_id="day-am-1",
+            official_trading_day="2030-01-01",
+        )
+    )
+    retained = engine.process(
+        replace(
+            iron,
+            collector_seq=4,
+            source_event_ns=iron.source_event_ns + 2,
+            receive_utc_ns=iron.receive_utc_ns + 2,
+            receive_monotonic_ns=4,
+            active_time_ns=4,
+            bid_size="11",
+            provider_update_id="provider-4",
+        )
+    )
+
+    assert point.status == "LANE_RESET"
+    assert retained.status == "WARMING_UP"
+
+
+def test_read_only_custody_reader_requires_external_terminal_anchors(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "custody"
+    with custody_journal(
+        root,
+        run_id="run-1",
+        partition_id="p-1",
+        collector_generation="generation-1",
+    ) as journal:
+        written = journal.append(custody_record(seq=1))
+        head = journal.seal(closed_at_utc="2030-01-01T00:00:01Z")
+    pins = pin_custody_root(root)
+    before = {
+        path.name: path.read_bytes()
+        for path in root.iterdir()
+        if path.is_file()
+    }
+
+    stream = read_verified_custody_stream_v1(
+        root,
+        expected_root_pins=pins,
+        trusted_head_partition_hash=head.partition_hash,
+        trusted_head_seal_id=head.seal_id,
+    )
+
+    assert stream.terminal_partition_hash == head.partition_hash
+    assert stream.terminal_seal_id == head.seal_id
+    assert stream.rows == (written,)
+    assert {
+        path.name: path.read_bytes()
+        for path in root.iterdir()
+        if path.is_file()
+    } == before
+    with pytest.raises(BBOChangeContractError, match="terminal anchor"):
+        read_verified_custody_stream_v1(
+            root,
+            expected_root_pins=pins,
+            trusted_head_partition_hash="0" * 64,
+            trusted_head_seal_id=head.seal_id,
+        )
+
+
+def test_read_only_custody_reader_rejects_an_unsealed_orphan_tail(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "custody"
+    with custody_journal(
+        root,
+        run_id="run-1",
+        partition_id="p-1",
+        collector_generation="generation-1",
+    ) as journal:
+        journal.append(custody_record(seq=1))
+        head = journal.seal(closed_at_utc="2030-01-01T00:00:01Z")
+    pins = pin_custody_root(root)
+    (root / "p-orphan.jsonl").write_text("{}\n", encoding="utf-8")
+    os.chmod(root / "p-orphan.jsonl", 0o600)
+
+    with pytest.raises(BBOChangeContractError, match="orphan or unsealed"):
+        read_verified_custody_stream_v1(
+            root,
+            expected_root_pins=pins,
+            trusted_head_partition_hash=head.partition_hash,
+            trusted_head_seal_id=head.seal_id,
+        )
+
+
+def test_read_only_manifest_identity_names_must_be_canonical(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "custody"
+    with custody_journal(
+        root,
+        run_id="run-1",
+        partition_id="p-1",
+        collector_generation="generation-1",
+    ) as journal:
+        journal.append(custody_record(seq=1))
+        head = journal.seal(closed_at_utc="2030-01-01T00:00:01Z")
+
+    with pytest.raises(BBOChangeContractError, match="not canonical"):
+        bbo_change_module._validate_sealed_manifest_v1(
+            replace(head, run_id=" run-1")
+        )
+
+
+def test_read_only_custody_reader_requires_empty_writer_lock(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "custody"
+    with custody_journal(
+        root,
+        run_id="run-1",
+        partition_id="p-1",
+        collector_generation="generation-1",
+    ) as journal:
+        journal.append(custody_record(seq=1))
+        head = journal.seal(closed_at_utc="2030-01-01T00:00:01Z")
+    pins = pin_custody_root(root)
+    (root / ".custody.lock").write_bytes(b"unexpected")
+
+    with pytest.raises(BBOChangeContractError, match="size is invalid"):
+        read_verified_custody_stream_v1(
+            root,
+            expected_root_pins=pins,
+            trusted_head_partition_hash=head.partition_hash,
+            trusted_head_seal_id=head.seal_id,
+        )
+
+
+def test_read_only_custody_reader_bounds_data_before_reading(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "custody"
+    with custody_journal(
+        root,
+        run_id="run-1",
+        partition_id="p-1",
+        collector_generation="generation-1",
+    ) as journal:
+        journal.append(custody_record(seq=1))
+        head = journal.seal(closed_at_utc="2030-01-01T00:00:01Z")
+    pins = pin_custody_root(root)
+    partition = root / "p-1.jsonl"
+    partition.write_bytes(partition.read_bytes() + b"x")
+
+    with pytest.raises(BBOChangeContractError, match="size is invalid"):
+        read_verified_custody_stream_v1(
+            root,
+            expected_root_pins=pins,
+            trusted_head_partition_hash=head.partition_hash,
+            trusted_head_seal_id=head.seal_id,
+        )
+
+
+def test_read_only_custody_reader_caps_manifest_before_reading(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "custody"
+    with custody_journal(
+        root,
+        run_id="run-1",
+        partition_id="p-1",
+        collector_generation="generation-1",
+    ) as journal:
+        journal.append(custody_record(seq=1))
+        head = journal.seal(closed_at_utc="2030-01-01T00:00:01Z")
+    pins = pin_custody_root(root)
+    manifest = root / "p-1.closed.json"
+    with manifest.open("r+b") as handle:
+        handle.truncate(bbo_change_module._MAX_CUSTODY_MANIFEST_BYTES + 1)
+
+    with pytest.raises(BBOChangeContractError, match="exceeds its read bound"):
+        read_verified_custody_stream_v1(
+            root,
+            expected_root_pins=pins,
+            trusted_head_partition_hash=head.partition_hash,
+            trusted_head_seal_id=head.seal_id,
+        )
+
+
+def test_replay_reverifies_public_stream_bytes_and_rows_before_freeze(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "custody"
+    with custody_journal(
+        root,
+        run_id="run-1",
+        partition_id="p-1",
+        collector_generation="generation-1",
+    ) as journal:
+        journal.append(custody_record(seq=1))
+        head = journal.seal(closed_at_utc="2030-01-01T00:00:01Z")
+    stream = read_verified_custody_stream_v1(
+        root,
+        expected_root_pins=pin_custody_root(root),
+        trusted_head_partition_hash=head.partition_hash,
+        trusted_head_seal_id=head.seal_id,
+    )
+    with pytest.raises(TypeError):
+        stream.rows[0]["bid_price1_raw"] = "999"  # type: ignore[index]
+    forged_rows = [dict(stream.rows[0])]
+    forged_rows[0]["bid_price1_raw"] = "999"
+    forged = VerifiedCustodyStream(
+        stream.root_pins,
+        stream.terminal_partition_hash,
+        stream.terminal_seal_id,
+        stream.partitions,
+        tuple(forged_rows),
+    )
+
+    with pytest.raises(BBOChangeContractError, match="forged"):
+        replay_multi_signal_raw_v1(
+            forged,
+            {},
+            expected_root_pins=stream.root_pins,
+            trusted_head_partition_hash=stream.terminal_partition_hash,
+            trusted_head_seal_id=stream.terminal_seal_id,
+            trusted_freeze_sha256="0" * 64,
+        )
+
+
+def test_terminal_seal_recursively_binds_prior_manifest_metadata(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "custody"
+    with custody_journal(
+        root,
+        run_id="run-1",
+        partition_id="p-1",
+        collector_generation="generation-1",
+    ) as first:
+        first.append(custody_record(seq=1))
+        first_head = first.seal(closed_at_utc="2030-01-01T00:00:01Z")
+    pins = pin_custody_root(root)
+    with custody_journal(
+        root,
+        run_id="run-1",
+        partition_id="p-2",
+        collector_generation="generation-1",
+        expected_root_pins=pins,
+        expected_head_partition_hash=first_head.partition_hash,
+        expected_head_seal_id=first_head.seal_id,
+    ) as second:
+        second.append(custody_record(seq=2))
+        terminal = second.seal(closed_at_utc="2030-01-01T00:00:02Z")
+    prior_manifest = root / "p-1.closed.json"
+    decoded = json.loads(prior_manifest.read_text(encoding="utf-8"))
+    decoded["closed_at_utc"] = "2030-01-01T00:00:09Z"
+    core = dict(decoded)
+    core.pop("seal_id")
+    decoded["seal_id"] = bbo_change_module._sha256(
+        bbo_change_module._canonical_json_bytes(core)
+    )
+    prior_manifest.write_bytes(
+        bbo_change_module._canonical_json_bytes(decoded) + b"\n"
+    )
+
+    with pytest.raises(BBOChangeContractError, match="partition commitment"):
+        read_verified_custody_stream_v1(
+            root,
+            expected_root_pins=pins,
+            trusted_head_partition_hash=terminal.partition_hash,
+            trusted_head_seal_id=terminal.seal_id,
         )

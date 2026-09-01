@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 
 
 class AccountingContractError(ValueError):
@@ -22,9 +22,13 @@ EVENT_ORDER_VERSION = "collector-callback-order-v1"
 
 
 def _text(value: object, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise AccountingContractError(f"{name} must be non-empty text")
-    return value.strip()
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or value != value.strip()
+    ):
+        raise AccountingContractError(f"{name} must be non-empty canonical text")
+    return value
 
 
 def _int(value: object, name: str, *, minimum: int = 0) -> int:
@@ -251,7 +255,9 @@ class ScenarioAdmissionLedger:
     _last_callback_seq: int = 0
     _stream: tuple[str, str] | None = None
     _admitted_trade_ids: set[str] = field(default_factory=set)
-    _admitted_threshold_crossing_ids: set[str] = field(default_factory=set)
+    _admitted_threshold_crossing_ids: set[tuple[str, str]] = field(
+        default_factory=set
+    )
     rows: list[AdmissionLedgerRow] = field(default_factory=list)
 
     def admit(self, candidate: AdmissionCandidate) -> AdmissionLedgerRow:
@@ -302,7 +308,11 @@ class ScenarioAdmissionLedger:
         else:
             if candidate.proposed_trade_id in self._admitted_trade_ids:
                 raise AccountingContractError("admitted trade_id cannot be reused")
-            if candidate.threshold_crossing_id in self._admitted_threshold_crossing_ids:
+            crossing_key = (
+                candidate.scenario_id,
+                candidate.threshold_crossing_id,
+            )
+            if crossing_key in self._admitted_threshold_crossing_ids:
                 raise AccountingContractError("admitted threshold_crossing_id cannot be reused")
             lane = (
                 candidate.run_id,
@@ -315,7 +325,7 @@ class ScenarioAdmissionLedger:
                 "ENTRY_PENDING", candidate.proposed_trade_id, lane
             )
             self._admitted_trade_ids.add(candidate.proposed_trade_id)
-            self._admitted_threshold_crossing_ids.add(candidate.threshold_crossing_id)
+            self._admitted_threshold_crossing_ids.add(crossing_key)
             row = AdmissionLedgerRow(
                 *base,
                 "ADMITTED",
@@ -380,6 +390,7 @@ class ScenarioAdmissionLedger:
         allowed = {
             ("ENTRY_PENDING", "OPEN"),
             ("OPEN", "EXIT_PENDING"),
+            ("OPEN", "IDLE"),
             ("EXIT_PENDING", "IDLE"),
             ("ENTRY_PENDING", "IDLE"),
         }
@@ -519,6 +530,7 @@ class BrokerMarkupBinding:
 
 def _resolve_exact_one(
     bindings: Iterable[object],
+    expected_type: type[object],
     exact_contract: str,
     official_day: date,
     utc_ns: int,
@@ -528,9 +540,17 @@ def _resolve_exact_one(
     contract = _text(exact_contract, "exact_contract")
     day = _day(official_day, "official_day")
     moment = _int(utc_ns, "utc_ns", minimum=1)
+    validated: list[object] = []
+    for binding in bindings:
+        if type(binding) is not expected_type:
+            raise AccountingContractError(
+                f"trusted binding must be exact {expected_type.__name__}"
+            )
+        binding.__post_init__()  # type: ignore[attr-defined]
+        validated.append(binding)
     found = [
         b
-        for b in bindings
+        for b in validated
         if getattr(b, "exact_contract", None) == contract
         and getattr(b, "official_day", None) == day
         and getattr(b, "valid_from_utc_ns", 0)
@@ -551,7 +571,13 @@ def resolve_instrument_terms(
     official_day: date,
     utc_ns: int,
 ) -> InstrumentTermsBinding:
-    result = _resolve_exact_one(bindings, exact_contract, official_day, utc_ns)
+    result = _resolve_exact_one(
+        bindings,
+        InstrumentTermsBinding,
+        exact_contract,
+        official_day,
+        utc_ns,
+    )
     return result  # type: ignore[return-value]
 
 
@@ -563,7 +589,12 @@ def resolve_fee_schedule(
     offset: str,
 ) -> FeeScheduleBinding:
     result = _resolve_exact_one(
-        bindings, exact_contract, official_day, utc_ns, offset=_offset(offset)
+        bindings,
+        FeeScheduleBinding,
+        exact_contract,
+        official_day,
+        utc_ns,
+        offset=_offset(offset),
     )
     return result  # type: ignore[return-value]
 
@@ -576,7 +607,12 @@ def resolve_broker_markup(
     offset: str,
 ) -> BrokerMarkupBinding:
     result = _resolve_exact_one(
-        bindings, exact_contract, official_day, utc_ns, offset=_offset(offset)
+        bindings,
+        BrokerMarkupBinding,
+        exact_contract,
+        official_day,
+        utc_ns,
+        offset=_offset(offset),
     )
     return result  # type: ignore[return-value]
 
@@ -600,6 +636,16 @@ def calculate_fee(
     official_day: date,
     offset: str,
 ) -> tuple[Decimal, Decimal]:
+    for binding, expected_type, name in (
+        (terms, InstrumentTermsBinding, "terms"),
+        (exchange, FeeScheduleBinding, "exchange fee"),
+        (broker, BrokerMarkupBinding, "broker markup"),
+    ):
+        if type(binding) is not expected_type:
+            raise AccountingContractError(
+                f"{name} must be exact {expected_type.__name__}"
+            )
+        binding.__post_init__()
     contract, day, expected_offset = (
         _text(exact_contract, "exact_contract"),
         _day(official_day, "official_day"),
@@ -733,6 +779,9 @@ class ExactExecutionLegRow:
     broker_fee_cny: Decimal
 
     def __post_init__(self) -> None:
+        if type(self.quote) is not ExecutionQuote:
+            raise AccountingContractError("execution quote must be exact ExecutionQuote")
+        self.quote.__post_init__()
         _text(self.exact_contract, "exact_contract")
         scenario = frozen_scenario(self.scenario_id)
         if self.direction not in {"LONG", "SHORT"} or self.leg not in {"OPEN", "CLOSE"}:
@@ -808,40 +857,34 @@ class TradeLedgerRow:
     broker_fee_cny: Decimal | None
     net_cny: Decimal | None
 
-    def __post_init__(self) -> None:
-        _text(self.attempt_id, "attempt_id")
-        _text(self.exact_contract, "exact_contract")
-        frozen_scenario(self.scenario_id)
-        if self.direction not in {"LONG", "SHORT"} or self.status not in {"CLOSED", "FAILED"}:
-            raise AccountingContractError("invalid trade direction or status")
-        economics = (
-            self.gross_ticks,
-            self.gross_cny,
-            self.exchange_fee_cny,
-            self.broker_fee_cny,
-            self.net_cny,
-        )
-        if self.status == "FAILED":
-            if self.failure_reason is None or any(value is not None for value in economics):
-                raise AccountingContractError("failed trade must retain reason and no economics")
-            return
-        if self.failure_reason is not None or self.entry is None or self.exit is None:
-            raise AccountingContractError("closed trade requires both legs and no failure")
-        if any(value is None for value in economics):
-            raise AccountingContractError("closed trade requires complete economics")
-        entry, exit_leg = self.entry, self.exit
-        entry.__post_init__()
-        exit_leg.__post_init__()
+    def _validate_leg(
+        self,
+        value: ExactExecutionLegRow,
+        expected_leg: str,
+    ) -> None:
+        if type(value) is not ExactExecutionLegRow:
+            raise AccountingContractError("trade leg has an invalid type")
+        value.__post_init__()
         if (
-            entry.exact_contract != self.exact_contract
-            or exit_leg.exact_contract != self.exact_contract
-            or entry.scenario_id != self.scenario_id
-            or exit_leg.scenario_id != self.scenario_id
-            or entry.direction != self.direction
-            or exit_leg.direction != self.direction
-            or entry.leg != "OPEN"
-            or exit_leg.leg != "CLOSE"
-            or entry.position_before != 0
+            value.exact_contract != self.exact_contract
+            or value.scenario_id != self.scenario_id
+            or value.direction != self.direction
+            or value.leg != expected_leg
+        ):
+            kind = "closed" if self.status == "CLOSED" else "failed"
+            raise AccountingContractError(
+                f"{kind} trade legs are not self-consistent"
+            )
+
+    @staticmethod
+    def _validate_leg_pair(
+        entry: ExactExecutionLegRow,
+        exit_leg: ExactExecutionLegRow,
+        *,
+        require_equal_terms: bool,
+    ) -> None:
+        if (
+            entry.position_before != 0
             or exit_leg.position_after != 0
             or entry.position_after != exit_leg.position_before
             or entry.quote.official_day != exit_leg.quote.official_day
@@ -857,12 +900,58 @@ class TradeLedgerRow:
             )
             or exit_leg.quote.collector_seq <= entry.quote.collector_seq
             or exit_leg.quote.receive_utc_ns <= entry.quote.receive_utc_ns
-            or exit_leg.quote.receive_monotonic_ns <= entry.quote.receive_monotonic_ns
+            or exit_leg.quote.receive_monotonic_ns
+            <= entry.quote.receive_monotonic_ns
             or exit_leg.quote.active_time_ns <= entry.quote.active_time_ns
-            or exit_leg.quote.source_event_utc_ns < entry.quote.source_event_utc_ns
-            or (entry.tick_size, entry.multiplier) != (exit_leg.tick_size, exit_leg.multiplier)
+            or exit_leg.quote.source_event_utc_ns
+            < entry.quote.source_event_utc_ns
+            or (
+                require_equal_terms
+                and (entry.tick_size, entry.multiplier)
+                != (exit_leg.tick_size, exit_leg.multiplier)
+            )
         ):
-            raise AccountingContractError("closed trade legs are not self-consistent")
+            kind = "closed" if require_equal_terms else "failed"
+            raise AccountingContractError(
+                f"{kind} trade legs are not self-consistent"
+            )
+
+    def __post_init__(self) -> None:
+        _text(self.attempt_id, "attempt_id")
+        _text(self.exact_contract, "exact_contract")
+        frozen_scenario(self.scenario_id)
+        if self.direction not in {"LONG", "SHORT"} or self.status not in {"CLOSED", "FAILED"}:
+            raise AccountingContractError("invalid trade direction or status")
+        economics = (
+            self.gross_ticks,
+            self.gross_cny,
+            self.exchange_fee_cny,
+            self.broker_fee_cny,
+            self.net_cny,
+        )
+        entry, exit_leg = self.entry, self.exit
+        if exit_leg is not None and entry is None:
+            raise AccountingContractError("trade exit leg requires an entry leg")
+        if entry is not None:
+            self._validate_leg(entry, "OPEN")
+        if exit_leg is not None:
+            self._validate_leg(exit_leg, "CLOSE")
+        if entry is not None and exit_leg is not None:
+            self._validate_leg_pair(
+                entry,
+                exit_leg,
+                require_equal_terms=self.status == "CLOSED",
+            )
+        if self.status == "FAILED":
+            if self.failure_reason is None or any(value is not None for value in economics):
+                raise AccountingContractError("failed trade must retain reason and no economics")
+            _text(self.failure_reason, "failure_reason")
+            return
+        if self.failure_reason is not None or self.entry is None or self.exit is None:
+            raise AccountingContractError("closed trade requires both legs and no failure")
+        if any(value is None for value in economics):
+            raise AccountingContractError("closed trade requires complete economics")
+        assert entry is not None and exit_leg is not None
         gross_ticks = _decimal(self.gross_ticks, "gross_ticks")
         gross_cny = _decimal(self.gross_cny, "gross_cny")
         exchange_fee = _nonnegative(self.exchange_fee_cny, "exchange_fee_cny")
@@ -884,7 +973,7 @@ class TradeLedgerRow:
             raise AccountingContractError("closed trade economics are not self-consistent")
 
 
-def _make_leg(
+def make_execution_leg(
     contract: str,
     spec: ExecutionScenarioSpec,
     direction: str,
@@ -894,6 +983,8 @@ def _make_leg(
     fees: Iterable[FeeScheduleBinding],
     markups: Iterable[BrokerMarkupBinding],
 ) -> ExactExecutionLegRow:
+    """Build one frozen, PIT-bound aggressive execution leg."""
+
     offset = "OPEN" if leg == "OPEN" else "CLOSE_TODAY"
     buy = (direction == "LONG" and leg == "OPEN") or (
         direction == "SHORT" and leg == "CLOSE"
@@ -958,6 +1049,9 @@ def _make_leg(
     )
 
 
+_make_leg = make_execution_leg
+
+
 def attempt_round_trip(
     attempt_id: str,
     exact_contract: str,
@@ -1018,7 +1112,7 @@ def attempt_round_trip(
         )
         entry: ExactExecutionLegRow | None = None
         exit: ExactExecutionLegRow | None = None
-        entry = _make_leg(
+        entry = make_execution_leg(
             contract,
             spec,
             direction,
@@ -1028,7 +1122,7 @@ def attempt_round_trip(
             fee_rows,
             markup_rows,
         )
-        exit = _make_leg(
+        exit = make_execution_leg(
             contract,
             spec,
             direction,
@@ -1251,6 +1345,11 @@ def aggregate_fixed_20_day_grid(
     grid: Sequence[date],
     coverage: Iterable[DailyCoverageEvidence],
     scenario: ExecutionScenarioSpec = PRIMARY,
+    *,
+    terms_bindings: Iterable[InstrumentTermsBinding],
+    fees: Iterable[FeeScheduleBinding],
+    markups: Iterable[BrokerMarkupBinding],
+    trusted_quotes_by_raw_record_hash: Mapping[str, ExecutionQuote],
 ) -> tuple[DailyAggregateRow, ...]:
     if require_frozen_scenario(scenario).scenario_id != PRIMARY_SCENARIO_ID:
         raise AccountingContractError("fixed 20-day aggregation is PRIMARY-only")
@@ -1271,8 +1370,40 @@ def aggregate_fixed_20_day_grid(
         for contract, product in known.items()
         for day in grid
     }
+    trusted_terms = tuple(terms_bindings)
+    trusted_fees = tuple(fees)
+    trusted_markups = tuple(markups)
+    for values, expected_type, name in (
+        (trusted_terms, InstrumentTermsBinding, "instrument terms"),
+        (trusted_fees, FeeScheduleBinding, "fee schedule"),
+        (trusted_markups, BrokerMarkupBinding, "broker markup"),
+    ):
+        for binding in values:
+            if type(binding) is not expected_type:
+                raise AccountingContractError(
+                    f"trusted {name} must be exact {expected_type.__name__}"
+                )
+            binding.__post_init__()
+    if type(trusted_quotes_by_raw_record_hash) is not dict:
+        raise AccountingContractError("trusted raw quote map must be an exact dict")
+    trusted_quotes: dict[str, ExecutionQuote] = {}
+    for supplied_hash, quote in trusted_quotes_by_raw_record_hash.items():
+        record_hash = _sha256(supplied_hash, "trusted raw_record_hash")
+        if type(quote) is not ExecutionQuote:
+            raise AccountingContractError(
+                "trusted raw quote must be exact ExecutionQuote"
+            )
+        quote.__post_init__()
+        if quote.raw_record_hash != record_hash:
+            raise AccountingContractError("trusted raw quote map key mismatch")
+        trusted_quotes[record_hash] = quote
     evidence_by_cell: dict[tuple[str, str, date], DailyCoverageEvidence] = {}
     for evidence in coverage:
+        if type(evidence) is not DailyCoverageEvidence:
+            raise AccountingContractError(
+                "daily coverage must be exact DailyCoverageEvidence"
+            )
+        evidence.__post_init__()
         key = (evidence.product, evidence.exact_contract, evidence.official_day)
         if key in evidence_by_cell:
             raise AccountingContractError("duplicate daily coverage evidence")
@@ -1289,6 +1420,41 @@ def aggregate_fixed_20_day_grid(
     }
     seen_attempt_ids: set[str] = set()
     for trade in all_trades:
+        if type(trade) is not TradeLedgerRow:
+            raise AccountingContractError("trade must be exact TradeLedgerRow")
+        trade.__post_init__()
+        trade_scenario = frozen_scenario(trade.scenario_id)
+        for leg_name, leg in (("OPEN", trade.entry), ("CLOSE", trade.exit)):
+            if leg is None:
+                continue
+            if type(leg) is not ExactExecutionLegRow:
+                raise AccountingContractError(
+                    "trade leg must be exact ExactExecutionLegRow"
+                )
+            if type(leg.quote) is not ExecutionQuote:
+                raise AccountingContractError(
+                    "trade quote must be exact ExecutionQuote"
+                )
+            leg.quote.__post_init__()
+            trusted_quote = trusted_quotes.get(leg.quote.raw_record_hash)
+            if trusted_quote is None or leg.quote != trusted_quote:
+                raise AccountingContractError(
+                    "trade leg does not match trusted raw quote"
+                )
+            expected_leg = make_execution_leg(
+                trade.exact_contract,
+                trade_scenario,
+                trade.direction,
+                leg_name,
+                leg.quote,
+                trusted_terms,
+                trusted_fees,
+                trusted_markups,
+            )
+            if leg != expected_leg:
+                raise AccountingContractError(
+                    "trade leg does not match trusted PIT bindings"
+                )
         if trade.attempt_id in seen_attempt_ids:
             raise AccountingContractError("trade attempt_id must be globally unique")
         seen_attempt_ids.add(trade.attempt_id)
@@ -1352,6 +1518,11 @@ def primary_best3_removal(
         raise AccountingContractError("best-3 removal requires the fixed 20-day grid")
     grouped: dict[str, list[DailyAggregateRow]] = {}
     for row in rows:
+        if type(row) is not DailyAggregateRow:
+            raise AccountingContractError(
+                "best-3 input must be exact DailyAggregateRow"
+            )
+        row.__post_init__()
         if row.scenario_id != PRIMARY_SCENARIO_ID or not row.priced:
             raise AccountingContractError(
                 "unpriced/non-PRIMARY row blocks best-3 removal"
