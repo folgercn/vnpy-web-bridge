@@ -427,12 +427,21 @@ def max_drawdown(equity: list[float]) -> float:
     return drawdown
 
 
+def directional_unrealized(snapshot: dict[str, float | str | None], direction: int) -> float:
+    """Return the snapshot unrealized PnL only when that direction is held."""
+    return float(snapshot["unrealized_pnl_cny"]) if snapshot["position_direction"] == direction else 0.0
+
+
 def account_metrics(account: Account, rows: list[dict[str, Any]], days: list[str], start_index: int, end_index: int) -> dict[str, Any]:
     assert account.daily is not None
     selected_days = days[start_index : end_index + 1]
     before = INITIAL_CASH_CNY if start_index == 0 else float(account.daily[days[start_index - 1]]["equity_cny"])
     before_fees = 0.0 if start_index == 0 else float(account.daily[days[start_index - 1]]["fees_cny"])
     before_realized = 0.0 if start_index == 0 else float(account.daily[days[start_index - 1]]["realized_pnl_cny"])
+    before_snapshot: dict[str, float | str | None] = {
+        "unrealized_pnl_cny": 0.0,
+        "position_direction": None,
+    } if start_index == 0 else account.daily[days[start_index - 1]]
     equity = [before] + [float(account.daily[day]["equity_cny"]) for day in selected_days]
     deltas = [equity[index] - equity[index - 1] for index in range(1, len(equity))]
     top_index = max(range(len(deltas)), key=deltas.__getitem__) if deltas else None
@@ -444,6 +453,18 @@ def account_metrics(account: Account, rows: list[dict[str, Any]], days: list[str
     max_dd = max_drawdown(equity)
     filled = [row for row in rows if row["status"] == "FILLED" and selected_days[0] <= row["official_trading_day"] <= selected_days[-1]]
     opened = [row for row in filled if is_open(str(row["event_type"]))]
+
+    def direction_net(direction: int) -> float:
+        attributed = [row for row in filled if int(row["pnl_direction"]) == direction]
+        realized_after_fees = sum(float(row["realized_pnl_cny"]) - float(row["fee_cny"]) for row in attributed)
+        unrealized_change = directional_unrealized(last, direction) - directional_unrealized(before_snapshot, direction)
+        return realized_after_fees + unrealized_change
+
+    long_net = direction_net(1)
+    short_net = direction_net(-1)
+    roll_rows = [row for row in filled if "ROLL" in str(row["event_type"])]
+    roll_fees = sum(float(row["fee_cny"]) for row in roll_rows)
+    roll_realized_net = sum(float(row["realized_pnl_cny"]) - float(row["fee_cny"]) for row in roll_rows)
     return {
         "start_equity_cny": round(before, 10),
         "end_equity_cny": round(equity[-1], 10),
@@ -461,9 +482,14 @@ def account_metrics(account: Account, rows: list[dict[str, Any]], days: list[str
         "filled_events": len(filled),
         "long_open_events": sum(1 for row in opened if row["side"] == "BUY"),
         "short_open_events": sum(1 for row in opened if row["side"] == "SELL"),
-        "roll_events": sum(1 for row in filled if "ROLL" in str(row["event_type"])),
+        "long_net_pnl_cny": round(long_net, 10),
+        "short_net_pnl_cny": round(short_net, 10),
+        "roll_events": len(roll_rows),
+        "roll_realized_net_pnl_cny": round(roll_realized_net, 10),
+        "roll_fees_cny": round(roll_fees, 10),
         "terminal_contract": last["position_contract"],
         "terminal_direction": last["position_direction"],
+        "directional_pnl_identity_error_cny": round(net_pnl - long_net - short_net, 10),
         "accounting_identity_error_cny": round(
             float(last["equity_cny"]) - INITIAL_CASH_CNY - (float(last["realized_pnl_cny"]) - float(last["fees_cny"]) + float(last["unrealized_pnl_cny"])),
             10,
@@ -475,7 +501,7 @@ def apply_fill(account: Account, event: dict[str, str], fill: dict[str, Any], fe
     opening = is_open(event["event_type"])
     previous = account.position
     if fill["status"] != "FILLED":
-        return {"position_before": 0 if previous is None else previous.direction, "position_after": 0 if previous is None else previous.direction, "realized_pnl_cny": 0.0, "fee_cny": 0.0}
+        return {"position_before": 0 if previous is None else previous.direction, "position_after": 0 if previous is None else previous.direction, "pnl_direction": 0 if previous is None else previous.direction, "realized_pnl_cny": 0.0, "fee_cny": 0.0}
     if opening:
         if previous is not None:
             raise ReplayError(f"open while holding {previous.contract}")
@@ -484,7 +510,7 @@ def apply_fill(account: Account, event: dict[str, str], fill: dict[str, Any], fe
         account.cash -= cost
         account.fees_cny += cost
         account.position = AccountPosition(event["exact_contract"], direction, event["official_trading_day"], float(fill["fill_price"]), parse_float(spec["volume_multiple"], "volume_multiple"))
-        return {"position_before": 0, "position_after": direction, "realized_pnl_cny": 0.0, "fee_cny": cost, "offset": offset, "fee_provenance": provenance}
+        return {"position_before": 0, "position_after": direction, "pnl_direction": direction, "realized_pnl_cny": 0.0, "fee_cny": cost, "offset": offset, "fee_provenance": provenance}
     if previous is None:
         raise ReplayError("close while flat")
     if event["exact_contract"] != previous.contract:
@@ -497,7 +523,7 @@ def apply_fill(account: Account, event: dict[str, str], fill: dict[str, Any], fe
     account.realized_pnl += realized
     account.fees_cny += cost
     account.position = None
-    return {"position_before": previous.direction, "position_after": 0, "realized_pnl_cny": realized, "fee_cny": cost, "offset": offset, "fee_provenance": provenance}
+    return {"position_before": previous.direction, "position_after": 0, "pnl_direction": previous.direction, "realized_pnl_cny": realized, "fee_cny": cost, "offset": offset, "fee_provenance": provenance}
 
 
 def mark_account(account: Account, day: str, marks: dict[str, float]) -> None:
@@ -610,7 +636,19 @@ def replay(input_root: Path) -> tuple[dict[str, Any], list[dict[str, Any]], dict
             "close_today_fee": "official explicit value when present; otherwise ordinary fee * 0.5",
         },
     }
-    comparisons: dict[str, Any] = {"schema_version": "issue481_paired_baseline_economic_comparison_v1", "candidate_id": CANDIDATE_ID, "status": status, "economic_pnl_evaluated": not failures, "by_product": {}}
+    comparisons: dict[str, Any] = {
+        "schema_version": "issue481_paired_baseline_economic_comparison_v1",
+        "candidate_id": CANDIDATE_ID,
+        "status": status,
+        "economic_pnl_evaluated": not failures,
+        "pnl_attribution_definition": {
+            "long_net_pnl_cny": "long realized pnl less long-attributed fees plus long unrealized change within the fold",
+            "short_net_pnl_cny": "short realized pnl less short-attributed fees plus short unrealized change within the fold",
+            "roll_realized_net_pnl_cny": "ROLL event realized pnl less ROLL event fees; roll_fees_cny is reported separately",
+            "directional_pnl_identity_error_cny": "net_pnl_cny - long_net_pnl_cny - short_net_pnl_cny",
+        },
+        "by_product": {},
+    }
     if not failures:
         all_ranges = {"FULL_DEV": (0, len(curve_days) - 1)}
         for fold, (start, end) in FOLDS.items():
@@ -632,10 +670,18 @@ def replay(input_root: Path) -> tuple[dict[str, Any], list[dict[str, Any]], dict
                 ratio = candidate["profit_to_max_drawdown"]
                 paired_ratio = paired["profit_to_max_drawdown"]
                 net_gate = candidate["net_pnl_cny"] > 0 if scenario == PRIMARY else candidate["net_pnl_cny"] >= 0
-                paired_gate = ratio is not None and paired_ratio is not None and ratio > paired_ratio
-                ratio_gate = ratio is not None and ratio > 1 if scenario == PRIMARY else True
-                comparisons["by_product"][product][scenario]["gates"] = {"net": net_gate, "profit_to_max_drawdown": ratio_gate, "paired_increment": paired_gate}
-                gate_cells.append(net_gate and ratio_gate and paired_gate)
+                paired_increment = ratio is not None and paired_ratio is not None and ratio > paired_ratio
+                ratio_gate = ratio is not None and ratio > 1
+                gates = {"net": net_gate}
+                if scenario == PRIMARY:
+                    gates.update({"profit_to_max_drawdown": ratio_gate, "paired_increment": paired_increment})
+                comparisons["by_product"][product][scenario]["gates"] = gates
+                comparisons["by_product"][product][scenario]["reported_comparisons"] = {
+                    "candidate_profit_to_max_drawdown": ratio,
+                    "paired_profit_to_max_drawdown": paired_ratio,
+                    "paired_increment": paired_increment,
+                }
+                gate_cells.append(all(gates.values()))
         go_stop = "GO_RESEARCH_ONLY" if all(gate_cells) else "STOP_ECONOMIC_GATE"
         summary["go_stop"] = go_stop
         comparisons["go_stop"] = go_stop
@@ -669,7 +715,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"issue481 replay error: {exc}", file=sys.stderr)
         return 2
     print(canonical_json({"status": summary["status"], "output_dir": str(args.output_dir), "events_applied_before_stop": summary["events_applied_before_stop"]}))
-    return 0 if summary["status"] == "MODELED_PASS_RESEARCH_ONLY" else 3
+    return 0 if summary["status"] == "GO_RESEARCH_ONLY" else 3
 
 
 if __name__ == "__main__":

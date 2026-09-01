@@ -178,7 +178,29 @@ def test_economic_replay_covers_fees_roll_terminal_mtm_cross_fold_and_paired_gat
     assert ag["FULL_DEV"]["terminal_contract"] == "SHFE.ag2308"
     assert ag["FULL_DEV"]["terminal_direction"] == 1
     assert ag["FULL_DEV"]["roll_events"] == 2
+    assert ag["FULL_DEV"]["long_net_pnl_cny"] != 0
+    assert ag["FULL_DEV"]["short_net_pnl_cny"] == 0
+    assert ag["FULL_DEV"]["roll_fees_cny"] > 0
+    assert ag["FULL_DEV"]["roll_realized_net_pnl_cny"] != 0
+    assert abs(ag["FULL_DEV"]["net_pnl_cny"] - ag["FULL_DEV"]["long_net_pnl_cny"] - ag["FULL_DEV"]["short_net_pnl_cny"]) < 1e-6
+    paired = comparison["by_product"]["ag"][replay_module.PRIMARY]["PAIRED"]["FULL_DEV"]
+    assert paired["short_net_pnl_cny"] != 0
+    assert abs(paired["net_pnl_cny"] - paired["long_net_pnl_cny"] - paired["short_net_pnl_cny"]) < 1e-6
     assert abs(ag["FULL_DEV"]["accounting_identity_error_cny"]) < 1e-6
     assert any(row["event_id"] == "c-au-close" and row["scenario"] == replay_module.PRIMARY and row["offset"] == "CLOSE_TODAY" for row in rows)
     assert any(row["event_id"] == "p-short" and row["scenario"] == replay_module.PRIMARY and row["position_after"] == -1 for row in rows)
     assert set(comparison["by_product"]["ag"][replay_module.PRIMARY]["gates"]) == {"net", "profit_to_max_drawdown", "paired_increment"}
+    assert set(comparison["by_product"]["ag"][replay_module.STRESS]["gates"]) == {"net"}
+    assert "paired_increment" in comparison["by_product"]["ag"][replay_module.STRESS]["reported_comparisons"]
+
+
+def test_cli_returns_zero_for_go_research_only() -> None:
+    original_replay = replay_module.replay
+    original_write = replay_module.write_evidence
+    try:
+        replay_module.replay = lambda _root: ({"status": "GO_RESEARCH_ONLY", "events_applied_before_stop": 0}, [], {})
+        replay_module.write_evidence = lambda _output, _summary, _rows, _comparison: None
+        assert replay_module.main(["--input-root", "unused", "--output-dir", "unused-output"]) == 0
+    finally:
+        replay_module.replay = original_replay
+        replay_module.write_evidence = original_write
