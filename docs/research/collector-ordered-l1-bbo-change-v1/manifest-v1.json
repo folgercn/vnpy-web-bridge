@@ -1,0 +1,59 @@
+{
+  "schema_version": "collector_ordered_l1_bbo_change_freeze_manifest_v1",
+  "manifest_id": "cn-futures-collector-ordered-l1-bbo-change-p0-p1-20260901",
+  "research_line_id": "CN_COMMODITY_HFT_BBO_CHANGE_LAB_V1",
+  "candidate_id": "COLLECTOR_ORDERED_L1_BBO_CHANGE_IMBALANCE_V1",
+  "created_at_utc": "2026-09-01T03:29:07Z",
+  "freeze_effective_condition": "this exact manifest and referenced bytes are merged into main before any candidate economic result is read",
+  "canonicalization": "UTF-8 JSON; ensure_ascii=false; sort_keys=true; separators=(',', ':'); allow_nan=false",
+  "files": [
+    {
+      "path": "docs/research/collector-ordered-l1-bbo-change-v1/README.md",
+      "bytes": 3490,
+      "sha256": "33ebfbe2aea4036bc77acf3b11d65cf719987390edae66fc231effbf06905494"
+    },
+    {
+      "path": "docs/research/collector-ordered-l1-bbo-change-v1/design-contract-v1.json",
+      "bytes": 17454,
+      "sha256": "1ab8bbbd148da60d31e6e319eb0ee841d83681338404e28215f0b1d9de589060",
+      "canonical_bytes": 15345,
+      "canonical_sha256": "ff2b0c3d5c581018dbd718687839063393fa72fd6148336e282b9b0157600e16"
+    },
+    {
+      "path": "scripts/collector_ordered_l1_bbo_change_v1.py",
+      "bytes": 31606,
+      "sha256": "6786234c5e210939970d1c1487be3bed4350ab3381f3a6daafd7e6a621cc4b41"
+    }
+  ],
+  "verification_files": [
+    {
+      "path": "backend/tests/unit/test_issue488_hft_bbo_change_offline.py",
+      "bytes": 22258,
+      "sha256": "54668c54dc6d7c2e2ee59256e5bffa21c0cfbdd3d5fa7fec1c52acf8b2cb50dc",
+      "focused_cases": 39
+    }
+  ],
+  "authority": {
+    "research_only": true,
+    "offline_only": true,
+    "network_authorized": false,
+    "credential_access_authorized": false,
+    "provider_probe_authorized": false,
+    "calibration_collection_authorized": false,
+    "economic_result_authorized": false,
+    "forward_authorized": false,
+    "shadow_authorized": false,
+    "simnow_authorized": false,
+    "order_authorized": false,
+    "production_authorized": false
+  },
+  "stage_decision": {
+    "p0_identity_and_offline_contract": "READY_TO_FREEZE_ON_MERGE",
+    "p1_feature_and_single_round_trip_kernel": "IMPLEMENTED_OFFLINE",
+    "p1_raw_journal_and_partition_custody": "PENDING",
+    "p1_position_fee_and_pnl_ledger": "PENDING",
+    "p1_5_provider_capability_probe": "BLOCKED_PENDING_EXPLICIT_DATA_ONLY_AUTHORIZATION",
+    "p2_calibration": "NOT_AUTHORIZED",
+    "economic_result": "NOT_COMPUTED"
+  }
+}

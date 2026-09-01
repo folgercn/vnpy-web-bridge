@@ -12,6 +12,33 @@
 - 未经付哥新的明确授权，禁止回到旧重型链继续补 lifecycle blocker。
 - 如本文件不同章节发生冲突，以靠前章节和 #473 M5 规则为准。
 
+### 0.0 Issue #488 明确 Owner 例外（2026-09-01）
+
+付哥已明确要求建立并并行推进一条脱离 #480/#482 的全新高频研究线。
+本例外只适用于 Issue #488 的 offline P0/P1，且优先于本文中与其冲突的
+#473 允许路径、单 Agent 和“当前 milestone”限制；其余安全边界继续有效。
+
+仅允许修改：
+
+- `docs/research/collector-ordered-l1-bbo-change-v1/**`
+- `scripts/collector_ordered_l1_bbo_change_v1.py`
+- `backend/tests/unit/test_issue488_hft_bbo_change_offline.py`
+- `AGENTS.md`
+
+固定边界：
+
+- research-only、offline-only、no-order；不接入 SIMNOW_LAB、audited 或
+  production runtime；
+- 不访问网络、行情凭证、账户、持仓或订单接口；不新增 service、daemon、
+  port、database、queue、第三方依赖或 CI job；
+- 不修改现有 market-data journal、Execution/Custody/TargetPlan、RPC、Windows
+  runtime、STATIC_CORE_EQUAL 或已有策略；
+- 只实现 collector-observed BBO change 的纯函数、离线合同与 focused tests；
+  不得声称 exchange-native OFI、queue、passive fill 或 capacity；
+- 最多 5 个 production/docs 文件、3 个 test 文件，完成 focused test、compile
+  与 diff check 后停止。任何采集、经济结果、forward、shadow、SimNow 或下单
+  均需新的明确授权。
+
 当前 M5 完成目标：
 
 ```text
