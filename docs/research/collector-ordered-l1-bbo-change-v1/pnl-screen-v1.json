@@ -1,0 +1,1450 @@
+{
+  "broker_markup": "UNBOUND",
+  "cells": 41,
+  "classification": "DIAGNOSTIC_SCREEN",
+  "code_inputs": [
+    {
+      "bytes": 28557,
+      "path": "/Users/wuyaocheng/Downloads/vnpy-web-bridge-issue488-bbo-change/scripts/collector_ordered_l1_bbo_change_csv_pnl_screen_v1.py",
+      "sha256": "9e1410b3e22677a49f68a53b2886853504fcd937bcfeabc95f270a0b633da1d0"
+    },
+    {
+      "bytes": 194444,
+      "path": "/Users/wuyaocheng/Downloads/vnpy-web-bridge-issue488-bbo-change/scripts/collector_ordered_l1_bbo_change_v1.py",
+      "sha256": "94ed99ba568aae4f987b932f41bc3c21241d5adcaae3916b6c97981b14afdf5f"
+    }
+  ],
+  "date_axis": {
+    "official_trading_day_verified": false,
+    "semantics": "LOCAL_SESSION_OCCURRENCE_DATE_PROXY",
+    "source": "phase120_session_id_middle_component"
+  },
+  "decision": "NO_EDGE_IN_FAST_SCREEN",
+  "exchange_fee_binding": "HISTORICAL_SCHEDULE_LOOKUP_BY_SESSION_DATE_PROXY",
+  "excluded_cells": [
+    {
+      "cell": [
+        "BU",
+        "SHFE.bu2602",
+        "DAY_2"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "BU",
+        "SHFE.bu2602",
+        "DAY_3"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "BU",
+        "SHFE.bu2603",
+        "DAY_1"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "BU",
+        "SHFE.bu2603",
+        "DAY_2"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "BU",
+        "SHFE.bu2603",
+        "DAY_3"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "BU",
+        "SHFE.bu2604",
+        "DAY_1"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "BU",
+        "SHFE.bu2604",
+        "DAY_2"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "BU",
+        "SHFE.bu2604",
+        "DAY_3"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "BU",
+        "SHFE.bu2604",
+        "NIGHT"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "BU",
+        "SHFE.bu2609",
+        "DAY_1"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "BU",
+        "SHFE.bu2609",
+        "DAY_2"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "BU",
+        "SHFE.bu2609",
+        "DAY_3"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "BU",
+        "SHFE.bu2609",
+        "NIGHT"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "CU",
+        "SHFE.cu2602",
+        "DAY_1"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "CU",
+        "SHFE.cu2602",
+        "DAY_3"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "CU",
+        "SHFE.cu2602",
+        "NIGHT"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "CU",
+        "SHFE.cu2603",
+        "DAY_1"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "CU",
+        "SHFE.cu2603",
+        "DAY_2"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "CU",
+        "SHFE.cu2603",
+        "DAY_3"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "CU",
+        "SHFE.cu2604",
+        "DAY_1"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "CU",
+        "SHFE.cu2604",
+        "DAY_2"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "CU",
+        "SHFE.cu2604",
+        "DAY_3"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "CU",
+        "SHFE.cu2605",
+        "DAY_1"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "CU",
+        "SHFE.cu2605",
+        "DAY_2"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "CU",
+        "SHFE.cu2605",
+        "DAY_3"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "CU",
+        "SHFE.cu2606",
+        "DAY_2"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "CU",
+        "SHFE.cu2606",
+        "DAY_3"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "CU",
+        "SHFE.cu2607",
+        "DAY_1"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "CU",
+        "SHFE.cu2607",
+        "DAY_2"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "CU",
+        "SHFE.cu2607",
+        "DAY_3"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    },
+    {
+      "cell": [
+        "CU",
+        "SHFE.cu2607",
+        "NIGHT"
+      ],
+      "reason": "NO_EVALUATION_OFFICIAL_DAY"
+    }
+  ],
+  "fail_counts": {
+    "INSUFFICIENT_SIGNAL_REMAINING": 432,
+    "PRIMARY_OVERLAP_SUPPRESSED": 2647,
+    "STRESS_OVERLAP_SUPPRESSED": 2651
+  },
+  "inputs": [
+    {
+      "bytes": 269528,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk000_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "06742cac92031822f6477f6ffbfbd1480f7ec4755d986573d20b8559380da8ae"
+    },
+    {
+      "bytes": 4107000,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk001_019_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "d104e8b6597ddd4a152d43cf521a83cf36985009eacef8a1c890a707b55e472a"
+    },
+    {
+      "bytes": 4428300,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk020_039_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "d4eeda5c9da722bc87894e264679ea272d18c7b8597e50397f45bc727a7359d6"
+    },
+    {
+      "bytes": 9288029,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk040_079_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "4e0bc3393d1e6e492bbab160da1e125356a04aeffea9dccfa436020574533e62"
+    },
+    {
+      "bytes": 9381559,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk080_119_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "449adafde51d474df1a94dc53621e169d53c10de986eae331be03ad3e3ba6721"
+    },
+    {
+      "bytes": 5054513,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk120_139_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "53df9d3233a4dfdb7fb69d297e95ec476e9132aa8a1b58fcecb75e5dcc149bcf"
+    },
+    {
+      "bytes": 4468450,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk140_160_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "22e2a56bf5016247685533dad08e3c8cf47218ca0c28539d35d6ab76c4f70e12"
+    },
+    {
+      "bytes": 4932774,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk161_180_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "4c9f202cd49844e6b28ecebdb4cfec4d2d9524b8ee078b19ba03266760a970e0"
+    },
+    {
+      "bytes": 4944955,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk181_200_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "9dffb090793639acadf474395da7d82d0ade0d69c63f5c7248fbd0caace04734"
+    },
+    {
+      "bytes": 4438852,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk201_220_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "8b4516abdfe1c13937af39a499d283bfa472784b69fa79be48824bcd105bc334"
+    },
+    {
+      "bytes": 4673448,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk221_240_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "5157cf11c9496b76614f7596aeff87f8011468e7addb474d58dcec9dd0dbe7f5"
+    },
+    {
+      "bytes": 4254125,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk241_260_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "3ec687fbbf534aaa7d502704d74b1912acac8909723ec0005ac9bf492e2a5d7b"
+    },
+    {
+      "bytes": 4726086,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk261_280_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "275952aa01ef9f1ba57dd39528ac3945a9acfe9fa94eaad793ed8715f4676285"
+    },
+    {
+      "bytes": 4320053,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk281_300_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "0db3928e9647d933500782a353afe7dc67aeb0aee8f6d6d4c968a7b770115603"
+    },
+    {
+      "bytes": 3966396,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk301_320_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "4044387221fdefdbc2a0fe1b114569e76a01b6df6037c94c4275613bf79ea3a0"
+    },
+    {
+      "bytes": 3250045,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk321_335_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "b5f5d460b3d2a2ebd0856f98c4bd0ca031f0944af43ce56696bb9ec79d3c46f2"
+    },
+    {
+      "bytes": 4997521,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk336_355_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "91812091eae5ea9d03efc3615fbb96caf723bcae6fbc4ccd94dd87834b92acf3"
+    },
+    {
+      "bytes": 4646966,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk356_375_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "75f8c5a116bcf531277e483b4e9145e4c30719c7d127716fdb65b1484e99d64b"
+    },
+    {
+      "bytes": 4782863,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk376_395_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "d11b63b32649157c9f5fabb252aef6126ff0702922d2f1061a0c1d48ac0ece5f"
+    },
+    {
+      "bytes": 4504709,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk396_415_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "ef25aae42d5e4f8c9f6329a99d511014113cbc68cafbe467868440ee0081053f"
+    },
+    {
+      "bytes": 4724743,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk416_435_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "e7d062673611d299ced395c4cfac3353a03bf21bc40a7e67d8249a9b14f6298d"
+    },
+    {
+      "bytes": 3839291,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk436_455_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "7f447acd4d5ab6aba2ebfc454ab2a0bffb08486216e57ebbc12c221bea65fdd4"
+    },
+    {
+      "bytes": 4124152,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk456_475_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "11c7a188ce82d566dfcf9df627542a3d64b28aef277625ff058fc1bd51463a82"
+    },
+    {
+      "bytes": 4173040,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk476_495_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "eb153b02ccad4a641803d10b8f898ceeccb2b2de9f6d414a2985dc0e9dc3b653"
+    },
+    {
+      "bytes": 2590656,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk496_508_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "736d8a2620bc2288e416e10485bba4e1a5fcf3194357e282b4ff4ad80570730a"
+    },
+    {
+      "bytes": 1273561,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk509_528_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "02fec5e3af3f55c84970d452ede3df32df068e8922f9e887cfa31a2d7fa9d516"
+    },
+    {
+      "bytes": 705491,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk529_537_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "3c562b0d10094e32efd72558f18dba701adc0aa2deb9d7f6fdfabc04d341c6c8"
+    },
+    {
+      "bytes": 10403375,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk538_577_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "d2cd2011005fc8050e161a015c6e72d3dc397800fbe095a741744f0951d5dc11"
+    },
+    {
+      "bytes": 5391095,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk578_597_retry_close_timeout_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "6de39d14eb4c7bdc7065a2f9de0c0aac084c012faa6130d6c625cfdcaf3034ae"
+    },
+    {
+      "bytes": 4598687,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk598_617_retry_close_timeout_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "6d5d70faf8397168c91eccadd3a506ab9b56c93dca0f5b7064d0a1a6aeea5f8c"
+    },
+    {
+      "bytes": 10169366,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk618_657_retry_close_timeout_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "1b5cedced2c13477ba06b30dea23f1e74fbce83c2952c26a667b48efbf057cee"
+    },
+    {
+      "bytes": 9565244,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk658_697_retry_close_timeout_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "62770e3fac9fac08107382c43036bcfe1c9b2af0e011dda1a1784de264167d5c"
+    },
+    {
+      "bytes": 4215473,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase121_cms11_p145b_q10b_full_top1_tick_download_chunk698_715_retry_close_timeout_20260630/q10b_p145b_top1_tick_rows.csv",
+      "sha256": "ab38c7b305eaafc8e142413cabc999b04928a00ad119a82cbd73057a36ec74eb"
+    },
+    {
+      "bytes": 365308,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase123_cms11_p145b1_q10b_top1_tick_chunk_register_20260630/q10b_p145b1_segment_completion.csv",
+      "sha256": "d3c23d290586727a7681e976e7022a103d0a789249988bd65374b8d3a386cfc7"
+    },
+    {
+      "bytes": 699571,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/alpha_discovery_canonical_rebuild_phase120_cms11_p145_q10b_repaired_exact_contract_quote_depth_acquisition_preflight_20260630/q10b_p145_quote_depth_acquisition_window_plan.csv",
+      "sha256": "506be60b38502ee1f0d61590b4311ada7918f175372d6ec7289805bc0e9d1375"
+    },
+    {
+      "bytes": 19785132,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/commodity_strong_candidate_formal_fee_margin_expiry_v1_20260717/official_fee_margin_pit_history.csv",
+      "sha256": "e98c5b986c68da4433daada9249d0d01ac52680aee5905e57457fcad5df025a9"
+    },
+    {
+      "bytes": 3304,
+      "path": "/Users/wuyaocheng/Downloads/bkTrader-futures-alpha-discovery/research/entry_redesign/scripts/output/commodity_market_only_spec_empirical_verifier_v1_20260717/commodity_research_spec_empirically_verified.csv",
+      "sha256": "6fe969bf08ff5bff885a568644b7efae4ede636353ce51ff94d0fdb27efeff19"
+    }
+  ],
+  "method": {
+    "direction": "positive_LONG_negative_SHORT",
+    "feature_only_calibration_session_dates": 5,
+    "feature_window_seconds": 10,
+    "fee_rounding": "each_leg_0.01_ROUND_HALF_UP",
+    "fills": "aggressive_observed_ask_bid",
+    "holding_horizon_seconds": 30,
+    "primary_adverse_ticks_each_leg": 0,
+    "primary_latency_ms_each_decision": 500,
+    "quantity_lots": 1,
+    "stress_adverse_ticks_each_leg": 1,
+    "stress_latency_ms_each_decision": 1000,
+    "threshold": "nearest_rank_Q95_abs_score_per_exact_contract_session_family"
+  },
+  "products": [
+    "BU",
+    "CU"
+  ],
+  "rows": 249793,
+  "scenarios": {
+    "PRIMARY": {
+      "BU": {
+        "exchange_fee_net": "-1139.58",
+        "exchange_fees": "219.58",
+        "gross": "-920.0",
+        "max_drawdown": "-1245.96",
+        "positive_days": 3,
+        "trades": 72,
+        "wins": 20
+      },
+      "CU": {
+        "exchange_fee_net": "-6277.46",
+        "exchange_fees": "5927.46",
+        "gross": "-350.0",
+        "max_drawdown": "-13800.47",
+        "positive_days": 2,
+        "trades": 152,
+        "wins": 52
+      },
+      "POOLED": {
+        "exchange_fee_net": "-7417.04",
+        "exchange_fees": "6147.04",
+        "gross": "-1270.0",
+        "max_drawdown": "-14564.00",
+        "positive_days": 3,
+        "trades": 224,
+        "wins": 72
+      },
+      "POOLED_BEST3_SESSION_DATE_PROXY_REMOVED": {
+        "exchange_fee_net": "-12246.70",
+        "exchange_fees": "4946.70",
+        "gross": "-7300.0",
+        "max_drawdown": "-12571.42",
+        "positive_days": 0,
+        "removed_session_dates": [
+          "2026-01-29",
+          "2026-05-20",
+          "2026-05-22"
+        ],
+        "trades": 190,
+        "wins": 53
+      },
+      "PRODUCTS_AFTER_POOLED_BEST3_SESSION_DATE_PROXY_REMOVAL": {
+        "BU": {
+          "exchange_fee_net": "-1202.54",
+          "exchange_fees": "202.54",
+          "gross": "-1000.0",
+          "max_drawdown": "-1202.54",
+          "positive_days": 1,
+          "trades": 67,
+          "wins": 16
+        },
+        "CU": {
+          "exchange_fee_net": "-11044.16",
+          "exchange_fees": "4744.16",
+          "gross": "-6300.0",
+          "max_drawdown": "-11851.31",
+          "positive_days": 0,
+          "trades": 123,
+          "wins": 37
+        }
+      },
+      "SESSION_DATE_PROXY": {
+        "2026-01-27": {
+          "exchange_fee_net": "-482.43",
+          "exchange_fees": "52.43",
+          "gross": "-430.0",
+          "max_drawdown": "-482.43",
+          "positive_days": 0,
+          "trades": 21,
+          "wins": 3
+        },
+        "2026-01-28": {
+          "exchange_fee_net": "-53.77",
+          "exchange_fees": "153.77",
+          "gross": "100.0",
+          "max_drawdown": "-488.45",
+          "positive_days": 0,
+          "trades": 4,
+          "wins": 3
+        },
+        "2026-01-29": {
+          "exchange_fee_net": "4735.34",
+          "exchange_fees": "714.66",
+          "gross": "5450.0",
+          "max_drawdown": "-2810.08",
+          "positive_days": 1,
+          "trades": 17,
+          "wins": 9
+        },
+        "2026-02-04": {
+          "exchange_fee_net": "-373.49",
+          "exchange_fees": "273.49",
+          "gross": "-100.0",
+          "max_drawdown": "-1234.41",
+          "positive_days": 0,
+          "trades": 7,
+          "wins": 2
+        },
+        "2026-02-05": {
+          "exchange_fee_net": "-356.45",
+          "exchange_fees": "306.45",
+          "gross": "-50.0",
+          "max_drawdown": "-662.91",
+          "positive_days": 0,
+          "trades": 10,
+          "wins": 4
+        },
+        "2026-02-10": {
+          "exchange_fee_net": "-414.40",
+          "exchange_fees": "114.40",
+          "gross": "-300.0",
+          "max_drawdown": "-426.30",
+          "positive_days": 0,
+          "trades": 3,
+          "wins": 1
+        },
+        "2026-02-11": {
+          "exchange_fee_net": "-601.66",
+          "exchange_fees": "501.66",
+          "gross": "-100.0",
+          "max_drawdown": "-692.31",
+          "positive_days": 0,
+          "trades": 13,
+          "wins": 5
+        },
+        "2026-02-24": {
+          "exchange_fee_net": "-326.24",
+          "exchange_fees": "76.24",
+          "gross": "-250.0",
+          "max_drawdown": "-326.24",
+          "positive_days": 0,
+          "trades": 2,
+          "wins": 0
+        },
+        "2026-03-10": {
+          "exchange_fee_net": "-376.25",
+          "exchange_fees": "76.25",
+          "gross": "-300.0",
+          "max_drawdown": "-376.25",
+          "positive_days": 0,
+          "trades": 2,
+          "wins": 0
+        },
+        "2026-03-11": {
+          "exchange_fee_net": "-275.96",
+          "exchange_fees": "75.96",
+          "gross": "-200.0",
+          "max_drawdown": "-275.96",
+          "positive_days": 0,
+          "trades": 2,
+          "wins": 0
+        },
+        "2026-03-12": {
+          "exchange_fee_net": "-125.65",
+          "exchange_fees": "75.65",
+          "gross": "-50.0",
+          "max_drawdown": "-137.87",
+          "positive_days": 0,
+          "trades": 2,
+          "wins": 1
+        },
+        "2026-03-13": {
+          "exchange_fee_net": "-912.65",
+          "exchange_fees": "112.65",
+          "gross": "-800.0",
+          "max_drawdown": "-912.65",
+          "positive_days": 0,
+          "trades": 3,
+          "wins": 0
+        },
+        "2026-03-17": {
+          "exchange_fee_net": "-798.45",
+          "exchange_fees": "148.45",
+          "gross": "-650.0",
+          "max_drawdown": "-861.34",
+          "positive_days": 0,
+          "trades": 4,
+          "wins": 1
+        },
+        "2026-04-02": {
+          "exchange_fee_net": "-203.20",
+          "exchange_fees": "43.20",
+          "gross": "-160.0",
+          "max_drawdown": "-266.53",
+          "positive_days": 0,
+          "trades": 13,
+          "wins": 5
+        },
+        "2026-04-03": {
+          "exchange_fee_net": "-106.22",
+          "exchange_fees": "36.22",
+          "gross": "-70.0",
+          "max_drawdown": "-289.79",
+          "positive_days": 0,
+          "trades": 11,
+          "wins": 5
+        },
+        "2026-04-07": {
+          "exchange_fee_net": "-279.56",
+          "exchange_fees": "179.56",
+          "gross": "-100.0",
+          "max_drawdown": "-293.62",
+          "positive_days": 0,
+          "trades": 5,
+          "wins": 1
+        },
+        "2026-04-10": {
+          "exchange_fee_net": "-87.22",
+          "exchange_fees": "37.22",
+          "gross": "-50.0",
+          "max_drawdown": "-87.22",
+          "positive_days": 0,
+          "trades": 1,
+          "wins": 0
+        },
+        "2026-04-13": {
+          "exchange_fee_net": "-627.57",
+          "exchange_fees": "377.57",
+          "gross": "-250.0",
+          "max_drawdown": "-1139.86",
+          "positive_days": 0,
+          "trades": 10,
+          "wins": 5
+        },
+        "2026-04-20": {
+          "exchange_fee_net": "-13.06",
+          "exchange_fees": "3.06",
+          "gross": "-10.0",
+          "max_drawdown": "-13.06",
+          "positive_days": 0,
+          "trades": 1,
+          "wins": 0
+        },
+        "2026-04-23": {
+          "exchange_fee_net": "-49.34",
+          "exchange_fees": "9.34",
+          "gross": "-40.0",
+          "max_drawdown": "-66.20",
+          "positive_days": 0,
+          "trades": 3,
+          "wins": 1
+        },
+        "2026-04-28": {
+          "exchange_fee_net": "-123.05",
+          "exchange_fees": "13.05",
+          "gross": "-110.0",
+          "max_drawdown": "-123.05",
+          "positive_days": 0,
+          "trades": 4,
+          "wins": 0
+        },
+        "2026-05-06": {
+          "exchange_fee_net": "-1193.64",
+          "exchange_fees": "273.64",
+          "gross": "-920.0",
+          "max_drawdown": "-1255.01",
+          "positive_days": 0,
+          "trades": 8,
+          "wins": 1
+        },
+        "2026-05-07": {
+          "exchange_fee_net": "-643.84",
+          "exchange_fees": "273.84",
+          "gross": "-370.0",
+          "max_drawdown": "-693.32",
+          "positive_days": 0,
+          "trades": 8,
+          "wins": 2
+        },
+        "2026-05-08": {
+          "exchange_fee_net": "-727.85",
+          "exchange_fees": "237.85",
+          "gross": "-490.0",
+          "max_drawdown": "-734.62",
+          "positive_days": 0,
+          "trades": 7,
+          "wins": 2
+        },
+        "2026-05-11": {
+          "exchange_fee_net": "-440.86",
+          "exchange_fees": "240.86",
+          "gross": "-200.0",
+          "max_drawdown": "-550.73",
+          "positive_days": 0,
+          "trades": 6,
+          "wins": 2
+        },
+        "2026-05-12": {
+          "exchange_fee_net": "-512.28",
+          "exchange_fees": "362.28",
+          "gross": "-150.0",
+          "max_drawdown": "-761.09",
+          "positive_days": 0,
+          "trades": 9,
+          "wins": 3
+        },
+        "2026-05-14": {
+          "exchange_fee_net": "-86.78",
+          "exchange_fees": "46.78",
+          "gross": "-40.0",
+          "max_drawdown": "-86.78",
+          "positive_days": 0,
+          "trades": 3,
+          "wins": 0
+        },
+        "2026-05-15": {
+          "exchange_fee_net": "-984.08",
+          "exchange_fees": "474.08",
+          "gross": "-510.0",
+          "max_drawdown": "-1281.49",
+          "positive_days": 0,
+          "trades": 13,
+          "wins": 3
+        },
+        "2026-05-18": {
+          "exchange_fee_net": "-1000.29",
+          "exchange_fees": "350.29",
+          "gross": "-650.0",
+          "max_drawdown": "-1000.29",
+          "positive_days": 0,
+          "trades": 9,
+          "wins": 2
+        },
+        "2026-05-19": {
+          "exchange_fee_net": "-70.46",
+          "exchange_fees": "20.46",
+          "gross": "-50.0",
+          "max_drawdown": "-70.46",
+          "positive_days": 0,
+          "trades": 6,
+          "wins": 1
+        },
+        "2026-05-20": {
+          "exchange_fee_net": "67.69",
+          "exchange_fees": "482.31",
+          "gross": "550.0",
+          "max_drawdown": "-836.16",
+          "positive_days": 1,
+          "trades": 16,
+          "wins": 9
+        },
+        "2026-05-22": {
+          "exchange_fee_net": "26.63",
+          "exchange_fees": "3.37",
+          "gross": "30.0",
+          "max_drawdown": "0",
+          "positive_days": 1,
+          "trades": 1,
+          "wins": 1
+        }
+      }
+    },
+    "STRESS": {
+      "BU": {
+        "exchange_fee_net": "-2607.08",
+        "exchange_fees": "217.08",
+        "gross": "-2390.0",
+        "max_drawdown": "-2650.29",
+        "positive_days": 1,
+        "trades": 71,
+        "wins": 9
+      },
+      "CU": {
+        "exchange_fee_net": "-22510.52",
+        "exchange_fees": "5810.52",
+        "gross": "-16700.0",
+        "max_drawdown": "-27528.51",
+        "positive_days": 1,
+        "trades": 149,
+        "wins": 36
+      },
+      "POOLED": {
+        "exchange_fee_net": "-25117.60",
+        "exchange_fees": "6027.60",
+        "gross": "-19090.0",
+        "max_drawdown": "-29282.28",
+        "positive_days": 2,
+        "trades": 220,
+        "wins": 45
+      },
+      "POOLED_BEST3_SESSION_DATE_PROXY_REMOVED": {
+        "exchange_fee_net": "-26576.46",
+        "exchange_fees": "5306.46",
+        "gross": "-21270.0",
+        "max_drawdown": "-26576.46",
+        "positive_days": 0,
+        "removed_session_dates": [
+          "2026-01-29",
+          "2026-05-22",
+          "2026-04-20"
+        ],
+        "trades": 201,
+        "wins": 34
+      },
+      "PRODUCTS_AFTER_POOLED_BEST3_SESSION_DATE_PROXY_REMOVAL": {
+        "BU": {
+          "exchange_fee_net": "-2580.65",
+          "exchange_fees": "210.65",
+          "gross": "-2370.0",
+          "max_drawdown": "-2617.23",
+          "positive_days": 0,
+          "trades": 69,
+          "wins": 8
+        },
+        "CU": {
+          "exchange_fee_net": "-23995.81",
+          "exchange_fees": "5095.81",
+          "gross": "-18900.0",
+          "max_drawdown": "-24168.94",
+          "positive_days": 0,
+          "trades": 132,
+          "wins": 26
+        }
+      },
+      "SESSION_DATE_PROXY": {
+        "2026-01-27": {
+          "exchange_fee_net": "-859.94",
+          "exchange_fees": "49.94",
+          "gross": "-810.0",
+          "max_drawdown": "-859.94",
+          "positive_days": 0,
+          "trades": 20,
+          "wins": 1
+        },
+        "2026-01-28": {
+          "exchange_fee_net": "-453.77",
+          "exchange_fees": "153.77",
+          "gross": "-300.0",
+          "max_drawdown": "-626.90",
+          "positive_days": 0,
+          "trades": 4,
+          "wins": 2
+        },
+        "2026-01-29": {
+          "exchange_fee_net": "1485.29",
+          "exchange_fees": "714.71",
+          "gross": "2200.0",
+          "max_drawdown": "-3986.47",
+          "positive_days": 1,
+          "trades": 17,
+          "wins": 10
+        },
+        "2026-02-04": {
+          "exchange_fee_net": "-1034.44",
+          "exchange_fees": "234.44",
+          "gross": "-800.0",
+          "max_drawdown": "-1645.36",
+          "positive_days": 0,
+          "trades": 6,
+          "wins": 2
+        },
+        "2026-02-05": {
+          "exchange_fee_net": "-1196.45",
+          "exchange_fees": "306.45",
+          "gross": "-890.0",
+          "max_drawdown": "-1325.96",
+          "positive_days": 0,
+          "trades": 10,
+          "wins": 4
+        },
+        "2026-02-10": {
+          "exchange_fee_net": "-914.38",
+          "exchange_fees": "114.38",
+          "gross": "-800.0",
+          "max_drawdown": "-914.38",
+          "positive_days": 0,
+          "trades": 3,
+          "wins": 0
+        },
+        "2026-02-11": {
+          "exchange_fee_net": "-2051.67",
+          "exchange_fees": "501.67",
+          "gross": "-1550.0",
+          "max_drawdown": "-2051.67",
+          "positive_days": 0,
+          "trades": 13,
+          "wins": 3
+        },
+        "2026-02-24": {
+          "exchange_fee_net": "-476.24",
+          "exchange_fees": "76.24",
+          "gross": "-400.0",
+          "max_drawdown": "-476.24",
+          "positive_days": 0,
+          "trades": 2,
+          "wins": 0
+        },
+        "2026-03-10": {
+          "exchange_fee_net": "-576.26",
+          "exchange_fees": "76.26",
+          "gross": "-500.0",
+          "max_drawdown": "-576.26",
+          "positive_days": 0,
+          "trades": 2,
+          "wins": 0
+        },
+        "2026-03-11": {
+          "exchange_fee_net": "-475.96",
+          "exchange_fees": "75.96",
+          "gross": "-400.0",
+          "max_drawdown": "-475.96",
+          "positive_days": 0,
+          "trades": 2,
+          "wins": 0
+        },
+        "2026-03-12": {
+          "exchange_fee_net": "-175.65",
+          "exchange_fees": "75.65",
+          "gross": "-100.0",
+          "max_drawdown": "-187.87",
+          "positive_days": 0,
+          "trades": 2,
+          "wins": 1
+        },
+        "2026-03-13": {
+          "exchange_fee_net": "-1212.64",
+          "exchange_fees": "112.64",
+          "gross": "-1100.0",
+          "max_drawdown": "-1212.64",
+          "positive_days": 0,
+          "trades": 3,
+          "wins": 0
+        },
+        "2026-03-17": {
+          "exchange_fee_net": "-1248.46",
+          "exchange_fees": "148.46",
+          "gross": "-1100.0",
+          "max_drawdown": "-1248.46",
+          "positive_days": 0,
+          "trades": 4,
+          "wins": 0
+        },
+        "2026-04-02": {
+          "exchange_fee_net": "-503.21",
+          "exchange_fees": "43.21",
+          "gross": "-460.0",
+          "max_drawdown": "-539.87",
+          "positive_days": 0,
+          "trades": 13,
+          "wins": 3
+        },
+        "2026-04-03": {
+          "exchange_fee_net": "-336.20",
+          "exchange_fees": "36.20",
+          "gross": "-300.0",
+          "max_drawdown": "-379.78",
+          "positive_days": 0,
+          "trades": 11,
+          "wins": 2
+        },
+        "2026-04-07": {
+          "exchange_fee_net": "-579.55",
+          "exchange_fees": "179.55",
+          "gross": "-400.0",
+          "max_drawdown": "-593.61",
+          "positive_days": 0,
+          "trades": 5,
+          "wins": 1
+        },
+        "2026-04-10": {
+          "exchange_fee_net": "-237.22",
+          "exchange_fees": "37.22",
+          "gross": "-200.0",
+          "max_drawdown": "-237.22",
+          "positive_days": 0,
+          "trades": 1,
+          "wins": 0
+        },
+        "2026-04-13": {
+          "exchange_fee_net": "-1239.82",
+          "exchange_fees": "339.82",
+          "gross": "-900.0",
+          "max_drawdown": "-1602.11",
+          "positive_days": 0,
+          "trades": 9,
+          "wins": 4
+        },
+        "2026-04-20": {
+          "exchange_fee_net": "-33.06",
+          "exchange_fees": "3.06",
+          "gross": "-30.0",
+          "max_drawdown": "-33.06",
+          "positive_days": 0,
+          "trades": 1,
+          "wins": 0
+        },
+        "2026-04-23": {
+          "exchange_fee_net": "-109.34",
+          "exchange_fees": "9.34",
+          "gross": "-100.0",
+          "max_drawdown": "-109.34",
+          "positive_days": 0,
+          "trades": 3,
+          "wins": 0
+        },
+        "2026-04-28": {
+          "exchange_fee_net": "-223.05",
+          "exchange_fees": "13.05",
+          "gross": "-210.0",
+          "max_drawdown": "-223.05",
+          "positive_days": 0,
+          "trades": 4,
+          "wins": 0
+        },
+        "2026-05-06": {
+          "exchange_fee_net": "-1873.63",
+          "exchange_fees": "273.63",
+          "gross": "-1600.0",
+          "max_drawdown": "-1885.00",
+          "positive_days": 0,
+          "trades": 8,
+          "wins": 1
+        },
+        "2026-05-07": {
+          "exchange_fee_net": "-1503.84",
+          "exchange_fees": "273.84",
+          "gross": "-1230.0",
+          "max_drawdown": "-1503.84",
+          "positive_days": 0,
+          "trades": 8,
+          "wins": 0
+        },
+        "2026-05-08": {
+          "exchange_fee_net": "-1247.85",
+          "exchange_fees": "237.85",
+          "gross": "-1010.0",
+          "max_drawdown": "-1247.85",
+          "positive_days": 0,
+          "trades": 7,
+          "wins": 0
+        },
+        "2026-05-11": {
+          "exchange_fee_net": "-1050.72",
+          "exchange_fees": "200.72",
+          "gross": "-850.0",
+          "max_drawdown": "-1050.72",
+          "positive_days": 0,
+          "trades": 5,
+          "wins": 0
+        },
+        "2026-05-12": {
+          "exchange_fee_net": "-1562.27",
+          "exchange_fees": "362.27",
+          "gross": "-1200.0",
+          "max_drawdown": "-1572.05",
+          "positive_days": 0,
+          "trades": 9,
+          "wins": 2
+        },
+        "2026-05-14": {
+          "exchange_fee_net": "-266.78",
+          "exchange_fees": "46.78",
+          "gross": "-220.0",
+          "max_drawdown": "-266.78",
+          "positive_days": 0,
+          "trades": 3,
+          "wins": 0
+        },
+        "2026-05-15": {
+          "exchange_fee_net": "-2104.06",
+          "exchange_fees": "474.06",
+          "gross": "-1630.0",
+          "max_drawdown": "-2331.47",
+          "positive_days": 0,
+          "trades": 13,
+          "wins": 1
+        },
+        "2026-05-18": {
+          "exchange_fee_net": "-1700.30",
+          "exchange_fees": "350.30",
+          "gross": "-1350.0",
+          "max_drawdown": "-1700.30",
+          "positive_days": 0,
+          "trades": 9,
+          "wins": 1
+        },
+        "2026-05-19": {
+          "exchange_fee_net": "-210.46",
+          "exchange_fees": "20.46",
+          "gross": "-190.0",
+          "max_drawdown": "-210.46",
+          "positive_days": 0,
+          "trades": 6,
+          "wins": 1
+        },
+        "2026-05-20": {
+          "exchange_fee_net": "-1152.30",
+          "exchange_fees": "482.30",
+          "gross": "-670.0",
+          "max_drawdown": "-1727.07",
+          "positive_days": 0,
+          "trades": 16,
+          "wins": 5
+        },
+        "2026-05-22": {
+          "exchange_fee_net": "6.63",
+          "exchange_fees": "3.37",
+          "gross": "10.0",
+          "max_drawdown": "0",
+          "positive_days": 1,
+          "trades": 1,
+          "wins": 1
+        }
+      }
+    }
+  },
+  "schema_version": "issue488_csv_pnl_screen_v1",
+  "segment_overlap_preflight": "PASS",
+  "segments": 336,
+  "thresholds": [
+    {
+      "calibration_session_dates": [
+        "2026-01-12",
+        "2026-01-13",
+        "2026-01-14",
+        "2026-01-16",
+        "2026-01-22"
+      ],
+      "cell": [
+        "BU",
+        "SHFE.bu2603",
+        "NIGHT"
+      ],
+      "evaluation_session_dates": [
+        "2026-01-27",
+        "2026-02-04",
+        "2026-02-05",
+        "2026-02-09"
+      ],
+      "sample_count": 6110,
+      "threshold": "5.296938399114717816303946883"
+    },
+    {
+      "calibration_session_dates": [
+        "2026-03-17",
+        "2026-03-19",
+        "2026-03-20",
+        "2026-04-17",
+        "2026-05-06"
+      ],
+      "cell": [
+        "BU",
+        "SHFE.bu2606",
+        "DAY_1"
+      ],
+      "evaluation_session_dates": [
+        "2026-05-07",
+        "2026-05-08",
+        "2026-05-19",
+        "2026-05-20"
+      ],
+      "sample_count": 5834,
+      "threshold": "12.95328582739509105304829770"
+    },
+    {
+      "calibration_session_dates": [
+        "2026-04-10",
+        "2026-04-13",
+        "2026-04-15",
+        "2026-04-16",
+        "2026-04-20"
+      ],
+      "cell": [
+        "BU",
+        "SHFE.bu2606",
+        "DAY_2"
+      ],
+      "evaluation_session_dates": [
+        "2026-04-28",
+        "2026-05-06",
+        "2026-05-08",
+        "2026-05-14",
+        "2026-05-21"
+      ],
+      "sample_count": 5181,
+      "threshold": "8.919571971004487400759406282"
+    },
+    {
+      "calibration_session_dates": [
+        "2026-03-12",
+        "2026-03-13",
+        "2026-03-17",
+        "2026-03-18",
+        "2026-03-23"
+      ],
+      "cell": [
+        "BU",
+        "SHFE.bu2606",
+        "DAY_3"
+      ],
+      "evaluation_session_dates": [
+        "2026-04-02",
+        "2026-04-03",
+        "2026-04-14",
+        "2026-04-17",
+        "2026-04-20",
+        "2026-04-22",
+        "2026-04-23",
+        "2026-04-28",
+        "2026-04-30",
+        "2026-05-06",
+        "2026-05-13",
+        "2026-05-18",
+        "2026-05-22"
+      ],
+      "sample_count": 6112,
+      "threshold": "13.46049046321525885558583106"
+    },
+    {
+      "calibration_session_dates": [
+        "2026-03-19",
+        "2026-03-26",
+        "2026-03-30",
+        "2026-04-07",
+        "2026-04-20"
+      ],
+      "cell": [
+        "BU",
+        "SHFE.bu2606",
+        "NIGHT"
+      ],
+      "evaluation_session_dates": [
+        "2026-04-23",
+        "2026-04-28",
+        "2026-05-06",
+        "2026-05-13",
+        "2026-05-15",
+        "2026-05-18",
+        "2026-05-19",
+        "2026-05-20"
+      ],
+      "sample_count": 8658,
+      "threshold": "15.28336380255941499085923218"
+    },
+    {
+      "calibration_session_dates": [
+        "2026-01-16",
+        "2026-01-21",
+        "2026-01-22",
+        "2026-01-23",
+        "2026-01-26"
+      ],
+      "cell": [
+        "CU",
+        "SHFE.cu2603",
+        "NIGHT"
+      ],
+      "evaluation_session_dates": [
+        "2026-01-28",
+        "2026-01-29",
+        "2026-02-04",
+        "2026-02-05",
+        "2026-02-10",
+        "2026-02-11",
+        "2026-02-24"
+      ],
+      "sample_count": 5873,
+      "threshold": "12.25"
+    },
+    {
+      "calibration_session_dates": [
+        "2026-02-25",
+        "2026-02-26",
+        "2026-03-03",
+        "2026-03-04",
+        "2026-03-06"
+      ],
+      "cell": [
+        "CU",
+        "SHFE.cu2604",
+        "NIGHT"
+      ],
+      "evaluation_session_dates": [
+        "2026-03-10",
+        "2026-03-11",
+        "2026-03-12",
+        "2026-03-13",
+        "2026-03-17"
+      ],
+      "sample_count": 7652,
+      "threshold": "10.81081081081081081081081081"
+    },
+    {
+      "calibration_session_dates": [
+        "2026-03-20",
+        "2026-03-23",
+        "2026-03-25",
+        "2026-03-31",
+        "2026-04-02"
+      ],
+      "cell": [
+        "CU",
+        "SHFE.cu2605",
+        "NIGHT"
+      ],
+      "evaluation_session_dates": [
+        "2026-04-07",
+        "2026-04-10",
+        "2026-04-13"
+      ],
+      "sample_count": 8456,
+      "threshold": "11.42857142857142857142857143"
+    },
+    {
+      "calibration_session_dates": [
+        "2026-04-17",
+        "2026-04-28",
+        "2026-05-07",
+        "2026-05-13",
+        "2026-05-15"
+      ],
+      "cell": [
+        "CU",
+        "SHFE.cu2606",
+        "DAY_1"
+      ],
+      "evaluation_session_dates": [
+        "2026-05-18",
+        "2026-05-20"
+      ],
+      "sample_count": 5867,
+      "threshold": "9.397590361445783132530120482"
+    },
+    {
+      "calibration_session_dates": [
+        "2026-04-17",
+        "2026-04-20",
+        "2026-04-21",
+        "2026-04-28",
+        "2026-04-29"
+      ],
+      "cell": [
+        "CU",
+        "SHFE.cu2606",
+        "NIGHT"
+      ],
+      "evaluation_session_dates": [
+        "2026-05-06",
+        "2026-05-07",
+        "2026-05-08",
+        "2026-05-11",
+        "2026-05-12",
+        "2026-05-14",
+        "2026-05-15",
+        "2026-05-20"
+      ],
+      "sample_count": 5968,
+      "threshold": "8.462184873949579831932773109"
+    }
+  ],
+  "warnings": [
+    "EVENT_WINDOW_SELECTED",
+    "NO_RECEIVE_CLOCK",
+    "NO_LOCAL_MONOTONIC_CLOCK",
+    "NO_COLLECTOR_SEQUENCE",
+    "NO_PROVIDER_UPDATE_ID",
+    "BROKER_MARKUP_UNBOUND",
+    "NOT_COUNTABLE_HOLDOUT",
+    "NON_CONTINUOUS_MARKET_COVERAGE",
+    "SOURCE_TIME_USED_AS_RECEIVE_CLOCK",
+    "EXCHANGE_FEE_FLOOR_ONLY",
+    "SESSION_OCCURRENCE_DATE_PROXY_NOT_OFFICIAL_TRADING_DAY"
+  ]
+}

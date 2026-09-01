@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import collector_ordered_l1_bbo_change_v1 as bbo_change_module  # noqa: E402
+import collector_ordered_l1_bbo_change_csv_pnl_screen_v1 as pnl_screen_module  # noqa: E402
 
 from collector_ordered_l1_bbo_change_v1 import (  # noqa: E402
     BBOChangeContractError,
@@ -116,6 +117,203 @@ def control(
         event_type=event_type,
         reason=f"fixture-{event_type.lower()}",
     )
+
+
+def test_csv_pnl_screen_requires_unique_session_date_mapping(tmp_path: Path) -> None:
+    """The quick screen must not invent a date when no session overlaps."""
+    registry = tmp_path / "registry.csv"
+    registry.write_text(
+        "segment_id,exact_contract_symbol,segment_start_utc,segment_end_utc,top1_download_complete\n"
+        "s1,SHFE.cu2601,2026-01-01T01:00:00+00:00,2026-01-01T01:02:00+00:00,True\n"
+    )
+    plan = tmp_path / "plan.csv"
+    plan.write_text(
+        "exact_contract_symbol,session_id,session_name,window_start_utc,window_end_utc\n"
+        "SHFE.cu2601,SHFE.cu:2026-01-01:day_1,day_1,2026-01-01T03:00:00+00:00,2026-01-01T03:01:00+00:00\n"
+    )
+    with pytest.raises(pnl_screen_module.ScreenInputError, match="0 session-date"):
+        pnl_screen_module._session_map(plan, registry)
+
+
+@pytest.mark.parametrize(("bid", "ask"), [("101", "100"), ("100", "100")])
+def test_csv_pnl_screen_fail_closed_bbo_and_deterministic_json(
+    tmp_path: Path, bid: str, ask: str
+) -> None:
+    """Invalid BBO is never repaired and canonical serialization is stable."""
+    rows = tmp_path / "ticks.csv"
+    rows.write_text(
+        "segment_id,instrument,exchange,exact_contract_symbol,segment_start_utc,segment_end_utc,tick_timestamp_utc,bid_price1,bid_volume1,ask_price1,ask_volume1\n"
+        f"s1,CU,SHFE,SHFE.cu2601,2026-01-01T01:00:00+00:00,2026-01-01T01:02:00+00:00,2026-01-01T01:00:00+00:00,{bid},1,{ask},1\n"
+    )
+    with pytest.raises(pnl_screen_module.ScreenInputError, match="invalid BBO"):
+        pnl_screen_module._load_segments(
+            str(rows), {"s1": ("2026-01-01", "DAY")}, {"CU"}
+        )
+    payload = {"b": ["x"], "a": {"z": 1}}
+    first = json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False)
+    second = json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False)
+    assert first == second
+
+
+def test_csv_pnl_screen_uses_first_five_session_dates_without_lookahead() -> None:
+    calibration, evaluation = pnl_screen_module._session_date_split(
+        [
+            "2026-01-06",
+            "2026-01-02",
+            "2026-01-05",
+            "2026-01-01",
+            "2026-01-04",
+            "2026-01-03",
+            "2026-01-07",
+        ]
+    )
+    assert calibration == {
+        "2026-01-01",
+        "2026-01-02",
+        "2026-01-03",
+        "2026-01-04",
+        "2026-01-05",
+    }
+    assert evaluation == {"2026-01-06", "2026-01-07"}
+
+
+def test_csv_pnl_screen_primary_and_stress_fill_are_adverse() -> None:
+    signal = SignalDecision(
+        exact_contract="SHFE.rb2701",
+        session_family="DAY_1",
+        segment_id="s",
+        collector_generation="CSV_DIAGNOSTIC",
+        clock_epoch="CSV_CLOCK",
+        collector_seq=1,
+        source_event_ns=BASE_UTC_NS,
+        receive_monotonic_ns=0,
+        active_time_ns=0,
+        direction="LONG",
+        score=Decimal("2"),
+        threshold=Decimal("1"),
+    )
+    rows = (
+        replace(
+            observation(
+                1,
+                active_ns=0,
+                collector_generation="CSV_DIAGNOSTIC",
+                clock_epoch="CSV_CLOCK",
+                session_family="DAY_1",
+                segment_id="s",
+            ),
+            exact_contract="SHFE.rb2701",
+        ),
+        replace(
+            observation(
+                2,
+                active_ns=SECOND,
+                bid_price="100",
+                ask_price="101",
+                collector_generation="CSV_DIAGNOSTIC",
+                clock_epoch="CSV_CLOCK",
+                session_family="DAY_1",
+                segment_id="s",
+            ),
+            exact_contract="SHFE.rb2701",
+        ),
+        replace(
+            observation(
+                3,
+                active_ns=31 * SECOND,
+                bid_price="103",
+                ask_price="104",
+                collector_generation="CSV_DIAGNOSTIC",
+                clock_epoch="CSV_CLOCK",
+                session_family="DAY_1",
+                segment_id="s",
+            ),
+            exact_contract="SHFE.rb2701",
+        ),
+        replace(
+            observation(
+                4,
+                active_ns=32 * SECOND,
+                bid_price="103",
+                ask_price="104",
+                collector_generation="CSV_DIAGNOSTIC",
+                clock_epoch="CSV_CLOCK",
+                session_family="DAY_1",
+                segment_id="s",
+            ),
+            exact_contract="SHFE.rb2701",
+        ),
+    )
+    primary = pnl_screen_module._round_trip(signal, rows, 500_000_000, 0, Decimal("1"))
+    stress = pnl_screen_module._round_trip(signal, rows, SECOND, 1, Decimal("1"))
+    assert primary[:3] == ("BUY", Decimal("101"), Decimal("103"))
+    assert stress[:3] == ("BUY", Decimal("102"), Decimal("102"))
+
+    late_entry_rows = (
+        rows[0],
+        replace(rows[1], active_time_ns=7 * SECOND, receive_monotonic_ns=7 * SECOND),
+        replace(rows[2], active_time_ns=37 * SECOND, receive_monotonic_ns=37 * SECOND),
+        replace(rows[3], active_time_ns=38 * SECOND, receive_monotonic_ns=38 * SECOND),
+    )
+    late_entry = pnl_screen_module._round_trip(
+        signal, late_entry_rows, 500_000_000, 0, Decimal("1")
+    )
+    assert late_entry is not None
+    assert late_entry[-1] is False
+
+    timeout_rows = (
+        rows[0],
+        rows[1],
+        replace(rows[2], active_time_ns=37 * SECOND, receive_monotonic_ns=37 * SECOND),
+    )
+    timed_out = pnl_screen_module._round_trip(
+        signal, timeout_rows, 500_000_000, 0, Decimal("1")
+    )
+    assert timed_out is not None
+    assert timed_out[-1] is True
+
+
+def test_csv_pnl_screen_rounds_each_fee_leg_and_removes_whole_session_dates() -> None:
+    entry_fee = pnl_screen_module._leg_fee(
+        Decimal("100"), Decimal("1"), Decimal("0.00005"), Decimal(0)
+    )
+    exit_fee = pnl_screen_module._leg_fee(
+        Decimal("100"), Decimal("1"), Decimal("0.00005"), Decimal(0)
+    )
+    assert entry_fee + exit_fee == Decimal("0.02")
+
+    rows = [
+        {"official_day": "2026-01-01", "net": Decimal("5")},
+        {"official_day": "2026-01-01", "net": Decimal("5")},
+        {"official_day": "2026-01-02", "net": Decimal("9")},
+        {"official_day": "2026-01-03", "net": Decimal("8")},
+        {"official_day": "2026-01-04", "net": Decimal("7")},
+    ]
+    retained, removed = pnl_screen_module._remove_best_three_session_dates(rows)
+    assert removed == ["2026-01-01", "2026-01-02", "2026-01-03"]
+    assert retained == [{"official_day": "2026-01-04", "net": Decimal("7")}]
+
+
+def test_csv_pnl_screen_rejects_overlapping_exact_contract_segments() -> None:
+    first_rows = (
+        replace(observation(1, active_ns=0), exact_contract="SHFE.cu2601"),
+        replace(observation(2, active_ns=2 * SECOND), exact_contract="SHFE.cu2601"),
+    )
+    second_rows = (
+        replace(observation(1, active_ns=SECOND), exact_contract="SHFE.cu2601"),
+        replace(observation(2, active_ns=3 * SECOND), exact_contract="SHFE.cu2601"),
+    )
+    segments = (
+        pnl_screen_module.Segment(
+            "s1", "CU", "SHFE.cu2601", "2026-01-01", "DAY_1", first_rows
+        ),
+        pnl_screen_module.Segment(
+            "s2", "CU", "SHFE.cu2601", "2026-01-01", "DAY_1", second_rows
+        ),
+    )
+    with pytest.raises(pnl_screen_module.ScreenInputError, match="overlapping"):
+        pnl_screen_module._require_nonoverlapping_segments(segments)
+
 
 
 def custody_record(

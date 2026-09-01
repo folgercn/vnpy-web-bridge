@@ -43,6 +43,35 @@
   与 diff check 后停止。任何采集、经济结果、forward、shadow、SimNow 或下单
   均需新的明确授权。
 
+### 0.0.1 Issue #488 本地 PnL 快速筛选授权（2026-09-01）
+
+付哥已进一步明确授权尽快做 PnL 验证，并要求停止与策略有效性判断无关的
+琐细 hardening 和扩展。本授权优先于上节的“经济结果未授权”，但只允许读取
+本机已经存在的 CSV，做 research-only、offline-only 的快速经济筛选。
+
+本 tranche 仅允许新增或修改：
+
+- `scripts/collector_ordered_l1_bbo_change_csv_pnl_screen_v1.py`
+- `backend/tests/unit/test_issue488_hft_bbo_change_offline.py`
+- `docs/research/collector-ordered-l1-bbo-change-v1/pnl-screen-v1.json`
+- `AGENTS.md`
+
+固定收缩边界：
+
+- 不再修改 collector/accounting/auditor 三个冻结内核，不补平台、daily/best3、
+  runtime、service、CI、部署或通用框架；
+- 只允许本地既有数据读取；不联网、不读取或注入凭证、不调用 provider，
+  不采集/下载/回填新数据；
+- 保留冻结的 10s feature、Q95、方向、PRIMARY/STRESS latency、30s horizon、
+  aggressive bid/ask、one-lot 和单合约单场景重叠抑制；
+- 结果必须同时报告 gross、交易所费后 PnL 与 STRESS，不得把缺失 broker markup
+  默填成已知净值；
+- event-window selection、缺真实 receive clock/provider id、calendar-day proxy、
+  非连续市场覆盖等局限必须进入机器可读结果；该结果只能是 fast screen，
+  不得声称独立 OOS、完整 2×20 holdout、shadow/SimNow/生产或下单授权；
+- 本 tranche 除本政策文件外严格限制为 1 个 runner、1 个既有 test 文件和
+  1 个结果 JSON；得到 PnL 判定后立即停止非必要扩展。
+
 当前 M5 完成目标：
 
 ```text
