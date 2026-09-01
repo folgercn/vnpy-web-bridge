@@ -33,6 +33,12 @@ BBO_FILE = "event_bbo_first_qualified.csv"
 FEE_FILE = "official_pit_mapping_with_modeled_close_today_fee.csv"
 FEE_HISTORY_FILE = "official_fee_margin_history_6products_with_modeled_close_today.csv"
 SPEC_FILE = "contract_specs.csv"
+CURVE_FILE = "curve_contract_daily.csv"
+INITIAL_CASH_CNY = 1_000_000.0
+DEV_START = "2023-01-03"
+DEV_END = "2024-12-31"
+EXPECTED_CORRECTED_EVENT_SHA256 = "74915208177e188f65074290d68590eec7b4c4d811a8648c1d92a331d2cbd71c"
+FOLDS = {"DEV_2023": ("2023-01-01", "2023-12-31"), "DEV_2024": ("2024-01-01", "2024-12-31")}
 
 
 class ReplayError(ValueError):
@@ -44,6 +50,28 @@ class Position:
     contract: str
     direction: int
     opened_day: str
+
+
+@dataclass
+class AccountPosition:
+    contract: str
+    direction: int
+    opened_day: str
+    entry_price: float
+    multiplier: float
+
+
+@dataclass
+class Account:
+    cash: float = INITIAL_CASH_CNY
+    realized_pnl: float = 0.0
+    fees_cny: float = 0.0
+    position: AccountPosition | None = None
+    daily: dict[str, dict[str, float | str | None]] | None = None
+
+    def __post_init__(self) -> None:
+        if self.daily is None:
+            self.daily = {}
 
 
 def sha256_file(path: Path) -> str:
@@ -62,6 +90,35 @@ def read_csv(path: Path, required: set[str]) -> list[dict[str, str]]:
         if missing:
             raise ReplayError(f"{path.name} missing columns: {sorted(missing)}")
         return list(reader)
+
+
+def read_dev_curve(path: Path) -> tuple[list[str], dict[str, dict[str, float]]]:
+    """Read only the chronological DEV source rows; never parse 2025+ marks."""
+    required = {"source_official_day", "available_official_day", "exact_contract", "settlement"}
+    marks: dict[str, dict[str, float]] = defaultdict(dict)
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        missing = required - set(reader.fieldnames or ())
+        if missing:
+            raise ReplayError(f"{path.name} missing columns: {sorted(missing)}")
+        for row in reader:
+            day = row["source_official_day"]
+            if day > DEV_END:
+                break
+            if day < DEV_START:
+                continue
+            if row["available_official_day"] <= day:
+                raise ReplayError(f"non-causal curve availability for {row['exact_contract']} {day}")
+            settlement = parse_float(row["settlement"], "settlement")
+            if settlement <= 0:
+                continue
+            existing = marks[day].get(row["exact_contract"])
+            if existing is not None and existing != settlement:
+                raise ReplayError(f"conflicting settlement for {row['exact_contract']} {day}")
+            marks[day][row["exact_contract"]] = settlement
+    if not marks:
+        raise ReplayError("no DEV curve settlements")
+    return sorted(marks), marks
 
 
 def one_named_file(input_root: Path, name: str) -> Path:
@@ -228,9 +285,11 @@ def load_inputs(input_root: Path) -> tuple[
     dict[tuple[str, str], dict[str, str]],
     dict[str, list[dict[str, str]]],
     dict[str, dict[str, str]],
+    list[str],
+    dict[str, dict[str, float]],
     dict[str, str],
 ]:
-    paths = {name: one_named_file(input_root, name) for name in (EVENT_FILE, BBO_FILE, FEE_FILE, FEE_HISTORY_FILE, SPEC_FILE)}
+    paths = {name: one_named_file(input_root, name) for name in (EVENT_FILE, BBO_FILE, FEE_FILE, FEE_HISTORY_FILE, SPEC_FILE, CURVE_FILE)}
     events = read_csv(
         paths[EVENT_FILE],
         {"event_id", "path_id", "candidate_id", "product", "exact_contract", "event_type", "side", "official_trading_day", "eligibility_time"},
@@ -248,6 +307,7 @@ def load_inputs(input_root: Path) -> tuple[
         {"official_day", "exact_contract", "ordinary_fee_ratio_per_mille", "ordinary_fee_cny_per_lot", "modeled_close_today_fee_ratio_per_mille", "modeled_close_today_fee_cny_per_lot", "close_today_fee_provenance"},
     )
     spec_rows = read_csv(paths[SPEC_FILE], {"exact_contract", "price_tick", "volume_multiple"})
+    curve_days, curve_marks = read_dev_curve(paths[CURVE_FILE])
 
     event_ids: set[str] = set()
     for event in events:
@@ -287,7 +347,7 @@ def load_inputs(input_root: Path) -> tuple[
         if contract in specs:
             raise ReplayError(f"duplicate spec: {contract}")
         specs[contract] = spec
-    return events, quotes, fee_history, specs, {name: sha256_file(path) for name, path in paths.items()}
+    return events, quotes, fee_history, specs, curve_days, curve_marks, {name: sha256_file(path) for name, path in paths.items()}
 
 
 def effective_fee(fee_history: dict[str, list[dict[str, str]]], event: dict[str, str]) -> dict[str, str]:
@@ -358,8 +418,110 @@ def fee_cny(event: dict[str, str], position: Position | None, fee: dict[str, str
     return offset, provenance, (fill_price * multiplier * ratio / 1000.0 + fixed) * multiplier_cost
 
 
+def max_drawdown(equity: list[float]) -> float:
+    peak = equity[0]
+    drawdown = 0.0
+    for value in equity:
+        peak = max(peak, value)
+        drawdown = max(drawdown, peak - value)
+    return drawdown
+
+
+def account_metrics(account: Account, rows: list[dict[str, Any]], days: list[str], start_index: int, end_index: int) -> dict[str, Any]:
+    assert account.daily is not None
+    selected_days = days[start_index : end_index + 1]
+    before = INITIAL_CASH_CNY if start_index == 0 else float(account.daily[days[start_index - 1]]["equity_cny"])
+    before_fees = 0.0 if start_index == 0 else float(account.daily[days[start_index - 1]]["fees_cny"])
+    before_realized = 0.0 if start_index == 0 else float(account.daily[days[start_index - 1]]["realized_pnl_cny"])
+    equity = [before] + [float(account.daily[day]["equity_cny"]) for day in selected_days]
+    deltas = [equity[index] - equity[index - 1] for index in range(1, len(equity))]
+    top_index = max(range(len(deltas)), key=deltas.__getitem__) if deltas else None
+    reduced = [before]
+    for index, delta in enumerate(deltas):
+        reduced.append(reduced[-1] + (0.0 if index == top_index else delta))
+    last = account.daily[selected_days[-1]]
+    net_pnl = equity[-1] - before
+    max_dd = max_drawdown(equity)
+    filled = [row for row in rows if row["status"] == "FILLED" and selected_days[0] <= row["official_trading_day"] <= selected_days[-1]]
+    opened = [row for row in filled if is_open(str(row["event_type"]))]
+    return {
+        "start_equity_cny": round(before, 10),
+        "end_equity_cny": round(equity[-1], 10),
+        "net_pnl_cny": round(net_pnl, 10),
+        "net_return": round(net_pnl / INITIAL_CASH_CNY, 12),
+        "realized_pnl_cny": round(float(last["realized_pnl_cny"]) - before_realized, 10),
+        "unrealized_pnl_cny": round(float(last["unrealized_pnl_cny"]), 10),
+        "fees_cny": round(float(last["fees_cny"]) - before_fees, 10),
+        "max_drawdown_cny": round(max_dd, 10),
+        "profit_to_max_drawdown": None if max_dd == 0 else round(net_pnl / max_dd, 12),
+        "top_day": None if top_index is None else selected_days[top_index],
+        "top_day_pnl_cny": None if top_index is None else round(deltas[top_index], 10),
+        "net_pnl_after_top_day_removal_cny": round(reduced[-1] - before, 10),
+        "max_drawdown_after_top_day_removal_cny": round(max_drawdown(reduced), 10),
+        "filled_events": len(filled),
+        "long_open_events": sum(1 for row in opened if row["side"] == "BUY"),
+        "short_open_events": sum(1 for row in opened if row["side"] == "SELL"),
+        "roll_events": sum(1 for row in filled if "ROLL" in str(row["event_type"])),
+        "terminal_contract": last["position_contract"],
+        "terminal_direction": last["position_direction"],
+        "accounting_identity_error_cny": round(
+            float(last["equity_cny"]) - INITIAL_CASH_CNY - (float(last["realized_pnl_cny"]) - float(last["fees_cny"]) + float(last["unrealized_pnl_cny"])),
+            10,
+        ) if start_index == 0 else None,
+    }
+
+
+def apply_fill(account: Account, event: dict[str, str], fill: dict[str, Any], fee: dict[str, str], spec: dict[str, str], scenario: str) -> dict[str, Any]:
+    opening = is_open(event["event_type"])
+    previous = account.position
+    if fill["status"] != "FILLED":
+        return {"position_before": 0 if previous is None else previous.direction, "position_after": 0 if previous is None else previous.direction, "realized_pnl_cny": 0.0, "fee_cny": 0.0}
+    if opening:
+        if previous is not None:
+            raise ReplayError(f"open while holding {previous.contract}")
+        direction = 1 if event["side"] == "BUY" else -1
+        offset, provenance, cost = fee_cny(event, None, fee, spec, float(fill["fill_price"]), scenario)
+        account.cash -= cost
+        account.fees_cny += cost
+        account.position = AccountPosition(event["exact_contract"], direction, event["official_trading_day"], float(fill["fill_price"]), parse_float(spec["volume_multiple"], "volume_multiple"))
+        return {"position_before": 0, "position_after": direction, "realized_pnl_cny": 0.0, "fee_cny": cost, "offset": offset, "fee_provenance": provenance}
+    if previous is None:
+        raise ReplayError("close while flat")
+    if event["exact_contract"] != previous.contract:
+        raise ReplayError(f"close contract {event['exact_contract']} differs from held {previous.contract}")
+    if event["side"] != ("SELL" if previous.direction > 0 else "BUY"):
+        raise ReplayError("close side does not reduce held position")
+    offset, provenance, cost = fee_cny(event, previous, fee, spec, float(fill["fill_price"]), scenario)
+    realized = previous.direction * (float(fill["fill_price"]) - previous.entry_price) * previous.multiplier
+    account.cash += realized - cost
+    account.realized_pnl += realized
+    account.fees_cny += cost
+    account.position = None
+    return {"position_before": previous.direction, "position_after": 0, "realized_pnl_cny": realized, "fee_cny": cost, "offset": offset, "fee_provenance": provenance}
+
+
+def mark_account(account: Account, day: str, marks: dict[str, float]) -> None:
+    position = account.position
+    unrealized = 0.0
+    if position is not None:
+        settlement = marks.get(position.contract)
+        if settlement is None:
+            raise ReplayError(f"missing official settlement for held {position.contract} on {day}")
+        unrealized = position.direction * (settlement - position.entry_price) * position.multiplier
+    assert account.daily is not None
+    account.daily[day] = {
+        "cash_cny": account.cash,
+        "realized_pnl_cny": account.realized_pnl,
+        "unrealized_pnl_cny": unrealized,
+        "fees_cny": account.fees_cny,
+        "equity_cny": account.cash + unrealized,
+        "position_contract": None if position is None else position.contract,
+        "position_direction": None if position is None else position.direction,
+    }
+
+
 def replay(input_root: Path) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
-    events, quotes, fee_history, specs, source_hashes = load_inputs(input_root)
+    events, quotes, fee_history, specs, curve_days, curve_marks, source_hashes = load_inputs(input_root)
     input_event_sha256 = canonical_sha256(events)
     try:
         ordered, corrections = corrected_event_path(events)
@@ -378,85 +540,59 @@ def replay(input_root: Path) -> tuple[dict[str, Any], list[dict[str, Any]], dict
         comparison = {"schema_version": "issue481_paired_baseline_feasibility_comparison_v1", "candidate_id": CANDIDATE_ID, "status": summary["status"], "economic_pnl_evaluated": False, "paths": {}}
         return summary, [], comparison
     corrected_event_sha256 = canonical_sha256(ordered)
-    states: dict[tuple[str, str, str], Position] = {}
+    if len(events) == 607 and corrected_event_sha256 != EXPECTED_CORRECTED_EVENT_SHA256:
+        raise ReplayError("corrected event path SHA256 differs from the frozen 603-event binding")
+    if any(not DEV_START <= event["official_trading_day"] <= DEV_END for event in ordered):
+        raise ReplayError("non-DEV target event is forbidden")
     evidence: list[dict[str, Any]] = []
     failures: list[dict[str, str]] = []
-    counts: dict[tuple[str, str], dict[str, int]] = defaultdict(lambda: {"filled": 0, "unfilled": 0, "events": 0})
-
+    events_by_day: dict[str, list[dict[str, str]]] = defaultdict(list)
     for event in ordered:
-        key = (event["path_id"], event["product"], "shared_target")
-        previous = states.get(key)
-        opening = is_open(event["event_type"])
-        try:
-            if opening:
-                if previous is not None:
-                    raise ReplayError(f"open while already holding {previous.contract}")
-                next_position = Position(event["exact_contract"], 1 if event["side"] == "BUY" else -1, event["official_trading_day"])
-            else:
-                if previous is None:
-                    raise ReplayError("close while flat")
-                expected_side = "SELL" if previous.direction > 0 else "BUY"
-                if event["side"] != expected_side:
-                    raise ReplayError(f"close side {event['side']} does not reduce {previous.direction:+d} position")
-                if event["exact_contract"] != previous.contract:
-                    raise ReplayError(f"close contract {event['exact_contract']} differs from held {previous.contract}")
-                next_position = None
+        events_by_day[event["official_trading_day"]].append(event)
+    products = sorted({event["product"] for event in ordered})
+    accounts = {(path, scenario, product): Account() for path in ("CANDIDATE", "PAIRED") for scenario in SCENARIOS for product in products}
+
+    for day in curve_days:
+        for event in events_by_day.get(day, []):
             spec = specs.get(event["exact_contract"])
             if spec is None:
-                raise ReplayError("missing exact-contract spec")
+                failures.append({"event_id": event["event_id"], "reason": "missing exact-contract spec"})
+                break
             fee = effective_fee(fee_history, event)
+            bbo_source_event_id = event.get("bbo_source_event_id", event["event_id"])
+            for scenario in SCENARIOS:
+                account = accounts[(event["path_id"], scenario, event["product"])]
+                try:
+                    fill = quote_fill(event, quotes[(bbo_source_event_id, scenario)], spec, scenario)
+                    accounting = apply_fill(account, event, fill, fee, spec, scenario)
+                except ReplayError as exc:
+                    failures.append({"event_id": event["event_id"], "path_id": event["path_id"], "product": event["product"], "scenario": scenario, "reason": str(exc)})
+                    break
+                record: dict[str, Any] = {**event, "source_event_id": event.get("source_event_id", event["event_id"]), "bbo_source_event_id": bbo_source_event_id, "scenario": scenario, "status": fill["status"]}
+                record.update(fill)
+                record.update({key: round(value, 10) if isinstance(value, float) else value for key, value in accounting.items()})
+                record.update({"cash_after_cny": round(account.cash, 10), "realized_pnl_after_cny": round(account.realized_pnl, 10), "fees_after_cny": round(account.fees_cny, 10)})
+                if "correction_type" in event:
+                    record["correction"] = {"type": event["correction_type"], "dropped_roll_close_event_id": event["dropped_roll_close_event_id"], "dropped_roll_open_event_id": event["dropped_roll_open_event_id"]}
+                evidence.append(record)
+            if failures:
+                break
+        if failures:
+            break
+        try:
+            for account in accounts.values():
+                mark_account(account, day, curve_marks[day])
         except ReplayError as exc:
-            failures.append({"event_id": event["event_id"], "path_id": event["path_id"], "product": event["product"], "event_type": event["event_type"], "reason": str(exc)})
+            failures.append({"official_trading_day": day, "reason": str(exc)})
             break
 
-        scenario_records: list[dict[str, Any]] = []
-        bbo_source_event_id = event.get("bbo_source_event_id", event["event_id"])
-        for scenario in SCENARIOS:
-            fill = quote_fill(event, quotes[(bbo_source_event_id, scenario)], spec, scenario)
-            record: dict[str, Any] = {
-                "event_id": event["event_id"],
-                "source_event_id": event.get("source_event_id", event["event_id"]),
-                "bbo_source_event_id": bbo_source_event_id,
-                "path_id": event["path_id"],
-                "product": event["product"],
-                "exact_contract": event["exact_contract"],
-                "event_type": event["event_type"],
-                "side": event["side"],
-                "official_trading_day": event["official_trading_day"],
-                "scenario": scenario,
-                "target_before": 0 if previous is None else previous.direction,
-                "target_after": 0 if next_position is None else next_position.direction,
-                "status": fill["status"],
-            }
-            if "correction_type" in event:
-                record["correction"] = {
-                    "type": event["correction_type"],
-                    "dropped_roll_close_event_id": event["dropped_roll_close_event_id"],
-                    "dropped_roll_open_event_id": event["dropped_roll_open_event_id"],
-                }
-            record.update(fill)
-            if fill["status"] == "FILLED":
-                offset, provenance, cost = fee_cny(event, previous, fee, spec, fill["fill_price"], scenario)
-                record.update({"offset": offset, "fee_provenance": provenance, "fee_cny": round(cost, 10)})
-                counts[(event["path_id"], scenario)]["filled"] += 1
-            else:
-                counts[(event["path_id"], scenario)]["unfilled"] += 1
-            counts[(event["path_id"], scenario)]["events"] += 1
-            scenario_records.append(record)
-        evidence.extend(scenario_records)
-        if all(record["status"] == "FILLED" for record in scenario_records):
-            if next_position is None:
-                states.pop(key, None)
-            else:
-                states[key] = next_position
-
-    status = "MODELED_PASS_RESEARCH_ONLY" if not failures else "STOP_EVENT_PATH_INCONSISTENT"
+    status = "MODELED_PASS_RESEARCH_ONLY" if not failures else "STOP_REPLAY_INCONSISTENT"
     summary = {
         "schema_version": "issue481_minimal_causal_replay_v1",
         "candidate_id": CANDIDATE_ID,
         "status": status,
-        "economic_pnl_evaluated": False,
-        "replay_scope": "target-only causal transition and quote/fee feasibility; no terminal MTM or economic gate evaluation",
+        "economic_pnl_evaluated": not failures,
+        "replay_scope": "DEV_2023/DEV_2024 only; side-aware fills, historical fee model, official daily settlement MTM, no holdout or 2025+ economic data",
         "source_files_sha256": source_hashes,
         "events_input": len(events),
         "events_after_causal_correction": len(ordered),
@@ -474,14 +610,38 @@ def replay(input_root: Path) -> tuple[dict[str, Any], list[dict[str, Any]], dict
             "close_today_fee": "official explicit value when present; otherwise ordinary fee * 0.5",
         },
     }
-    comparisons: dict[str, Any] = {"schema_version": "issue481_paired_baseline_feasibility_comparison_v1", "candidate_id": CANDIDATE_ID, "status": status, "economic_pnl_evaluated": False, "paths": {}}
-    for (path_id, scenario), total in sorted(counts.items()):
-        selected = [row for row in evidence if row["path_id"] == path_id and row["scenario"] == scenario]
-        comparisons["paths"].setdefault(path_id, {})[scenario] = {
-            **total,
-            "total_modeled_fee_cny": round(sum(float(row.get("fee_cny", 0.0)) for row in selected), 10),
-            "unfilled_retained": total["unfilled"],
-        }
+    comparisons: dict[str, Any] = {"schema_version": "issue481_paired_baseline_economic_comparison_v1", "candidate_id": CANDIDATE_ID, "status": status, "economic_pnl_evaluated": not failures, "by_product": {}}
+    if not failures:
+        all_ranges = {"FULL_DEV": (0, len(curve_days) - 1)}
+        for fold, (start, end) in FOLDS.items():
+            indexes = [index for index, day in enumerate(curve_days) if start <= day <= end]
+            if not indexes:
+                raise ReplayError(f"no curve days for {fold}")
+            all_ranges[fold] = (indexes[0], indexes[-1])
+        gate_cells: list[bool] = []
+        for product in products:
+            comparisons["by_product"][product] = {}
+            for scenario in SCENARIOS:
+                path_metrics: dict[str, dict[str, Any]] = {}
+                for path in ("CANDIDATE", "PAIRED"):
+                    rows = [row for row in evidence if row["product"] == product and row["scenario"] == scenario and row["path_id"] == path]
+                    path_metrics[path] = {name: account_metrics(accounts[(path, scenario, product)], rows, curve_days, start, end) for name, (start, end) in all_ranges.items()}
+                comparisons["by_product"][product][scenario] = path_metrics
+                candidate = path_metrics["CANDIDATE"]["FULL_DEV"]
+                paired = path_metrics["PAIRED"]["FULL_DEV"]
+                ratio = candidate["profit_to_max_drawdown"]
+                paired_ratio = paired["profit_to_max_drawdown"]
+                net_gate = candidate["net_pnl_cny"] > 0 if scenario == PRIMARY else candidate["net_pnl_cny"] >= 0
+                paired_gate = ratio is not None and paired_ratio is not None and ratio > paired_ratio
+                ratio_gate = ratio is not None and ratio > 1 if scenario == PRIMARY else True
+                comparisons["by_product"][product][scenario]["gates"] = {"net": net_gate, "profit_to_max_drawdown": ratio_gate, "paired_increment": paired_gate}
+                gate_cells.append(net_gate and ratio_gate and paired_gate)
+        go_stop = "GO_RESEARCH_ONLY" if all(gate_cells) else "STOP_ECONOMIC_GATE"
+        summary["go_stop"] = go_stop
+        comparisons["go_stop"] = go_stop
+        summary["status"] = go_stop
+        comparisons["status"] = go_stop
+        summary["standalone_accounts"] = comparisons["by_product"]
     return summary, evidence, comparisons
 
 
