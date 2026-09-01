@@ -50,7 +50,7 @@ the held exact contract, close-before-open ordering, real BBO qualification,
 price impact, and fee provenance. It writes only the three evidence files allowed
 by the freeze. It does not calculate PnL or read the sealed holdout.
 
-The current research-only feasibility status is:
+The target-transition feasibility status was:
 
 ```text
 MODELED_PASS_RESEARCH_ONLY
@@ -63,9 +63,41 @@ evidence. Two CU same-open slow-exit/roll collisions are corrected causally by
 closing the actually held old contract and suppressing the new roll leg. The
 corrected 603-event path is SHA-bound in the inventory.
 
+## DEV economic result
+
+The Owner subsequently authorized one economic read of DEV_2023 and DEV_2024
+with the frozen 603-event path. The replay uses independent CNY 1,000,000
+accounts per product, Primary and Stress fills, historically bound/modelled fees,
+and official end-of-day settlement marks. Positions still open on 2024-12-31
+remain open and are marked to that day's official settlement; no terminal fill is
+invented.
+
+The preregistered standalone gates fail:
+
+| Product | Primary net PnL CNY | Stress net PnL CNY |
+| --- | ---: | ---: |
+| ag | -1,620.09 | -2,505.10 |
+| au | 0.00 | 0.00 |
+| cu | 10,401.60 | 5,151.91 |
+| rb | -1,274.17 | -2,527.72 |
+| ru | -22,737.50 | -27,534.38 |
+| sc | -117,380.00 | -139,650.00 |
+
+Only cu has positive net PnL in both scenarios, but its Primary net-profit to
+maximum-drawdown ratio is 0.8382, below the required value greater than 1. au
+has no candidate events and therefore cannot meet the strictly positive Primary
+return gate. The final status is:
+
+```text
+STOP_ECONOMIC_GATE
+```
+
+The three create-only evidence files and their SHA-256 values are bound in the
+inventory. The maximum accounting-identity error is CNY 4e-10.
+
 ## Stage boundary
 
-This stage authorizes only the minimal target-transition feasibility replay. It
-does not authorize historical economic gate evaluation, holdout access, no-order
-forward, shadow, SimNow, production, or order integration. The Owner must make
-the next decision after this result is independently reviewed.
+This candidate stops at the DEV economic gate. Its parameters, universe,
+directions, costs, or event path must not be changed after seeing the result.
+Holdout access, no-order forward, shadow, SimNow, production, and order
+integration remain unauthorized.

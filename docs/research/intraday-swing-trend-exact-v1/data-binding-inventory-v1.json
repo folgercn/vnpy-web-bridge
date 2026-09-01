@@ -1,7 +1,7 @@
 {
   "schema_version": "intraday_swing_trend_exact_data_binding_inventory_v1",
   "candidate_id": "INTRADAY_SWING_TREND_EXACT_V1",
-  "assessed_at_utc": "2026-08-31T14:47:00Z",
+  "assessed_at_utc": "2026-09-01T00:28:44Z",
   "contract_binding": {
     "main_merge_commit": "1735402ce3e79dc6d24db727c0f2f78f1d2230de",
     "design_contract_raw_sha256": "cc42fa3b3e3495916c3d675324de93d2049c0e5d5657f2356ff47716fb85ae85",
@@ -21,8 +21,9 @@
       "ru.SHFE",
       "sc.INE"
     ],
-    "economic_results_read": false,
+    "economic_results_read": true,
     "target_only_replay_run": true,
+    "dev_economic_replay_run": true,
     "holdout_read": false,
     "collector_or_platform_built": false,
     "custody_acl_changed": false,
@@ -54,7 +55,24 @@
       }
     ],
     "archive_sha256_rechecked": true,
-    "archive_integrity_checked": true
+    "archive_integrity_checked": true,
+    "dev_economic_evidence": {
+      "path": "20260901-dev-economic-replay-696482d8",
+      "files": [
+        {
+          "name": "replay-summary.json",
+          "sha256": "93117efaa62798c5b35581de8d308dc15b16f1df30e5c2d85dabc0628df16243"
+        },
+        {
+          "name": "target-changes.jsonl",
+          "sha256": "1a8d0e50e2f96b41e07d875415818021eb04f5683e289706b0488cefd8b294ee"
+        },
+        {
+          "name": "paired-baseline-comparison.json",
+          "sha256": "fe48b34dbf2a1271b1063c61a7a3aebe2b7b1dea8bbd4975db6e203797d1ddd3"
+        }
+      ]
+    }
   },
   "observed_existing_evidence": [
     {
@@ -173,19 +191,51 @@
     "corrections": 2,
     "corrected_event_canonical_sha256": "74915208177e188f65074290d68590eec7b4c4d811a8648c1d92a331d2cbd71c",
     "correction_reason": "on two CU opens a slow-target exit and mapping roll collided; the causal path closes the actually held old contract and does not open the new roll leg",
-    "economic_pnl_evaluated": false,
+    "economic_pnl_evaluated": true,
     "outputs": [
       "replay-summary.json",
       "target-changes.jsonl",
       "paired-baseline-comparison.json"
     ]
   },
+  "dev_economic_result": {
+    "status": "STOP_ECONOMIC_GATE",
+    "initial_cash_cny_per_product": 1000000,
+    "candidate_full_dev_net_pnl_cny": {
+      "PRIMARY_2S": {
+        "ag": -1620.08925,
+        "au": 0.0,
+        "cu": 10401.60375,
+        "rb": -1274.169,
+        "ru": -22737.5,
+        "sc": -117380.0
+      },
+      "STRESS_5S": {
+        "ag": -2505.103125,
+        "au": 0.0,
+        "cu": 5151.9078125,
+        "rb": -2527.715,
+        "ru": -27534.375,
+        "sc": -139650.0
+      }
+    },
+    "primary_gate_pass_products": [],
+    "stress_net_gate_pass_products": [
+      "au",
+      "cu"
+    ],
+    "accounting_identity_max_abs_error_cny": 4e-10,
+    "holdout_read": false,
+    "parameter_change_after_result_forbidden": true
+  },
   "decision": {
-    "status": "MODELED_PASS_RESEARCH_ONLY",
-    "reason": "the bounded custody export clears the target-only causal replay feasibility gate under the Owner-approved received-time, limit-envelope, and close-today fee research models",
-    "replay_authorized": true,
-    "economic_gate_evaluation_authorized": false,
-    "minimum_external_input": "satisfied for this modeled research-only feasibility stage",
-    "forbidden_response": "do not synthesize the missing history, infer fees as zero, use continuous-main fills, relax custody ACLs, or build a collector/platform under issue 481"
+    "status": "STOP_ECONOMIC_GATE",
+    "reason": "the frozen six-product DEV replay fails the preregistered standalone economic gates; only cu is profitable in both scenarios, au has no candidate events, and ag/rb/ru/sc lose money",
+    "replay_authorized": false,
+    "economic_gate_evaluation_completed": true,
+    "holdout_authorized": false,
+    "shadow_or_simnow_authorized": false,
+    "minimum_external_input": "satisfied; the stop is economic rather than a remaining data gap",
+    "forbidden_response": "do not tune parameters, remove failed products or directions, open holdout, enter shadow or SimNow, or rerun this candidate under a changed cost or event path"
   }
 }

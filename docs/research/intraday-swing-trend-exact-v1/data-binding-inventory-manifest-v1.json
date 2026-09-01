@@ -1,26 +1,27 @@
 {
   "schema_version": "intraday_swing_trend_exact_data_binding_inventory_manifest_v1",
   "candidate_id": "INTRADAY_SWING_TREND_EXACT_V1",
-  "created_at_utc": "2026-08-31T14:47:00Z",
+  "created_at_utc": "2026-09-01T00:28:44Z",
   "canonicalization": "UTF-8 JSON; ensure_ascii=false; sort_keys=true; separators=(',', ':'); allow_nan=false",
   "contract_merge_commit": "1735402ce3e79dc6d24db727c0f2f78f1d2230de",
   "inventory": {
     "path": "docs/research/intraday-swing-trend-exact-v1/data-binding-inventory-v1.json",
-    "bytes": 8508,
-    "sha256": "20425ce904c6fbc69176a243e8dce7a4339a78ad9fc8d6b2b993d9b9abe9c8e4",
-    "canonical_bytes": 7221,
-    "canonical_sha256": "1ab090e6e9c75708474c5cbdbd897787225a2963645762d4dc8bc9bba13b584f"
+    "bytes": 9961,
+    "sha256": "0b3aaf229e61ef29b850a0171024f497f8323e21119bbb19bae0916f3fd1a740",
+    "canonical_bytes": 8267,
+    "canonical_sha256": "690ffe4dd3609331477b2dc1bf21e1c37b4cd9b5a0100583fc14751732f1e2c9"
   },
   "authority": {
     "research_only": true,
-    "economic_results_read": false,
-    "replay_authorized": true,
+    "economic_results_read": true,
+    "replay_authorized": false,
     "target_only_feasibility_replay_completed": true,
-    "economic_gate_evaluation_authorized": false,
+    "economic_gate_evaluation_completed": true,
+    "holdout_authorized": false,
     "order_authorized": false,
     "shadow_authorized": false,
     "simnow_authorized": false,
     "production_authorized": false
   },
-  "decision": "MODELED_PASS_RESEARCH_ONLY"
+  "decision": "STOP_ECONOMIC_GATE"
 }
