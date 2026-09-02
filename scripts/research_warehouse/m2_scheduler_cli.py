@@ -374,7 +374,8 @@ def _precompute_daily_route_export(context, trade_day: str) -> bytes:
 
 
 def _precompute_monthly_preopen_exports(
-    context, trade_day: str, history_receipt_path: Path, operator_state
+    context, trade_day: str, history_receipt_path: Path, operator_state,
+    *, execution_day_override: date | None = None,
 ) -> tuple[bytes, bytes]:
     """Prepare only a just-completed source month; never catch it up later."""
 
@@ -409,6 +410,7 @@ def _precompute_monthly_preopen_exports(
             contract_registry_raw=_frozen_contract_registry_raw(),
             source_month=source_month,
             shfe_contract_parameters=parameters,
+            execution_day_override=execution_day_override,
         )
         return built.static_raw, built.thermostat_raw
     except RegistryError:
@@ -755,28 +757,43 @@ def export_simnow_lab_inputs(
         )
         return
 
-    # A preopen is a time-bounded one-shot source.  Preserve a valid one for
-    # the M5 execution-open runner; a broken half fails closed rather than
-    # allowing a later post-close replay to become a late rebalance.
-    static_preopen = _is_preopen_document(current[0], SIMNOW_LAB_PREOPEN_STATIC_SCHEMA)
-    thermostat_preopen = _is_preopen_document(
-        current[1], SIMNOW_LAB_PREOPEN_THERMOSTAT_SCHEMA
-    )
-    if static_preopen or thermostat_preopen:
-        if not (static_preopen and thermostat_preopen):
-            raise RegistryError("SIMNOW_LAB monthly preopen pair is incomplete")
-        try:
-            validate_preopen_pair(current[0], current[1])
-        except RegistryError as exc:
-            raise RegistryError("SIMNOW_LAB monthly preopen pair is invalid") from exc
+    # Catch up a missed execution-open so Lab PnL cannot stay on old quantities.
+    current_is_preopen = _is_preopen_document(current[0], SIMNOW_LAB_PREOPEN_STATIC_SCHEMA)
+    if current_is_preopen:
+        validate_preopen_pair(current[0], current[1])
         return
-
-    # Non-month-end runs retain whatever final source is already present (the
-    # pre-A pair remains compatible) and never manufacture a delayed source
-    # month from post-close raw.  A fresh install therefore has only a route
-    # until the next completed source-month close, which is intentionally
-    # safer than a late monthly rebalance.
-    return
+    elif current[0] is None and current[1] is None:
+        return
+    else:
+        if current[0] is None or current[1] is None:
+            raise RegistryError("SIMNOW_LAB monthly source pair is incomplete")
+        thermostat = parse_json_strict(
+            current[1], "SIMNOW_LAB monthly thermostat source"
+        )
+        baseline = thermostat.get("baseline_batch")
+        current_month = (
+            baseline.get("source_month") if isinstance(baseline, dict) else None
+        )
+        if not isinstance(current_month, str) or len(current_month) != 7:
+            raise RegistryError("SIMNOW_LAB monthly source pair is invalid")
+    due_month = _source_month_for_completed_day(context, trade_day)
+    if current_month == due_month:
+        return
+    if current_month is not None and current_month > due_month:
+        raise RegistryError("SIMNOW_LAB monthly source month moved backwards")
+    research_day, _natural_execution, _cutoff = _official_month_boundary(
+        context.calendar, source_month=due_month
+    )
+    route = parse_json_strict(route_raw, "SIMNOW_LAB daily route")
+    execution_day = date.fromisoformat(route["metadata"]["execution_day"])
+    static_raw, thermostat_raw = _precompute_monthly_preopen_exports(
+        context, research_day.isoformat(), history_receipt_path, operator_state,
+        execution_day_override=execution_day,
+    )
+    _stage_and_publish_preopen_pair(
+        root=root, monthly_paths=monthly_paths, current=(current[0], current[1]),
+        static_raw=static_raw, thermostat_raw=thermostat_raw,
+    )
 
 
 def parser() -> argparse.ArgumentParser:
