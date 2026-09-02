@@ -176,6 +176,7 @@ def build_monthly_preopen(
     contract_registry_raw: bytes,
     source_month: str,
     shfe_contract_parameters: ShfeContractParameterEvidence | None = None,
+    execution_day_override: date | None = None,
 ) -> BuiltMonthlyPreopen:
     """Build the two M2-only month-end halves before the execution open exists.
 
@@ -184,9 +185,13 @@ def build_monthly_preopen(
     """
 
     _require_source_month(source_month)
-    research_day, execution_day, cutoff_day = _official_month_boundary(
+    research_day, natural_execution_day, cutoff_day = _official_month_boundary(
         calendar, source_month=source_month
     )
+    execution_day = execution_day_override or natural_execution_day
+    row = calendar.days.get(execution_day)
+    if execution_day < natural_execution_day or row is None or not row.is_official:
+        raise PitSourceViewError("SIMNOW preopen execution day override is invalid")
     following = sorted(
         day
         for day, row in calendar.days.items()

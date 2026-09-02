@@ -530,6 +530,7 @@ def test_research_export_atomic_write_is_idempotent_and_public_read_only(
     monkeypatch.setattr(
         research_job, "_preopen_source_month_for_completed_day", lambda *_args: None
     )
+    monkeypatch.setattr(research_job, "_precompute_exports", lambda *_args: outputs)
     result = {"status": "OFFICIAL_DAY_COMPLETE", "trade_day": "2030-01-31"}
     history = tmp_path / "history.json"
     research_job.export_simnow_lab_inputs(
@@ -1031,7 +1032,7 @@ def test_month_end_preopen_rejects_pair_hash_tamper() -> None:
         )
 
 
-def test_nonmonth_export_recovers_staged_preopen_without_late_rebuild(
+def test_nonmonth_export_recovers_staged_preopen_without_rebuilding(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     static_raw, thermostat_raw = _monthly_preopen_pair()
@@ -1063,11 +1064,12 @@ def test_nonmonth_export_recovers_staged_preopen_without_late_rebuild(
             thermostat_raw=thermostat_raw,
         )
     monkeypatch.setattr(research_job, "_replace", original_replace)
-    monkeypatch.setattr(research_job, "_precompute_daily_route_export", lambda *_args: b"route")
+    route_raw = b"route"
+    monkeypatch.setattr(research_job, "_precompute_daily_route_export", lambda *_args: route_raw)
     monkeypatch.setattr(
         research_job,
-        "_precompute_exports",
-        lambda *_args: (_ for _ in ()).throw(AssertionError("late rebuild")),
+        "_precompute_monthly_preopen_exports",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("rebuild")),
     )
     context = SimpleNamespace(calendar=calendar)
     research_job.export_simnow_lab_inputs(
@@ -1078,7 +1080,7 @@ def test_nonmonth_export_recovers_staged_preopen_without_late_rebuild(
     )
     assert paths[0].read_bytes() == static_raw
     assert paths[1].read_bytes() == thermostat_raw
-    assert paths[2].read_bytes() == b"route"
+    assert paths[2].read_bytes() == route_raw
     assert not any(root.glob(".*preopen-pending*"))
 
 
