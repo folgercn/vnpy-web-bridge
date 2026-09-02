@@ -257,6 +257,20 @@ def _issue483_market_snapshot(
     return value
 
 
+def test_m5_market_passes_exact_subscription_hints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+    monkeypatch.setattr(
+        m5.lab_cli, "rpc_call", lambda **kwargs: calls.append(kwargs) or {"status": "MARKET"}
+    )
+    assert m5._market_snapshot(
+        request_address="request", publish_address="publish", timeout_ms=30_000,
+        vt_symbols=["rb2701.SHFE"],
+    ) == {"status": "MARKET"}
+    assert calls[0]["args"] == ("MARKET", ["rb2701.SHFE"])
+
+
 def _issue483_market_row(
     *, contract: str = "SHFE.ag2609", symbol: str = "ag2609.SHFE"
 ) -> dict[str, object]:

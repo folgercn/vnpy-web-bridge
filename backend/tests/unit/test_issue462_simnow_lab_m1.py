@@ -690,6 +690,33 @@ def test_market_snapshot_is_canonical_bounded_ctp_memory_only(
         assert all(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0 for table in ("runs", "orders", "trades", "snapshots"))
 
 
+def test_market_snapshot_subscribes_missing_route_contract(
+    lab: tuple[SimNowLabExecutorV1, FakeMainEngine, Path]
+) -> None:
+    subject, main, _db_path = lab
+    add_rb_contract(main, "rb2701")
+    del main.ticks["rb2701.SHFE"]
+    subscribed: list[str] = []
+
+    def subscribe(request: Any, _gateway_name: str) -> None:
+        subscribed.append(request.vt_symbol)
+        tick = TickData(
+            symbol=request.symbol, exchange=request.exchange,
+            datetime=datetime.now(timezone.utc), bid_price_1=99,
+            ask_price_1=100, gateway_name="CTP",
+        )
+        tick.open_price = 99
+        main.ticks[tick.vt_symbol] = tick
+
+    main.subscribe = subscribe
+    symbols = [row["vt_symbol"] for row in target(rb=1)["targets"]]
+    symbols[symbols.index("rb2610.SHFE")] = "rb2701.SHFE"
+    result = subject.simnow_lab_get_run_v1("MARKET", symbols)
+
+    assert subscribed == ["rb2701.SHFE"]
+    assert any(row["exact_contract"] == "SHFE.rb2701" for row in result["rows"])
+
+
 @pytest.mark.parametrize(
     ("attribute", "value"),
     (

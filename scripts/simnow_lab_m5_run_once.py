@@ -80,11 +80,14 @@ def _expected_legacy_source_month(execution_day: date) -> str:
     return f"{execution_day.year:04d}-{execution_day.month - 1:02d}"
 
 
-def _market_snapshot(*, request_address: str, publish_address: str, timeout_ms: int) -> object:
+def _market_snapshot(
+    *, request_address: str, publish_address: str, timeout_ms: int,
+    vt_symbols: list[str],
+) -> object:
     try:
         return lab_cli.rpc_call(
             method=lab_cli.RPC_GET,
-            args=("MARKET",),
+            args=("MARKET", vt_symbols),
             request_address=request_address,
             publish_address=publish_address,
             timeout_ms=timeout_ms,
@@ -246,6 +249,11 @@ def run_once(
                 request_address=request_address,
                 publish_address=publish_address,
                 timeout_ms=timeout_ms,
+                vt_symbols=[
+                    f"{row['pit_main']['exact_contract'].split('.', 1)[1]}."
+                    f"{row['pit_main']['exact_contract'].split('.', 1)[0]}"
+                    for row in static_preopen["products"]
+                ],
             )
             try:
                 produced = preopen_join.complete_and_materialize(

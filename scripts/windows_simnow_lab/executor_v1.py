@@ -949,9 +949,13 @@ class SimNowLabExecutorV1:
         finally:
             self._thread_lock.release()
 
-    def simnow_lab_get_run_v1(self, run_id: Any) -> dict[str, Any]:
+    def simnow_lab_get_run_v1(
+        self, run_id: Any, market_symbols: Any = None
+    ) -> dict[str, Any]:
         if run_id == "MARKET":
-            return self._market_snapshot()
+            return self._market_snapshot(market_symbols)
+        if market_symbols is not None:
+            raise SimNowLabError("RUN_ARGUMENTS_INVALID")
         if run_id == "DASHBOARD":
             from .dashboard_v1 import read_dashboard_v1
 
@@ -969,7 +973,7 @@ class SimNowLabExecutorV1:
             snapshots = [dict(row) for row in db.execute("SELECT * FROM snapshots WHERE run_id=? ORDER BY observed_at", (run_id,))]
         return {"run": dict(run), "orders": orders, "trades": trades, "snapshots": snapshots}
 
-    def _market_snapshot(self) -> dict[str, Any]:
+    def _market_snapshot(self, expected_symbols: Any = None) -> dict[str, Any]:
         """Return a bounded CTP tick snapshot without touching execution state.
 
         This reads the in-memory tick collection plus CTP MD's local TradingDay
@@ -977,6 +981,19 @@ class SimNowLabExecutorV1:
         access is permitted.  The M5 caller chooses its pinned exact contracts.
         """
 
+        if expected_symbols is not None:
+            if not isinstance(expected_symbols, list) or len(expected_symbols) != 10:
+                raise SimNowLabError("MARKET_SUBSCRIPTIONS_INVALID")
+            normalized = {_canonical_vt_symbol(value) for value in expected_symbols}
+            if None in normalized or len(normalized) != 10:
+                raise SimNowLabError("MARKET_SUBSCRIPTIONS_INVALID")
+            for vt_symbol in sorted(normalized):
+                match = _VT_SYMBOL.fullmatch(vt_symbol)
+                if match is None or _FROZEN_PRODUCT_EXCHANGES.get(
+                    re.sub(r"[0-9]+$", "", match.group("symbol"))
+                ) != match.group("exchange"):
+                    raise SimNowLabError("MARKET_SUBSCRIPTIONS_INVALID")
+                self._tick(vt_symbol)
         getter = getattr(self.main_engine, "get_all_ticks", None)
         if not callable(getter):
             raise SimNowLabError("MARKET_TICKS_UNAVAILABLE")
