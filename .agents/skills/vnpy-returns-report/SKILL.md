@@ -12,13 +12,14 @@ description: 核验指定 SIMNOW_LAB 时间区间的权益、回撤、成交和�
 - 不使用 Dashboard 的最近 1,000 快照、500 成交截断结果来代表任意完整周期。
 - 对 SQLite 区间核验，运行 `scripts/inspect_returns_v1.py DB_PATH --start YYYY-MM-DD --end YYYY-MM-DD`。该工具仅以 `mode=ro` 和 `PRAGMA query_only=ON` 读取 `snapshots`、`trades`，上海时区解释请求日期。
 - 若来源不是该 SQLite，先核对字段、时区、费用和出入金口径；不能为报告补采、修数、写库、生成 target 或执行交易。
-- 工具的 `observed_span_covers_requested_range` 只表示首末观察时间跨越请求边界，不能单独证明期间没有缺口。`invalid_*_time_rows` 或边界缺失必须写入结论。
+- 工具的 `requested_window_bracketed_by_observations` 只表示全库首末观察时间跨越请求边界，不能单独证明期间没有缺口。报告同时列出区间内有效/缺失权益样本数与有效权益实际起止时间；`invalid_*_time_rows` 或边界缺失必须写入结论。
 
 ## 判读
 
 - `equity_change` 是所选有效快照之间的权益变化，不等于策略净收益；账户出入金、其他活动和未实现盈亏会影响它。
 - `realized_pnl_change_estimate` 仅在两端未实现盈亏都有效时给出，仍不是已独立归因的策略净收益。
 - `max_drawdown_amount` 基于区间内已观察权益；不把有限采样写成完整周期最大回撤。
+- 少于两条有效权益观察时保留已知起止权益，但 `equity_change`、`realized_pnl_change_estimate` 和 `max_drawdown_amount` 必须为 `null`。
 - 当前表无手续费字段，因此费用必须报告为 `UNVERIFIED`，不得填 0。滑点只报告已记录的 `slippage × volume` 汇总及缺失行数，不将其断言为费用。
 - 任一指标缺数据时保留 `null`/`UNVERIFIED`；missing 不等于 zero。
 

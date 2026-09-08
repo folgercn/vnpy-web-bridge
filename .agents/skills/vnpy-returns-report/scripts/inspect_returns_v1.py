@@ -68,22 +68,32 @@ def build_report(db_path: Path, start_day: date, end_day: date) -> dict[str, Any
     trades, trade_coverage = _coverage(trade_rows, "created_at", start, end)
     equity_rows = [(at, _number(row["equity"]), _number(row["unrealized_pnl"])) for at, row in snapshots]
     equity_rows = [row for row in equity_rows if row[1] is not None]
+    valid_equity_samples = len(equity_rows)
+    snapshot_coverage.update(
+        {
+            "valid_equity_samples_in_requested_range": valid_equity_samples,
+            "missing_equity_samples_in_requested_range": len(snapshots) - valid_equity_samples,
+            "first_valid_equity_observed_at": equity_rows[0][0].isoformat().replace("+00:00", "Z") if equity_rows else None,
+            "last_valid_equity_observed_at": equity_rows[-1][0].isoformat().replace("+00:00", "Z") if equity_rows else None,
+        }
+    )
     equity_start = equity_rows[0][1] if equity_rows else None
     equity_end = equity_rows[-1][1] if equity_rows else None
-    equity_change = equity_end - equity_start if equity_start is not None and equity_end is not None else None
+    equity_change = equity_end - equity_start if valid_equity_samples >= 2 else None
     unrealized_start = equity_rows[0][2] if equity_rows else None
     unrealized_end = equity_rows[-1][2] if equity_rows else None
     realized_estimate = (
         equity_change - (unrealized_end - unrealized_start)
-        if equity_change is not None and unrealized_start is not None and unrealized_end is not None
+        if valid_equity_samples >= 2 and equity_change is not None and unrealized_start is not None and unrealized_end is not None
         else None
     )
     peak: float | None = None
     max_drawdown: float | None = None
-    for _at, equity, _unrealized in equity_rows:
-        peak = equity if peak is None else max(peak, equity)
-        drawdown = equity - peak
-        max_drawdown = drawdown if max_drawdown is None else min(max_drawdown, drawdown)
+    if valid_equity_samples >= 2:
+        for _at, equity, _unrealized in equity_rows:
+            peak = equity if peak is None else max(peak, equity)
+            drawdown = equity - peak
+            max_drawdown = drawdown if max_drawdown is None else min(max_drawdown, drawdown)
     slippage_sum, missing_slippage_rows = 0.0, 0
     for _at, row in trades:
         slippage, volume = _number(row["slippage"]), _number(row["volume"])
