@@ -1,0 +1,241 @@
+{
+  "schema_version": "intraday_swing_trend_exact_data_binding_inventory_v1",
+  "candidate_id": "INTRADAY_SWING_TREND_EXACT_V1",
+  "assessed_at_utc": "2026-09-01T00:28:44Z",
+  "contract_binding": {
+    "main_merge_commit": "1735402ce3e79dc6d24db727c0f2f78f1d2230de",
+    "design_contract_raw_sha256": "cc42fa3b3e3495916c3d675324de93d2049c0e5d5657f2356ff47716fb85ae85",
+    "data_gap_matrix_raw_sha256": "96b82af6005f6cdf298525c6dd262dacad42a2d19180ffa677097108ac1927c0"
+  },
+  "assessment_boundary": {
+    "mode": "bounded immutable custody binding and target-only causal replay feasibility",
+    "development_folds": [
+      "DEV_2023",
+      "DEV_2024"
+    ],
+    "ordered_products": [
+      "ag.SHFE",
+      "au.SHFE",
+      "cu.SHFE",
+      "rb.SHFE",
+      "ru.SHFE",
+      "sc.INE"
+    ],
+    "economic_results_read": true,
+    "target_only_replay_run": true,
+    "dev_economic_replay_run": true,
+    "holdout_read": false,
+    "collector_or_platform_built": false,
+    "custody_acl_changed": false,
+    "simnow_or_order_accessed": false
+  },
+  "external_custody_binding": {
+    "host": "192.168.100.89",
+    "path": "/Users/fujun/vnpy-research-upload/issue-481/20260831-local-research-custody",
+    "archives": [
+      {
+        "name": "issue481_local_research_custody_20260831.tar.gz",
+        "sha256": "c5282f9167b93eeea10979cdb0f1bf299703c51aa6c1d2e6c7820792ee95d695"
+      },
+      {
+        "name": "issue481_tqsdk_supplement_20260831.tar.gz",
+        "sha256": "72649e941337e14fdacc580a1a97dc70494ebbd471981c96d4b5dd3b1771144a"
+      },
+      {
+        "name": "issue481_gap_resolution_supplement_20260831.tar.gz",
+        "sha256": "3371dc9feb55808885105dd62b7dc596855a85fe5a10e7a775d36e748a04e176"
+      },
+      {
+        "name": "issue481_close_today_fee_model_20260831.tar.gz",
+        "sha256": "ec6dbfef2c3320dd5576db0aa531a2da9be0ac9fe4eebf58077dd1dfe33abf20"
+      },
+      {
+        "name": "issue481_event_bbo_supplement_20260831.tar.gz",
+        "sha256": "9166f29030aec9a8d54708f2a0a8c424660e67c3fa43ee50c5a45458e86fbc8e"
+      }
+    ],
+    "archive_sha256_rechecked": true,
+    "archive_integrity_checked": true,
+    "dev_economic_evidence": {
+      "path": "20260901-dev-economic-replay-696482d8",
+      "files": [
+        {
+          "name": "replay-summary.json",
+          "sha256": "93117efaa62798c5b35581de8d308dc15b16f1df30e5c2d85dabc0628df16243"
+        },
+        {
+          "name": "target-changes.jsonl",
+          "sha256": "1a8d0e50e2f96b41e07d875415818021eb04f5683e289706b0488cefd8b294ee"
+        },
+        {
+          "name": "paired-baseline-comparison.json",
+          "sha256": "fe48b34dbf2a1271b1063c61a7a3aebe2b7b1dea8bbd4975db6e203797d1ddd3"
+        }
+      ]
+    }
+  },
+  "observed_existing_evidence": [
+    {
+      "evidence_id": "M2_RUNTIME_INPUT",
+      "host": "192.168.100.89",
+      "path": "/usr/local/libexec/vnpyresearch/runtime-input-v1.json",
+      "raw_sha256": "9ce4f550e428125be3c9b3f70535de1f678721f644823511a6592d758a080f6a",
+      "bound_facts": {
+        "collector_version": "m2-daily-scheduler-v1",
+        "monitor_from_day": "2026-07-30",
+        "official_calendar_raw_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+        "calendar_availability_anchor_raw_sha256": "8d428abc0e3681c59ebe3614a9feb75c763564d3c8a340342b8573b6c27860bc"
+      }
+    },
+    {
+      "evidence_id": "M2_OPERATOR_STATE",
+      "host": "192.168.100.89",
+      "path": "/usr/local/libexec/vnpyresearch/operator-state-v1.json",
+      "raw_sha256": "d91a3e696965e49b7175c54b87e8a14f6db51225d04cdf7686de0937da984fe6",
+      "bound_facts": {
+        "last_trade_day": "2026-08-28",
+        "manifest_sequence": 200,
+        "commit_anchor_ledger_raw_sha256": "9c2f5badf49f21be37b734d95739165ab99968aceeae5451baa38434270ad689"
+      }
+    },
+    {
+      "evidence_id": "M2_COMMIT_ANCHOR_LEDGER",
+      "host": "192.168.100.89",
+      "path": "/usr/local/libexec/vnpyresearch/commit-anchor-ledgers/commit-anchor-ledger-9c2f5badf49f21be37b734d95739165ab99968aceeae5451baa38434270ad689.json",
+      "raw_sha256": "9c2f5badf49f21be37b734d95739165ab99968aceeae5451baa38434270ad689",
+      "bound_facts": {
+        "entry_count": 200,
+        "first_available_at": "2026-07-30T11:27:24.006882Z",
+        "last_available_at": "2026-08-28T10:40:22.085658Z"
+      }
+    },
+    {
+      "evidence_id": "M2_VERIFIED_DAILY_ROLL_EXAMPLE",
+      "host": "192.168.100.89",
+      "path": "/usr/local/libexec/vnpyresearch/daily-roll-predecessor-catalog-v1/artifacts/verified-daily-roll-13d111b50324390c7bfba9be21deac694cdc3172ff537817f4557c3cbe6fc7be.json",
+      "raw_sha256": "84fd5332418a8cc2a3240d477e82f61f04245d630700d06510b97aceb4b9c0e7",
+      "bound_facts": {
+        "official_day": "2026-08-19",
+        "execution_day": "2026-08-20",
+        "covers_all_six_candidate_products": true,
+        "inside_development_folds": false
+      }
+    },
+    {
+      "evidence_id": "M2_VERIFIED_DAILY_ROLL_RECEIPT",
+      "host": "192.168.100.89",
+      "path": "/usr/local/libexec/vnpyresearch/daily-roll-predecessor-catalog-v1/receipts/2026-08-19.json",
+      "raw_sha256": "d8660821e090beb7314dc1612b2df9b458f854b74196a2d35676c48e3dcae859"
+    }
+  ],
+  "custody_observation": {
+    "host": "192.168.100.89",
+    "path": "/Users/Shared/vnpy-research",
+    "owner": "vnpyresearch",
+    "group": "vnpyresearch",
+    "mode": "0700",
+    "current_fujun_session_can_enumerate": false,
+    "interpretation": "the private custody boundary is working; directory existence is not evidence of frozen-sample coverage"
+  },
+  "coverage": [
+    {
+      "data_id": "EXACT_CONTRACT_1MIN",
+      "development_fold_status": "AVAILABLE",
+      "bound_row_count": 2904,
+      "reason": "all 2,904 frozen PIT-mapped product-days have complete day-session exact-contract one-minute coverage; the final two gaps were rebuilt from retained real TQSDK ticks"
+    },
+    {
+      "data_id": "EXACT_CONTRACT_TICK_BBO",
+      "development_fold_status": "MODELED_PASS_RESEARCH_ONLY",
+      "bound_row_count": 603,
+      "reason": "all 603 corrected causal target events bind real TQSDK event-time BBO in both PRIMARY_2S and STRESS_5S; collector received time and exchange limit fields remain explicitly modeled"
+    },
+    {
+      "data_id": "PIT_ALL_CONTRACT_DAILY_CURVE",
+      "development_fold_status": "AVAILABLE",
+      "bound_row_count": 117306,
+      "reason": "official all-listed-contract daily settlement and open-interest history is bound from 2022-09-01 through the frozen development folds with next-official-day availability"
+    },
+    {
+      "data_id": "OFFICIAL_CALENDAR_AND_SESSIONS",
+      "development_fold_status": "AVAILABLE_WITH_EVENT_REVIEW",
+      "bound_row_count": 565,
+      "reason": "565 official TradingDays and day-session segments cover 2022-2024; any temporary suspension remains an event-specific fail-closed review"
+    },
+    {
+      "data_id": "EXACT_CONTRACT_SPECS_AND_ROLL",
+      "development_fold_status": "AVAILABLE",
+      "bound_row_count": 233,
+      "reason": "233 exact-contract specs plus official LTD history are bound; causal replay validates held-contract close before roll open"
+    },
+    {
+      "data_id": "HISTORICAL_EFFECTIVE_FEES",
+      "development_fold_status": "MODELED_PASS_RESEARCH_ONLY",
+      "bound_row_count": 2904,
+      "reason": "ordinary historical fee coverage is complete; 660 mappings use explicit close-today parameters and 2,244 use the Owner-approved ordinary-fee-times-0.5 research model"
+    },
+    {
+      "data_id": "PROVENANCE_AND_REVISIONS",
+      "development_fold_status": "AVAILABLE",
+      "bound_row_count": 10,
+      "reason": "five existing warehouse controls and five immutable custody archives are SHA-bound; raw, normalized, coverage, receipt, and gap artifacts remain separate"
+    }
+  ],
+  "minimal_causal_replay": {
+    "implementation": "scripts/issue481_minimal_causal_replay.py",
+    "source_events": 607,
+    "corrected_events": 603,
+    "primary_filled": 603,
+    "stress_filled": 603,
+    "unfilled": 0,
+    "corrections": 2,
+    "corrected_event_canonical_sha256": "74915208177e188f65074290d68590eec7b4c4d811a8648c1d92a331d2cbd71c",
+    "correction_reason": "on two CU opens a slow-target exit and mapping roll collided; the causal path closes the actually held old contract and does not open the new roll leg",
+    "economic_pnl_evaluated": true,
+    "outputs": [
+      "replay-summary.json",
+      "target-changes.jsonl",
+      "paired-baseline-comparison.json"
+    ]
+  },
+  "dev_economic_result": {
+    "status": "STOP_ECONOMIC_GATE",
+    "initial_cash_cny_per_product": 1000000,
+    "candidate_full_dev_net_pnl_cny": {
+      "PRIMARY_2S": {
+        "ag": -1620.08925,
+        "au": 0.0,
+        "cu": 10401.60375,
+        "rb": -1274.169,
+        "ru": -22737.5,
+        "sc": -117380.0
+      },
+      "STRESS_5S": {
+        "ag": -2505.103125,
+        "au": 0.0,
+        "cu": 5151.9078125,
+        "rb": -2527.715,
+        "ru": -27534.375,
+        "sc": -139650.0
+      }
+    },
+    "primary_gate_pass_products": [],
+    "stress_net_gate_pass_products": [
+      "au",
+      "cu"
+    ],
+    "accounting_identity_max_abs_error_cny": 4e-10,
+    "holdout_read": false,
+    "parameter_change_after_result_forbidden": true
+  },
+  "decision": {
+    "status": "STOP_ECONOMIC_GATE",
+    "reason": "the frozen six-product DEV replay fails the preregistered standalone economic gates; only cu is profitable in both scenarios, au has no candidate events, and ag/rb/ru/sc lose money",
+    "replay_authorized": false,
+    "economic_gate_evaluation_completed": true,
+    "holdout_authorized": false,
+    "shadow_or_simnow_authorized": false,
+    "minimum_external_input": "satisfied; the stop is economic rather than a remaining data gap",
+    "forbidden_response": "do not tune parameters, remove failed products or directions, open holdout, enter shadow or SimNow, or rerun this candidate under a changed cost or event path"
+  }
+}
