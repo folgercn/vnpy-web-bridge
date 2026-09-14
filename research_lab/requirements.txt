@@ -1,0 +1,3 @@
+# Direct runtime dependencies for the standalone Research Lab MVP.
+PyYAML>=6.0,<7
+pydantic>=2.7,<3
