@@ -161,8 +161,9 @@ class FeatureStore:
             if request.name == "close_return":
                 value = 0.0 if len(closes) == 1 else closes[-1] / closes[-2] - 1.0
             elif request.name == "simple_moving_average":
-                window = request.parameters["window"]
-                assert isinstance(window, int)
+                window = request.parameters.get("window")
+                if not isinstance(window, int) or isinstance(window, bool) or window < 1:
+                    raise FeatureError("simple_moving_average requires an integer window >= 1")
                 value = sum(closes[-window:]) / min(len(closes), window)
             else:  # Schema validation makes this unreachable; retain a clear boundary.
                 raise FeatureError(f"unsupported feature: {request.name}")

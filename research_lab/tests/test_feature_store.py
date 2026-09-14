@@ -62,11 +62,15 @@ class FeatureStoreTest(unittest.TestCase):
             self.assertEqual(experiment.features[1].parameters, {"window": 2})
 
     def test_yaml_rejects_invalid_feature_parameters(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "experiment.yaml"
-            path.write_text(EXPERIMENT_YAML.replace("window: 2", "window: 0"), encoding="utf-8")
-            with self.assertRaises(ExperimentLoadError):
-                load_experiment(path)
+        for invalid_window in ("0", "-1", "true", "'2'"):
+            with self.subTest(window=invalid_window), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "experiment.yaml"
+                path.write_text(
+                    EXPERIMENT_YAML.replace("window: 2", f"window: {invalid_window}"),
+                    encoding="utf-8",
+                )
+                with self.assertRaises(ExperimentLoadError):
+                    load_experiment(path)
 
     def test_cache_reuses_matching_input_and_invalidates_data_or_parameters(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
