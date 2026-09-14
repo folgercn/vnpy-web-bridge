@@ -4,7 +4,7 @@ import math
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 _EXPERIMENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$")
@@ -25,19 +25,36 @@ class FactorSpec(BaseModel):
 
 
 class DatasetSpec(BaseModel):
-    """MVP inline price series; providers may replace it behind the adapter."""
+    """A data request resolved by a MarketDataProvider."""
 
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=1, max_length=128)
-    prices: list[float] = Field(min_length=2)
+    provider: Literal["inline", "local_csv"] = "inline"
+    prices: list[float] | None = None
+    path: str | None = None
 
     @field_validator("prices")
     @classmethod
-    def prices_must_be_positive(cls, value: list[float]) -> list[float]:
+    def prices_must_be_positive(cls, value: list[float] | None) -> list[float] | None:
+        if value is None:
+            return value
         if any(not math.isfinite(price) or price <= 0 for price in value):
             raise ValueError("prices must all be finite and positive")
         return value
+
+    @model_validator(mode="after")
+    def validate_provider_request(self) -> "DatasetSpec":
+        if self.provider == "inline":
+            if self.prices is None or len(self.prices) < 2:
+                raise ValueError("inline datasets require at least two prices")
+            if self.path is not None:
+                raise ValueError("inline datasets must not declare path")
+        elif self.path is None or not self.path.strip():
+            raise ValueError("local_csv datasets require path")
+        elif self.prices is not None:
+            raise ValueError("local_csv datasets must not declare prices")
+        return self
 
 
 class ExecutionConfig(BaseModel):

@@ -11,10 +11,6 @@ class StrategyLoader(Protocol):
     def load(self, experiment: ExperimentSpec) -> Sequence[float]: ...
 
 
-class MarketDataProvider(Protocol):
-    def load_prices(self, experiment: ExperimentSpec) -> Sequence[float]: ...
-
-
 class ExecutionSimulator(Protocol):
     def transaction_cost(self, turnover: float, cost_bps: float) -> float: ...
 

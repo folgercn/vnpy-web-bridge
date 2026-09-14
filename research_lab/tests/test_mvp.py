@@ -74,6 +74,17 @@ class ResearchLabMvpTest(unittest.TestCase):
                 with self.assertRaises(ExperimentLoadError):
                     load_experiment(path)
 
+    def test_legacy_inline_prices_accept_multi_symbol_universe(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "legacy-universe.yaml"
+            path.write_text(EXPERIMENT_YAML.replace("universe: [DEMO]", "universe: [DEMO, DEMO2]"), encoding="utf-8")
+
+            result = ExperimentRunner.local(root / "output").run_yaml(path)
+
+            self.assertEqual(result.status, "completed")
+            self.assertAlmostEqual(result.metrics.total_return, 0.209, places=8)
+
     def test_failed_backtest_is_indexed_by_failure_code(self) -> None:
         class BrokenAdapter:
             def run(self, experiment):
