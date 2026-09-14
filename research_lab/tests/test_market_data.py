@@ -105,6 +105,20 @@ class LocalCSVProviderTest(unittest.TestCase):
             self.assertEqual(result.status, "completed")
             self.assertAlmostEqual(result.metrics.total_return, 0.44)
 
+    def test_normalized_dataset_accepts_interleaved_symbol_timestamps(self) -> None:
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        dataset = NormalizedDataset(
+            name="interleaved-symbols",
+            rows=(
+                DatasetRow(start, "CU", 100, 100, 100, 100, 0, 0),
+                DatasetRow(start + timedelta(days=1), "CU", 101, 101, 101, 101, 0, 0),
+                DatasetRow(start, "AU", 200, 200, 200, 200, 0, 0),
+                DatasetRow(start + timedelta(days=1), "AU", 201, 201, 201, 201, 0, 0),
+            ),
+        )
+
+        self.assertEqual(dataset.close_prices(("AU",)), (200, 201))
+
 
 if __name__ == "__main__":
     unittest.main()

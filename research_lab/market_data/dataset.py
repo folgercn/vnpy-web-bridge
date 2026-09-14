@@ -32,14 +32,11 @@ class NormalizedDataset:
         if len(self.rows) < 2:
             raise MarketDataError("dataset must contain at least two rows")
         previous_timestamps: dict[str, datetime] = {}
-        previous_row_timestamp: datetime | None = None
         for row in self.rows:
             if not row.symbol.strip():
                 raise MarketDataError("dataset symbol must be nonempty")
             if row.timestamp.tzinfo is None:
                 raise MarketDataError("dataset timestamps must include a timezone")
-            if previous_row_timestamp is not None and row.timestamp < previous_row_timestamp:
-                raise MarketDataError("dataset rows must be ordered by timestamp")
             prices = (row.open, row.high, row.low, row.close)
             if any(not math.isfinite(value) or value <= 0 for value in prices):
                 raise MarketDataError("OHLC prices must be finite and positive")
@@ -51,7 +48,6 @@ class NormalizedDataset:
             if previous is not None and row.timestamp <= previous:
                 raise MarketDataError("timestamps must be strictly increasing for each symbol")
             previous_timestamps[row.symbol] = row.timestamp
-            previous_row_timestamp = row.timestamp
 
     def close_prices(self, symbols: tuple[str, ...]) -> tuple[float, ...]:
         requested = set(symbols)
