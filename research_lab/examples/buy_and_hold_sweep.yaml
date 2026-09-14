@@ -1,0 +1,32 @@
+schema_version: research_lab.sweep.v1
+sweep_id: buy-and-hold-sweep-001
+experiment:
+  schema_version: research_lab.experiment.v1
+  experiment_id: buy-and-hold-base-001
+  strategy:
+    name: buy_and_hold
+  factor:
+    name: close_return
+  universe: [DEMO]
+  dataset:
+    name: demo_prices
+    prices: [100.0, 105.0, 110.0, 121.0]
+  parameters: {}
+  execution:
+    initial_capital: 1000.0
+    position_size: 1.0
+  cost_model:
+    bps: 0.0
+  validation:
+    method: in_sample
+  output:
+    format: json
+search_strategy: cartesian
+parameters:
+  - path: execution.position_size
+    values: [0.5, 1.0]
+  - path: cost_model.bps
+    values: [0.0, 10.0]
+ranking:
+  metric: sharpe
+  direction: maximize

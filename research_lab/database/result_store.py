@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 
 from research_lab.config import ResearchLabConfig
-from research_lab.schemas import ExperimentResult
+from research_lab.schemas import ExperimentResult, SweepResult
 
 
 class ResultStore:
@@ -44,6 +44,17 @@ class ResultStore:
             connection.execute("CREATE INDEX IF NOT EXISTS idx_results_strategy ON experiment_results(strategy_name)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_results_factor ON experiment_results(factor_name)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_results_error ON experiment_results(error_code)")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sweep_results (
+                    sweep_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    artifact_location TEXT NOT NULL,
+                    report_location TEXT,
+                    result_json TEXT NOT NULL
+                )
+                """
+            )
 
     def save(self, result: ExperimentResult) -> ExperimentResult:
         artifact_path = self.config.artifacts_dir / f"{result.experiment_id}.result.json"
@@ -79,6 +90,31 @@ class ResultStore:
                 "SELECT result_json FROM experiment_results WHERE experiment_id = ?", (experiment_id,)
             ).fetchone()
         return ExperimentResult.model_validate_json(row["result_json"]) if row else None
+
+    def save_sweep(self, result: SweepResult) -> SweepResult:
+        artifact_path = self.config.artifacts_dir / f"{result.sweep_id}.sweep.json"
+        stored = result.model_copy(update={"artifact_location": str(artifact_path)})
+        self._write_json(artifact_path, stored.model_dump(mode="json"))
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO sweep_results (sweep_id, status, artifact_location, report_location, result_json)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(sweep_id) DO UPDATE SET
+                    status=excluded.status, artifact_location=excluded.artifact_location,
+                    report_location=excluded.report_location, result_json=excluded.result_json
+                """,
+                (stored.sweep_id, stored.status, stored.artifact_location,
+                 stored.report_location, stored.model_dump_json()),
+            )
+        return stored
+
+    def get_sweep(self, sweep_id: str) -> SweepResult | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT result_json FROM sweep_results WHERE sweep_id = ?", (sweep_id,)
+            ).fetchone()
+        return SweepResult.model_validate_json(row["result_json"]) if row else None
 
     def query(
         self,
