@@ -24,6 +24,26 @@ class FactorSpec(BaseModel):
     parameters: dict[str, float | int | str | bool] = Field(default_factory=dict)
 
 
+class FeatureRequest(BaseModel):
+    """A versioned technical feature requested by an experiment."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: Literal["close_return", "simple_moving_average"]
+    version: Literal["v1"] = "v1"
+    parameters: dict[str, float | int | str | bool] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_parameters(self) -> "FeatureRequest":
+        if self.name == "simple_moving_average":
+            window = self.parameters.get("window")
+            if not isinstance(window, int) or isinstance(window, bool) or window < 1:
+                raise ValueError("simple_moving_average requires an integer window >= 1")
+        elif self.parameters:
+            raise ValueError("close_return does not accept parameters")
+        return self
+
+
 class DatasetSpec(BaseModel):
     """A data request resolved by a MarketDataProvider."""
 
@@ -91,6 +111,7 @@ class ExperimentSpec(BaseModel):
     experiment_id: str
     strategy: StrategySpec
     factor: FactorSpec
+    features: list[FeatureRequest] = Field(default_factory=list)
     universe: list[str] = Field(min_length=1)
     dataset: DatasetSpec
     parameters: dict[str, Any] = Field(default_factory=dict)

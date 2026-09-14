@@ -4,6 +4,12 @@ strategy:
   name: buy_and_hold
 factor:
   name: close_return
+features:
+  - name: close_return
+  - name: simple_moving_average
+    version: v1
+    parameters:
+      window: 2
 universe: [DEMO]
 dataset:
   name: demo_ohlcv

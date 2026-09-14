@@ -3,7 +3,7 @@
 This package implements the first local experiment loop:
 
 ```text
-experiment.yaml -> ExperimentRunner -> BacktestAdapter -> JSON + SQLite + report
+experiment.yaml -> MarketDataProvider -> FeatureStore -> BacktestAdapter -> JSON + SQLite + report
 ```
 
 The only bundled engine is deterministic and accepts inline prices or a local
@@ -35,6 +35,20 @@ The output directory contains `artifacts/<experiment>.result.json`,
 `artifacts/<experiment>.report.md`, and `research_lab.sqlite3`. Query indexed
 results through `research_lab.database.ResultStore.query()` using strategy,
 factor, or failure-code filters.
+
+Experiments may declare reusable technical features in `features`. The MVP
+supports `close_return` and `simple_moving_average` (with integer `window`),
+both at version `v1`. Their normalized output rows contain `timestamp`,
+`symbol`, `feature_name`, `feature_version`, and `value`. The local Feature
+Store writes content-addressed entries under `feature_cache/`; each cache key
+binds the exact normalized input dataset, feature name/version, and parameters.
+Feature lineage is included in completed result details, and callers can reuse
+valid cached sets with `FeatureStore(...).query(name="close_return")`.
+
+Features are point-in-time technical calculations: an output at a timestamp
+uses only that observation and earlier observations for its symbol. This MVP
+does not provide fundamental data, term structure, volatility surfaces, TQSDK,
+or live market data.
 
 For a custom CSV, set `dataset.provider: local_csv` and provide `dataset.path`.
 The deterministic engine currently consumes one requested symbol's `close`
