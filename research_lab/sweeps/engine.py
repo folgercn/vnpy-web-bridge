@@ -11,7 +11,7 @@ from research_lab.experiments import load_sweep
 from research_lab.reports import write_sweep_report
 from research_lab.runners import ExperimentRunner
 from research_lab.schemas import (
-    ParameterStability, RankedTrial, SweepParameter, SweepResult, SweepSpec,
+    ParameterStability, RankedTrial, SweepResult, SweepSpec,
     SweepTrial, SweepTrialResult,
 )
 
