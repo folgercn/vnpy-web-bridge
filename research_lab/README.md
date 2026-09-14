@@ -78,5 +78,32 @@ Only `strategy.parameters.<name>`, `factor.parameters.<name>`,
 `parameters.<name>`, `execution.initial_capital`, `execution.position_size`,
 and `cost_model.bps` are accepted paths. This is local, deterministic,
 sequential execution only. It does not create a Worker queue, schedule work in
-parallel, call an LLM, or provide walk-forward/Astra functionality; those are
-separate future milestones.
+parallel, call an LLM, or provide Astra functionality; those are separate
+future milestones.
+
+## Walk-forward validation
+
+`research_lab.validation.v1` declares local observation-count windows around
+one existing experiment. `train_test_split` consumes every selected-symbol
+observation in one train/test fold. `rolling_window` keeps a fixed-size train
+window, while `walk_forward` expands it. For rolling and walk-forward plans,
+`step_size` must be at least `test_size`, so OOS observations are not counted
+in more than one fold. All test windows begin at or after their paired train
+end; the engine reloads a distinct normalized data slice for
+each IS and OOS run through the unchanged `ExperimentRunner` interface.
+
+Run the included walk-forward example:
+
+```bash
+PYTHONPATH=. .venv-research-lab/bin/python -m research_lab.validation research_lab/examples/buy_and_hold_walk_forward.yaml --output /tmp/research-lab-validation-output
+```
+
+The result is saved as `artifacts/<validation>.validation.json`, indexed in
+`research_lab.sqlite3`, and rendered as a robustness report. It includes each
+fold's IS/OOS metrics, a documented heuristic stability score, aggregate OOS
+minus IS degradation, and minimal OOS return-sign regime counts. The score is
+not a selection or promotion decision. This deterministic MVP supports only
+`universe[0]`; local CSV works through the same normalized provider path, but
+multi-symbol portfolio validation, TQSDK, live data, queues, Critic Agent, LLM
+evaluation, and Astra discovery are outside this milestone. The versioned
+validation result is the stable local handoff boundary for a future Critic.

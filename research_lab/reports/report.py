@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from research_lab.schemas import ExperimentResult, SweepResult
+from research_lab.schemas import ExperimentResult, SweepResult, ValidationResult
 
 
 def write_report(root: Path, result: ExperimentResult) -> Path:
@@ -58,5 +58,50 @@ def write_sweep_report(root: Path, result: SweepResult) -> Path:
         )
     if not result.stability:
         lines.append("- No completed trials")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def write_validation_report(root: Path, result: ValidationResult) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"{result.validation_id}.validation.report.md"
+    lines = [
+        f"# Validation {result.validation_id}", "",
+        "- Execution: local, sequential; each fold is run through ExperimentRunner",
+        "- Scope: one requested symbol (`universe[0]`) with the deterministic adapter",
+        f"- Method: {result.method}",
+        f"- Status: {result.status}",
+        f"- Result artifact: {result.artifact_location or 'pending'}", "",
+        "## Fold results", "",
+    ]
+    for item in result.folds:
+        is_metric = item.in_sample.metrics.total_return if item.in_sample.metrics else None
+        oos_metric = item.out_of_sample.metrics.total_return if item.out_of_sample.metrics else None
+        lines.append(
+            f"- Fold {item.fold.index}: train=[{item.fold.train_start}, {item.fold.train_end}), "
+            f"test=[{item.fold.test_start}, {item.fold.test_end}); "
+            f"IS={is_metric if is_metric is not None else item.in_sample.status}; "
+            f"OOS={oos_metric if oos_metric is not None else item.out_of_sample.status}"
+        )
+    lines.extend(["", "## Stability and degradation", ""])
+    if result.stability and result.degradation:
+        lines.extend([
+            "- Score: %.6f / 100 (heuristic; not a promotion decision)" % result.stability.stability_score,
+            "- Positive OOS fraction: %.6f" % result.stability.positive_oos_fraction,
+            "- OOS Sharpe standard deviation: %.6f" % result.stability.oos_sharpe_stddev,
+            "- Mean total-return delta (OOS - IS): %.6f" % result.degradation.total_return_delta,
+            "- Mean Sharpe delta (OOS - IS): %.6f" % result.degradation.sharpe_delta,
+        ])
+    else:
+        lines.append("- No completed IS/OOS fold pairs")
+    lines.extend(["", "## Minimal OOS return-sign regimes", ""])
+    for regime in result.regimes:
+        mean = "n/a" if regime.mean_total_return is None else f"{regime.mean_total_return:.6f}"
+        lines.append(f"- {regime.regime}: folds={regime.completed_folds}, mean_total_return={mean}")
+    lines.extend([
+        "", "## Boundary", "",
+        "This artifact is a stable local validation handoff for a future Critic integration. "
+        "It does not implement a Critic Agent, candidate selection, LLM evaluation, live data, or promotion.",
+    ])
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
