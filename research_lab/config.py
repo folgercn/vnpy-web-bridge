@@ -17,3 +17,7 @@ class ResearchLabConfig:
     @property
     def database_path(self) -> Path:
         return self.root / "research_lab.sqlite3"
+
+    @property
+    def feature_cache_dir(self) -> Path:
+        return self.root / "feature_cache"
