@@ -5,7 +5,7 @@ from pathlib import Path
 import yaml
 from pydantic import ValidationError
 
-from research_lab.schemas import ExperimentSpec
+from research_lab.schemas import ExperimentSpec, SweepSpec
 
 
 class ExperimentLoadError(ValueError):
@@ -24,3 +24,17 @@ def load_experiment(path: Path | str) -> ExperimentSpec:
         return ExperimentSpec.model_validate(payload)
     except ValidationError as exc:
         raise ExperimentLoadError("experiment YAML does not match v1 schema") from exc
+
+
+def load_sweep(path: Path | str) -> SweepSpec:
+    source = Path(path)
+    try:
+        payload = yaml.safe_load(source.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise ExperimentLoadError(f"cannot read sweep YAML: {source}") from exc
+    if not isinstance(payload, dict):
+        raise ExperimentLoadError("sweep YAML must contain a mapping")
+    try:
+        return SweepSpec.model_validate(payload)
+    except ValidationError as exc:
+        raise ExperimentLoadError("sweep YAML does not match v1 schema") from exc

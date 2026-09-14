@@ -56,3 +56,27 @@ series: it uses the first item in `universe`, matching the original inline
 price-series behavior. Other providers can implement `MarketDataProvider.load()`
 and return the same `NormalizedDataset` schema without changing
 `ExperimentRunner`.
+
+## Local parameter sweeps
+
+`research_lab.sweep.v1` declares a finite Cartesian set of allowed experiment
+parameter paths. `search_strategy` currently accepts only `cartesian`. The
+bundled sweep engine creates a distinct deterministic
+experiment ID for each combination, calls the unchanged `ExperimentRunner`
+sequentially, stores each trial in the normal result history, and stores a
+separate sweep JSON/report artifact. It ranks completed trials by the selected
+metric, breaking ties by experiment ID, and reports the mean, best, and
+standard deviation for every parameter value across completed trials.
+
+Run the included example:
+
+```bash
+PYTHONPATH=. .venv-research-lab/bin/python -m research_lab.sweeps research_lab/examples/buy_and_hold_sweep.yaml --output /tmp/research-lab-sweep-output
+```
+
+Only `strategy.parameters.<name>`, `factor.parameters.<name>`,
+`parameters.<name>`, `execution.initial_capital`, `execution.position_size`,
+and `cost_model.bps` are accepted paths. This is local, deterministic,
+sequential execution only. It does not create a Worker queue, schedule work in
+parallel, call an LLM, or provide walk-forward/Astra functionality; those are
+separate future milestones.
