@@ -1,0 +1,27 @@
+schema_version: research_lab.validation.v1
+validation_id: demo-walk-forward-001
+method: walk_forward
+train_size: 3
+test_size: 2
+step_size: 2
+experiment:
+  schema_version: research_lab.experiment.v1
+  experiment_id: demo-walk-base-001
+  strategy:
+    name: buy_and_hold
+  factor:
+    name: close_return
+  universe: [DEMO]
+  dataset:
+    name: demo_walk_prices
+    prices: [100.0, 102.0, 104.0, 103.0, 105.0, 107.0, 106.0, 109.0]
+  parameters: {}
+  execution:
+    initial_capital: 1000.0
+    position_size: 1.0
+  cost_model:
+    bps: 0.0
+  validation:
+    method: in_sample
+  output:
+    format: json
