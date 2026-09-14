@@ -4,14 +4,21 @@ import math
 from statistics import fmean, stdev
 
 from research_lab.backtest.adapter import BacktestAdapter, BacktestRun
+from research_lab.market_data import DefaultMarketDataProvider, MarketDataProvider
 from research_lab.schemas import ExperimentSpec, PerformanceMetrics
 
 
 class DeterministicBacktestAdapter(BacktestAdapter):
-    """A dependency-free MVP engine for deterministic inline price experiments."""
+    """A dependency-free MVP engine using a replaceable MarketDataProvider."""
+
+    def __init__(self, provider: MarketDataProvider | None = None) -> None:
+        self.provider = provider or DefaultMarketDataProvider()
 
     def run(self, experiment: ExperimentSpec) -> BacktestRun:
-        prices = tuple(experiment.dataset.prices)
+        # The MVP engine has always run one shared price series. Keep legacy
+        # inline YAML with multi-symbol universes compatible by using its first
+        # symbol as the deterministic series selector.
+        prices = self.provider.load(experiment).close_prices((experiment.universe[0],))
         if experiment.strategy.name == "buy_and_hold":
             positions = (0.0,) + (experiment.execution.position_size,) * (len(prices) - 1)
         else:
