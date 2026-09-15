@@ -1,0 +1,127 @@
+{
+  "schema_version": "research_lab.experiment.v2",
+  "revision": "rev.1",
+  "spec_id": "spec-stat-carry-roll-yield-001",
+  "task_id": "task-stat-term-structure-carry",
+  "task_revision": "rev.1",
+  "task_content_hash": null,
+  "spec_content_hash": null,
+  "hash_profile": "research-json-v1",
+  "research_stage": "confirmation",
+  "trial_kind_proposal": null,
+  "experiment_type": "statistical_factor",
+  "description": "商品期货六品种期限结构展期收益率因子截面预测力与统计稳健性研究规格",
+  "dataset_requirements": {
+    "provider_kind": "candidate_warehouse_reference",
+    "catalog_name": "commodity_term_structure_pit_view",
+    "dataset_reference_uri": "candidate://futures/commodity_settlement_curves_v1",
+    "snapshot_selection_mode": "fixed_snapshot",
+    "snapshot_sha256": null,
+    "universe": [
+      "RB.SHFE",
+      "HC.SHFE",
+      "I.DCE",
+      "J.DCE",
+      "JM.DCE",
+      "ZC.CZCE"
+    ],
+    "frequencies": [
+      "1d"
+    ],
+    "time_range": {
+      "start": "2018-12-31T16:00:00.000000Z",
+      "end": "2023-12-31T15:59:59.000000Z"
+    },
+    "required_fields": [
+      "timestamp",
+      "symbol",
+      "close",
+      "settlement",
+      "open_interest",
+      "contract_maturity_date"
+    ],
+    "pit_constraints": "Timestamps and maturity schedules must adhere to exchange official releases. Availability receipt required for daily settlement prices."
+  },
+  "seed_proposal": 42,
+  "feature_specification": {
+    "feature_name": "annualized_roll_yield",
+    "implementation_ref": "candidate.research_lab.factors.v1.annualized_roll_yield",
+    "parameters": [
+      {
+        "name": "min_open_interest_threshold",
+        "value_type": "integer",
+        "unit": "count",
+        "value": 10000
+      }
+    ],
+    "near_far_contract_selection_rule": "Sort active contracts by contract_maturity_date ascending; near is earliest maturity with open_interest > threshold, far is subsequent maturity with open_interest > threshold. Do not assume main is earlier than sub_main.",
+    "pit_alignment": {
+      "required_receipt": "actual_release_timestamp",
+      "signal_decision_point": "next_trading_day_open"
+    }
+  },
+  "target_specification": {
+    "target_name": "forward_log_return_20d",
+    "implementation_ref": "candidate.research_lab.targets.v1.forward_log_return",
+    "horizon_trading_days": 20,
+    "return_interval": "Open_{t+1} to Close_{t+20}",
+    "target_type": "forward_log_return"
+  },
+  "split_and_leakage_control": {
+    "method": "purged_time_series_split",
+    "train_window_days": 504,
+    "test_window_days": 126,
+    "step_size_days": 126,
+    "leakage_mitigation": {
+      "purging_rule": "Purge all training observations whose 20-day return intervals overlap with test evaluation windows (horizon=20 trading days).",
+      "embargo_days": 5,
+      "embargo_rationale": "Candidate embargo buffer post-test to alleviate autoregressive residual spillover; does not eliminate all serial correlation."
+    }
+  },
+  "candidate_decision_criteria": {
+    "min_mean_rank_ic": "0.03",
+    "min_t_statistic_hac": "1.96"
+  },
+  "metric_specifications": [
+    {
+      "metric_name": "rank_ic_spearman_cross_sectional",
+      "calculation_definition_version": "candidate.research_lab.metrics.v1.spearman_rank_ic",
+      "unit": "correlation_coefficient",
+      "sample_scope": "daily_cross_sectional_valid_pairs",
+      "precision_rule": "Round final value to 8 decimal places, ROUND_HALF_EVEN; serialize canonical Decimal without trailing zeroes; do not round intermediate calculations.",
+      "sampling_frequency": "daily",
+      "undefined_policy": "null_with_reason_not_zero",
+      "calculation_definition": "For each date select finite feature/target pairs on distinct products. Use Pearson correlation of average ranks (ties use mean rank); require at least 3 pairs and nonzero variance in both ranks. Report equal-weight mean over defined daily correlations and both valid-pair and valid-day counts. Never replace undefined dates with zero."
+    },
+    {
+      "metric_name": "t_statistic_hac_adjusted",
+      "calculation_definition_version": "candidate.research_lab.metrics.v1.newey_west_hac_t_stat",
+      "unit": "t_statistic",
+      "sample_scope": "time_series_of_daily_rank_ic",
+      "precision_rule": "Round final value to 8 decimal places, ROUND_HALF_EVEN; serialize canonical Decimal without trailing zeroes; do not round intermediate calculations.",
+      "hac_lag_rule": "horizon_minus_one_lag_19",
+      "undefined_policy": "null_with_reason_not_zero",
+      "calculation_definition": "For the valid daily IC series x of length n, estimate mu=mean(x), gamma_l=sum((x_t-mu)*(x_(t-l)-mu),t=l..n-1)/n. L=19; V=gamma_0+2*sum((1-l/(L+1))*gamma_l,l=1..L). t=mu/sqrt(V/n). Undefined if n<=L+1 or V<=0. Removed dates and irregular spacing must be disclosed; no independence or significance claim follows automatically."
+    },
+    {
+      "metric_name": "top_bottom_spread",
+      "calculation_definition_version": "candidate.research_lab.metrics.v1.top_bottom_spread",
+      "unit": "decimal_spread",
+      "sample_scope": "daily_top_two_minus_bottom_two_20d_log_returns",
+      "precision_rule": "Round final value to 8 decimal places, ROUND_HALF_EVEN; serialize canonical Decimal without trailing zeroes; do not round intermediate calculations.",
+      "sampling_frequency": "daily",
+      "undefined_policy": "null_with_reason_not_zero",
+      "calculation_definition": "Each date rank finite feature/target pairs descending by feature, tie-break product symbol ascending. Require at least 4 products. Compute mean forward 20-day log return of top 2 minus mean of bottom 2; report equal-weight mean across valid dates and counts. Overlapping horizons are retained and disclosed; this is a statistical label spread, not tradable PnL."
+    }
+  ],
+  "rejection_policy": {
+    "forbid_unknown_fields": true,
+    "reject_unregistered_implementation": true,
+    "reject_backtest_metrics_in_pure_statistical_spec": true,
+    "reject_unmitigated_label_overlaps": true
+  },
+  "holdout_policy": {
+    "mode": "not_used",
+    "reason": "Exploratory/diagnostic example; no independent confirmation claim. Out-of-sample diagnostics are not sealed confirmation."
+  }
+}

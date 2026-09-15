@@ -1,0 +1,119 @@
+"""Offline structural contract audit; no execution/admission or synthetic evidence."""
+import copy
+from datetime import datetime
+import json
+from pathlib import Path
+
+from jsonschema import Draft202012Validator, FormatChecker
+
+ROOT = Path(__file__).resolve().parents[3]
+DIRECTORY = ROOT / 'docs/research-lab/specs'
+schema = json.loads((ROOT / 'docs/schemas/research-experiment-spec-v2.schema.json').read_text())
+Draft202012Validator.check_schema(schema)
+formats = FormatChecker()
+
+
+@formats.checks('date-time', raises=ValueError)
+def utc_micros(value):
+    if not isinstance(value, str):
+        return True  # type assertion belongs to Schema
+    datetime.strptime(value, '%Y-%m-%dT%H:%M:%S.%fZ')
+    return True
+
+
+validator = Draft202012Validator(schema, format_checker=formats)
+count = 0
+
+
+def check(name, value, expected):
+    global count
+    errors = list(validator.iter_errors(value))
+    assert bool(errors) != expected, (name, [e.message for e in errors])
+    count += 1
+    print(('ACCEPT ' if expected else 'REJECT ') + name)
+
+
+examples = {}
+for file in sorted(DIRECTORY.glob('spec-*-example.json')):
+    value = json.loads(file.read_text())
+    examples[value['experiment_type']] = value
+    check(file.name, value, True)
+for file in sorted(DIRECTORY.glob('reject-*.json')):
+    check(file.name, json.loads(file.read_text()), False)
+
+
+def mutation(name, kind, mutate, expected=False):
+    value = copy.deepcopy(examples[kind])
+    mutate(value)
+    check(name, value, expected)
+
+
+DQ, ST, BT = 'data_quality', 'statistical_factor', 'trading_backtest'
+mutation('physical_file_uri', DQ, lambda x: x['dataset_requirements'].update(dataset_reference_uri='file:///tmp/data.csv'))
+mutation('disable_unknown_field_rejection', DQ, lambda x: x['rejection_policy'].update(forbid_unknown_fields=False))
+mutation('nested_runtime_fact', DQ, lambda x: x['quality_checks'][0].update(actual_code_commit='abc'))
+mutation('old_untyped_parameter_map', ST, lambda x: x['feature_specification'].update(parameters={'lookback': 20}))
+mutation('wrong_parameter_type', ST, lambda x: x['feature_specification']['parameters'][0].update(value='10000'))
+mutation('unsafe_seed', ST, lambda x: x.update(seed_proposal=9007199254740992))
+mutation('unknown_version', DQ, lambda x: x.update(schema_version='research_lab.experiment.v9'))
+mutation('invalid_calendar_date', DQ, lambda x: x['dataset_requirements']['time_range'].update(start='2023-02-30T00:00:00.000000Z'))
+mutation('non_utc_timestamp', DQ, lambda x: x['dataset_requirements']['time_range'].update(start='2023-02-20T00:00:00.000000+00:00'))
+mutation('bad_decimal', BT, lambda x: x['cost_model'].update(commission_open_bps='1.00'))
+mutation('cost_gap_fact_in_spec', BT, lambda x: x['cost_model'].update(fee_metadata_gap=True))
+mutation('current_close_fill', BT, lambda x: x['execution_config'].update(fill_assumption='current_bar_close'))
+mutation('missing_roll_policy', BT, lambda x: x.pop('roll_policy'))
+mutation('pnl_metric_in_stats', ST, lambda x: x['metric_specifications'].append(copy.deepcopy(examples[BT]['metric_specifications'][0])))
+for field in ['annualization_days', 'risk_free_rate', 'risk_free_rate_convention', 'return_definition', 'cash_flow_treatment', 'calculation_definition', 'undefined_policy']:
+    mutation('sharpe_missing_' + field, BT, lambda x, f=field: x['metric_specifications'][0].pop(f))
+for mode, field in [('fixed_cash', 'cash_per_trade'), ('percent_equity', 'percent_per_trade')]:
+    mutation(mode + '_valid', BT, lambda x, m=mode, f=field: x['execution_config'].update(position_sizing={'mode': m, f: '0.1'}), True)
+    mutation(mode + '_missing_amount', BT, lambda x, m=mode: x['execution_config'].update(position_sizing={'mode': m}))
+    mutation(mode + '_mixed_sizing', BT, lambda x, m=mode, f=field: x['execution_config'].update(position_sizing={'mode': m, f: '0.1', 'lots_per_trade': 1}))
+mutation('dynamic_without_rule', DQ, lambda x: x['dataset_requirements'].update(snapshot_selection_mode='point_in_time_rule'))
+
+
+def dynamic(x):
+    x['dataset_requirements'].pop('snapshot_sha256')
+    x['dataset_requirements'].update(snapshot_selection_mode='point_in_time_rule', snapshot_selection_rule='Select catalog records received before 2023-12-31T00:00:00.000000Z, freeze raw byte hashes before execution.')
+
+
+mutation('dynamic_with_rule', DQ, dynamic, True)
+mutation('fixed_without_hash_field', DQ, lambda x: x['dataset_requirements'].pop('snapshot_sha256'))
+mutation('missing_holdout_policy', ST, lambda x: x.pop('holdout_policy'))
+confirmation = copy.deepcopy(examples[ST])
+confirmation.update(research_stage='confirmation', trial_kind_proposal=None)
+confirmation['holdout_policy'] = {
+    'mode': 'reserved_confirmation',
+    'sample_range': {'start': '2023-01-01T00:00:00.000000Z', 'end': '2024-01-01T00:00:00.000000Z'},
+    'hypothesis_family': 'synthetic-shape-test-only',
+    'access_rule': 'No candidate fitting or selection on these samples.',
+    'exposure_history_requirement': 'cross_task_sample_overlap_history_required_unknown_blocks_confirmation',
+}
+confirmation['confirmation_plan'] = {
+    'source_spec_ref': {'spec_id': 'source', 'spec_revision': 'rev.1', 'spec_content_hash': 'a' * 64},
+    'source_evidence_ref': {'evidence_id': 'source', 'evidence_content_hash': 'b' * 64},
+    'source_review_ref': {'review_id': 'source', 'revision': 'rev.1', 'review_content_hash': 'c' * 64},
+    'pre_registered_primary_metric': {'metric_name': 'rank_ic_spearman_cross_sectional', 'calculation_definition_version': examples[ST]['metric_specifications'][0]['calculation_definition_version'], 'threshold_value': '0.03', 'comparison_operator': 'ge', 'benchmark_definition': 'zero IC'},
+    'sample_selection_rule': 'Synthetic structure only; exclude all training and previously exposed samples.',
+    'replicate_plan': 'Single fixed seed 42; one aggregate result; no selection among runs.',
+    'registered_at': '2022-12-01T00:00:00.000000Z',
+}
+check('confirmation_shape_only_NOT_execution_eligible', confirmation, True)
+broken = copy.deepcopy(confirmation)
+broken['confirmation_plan']['source_spec_ref']['spec_revision'] = 'rev.0'
+check('source_spec_revision_zero', broken, False)
+for field in ['source_spec_ref', 'source_evidence_ref', 'source_review_ref', 'replicate_plan', 'registered_at']:
+    broken = copy.deepcopy(confirmation)
+    broken['confirmation_plan'].pop(field)
+    check('confirmation_missing_' + field, broken, False)
+for field in ['benchmark_definition', 'comparison_operator']:
+    broken = copy.deepcopy(confirmation)
+    broken['confirmation_plan']['pre_registered_primary_metric'].pop(field)
+    check('confirmation_missing_' + field, broken, False)
+broken = copy.deepcopy(confirmation)
+broken['trial_kind_proposal'] = 'parameter_search'
+check('confirmation_search_forbidden', broken, False)
+broken = copy.deepcopy(confirmation)
+broken['holdout_policy'] = copy.deepcopy(examples[ST]['holdout_policy'])
+check('confirmation_requires_reserved_holdout', broken, False)
+print(f'PASS: {count} structural checks; semantic admission S1-S7 is NOT implemented or certified.')

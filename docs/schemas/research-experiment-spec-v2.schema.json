@@ -1,0 +1,1663 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bktrader.local/schemas/research-experiment-spec-v2.schema.json",
+  "title": "Research Lab ExperimentSpec Schema v2",
+  "description": "Candidate JSON Schema definition for Phase 0 ExperimentSpec contract in AI Quant Research Lab (Protocol v2, status: DRAFT_UNFROZEN). ExperimentSpec defines PREDICTIVE INTENT and methodology specification only (methods, parameters, logical data requirements, validation boundaries, and cost models). It strictly forbids runtime facts, execution artifacts, worker details, and evaluation assessments.",
+  "type": "object",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/data_quality_spec"
+    },
+    {
+      "$ref": "#/$defs/statistical_factor_spec"
+    },
+    {
+      "$ref": "#/$defs/trading_backtest_spec"
+    }
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "research_stage": {
+            "const": "confirmation"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "confirmation_plan"
+        ],
+        "properties": {
+          "trial_kind_proposal": {
+            "not": {
+              "const": "parameter_search"
+            }
+          },
+          "holdout_policy": {
+            "properties": {
+              "mode": {
+                "const": "reserved_confirmation"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "decimal_string": {
+      "type": "string",
+      "pattern": "^0$|^-?(0\\.[0-9]*[1-9]|[1-9][0-9]*(\\.[0-9]*[1-9])?)$",
+      "description": "Canonical Decimal representation aligned with research-json-v1: no leading/trailing decimal zeroes, no exponent, no positive sign, no negative zero."
+    },
+    "iso_timestamp_micros": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$",
+      "description": "Strict UTC ISO-8601 timestamp with microsecond resolution (YYYY-MM-DDTHH:mm:ss.ffffffZ).",
+      "format": "date-time"
+    },
+    "iso_date": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+      "description": "Calendar date representation (YYYY-MM-DD).",
+      "format": "date"
+    },
+    "sha256_hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "64-character lowercase hexadecimal SHA-256 digest."
+    },
+    "nullable_sha256_hash": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "Nullable 64-character lowercase hexadecimal SHA-256 digest (null only in unexecuted drafts)."
+    },
+    "time_range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start",
+        "end"
+      ],
+      "properties": {
+        "start": {
+          "$ref": "#/$defs/iso_timestamp_micros"
+        },
+        "end": {
+          "$ref": "#/$defs/iso_timestamp_micros"
+        }
+      }
+    },
+    "metric_specification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "metric_name",
+        "calculation_definition_version",
+        "unit",
+        "sample_scope",
+        "precision_rule",
+        "calculation_definition",
+        "undefined_policy"
+      ],
+      "properties": {
+        "metric_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "calculation_definition_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sample_scope": {
+          "type": "string",
+          "minLength": 1
+        },
+        "precision_rule": {
+          "type": "string",
+          "minLength": 1
+        },
+        "annualization_days": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 366
+        },
+        "sampling_frequency": {
+          "type": "string"
+        },
+        "risk_free_rate": {
+          "$ref": "#/$defs/decimal_string"
+        },
+        "cash_flow_treatment": {
+          "type": "string"
+        },
+        "hac_lag_rule": {
+          "type": "string"
+        },
+        "minimum_valid_observations": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "calculation_definition": {
+          "type": "string",
+          "minLength": 1
+        },
+        "undefined_policy": {
+          "const": "null_with_reason_not_zero"
+        },
+        "return_definition": {
+          "type": "string",
+          "minLength": 1
+        },
+        "risk_free_rate_convention": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "metric_name": {
+                "const": "sharpe_ratio"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "annualization_days",
+              "sampling_frequency",
+              "risk_free_rate",
+              "risk_free_rate_convention",
+              "cash_flow_treatment",
+              "return_definition"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "metric_name": {
+                "enum": [
+                  "total_return",
+                  "max_drawdown"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "cash_flow_treatment",
+              "return_definition",
+              "sampling_frequency"
+            ]
+          }
+        }
+      ]
+    },
+    "confirmation_plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_spec_ref",
+        "source_evidence_ref",
+        "source_review_ref",
+        "pre_registered_primary_metric",
+        "sample_selection_rule",
+        "replicate_plan",
+        "registered_at"
+      ],
+      "properties": {
+        "source_spec_ref": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "spec_id",
+            "spec_revision",
+            "spec_content_hash"
+          ],
+          "properties": {
+            "spec_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "spec_revision": {
+              "type": "string",
+              "pattern": "^rev\\.[1-9][0-9]*$"
+            },
+            "spec_content_hash": {
+              "$ref": "#/$defs/sha256_hash"
+            }
+          }
+        },
+        "source_evidence_ref": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "evidence_id",
+            "evidence_content_hash"
+          ],
+          "properties": {
+            "evidence_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "evidence_content_hash": {
+              "$ref": "#/$defs/sha256_hash"
+            }
+          }
+        },
+        "source_review_ref": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "review_id",
+            "review_content_hash",
+            "revision"
+          ],
+          "properties": {
+            "review_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "review_content_hash": {
+              "$ref": "#/$defs/sha256_hash"
+            },
+            "revision": {
+              "type": "string",
+              "pattern": "^rev\\.[1-9][0-9]*$"
+            }
+          }
+        },
+        "pre_registered_primary_metric": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "metric_name",
+            "calculation_definition_version",
+            "threshold_value",
+            "comparison_operator",
+            "benchmark_definition"
+          ],
+          "properties": {
+            "metric_name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "calculation_definition_version": {
+              "type": "string",
+              "minLength": 1
+            },
+            "threshold_value": {
+              "$ref": "#/$defs/decimal_string"
+            },
+            "comparison_operator": {
+              "enum": [
+                "gt",
+                "ge",
+                "lt",
+                "le",
+                "eq"
+              ]
+            },
+            "benchmark_definition": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "sample_selection_rule": {
+          "type": "string",
+          "minLength": 1
+        },
+        "replicate_plan": {
+          "type": "string",
+          "minLength": 1
+        },
+        "registered_at": {
+          "$ref": "#/$defs/iso_timestamp_micros"
+        }
+      }
+    },
+    "dataset_requirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider_kind",
+        "dataset_reference_uri",
+        "snapshot_selection_mode",
+        "universe",
+        "time_range",
+        "required_fields",
+        "pit_constraints"
+      ],
+      "properties": {
+        "provider_kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "catalog_name": {
+          "type": "string"
+        },
+        "dataset_reference_uri": {
+          "type": "string",
+          "pattern": "^candidate://[a-zA-Z0-9][a-zA-Z0-9/_.-]*$",
+          "description": "Logical catalog identifier only; not a physical file, host or network locator."
+        },
+        "snapshot_selection_mode": {
+          "type": "string",
+          "enum": [
+            "fixed_snapshot",
+            "point_in_time_rule"
+          ]
+        },
+        "snapshot_sha256": {
+          "$ref": "#/$defs/nullable_sha256_hash"
+        },
+        "universe": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "frequencies": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "time_range": {
+          "$ref": "#/$defs/time_range"
+        },
+        "required_fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "pit_constraints": {
+          "type": "string",
+          "minLength": 1
+        },
+        "timing_receipt_requirements": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "receipt_type": {
+              "type": "string"
+            },
+            "required_fields": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "max_receipt_lag_seconds": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "normalization_rule_version": {
+          "type": "string"
+        },
+        "calendar_id": {
+          "type": "string"
+        },
+        "snapshot_selection_rule": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "snapshot_selection_mode": {
+                "const": "fixed_snapshot"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "snapshot_sha256"
+            ],
+            "not": {
+              "required": [
+                "snapshot_selection_rule"
+              ]
+            }
+          },
+          "else": {
+            "required": [
+              "snapshot_selection_rule"
+            ],
+            "not": {
+              "required": [
+                "snapshot_sha256"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "rejection_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "forbid_unknown_fields",
+        "reject_unregistered_implementation"
+      ],
+      "properties": {
+        "forbid_unknown_fields": {
+          "const": true
+        },
+        "reject_unregistered_implementation": {
+          "const": true
+        },
+        "reject_unsupported_data_sources": {
+          "const": true
+        },
+        "reject_backtest_metrics_in_pure_statistical_spec": {
+          "const": true
+        },
+        "reject_unmitigated_label_overlaps": {
+          "const": true
+        },
+        "reject_cross_currency_settlement": {
+          "const": true
+        },
+        "reject_unsupported_order_types": {
+          "const": true
+        }
+      }
+    },
+    "data_quality_spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "revision",
+        "spec_id",
+        "task_id",
+        "task_revision",
+        "task_content_hash",
+        "spec_content_hash",
+        "hash_profile",
+        "research_stage",
+        "experiment_type",
+        "dataset_requirements",
+        "quality_checks",
+        "validation_config",
+        "candidate_decision_criteria",
+        "metric_specifications",
+        "rejection_policy",
+        "holdout_policy"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "research_lab.experiment.v2"
+        },
+        "revision": {
+          "type": "string",
+          "pattern": "^rev\\.[1-9][0-9]*$"
+        },
+        "spec_id": {
+          "type": "string",
+          "pattern": "^spec-[a-z0-9-]+$"
+        },
+        "task_id": {
+          "type": "string",
+          "pattern": "^task-[a-z0-9-]+$"
+        },
+        "task_revision": {
+          "type": "string",
+          "pattern": "^rev\\.[1-9][0-9]*$"
+        },
+        "task_content_hash": {
+          "$ref": "#/$defs/nullable_sha256_hash"
+        },
+        "spec_content_hash": {
+          "$ref": "#/$defs/nullable_sha256_hash"
+        },
+        "hash_profile": {
+          "const": "research-json-v1"
+        },
+        "research_stage": {
+          "type": "string",
+          "enum": [
+            "exploration",
+            "validation",
+            "confirmation"
+          ]
+        },
+        "trial_kind_proposal": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "parameter_search",
+            "replicate_reseed",
+            "replicate_refold",
+            "technical_retry",
+            null
+          ]
+        },
+        "confirmation_plan": {
+          "$ref": "#/$defs/confirmation_plan"
+        },
+        "experiment_type": {
+          "const": "data_quality"
+        },
+        "description": {
+          "type": "string"
+        },
+        "dataset_requirements": {
+          "$ref": "#/$defs/dataset_requirements"
+        },
+        "seed_proposal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/safe_integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "quality_checks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "check_id",
+              "implementation_ref",
+              "parameters"
+            ],
+            "properties": {
+              "check_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "implementation_ref": {
+                "type": "string",
+                "minLength": 1
+              },
+              "parameters": {
+                "$ref": "#/$defs/parameters"
+              },
+              "failure_action": {
+                "const": "record",
+                "description": "Data defects are observed facts, not failure to execute an audit."
+              }
+            }
+          }
+        },
+        "validation_config": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "method"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "full_sample_scan",
+                "random_batch_scan",
+                "windowed_scan"
+              ]
+            },
+            "batch_size": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "window_size_days": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "method": {
+                    "const": "random_batch_scan"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "batch_size"
+                ]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "method": {
+                    "const": "windowed_scan"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "window_size_days"
+                ]
+              }
+            }
+          ]
+        },
+        "candidate_decision_criteria": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_allowed_envelope_violations": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "max_allowed_timestamp_reversals": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "max_allowed_unexplained_gaps": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "min_required_completeness_ratio": {
+              "$ref": "#/$defs/decimal_string"
+            }
+          }
+        },
+        "metric_specifications": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/metric_specification"
+              },
+              {
+                "properties": {
+                  "metric_name": {
+                    "enum": [
+                      "completeness_ratio",
+                      "timestamp_monotonicity_violations",
+                      "price_envelope_violations",
+                      "unexplained_roll_gaps_count"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "rejection_policy": {
+          "$ref": "#/$defs/rejection_policy"
+        },
+        "holdout_policy": {
+          "$ref": "#/$defs/holdout_policy"
+        }
+      }
+    },
+    "statistical_factor_spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "revision",
+        "spec_id",
+        "task_id",
+        "task_revision",
+        "task_content_hash",
+        "spec_content_hash",
+        "hash_profile",
+        "research_stage",
+        "experiment_type",
+        "dataset_requirements",
+        "feature_specification",
+        "target_specification",
+        "split_and_leakage_control",
+        "candidate_decision_criteria",
+        "metric_specifications",
+        "rejection_policy",
+        "holdout_policy"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "research_lab.experiment.v2"
+        },
+        "revision": {
+          "type": "string",
+          "pattern": "^rev\\.[1-9][0-9]*$"
+        },
+        "spec_id": {
+          "type": "string",
+          "pattern": "^spec-[a-z0-9-]+$"
+        },
+        "task_id": {
+          "type": "string",
+          "pattern": "^task-[a-z0-9-]+$"
+        },
+        "task_revision": {
+          "type": "string",
+          "pattern": "^rev\\.[1-9][0-9]*$"
+        },
+        "task_content_hash": {
+          "$ref": "#/$defs/nullable_sha256_hash"
+        },
+        "spec_content_hash": {
+          "$ref": "#/$defs/nullable_sha256_hash"
+        },
+        "hash_profile": {
+          "const": "research-json-v1"
+        },
+        "research_stage": {
+          "type": "string",
+          "enum": [
+            "exploration",
+            "validation",
+            "confirmation"
+          ]
+        },
+        "trial_kind_proposal": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "parameter_search",
+            "replicate_reseed",
+            "replicate_refold",
+            "technical_retry",
+            null
+          ]
+        },
+        "confirmation_plan": {
+          "$ref": "#/$defs/confirmation_plan"
+        },
+        "experiment_type": {
+          "const": "statistical_factor"
+        },
+        "description": {
+          "type": "string"
+        },
+        "dataset_requirements": {
+          "$ref": "#/$defs/dataset_requirements"
+        },
+        "seed_proposal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/safe_integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "feature_specification": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "feature_name",
+            "implementation_ref",
+            "pit_alignment"
+          ],
+          "properties": {
+            "feature_name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "implementation_ref": {
+              "type": "string",
+              "minLength": 1
+            },
+            "parameters": {
+              "$ref": "#/$defs/parameters"
+            },
+            "near_far_contract_selection_rule": {
+              "type": "string"
+            },
+            "pit_alignment": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "required_receipt",
+                "signal_decision_point"
+              ],
+              "properties": {
+                "required_receipt": {
+                  "type": "string"
+                },
+                "signal_decision_point": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "target_specification": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "target_name",
+            "implementation_ref",
+            "horizon_trading_days",
+            "return_interval",
+            "target_type"
+          ],
+          "properties": {
+            "target_name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "implementation_ref": {
+              "type": "string",
+              "minLength": 1
+            },
+            "horizon_trading_days": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "return_interval": {
+              "type": "string",
+              "minLength": 1
+            },
+            "target_type": {
+              "type": "string",
+              "enum": [
+                "forward_log_return",
+                "forward_simple_return"
+              ]
+            }
+          }
+        },
+        "split_and_leakage_control": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "train_window_days",
+            "test_window_days",
+            "step_size_days",
+            "leakage_mitigation"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "purged_time_series_split",
+                "combinatorial_purged_cross_validation",
+                "walk_forward_split"
+              ]
+            },
+            "train_window_days": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "test_window_days": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "step_size_days": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "leakage_mitigation": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "purging_rule",
+                "embargo_days"
+              ],
+              "properties": {
+                "purging_rule": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "embargo_days": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "embargo_rationale": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "candidate_decision_criteria": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "min_mean_rank_ic": {
+              "$ref": "#/$defs/decimal_string"
+            },
+            "min_mean_pearson_ic": {
+              "$ref": "#/$defs/decimal_string"
+            },
+            "min_t_statistic_hac": {
+              "$ref": "#/$defs/decimal_string"
+            },
+            "max_p_value_hac": {
+              "$ref": "#/$defs/decimal_string"
+            },
+            "min_top_bottom_spread": {
+              "$ref": "#/$defs/decimal_string"
+            }
+          }
+        },
+        "metric_specifications": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/metric_specification"
+              },
+              {
+                "properties": {
+                  "metric_name": {
+                    "enum": [
+                      "rank_ic_spearman_cross_sectional",
+                      "t_statistic_hac_adjusted",
+                      "top_bottom_spread"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "rejection_policy": {
+          "$ref": "#/$defs/rejection_policy"
+        },
+        "holdout_policy": {
+          "$ref": "#/$defs/holdout_policy"
+        }
+      }
+    },
+    "trading_backtest_spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "revision",
+        "spec_id",
+        "task_id",
+        "task_revision",
+        "task_content_hash",
+        "spec_content_hash",
+        "hash_profile",
+        "research_stage",
+        "experiment_type",
+        "backtest_profile",
+        "dataset_requirements",
+        "contract_specifications",
+        "strategy_spec",
+        "execution_config",
+        "cost_model",
+        "validation_config",
+        "candidate_decision_criteria",
+        "metric_specifications",
+        "rejection_policy",
+        "holdout_policy",
+        "roll_policy"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "research_lab.experiment.v2"
+        },
+        "revision": {
+          "type": "string",
+          "pattern": "^rev\\.[1-9][0-9]*$"
+        },
+        "spec_id": {
+          "type": "string",
+          "pattern": "^spec-[a-z0-9-]+$"
+        },
+        "task_id": {
+          "type": "string",
+          "pattern": "^task-[a-z0-9-]+$"
+        },
+        "task_revision": {
+          "type": "string",
+          "pattern": "^rev\\.[1-9][0-9]*$"
+        },
+        "task_content_hash": {
+          "$ref": "#/$defs/nullable_sha256_hash"
+        },
+        "spec_content_hash": {
+          "$ref": "#/$defs/nullable_sha256_hash"
+        },
+        "hash_profile": {
+          "const": "research-json-v1"
+        },
+        "research_stage": {
+          "type": "string",
+          "enum": [
+            "exploration",
+            "validation",
+            "confirmation"
+          ]
+        },
+        "trial_kind_proposal": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "parameter_search",
+            "replicate_reseed",
+            "replicate_refold",
+            "technical_retry",
+            null
+          ]
+        },
+        "confirmation_plan": {
+          "$ref": "#/$defs/confirmation_plan"
+        },
+        "experiment_type": {
+          "const": "trading_backtest"
+        },
+        "backtest_profile": {
+          "const": "futures"
+        },
+        "description": {
+          "type": "string"
+        },
+        "dataset_requirements": {
+          "$ref": "#/$defs/dataset_requirements"
+        },
+        "seed_proposal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/safe_integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "contract_specifications": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "target_symbol",
+            "exchange",
+            "multiplier",
+            "multiplier_unit",
+            "price_tick",
+            "price_currency",
+            "margin_ratio"
+          ],
+          "properties": {
+            "target_symbol": {
+              "type": "string",
+              "minLength": 1
+            },
+            "exchange": {
+              "type": "string",
+              "minLength": 1
+            },
+            "multiplier": {
+              "$ref": "#/$defs/decimal_string"
+            },
+            "multiplier_unit": {
+              "type": "string",
+              "minLength": 1
+            },
+            "price_tick": {
+              "$ref": "#/$defs/decimal_string"
+            },
+            "price_currency": {
+              "type": "string",
+              "minLength": 1
+            },
+            "margin_ratio": {
+              "$ref": "#/$defs/decimal_string"
+            }
+          }
+        },
+        "roll_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "roll_execution_model",
+            "roll_execution_order",
+            "trigger_condition",
+            "roll_execution_window",
+            "max_roll_slippage_ticks",
+            "continuous_to_exact_mapping"
+          ],
+          "properties": {
+            "roll_execution_model": {
+              "type": "string",
+              "enum": [
+                "sequential_close_old_then_open_new"
+              ]
+            },
+            "roll_execution_order": {
+              "type": "string",
+              "minLength": 1
+            },
+            "trigger_condition": {
+              "type": "string",
+              "minLength": 1
+            },
+            "roll_execution_window": {
+              "type": "string",
+              "minLength": 1
+            },
+            "max_roll_slippage_ticks": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "continuous_to_exact_mapping": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "strategy_spec": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "strategy_name",
+            "implementation_ref",
+            "parameters"
+          ],
+          "properties": {
+            "strategy_name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "implementation_ref": {
+              "type": "string",
+              "minLength": 1
+            },
+            "parameters": {
+              "$ref": "#/$defs/parameters"
+            }
+          }
+        },
+        "execution_config": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "initial_capital",
+            "capital_currency",
+            "position_sizing",
+            "fill_assumption",
+            "signal_availability_rule",
+            "model_definition_version"
+          ],
+          "properties": {
+            "initial_capital": {
+              "$ref": "#/$defs/decimal_string"
+            },
+            "capital_currency": {
+              "type": "string",
+              "minLength": 1
+            },
+            "position_sizing": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode"
+              ],
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "fixed_lots",
+                    "fixed_cash",
+                    "percent_equity"
+                  ]
+                },
+                "lots_per_trade": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "cash_per_trade": {
+                  "$ref": "#/$defs/decimal_string"
+                },
+                "percent_per_trade": {
+                  "$ref": "#/$defs/decimal_string"
+                }
+              },
+              "oneOf": [
+                {
+                  "properties": {
+                    "mode": {
+                      "const": "fixed_lots"
+                    }
+                  },
+                  "required": [
+                    "lots_per_trade"
+                  ],
+                  "not": {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "cash_per_trade"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "percent_per_trade"
+                        ]
+                      }
+                    ]
+                  }
+                },
+                {
+                  "properties": {
+                    "mode": {
+                      "const": "fixed_cash"
+                    }
+                  },
+                  "required": [
+                    "cash_per_trade"
+                  ],
+                  "not": {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "lots_per_trade"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "percent_per_trade"
+                        ]
+                      }
+                    ]
+                  }
+                },
+                {
+                  "properties": {
+                    "mode": {
+                      "const": "percent_equity"
+                    }
+                  },
+                  "required": [
+                    "percent_per_trade"
+                  ],
+                  "not": {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "lots_per_trade"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "cash_per_trade"
+                        ]
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            "fill_assumption": {
+              "type": "string",
+              "enum": [
+                "next_bar_open",
+                "next_bar_open_with_bbo_clip",
+                "next_tick_trade"
+              ]
+            },
+            "signal_availability_rule": {
+              "type": "string",
+              "minLength": 1
+            },
+            "model_definition_version": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "cost_model": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "commission_open_bps",
+            "commission_close_yesterday_bps",
+            "commission_close_today_bps",
+            "commission_unit",
+            "fixed_commission_per_lot_cny",
+            "slippage_ticks_per_side",
+            "slippage_unit",
+            "missing_fee_policy",
+            "model_definition_version"
+          ],
+          "properties": {
+            "commission_open_bps": {
+              "$ref": "#/$defs/decimal_string"
+            },
+            "commission_close_yesterday_bps": {
+              "$ref": "#/$defs/decimal_string"
+            },
+            "commission_close_today_bps": {
+              "$ref": "#/$defs/decimal_string"
+            },
+            "commission_unit": {
+              "type": "string",
+              "enum": [
+                "bps_of_turnover_unilateral"
+              ]
+            },
+            "fixed_commission_per_lot_cny": {
+              "$ref": "#/$defs/decimal_string"
+            },
+            "slippage_ticks_per_side": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "slippage_unit": {
+              "type": "string",
+              "enum": [
+                "ticks_unilateral"
+              ]
+            },
+            "missing_fee_policy": {
+              "const": "reject_execution"
+            },
+            "model_definition_version": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "validation_config": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "method",
+            "in_sample_range",
+            "out_of_sample_range"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "out_of_sample_holdout",
+                "walk_forward_backtest"
+              ]
+            },
+            "in_sample_range": {
+              "$ref": "#/$defs/time_range"
+            },
+            "out_of_sample_range": {
+              "$ref": "#/$defs/time_range"
+            }
+          }
+        },
+        "candidate_decision_criteria": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "min_sharpe_ratio": {
+              "$ref": "#/$defs/decimal_string"
+            },
+            "max_drawdown_limit": {
+              "$ref": "#/$defs/decimal_string"
+            },
+            "min_calmar_ratio": {
+              "$ref": "#/$defs/decimal_string"
+            },
+            "min_total_return": {
+              "$ref": "#/$defs/decimal_string"
+            },
+            "min_annualized_return": {
+              "$ref": "#/$defs/decimal_string"
+            },
+            "min_trade_count": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "metric_specifications": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/metric_specification"
+              },
+              {
+                "properties": {
+                  "metric_name": {
+                    "enum": [
+                      "sharpe_ratio",
+                      "max_drawdown",
+                      "total_return",
+                      "trade_count"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "rejection_policy": {
+          "$ref": "#/$defs/rejection_policy"
+        },
+        "holdout_policy": {
+          "$ref": "#/$defs/holdout_policy"
+        }
+      }
+    },
+    "safe_integer": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991
+    },
+    "parameter_definition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "value_type",
+        "unit",
+        "value"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "value_type": {
+          "enum": [
+            "integer",
+            "decimal",
+            "boolean",
+            "string"
+          ]
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value": {}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "value_type": {
+                "const": "integer"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "$ref": "#/$defs/safe_integer"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "value_type": {
+                "const": "decimal"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "$ref": "#/$defs/decimal_string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "value_type": {
+                "const": "boolean"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "value_type": {
+                "const": "string"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "parameters": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/parameter_definition"
+      },
+      "description": "Planned explicit overrides; names, types, units and omitted defaults must match the versioned method definition. Run records all resolved defaults."
+    },
+    "holdout_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "not_used",
+            "reserved_confirmation"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sample_range": {
+          "$ref": "#/$defs/time_range"
+        },
+        "hypothesis_family": {
+          "type": "string",
+          "minLength": 1
+        },
+        "access_rule": {
+          "type": "string",
+          "minLength": 1
+        },
+        "exposure_history_requirement": {
+          "const": "cross_task_sample_overlap_history_required_unknown_blocks_confirmation"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "not_used"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "reason"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "sample_range"
+                  ]
+                },
+                {
+                  "required": [
+                    "hypothesis_family"
+                  ]
+                },
+                {
+                  "required": [
+                    "access_rule"
+                  ]
+                },
+                {
+                  "required": [
+                    "exposure_history_requirement"
+                  ]
+                }
+              ]
+            }
+          },
+          "else": {
+            "required": [
+              "sample_range",
+              "hypothesis_family",
+              "access_rule",
+              "exposure_history_requirement"
+            ],
+            "not": {
+              "required": [
+                "reason"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}
