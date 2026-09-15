@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from research_lab.backtest import BacktestAdapter, DeterministicBacktestAdapter
+from research_lab.alpha_database import AlphaDatabase
 from research_lab.config import ResearchLabConfig
 from research_lab.database import ResultStore
 from research_lab.experiments import load_experiment
@@ -17,6 +18,7 @@ class ExperimentRunner:
         self.store = store
         self.adapter = adapter or DeterministicBacktestAdapter()
         self.feature_store = FeatureStore(self.store.config)
+        self.alpha_database = AlphaDatabase(self.store.config)
 
     @classmethod
     def local(cls, root: Path | str, adapter: BacktestAdapter | None = None) -> "ExperimentRunner":
@@ -37,7 +39,7 @@ class ExperimentRunner:
                 strategy_name=experiment.strategy.name, factor_name=experiment.factor.name,
                 error_code="BACKTEST_FAILED", error_message=str(exc),
             )
-            return self.store.save(failed)
+            return self._save_and_archive(failed)
         result = ExperimentResult(
             experiment_id=experiment.experiment_id, status="completed",
             strategy_name=experiment.strategy.name, factor_name=experiment.factor.name,
@@ -47,4 +49,9 @@ class ExperimentRunner:
         )
         stored = self.store.save(result)
         report_path = write_report(self.store.config.artifacts_dir, stored)
-        return self.store.save(stored.model_copy(update={"report_location": str(report_path)}))
+        return self._save_and_archive(stored.model_copy(update={"report_location": str(report_path)}))
+
+    def _save_and_archive(self, result: ExperimentResult) -> ExperimentResult:
+        stored = self.store.save(result)
+        self.alpha_database.archive_experiment(stored)
+        return stored
