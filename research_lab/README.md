@@ -177,3 +177,9 @@ recorded and blocks the task. Missing proposal fields or an absent/invalid
 can consume a ready artifact without changing `ExperimentRunner`; Astra itself
 creates no queue, scheduler, worker, experiment run, promotion, deployment, or
 trading action.
+
+Proposal IDs include the stored material SHA-256, and task IDs reference that
+versioned proposal plus its content hash. Revisions that reuse a caller's
+material ID and timestamp therefore remain distinct, auditable artifacts; a
+future consumer reads a specific proposal/task ID rather than guessing a latest
+version from timestamp or filename ordering.

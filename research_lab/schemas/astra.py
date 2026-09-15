@@ -10,6 +10,7 @@ from .experiment import ExperimentSpec
 
 
 _IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$")
+_HASH = re.compile(r"^[0-9a-f]{64}$")
 
 
 class ResearchMaterial(BaseModel):
@@ -40,6 +41,16 @@ class ResearchMaterial(BaseModel):
             raise ValueError("material_id must use letters, digits, '.', '_' or '-'")
         return value
 
+    @field_validator("title", "summary", "hypothesis", "economic_logic", "expected_edge")
+    @classmethod
+    def text_must_not_be_blank(cls, value: str | None) -> str | None:
+        return _nonblank_text(value)
+
+    @field_validator("evidence", "factor_names", "required_data", "validation_plan")
+    @classmethod
+    def list_items_must_not_be_blank(cls, value: list[str]) -> list[str]:
+        return _nonblank_list(value)
+
 
 class ResearchProposal(BaseModel):
     """Evidence-linked Discovery output; it never represents a trading decision."""
@@ -48,6 +59,7 @@ class ResearchProposal(BaseModel):
 
     proposal_id: str
     material_id: str
+    material_content_hash: str = Field(min_length=64, max_length=64)
     title: str = Field(min_length=1)
     hypothesis: str | None = None
     economic_logic: str | None = None
@@ -73,6 +85,23 @@ class ResearchProposal(BaseModel):
             raise ValueError("proposal and material IDs must use letters, digits, '.', '_' or '-'")
         return value
 
+    @field_validator("material_content_hash")
+    @classmethod
+    def material_hash_must_be_sha256(cls, value: str) -> str:
+        if _HASH.fullmatch(value) is None:
+            raise ValueError("material_content_hash must be a SHA-256 hex digest")
+        return value
+
+    @field_validator("title", "hypothesis", "economic_logic", "expected_edge")
+    @classmethod
+    def text_must_not_be_blank(cls, value: str | None) -> str | None:
+        return _nonblank_text(value)
+
+    @field_validator("required_data", "validation_plan", "factor_names", "evidence", "failed_pattern_notes", "blocked_reasons")
+    @classmethod
+    def list_items_must_not_be_blank(cls, value: list[str]) -> list[str]:
+        return _nonblank_list(value)
+
     @model_validator(mode="after")
     def status_must_match_reasons(self) -> "ResearchProposal":
         if self.status == "blocked" and not self.blocked_reasons:
@@ -89,6 +118,7 @@ class ResearchTask(BaseModel):
 
     task_id: str
     proposal_id: str
+    proposal_content_hash: str = Field(min_length=64, max_length=64)
     status: Literal["ready", "blocked"]
     experiment: ExperimentSpec | None = None
     evidence: list[str] = Field(min_length=1)
@@ -103,6 +133,18 @@ class ResearchTask(BaseModel):
             raise ValueError("task and proposal IDs must use letters, digits, '.', '_' or '-'")
         return value
 
+    @field_validator("proposal_content_hash")
+    @classmethod
+    def proposal_hash_must_be_sha256(cls, value: str) -> str:
+        if _HASH.fullmatch(value) is None:
+            raise ValueError("proposal_content_hash must be a SHA-256 hex digest")
+        return value
+
+    @field_validator("evidence", "blocked_reasons")
+    @classmethod
+    def list_items_must_not_be_blank(cls, value: list[str]) -> list[str]:
+        return _nonblank_list(value)
+
     @model_validator(mode="after")
     def task_must_match_status(self) -> "ResearchTask":
         if self.status == "ready" and (self.experiment is None or self.blocked_reasons):
@@ -110,3 +152,19 @@ class ResearchTask(BaseModel):
         if self.status == "blocked" and (self.experiment is not None or not self.blocked_reasons):
             raise ValueError("blocked tasks require reasons and no ExperimentSpec")
         return self
+
+
+def _nonblank_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError("text fields must not be blank")
+    return normalized
+
+
+def _nonblank_list(values: list[str]) -> list[str]:
+    normalized = [item.strip() for item in values]
+    if any(not item for item in normalized):
+        raise ValueError("text list items must not be blank")
+    return normalized

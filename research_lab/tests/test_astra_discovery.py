@@ -5,6 +5,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from pydantic import ValidationError
+
 from research_lab.alpha_database import AlphaDatabase
 from research_lab.astra import AstraDiscovery
 from research_lab.config import ResearchLabConfig
@@ -121,6 +123,30 @@ class AstraDiscoveryTest(unittest.TestCase):
             discovery.ingest(observed)
 
             self.assertEqual(discovery.query_materials(source_kind="market_anomaly"), [observed.model_copy(update={"content_hash": discovery.get_material(observed.material_id).content_hash})])
+
+    def test_blank_evidence_and_ready_inputs_are_rejected(self) -> None:
+        for field in ("evidence", "factor_names", "required_data", "validation_plan"):
+            with self.subTest(field=field), self.assertRaisesRegex(ValidationError, "must not be blank"):
+                material(**{field: [" "]})
+
+    def test_same_material_identity_and_timestamp_keeps_distinct_auditable_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            discovery = AstraDiscovery.local(Path(directory) / "output")
+            ready_proposal, ready_task = discovery.discover(material())
+            blocked_proposal, blocked_task = discovery.discover(material(
+                hypothesis=None,
+            ))
+
+            self.assertNotEqual(ready_proposal.proposal_id, blocked_proposal.proposal_id)
+            self.assertNotEqual(ready_task.task_id, blocked_task.task_id)
+            self.assertEqual(ready_proposal.status, "ready")
+            self.assertEqual(blocked_proposal.status, "blocked")
+            self.assertEqual(ready_task.status, "ready")
+            self.assertEqual(blocked_task.status, "blocked")
+            self.assertEqual(discovery.get_proposal(ready_proposal.proposal_id), ready_proposal)
+            self.assertEqual(discovery.get_proposal(blocked_proposal.proposal_id), blocked_proposal)
+            self.assertEqual(discovery.get_task(ready_task.task_id), ready_task)
+            self.assertEqual(discovery.get_task(blocked_task.task_id), blocked_task)
 
 
 if __name__ == "__main__":

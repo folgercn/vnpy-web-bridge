@@ -86,7 +86,8 @@ class AstraDiscovery:
         reasons.extend(f"HISTORICAL_CRITICAL_FAILURE:{pattern.pattern_id}" for pattern in critical_failures)
         notes = [f"{pattern.pattern_id}: {pattern.summary}" for pattern in failures]
         return ResearchProposal(
-            proposal_id=_identity("proposal", material.material_id), material_id=material.material_id,
+            proposal_id=_identity("proposal", material.material_id, material.content_hash),
+            material_id=material.material_id, material_content_hash=material.content_hash,
             title=material.title, hypothesis=material.hypothesis, economic_logic=material.economic_logic,
             expected_edge=material.expected_edge, required_data=material.required_data,
             validation_plan=material.validation_plan, factor_names=factors,
@@ -115,6 +116,7 @@ class AstraDiscovery:
             experiment = None
         return ResearchTask(
             task_id=_identity("task", proposal.proposal_id), proposal_id=proposal.proposal_id,
+            proposal_content_hash=proposal.content_hash,
             status="blocked" if reasons else "ready",
             experiment=experiment, evidence=proposal.evidence,
             blocked_reasons=_unique(reasons), created_at=proposal.created_at,
@@ -168,8 +170,8 @@ def _missing_proposal_fields(material: ResearchMaterial) -> list[str]:
     return reasons
 
 
-def _identity(prefix: str, value: str) -> str:
-    text = f"{prefix}-{value}"
+def _identity(prefix: str, *parts: str) -> str:
+    text = "-".join((prefix, *parts))
     if len(text) <= 128:
         return text
     return f"{text[:111]}-{hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]}"
