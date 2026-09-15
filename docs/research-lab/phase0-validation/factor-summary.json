@@ -1,0 +1,32 @@
+{
+  "research_stage": "exploration",
+  "method": "trend20_same_exact_contract_to_forward5_log_return",
+  "all_eligible_sample_count": 2868,
+  "reported_cross_section_sample_count": 2868,
+  "exclusions": {
+    "window_outside_snapshot": 36
+  },
+  "summary": {
+    "all": {
+      "date_count": 478,
+      "sample_count": 2868,
+      "mean_daily_cross_sectional_ic": "-0.012667903046",
+      "mean_top2_minus_bottom2_forward_log_return": "-0.001355555878"
+    },
+    "2023": {
+      "date_count": 242,
+      "sample_count": 1452,
+      "mean_daily_cross_sectional_ic": "-0.01770333313",
+      "mean_top2_minus_bottom2_forward_log_return": "-0.002017677675"
+    },
+    "2024": {
+      "date_count": 236,
+      "sample_count": 1416,
+      "mean_daily_cross_sectional_ic": "-0.007504453553",
+      "mean_top2_minus_bottom2_forward_log_return": "-0.000676600476"
+    }
+  },
+  "metrics_precision": "12 decimal places half-even; means computed from unrounded per-day values",
+  "independence_claim": false,
+  "trading_pnl_computed": false
+}

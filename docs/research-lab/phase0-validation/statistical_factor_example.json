@@ -1,0 +1,255 @@
+{
+  "protocol_status": "DRAFT_UNFROZEN",
+  "mapping_status": "RETROSPECTIVE_CASE_WALKTHROUGH_NOT_FORMAL_SCHEMA_VALIDATED",
+  "research_task": {
+    "schema_version": "research_lab.task.v2",
+    "hash_profile": "research-json-v1",
+    "task_id": "statistical_factor_example",
+    "revision": "rev.1",
+    "research_type": "statistical_factor",
+    "objective": "验证真实历史案例能表达为研究协议并复核计算事实；不验收Alpha或冻结协议",
+    "data_requirements": {
+      "products": [
+        "ag",
+        "au",
+        "cu",
+        "rb",
+        "ru",
+        "sc"
+      ],
+      "dev_dates": [
+        "2023-01-03",
+        "2024-12-31"
+      ],
+      "warmup_from": "2022-09-01"
+    },
+    "task_content_hash": "ea7755c8ef3bcff53b46edddb13a82b66a7c351f19e5c7124399872c943f475b"
+  },
+  "experiment_spec": {
+    "schema_version": "research_lab.experiment.v2",
+    "hash_profile": "research-json-v1",
+    "spec_id": "statistical_factor_example-spec",
+    "revision": "rev.1",
+    "task_id": "statistical_factor_example",
+    "task_revision": "rev.1",
+    "task_content_hash": "ea7755c8ef3bcff53b46edddb13a82b66a7c351f19e5c7124399872c943f475b",
+    "experiment_type": "statistical_factor",
+    "research_stage": "exploration",
+    "method": {
+      "stage": "exploration",
+      "feature": "log settlement(t)/settlement(t-20 official days) for the same exact contract",
+      "label": "log settlement(t+6)/settlement(t+1), same contract",
+      "selection": "eligible_curve_contract=True, maximum t open_interest per product; ties exact_contract ascending",
+      "universe": [
+        "ag",
+        "au",
+        "cu",
+        "rb",
+        "ru",
+        "sc"
+      ],
+      "minimum_cross_section": 4,
+      "group_size": 2,
+      "metrics": [
+        "daily cross-sectional Pearson IC",
+        "daily top2 minus bottom2 forward log-return spread",
+        "2023 and 2024 split summaries"
+      ],
+      "precision": "float64 stdlib calculation; published decimal metrics rounded half-even to 12 decimal places; no hypothesis test or annualization",
+      "missing": "no fill; reject sample if any required t-20 through t+6 official-day settlement missing/nonpositive or availability-day unavailable",
+      "claims": "historical exploratory statistical exercise only, no execution PnL, no confirmation or historical collector availability proof"
+    },
+    "candidate_decision_criteria": {
+      "purpose": "protocol expression and reproducible historical calculation only; not strategy acceptance, protocol freeze or Phase0 closure",
+      "plan_sha256": "f25b38a72a9e66f3a716cd8048fd77b9d5a75b2d7f2bbfb02f09d290fc7cb817"
+    },
+    "source_snapshot": {
+      "curve_contract_daily.csv": "f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351",
+      "official_trading_days_and_sessions.csv": "6503e6176c9458df3e42fd557d7c1826feeaa9ff73fed7dc34020672b112eeb1"
+    },
+    "spec_content_hash": "2b6571340647f6af1d066b55a0875ea76435d93b21d524b4dd8afc6401216092"
+  },
+  "experiment_run": {
+    "schema_version": "research_lab.run.v2",
+    "hash_profile": "research-json-v1",
+    "run_id": "statistical_factor_example-run-20260915",
+    "run_status": "COMPLETED",
+    "spec_id": "statistical_factor_example-spec",
+    "spec_revision": "rev.1",
+    "spec_content_hash": "2b6571340647f6af1d066b55a0875ea76435d93b21d524b4dd8afc6401216092",
+    "trial_context": {
+      "research_stage": "exploration",
+      "trial_kind": null,
+      "retry_of_run_id": null,
+      "holdout_usage_state": "unknown"
+    },
+    "resolved_computation_manifest": {
+      "hash_profile": "research-json-v1",
+      "fingerprint_schema_version": "phase0.validation_case_fingerprint.v1",
+      "code_revision": "0bb19e27a473c5742b3d1a054b9b967a6e041523",
+      "source_diff_fingerprint": "bce98d04365d8bda5200a14bcfffcb63fac6eb7ce0fae872bada6e077d940e75",
+      "record_mapping_script_sha256": "0c1cd4e74f14689a2779a693f3e9271ebebec41280233d6199cb73652fffbc3a",
+      "comparison_script_sha256": null,
+      "feature_implementation": {
+        "id": "phase0_offline_case_calculation",
+        "sha256": "bce98d04365d8bda5200a14bcfffcb63fac6eb7ce0fae872bada6e077d940e75"
+      },
+      "dependency_lock_hash": "8231156b8a25b8b567599dac2a8c9cc78706537fe6651bdacd1b9c7656298dfa",
+      "runtime_environment": {
+        "python_version": "3.12.4 (main, Jun  6 2024, 18:26:44) [Clang 15.0.0 (clang-1500.3.9.4)]",
+        "implementation": "CPython",
+        "platform": "macOS-26.6.2-x86_64-i386-64bit",
+        "machine": "x86_64",
+        "executable_sha256": "dc29238974c23b2bce27e7ac97e0b07d99e8dcb2f53cf2b6681c1a884a813344",
+        "external_dependencies": [],
+        "plan_sha256": "f25b38a72a9e66f3a716cd8048fd77b9d5a75b2d7f2bbfb02f09d290fc7cb817",
+        "analysis_script_sha256": "bce98d04365d8bda5200a14bcfffcb63fac6eb7ce0fae872bada6e077d940e75",
+        "loaded_module_file_sha256": {
+          "math": "00cba86f9108487e6945302cfb409c30598d50aaa581385a6a4670bec8360a04",
+          "statistics": "b9ef01a757de37e9fbf13d32beeb9530c8271582cabec4998226dcb7e0613cd0",
+          "csv": "46004923196e98a67f87d30da64d070027c81f144f5ac91242fbfae33507dda8",
+          "decimal": "6cb648bf8c466ed08eaa46fb94d18b3e2f5e939946d4efe75bf6fd7ceb58a696",
+          "json": "d5d41e2c29049515d295d81a6d40b4890fbec8d8482cfb401630f8ef2f77e4d5",
+          "hashlib": "6dbdebf270868b391080e21dc9687eddfaf321c965ad979f68d3f5c423c613ab"
+        },
+        "environment_limit": "Selected module files + interpreter recorded, not a complete hermetic OS/stdlib image."
+      },
+      "dataset_snapshot": {
+        "curve_contract_daily.csv": "f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351",
+        "official_trading_days_and_sessions.csv": "6503e6176c9458df3e42fd557d7c1826feeaa9ff73fed7dc34020672b112eeb1"
+      },
+      "effective_parameters": {
+        "stage": "exploration",
+        "feature": "log settlement(t)/settlement(t-20 official days) for the same exact contract",
+        "label": "log settlement(t+6)/settlement(t+1), same contract",
+        "selection": "eligible_curve_contract=True, maximum t open_interest per product; ties exact_contract ascending",
+        "universe": [
+          "ag",
+          "au",
+          "cu",
+          "rb",
+          "ru",
+          "sc"
+        ],
+        "minimum_cross_section": 4,
+        "group_size": 2,
+        "metrics": [
+          "daily cross-sectional Pearson IC",
+          "daily top2 minus bottom2 forward log-return spread",
+          "2023 and 2024 split summaries"
+        ],
+        "precision": "float64 stdlib calculation; published decimal metrics rounded half-even to 12 decimal places; no hypothesis test or annualization",
+        "missing": "no fill; reject sample if any required t-20 through t+6 official-day settlement missing/nonpositive or availability-day unavailable",
+        "claims": "historical exploratory statistical exercise only, no execution PnL, no confirmation or historical collector availability proof"
+      },
+      "scientific_time": {
+        "products": [
+          "ag",
+          "au",
+          "cu",
+          "rb",
+          "ru",
+          "sc"
+        ],
+        "dev_dates": [
+          "2023-01-03",
+          "2024-12-31"
+        ],
+        "warmup_from": "2022-09-01"
+      },
+      "random_seed": null,
+      "random_seed_reason": "deterministic calculation, no stochastic sampling"
+    },
+    "scientific_fingerprint": "8f5c68892a426454b73999382d10b18a11ca07b5b3267c82afe3cba8052e36d3",
+    "timing": {
+      "started_at": null,
+      "completed_at": null,
+      "recorded_at": "2026-09-15T09:24:44.633286Z"
+    },
+    "timing_missing_reason": "Retrospective protocol mapping: original process start/end timestamps were not captured; recorded_at is mapping time, not execution time.",
+    "process_exit_code": 0,
+    "run_content_hash": "a5715fbacfdc0920b37aa6746d1db6049d8af380942ddd093d273ae9719f98c5"
+  },
+  "result_evidence": {
+    "schema_version": "research_lab.evidence.v2",
+    "hash_profile": "research-json-v1",
+    "evidence_id": "statistical_factor_example-evidence",
+    "run_id": "statistical_factor_example-run-20260915",
+    "run_status_snapshot": "COMPLETED",
+    "run_content_hash": "a5715fbacfdc0920b37aa6746d1db6049d8af380942ddd093d273ae9719f98c5",
+    "execution_status": "COMPLETED",
+    "typed_metrics": {
+      "research_stage": "exploration",
+      "method": "trend20_same_exact_contract_to_forward5_log_return",
+      "all_eligible_sample_count": 2868,
+      "reported_cross_section_sample_count": 2868,
+      "exclusions": {
+        "window_outside_snapshot": 36
+      },
+      "summary": {
+        "all": {
+          "date_count": 478,
+          "sample_count": 2868,
+          "mean_daily_cross_sectional_ic": "-0.012667903046",
+          "mean_top2_minus_bottom2_forward_log_return": "-0.001355555878"
+        },
+        "2023": {
+          "date_count": 242,
+          "sample_count": 1452,
+          "mean_daily_cross_sectional_ic": "-0.01770333313",
+          "mean_top2_minus_bottom2_forward_log_return": "-0.002017677675"
+        },
+        "2024": {
+          "date_count": 236,
+          "sample_count": 1416,
+          "mean_daily_cross_sectional_ic": "-0.007504453553",
+          "mean_top2_minus_bottom2_forward_log_return": "-0.000676600476"
+        }
+      },
+      "metrics_precision": "12 decimal places half-even; means computed from unrounded per-day values",
+      "independence_claim": false,
+      "trading_pnl_computed": false
+    },
+    "supporting_artifacts": [
+      {
+        "relative_path": "factor-summary.json",
+        "media_type": "application/json",
+        "bytes": 1032,
+        "content_sha256": "1d39e5794f68f4ba0d5d6e3055941be51bcf739eee9a3f8f30640187f07ca203"
+      },
+      {
+        "relative_path": "external/factor-samples.csv",
+        "media_type": "text/csv",
+        "bytes": 259513,
+        "content_sha256": "e452103a87767a23dcd8f41467f356787205968bd3be9f4f3c8b842921dac421"
+      },
+      {
+        "relative_path": "external/factor-daily.csv",
+        "media_type": "text/csv",
+        "bytes": 21477,
+        "content_sha256": "de37a3a79ea5d2ea5502ce6762fa8e6449c7b67e24b9cfb979af76dea8c2ac44"
+      }
+    ],
+    "evidence_content_hash": "04faf0142ba14944f37c4a46b1c745a04ed1faa563f2537aab2531a803713bd7"
+  },
+  "review_assessments": [
+    {
+      "schema_version": "research_lab.review.v2",
+      "hash_profile": "research-json-v1",
+      "review_id": "statistical_factor_example-review",
+      "revision": "rev.1",
+      "evidence_id": "statistical_factor_example-evidence",
+      "evidence_content_hash": "04faf0142ba14944f37c4a46b1c745a04ed1faa563f2537aab2531a803713bd7",
+      "reviewer": "Codex primary case assessment; independent quality review recorded separately",
+      "reviewed_at": "2026-09-15T09:24:44.633286Z",
+      "criteria_ref": {
+        "id": "phase0-case-acceptance",
+        "revision": "rev.1",
+        "content_hash": "f25b38a72a9e66f3a716cd8048fd77b9d5a75b2d7f2bbfb02f09d290fc7cb817"
+      },
+      "recommendation": "accept",
+      "reason": "真实历史数据完成纯统计表达。IC与分组收益为负，未做显著性检验；标签重叠、事后研究、日级可得性凭据限制使结果不构成确认或可交易Alpha。",
+      "review_content_hash": "febe57180b848e917ec219d12fa15572b1fe9438b6f75868fd1068e7038ed76d"
+    }
+  ]
+}

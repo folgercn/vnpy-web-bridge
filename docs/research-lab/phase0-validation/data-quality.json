@@ -1,0 +1,53 @@
+{
+  "excluded_after_dev_rows": 46116,
+  "input_kind": "supplied_derived_panel",
+  "raw_input_sha256": "f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351",
+  "calendar_sha256": "6503e6176c9458df3e42fd557d7c1826feeaa9ff73fed7dc34020672b112eeb1",
+  "dev_start": "2023-01-03",
+  "dev_end": "2024-12-31",
+  "row_count": 35816,
+  "expected_product_days": 2904,
+  "observed_product_days": 2904,
+  "duplicate_key_excess_rows": 0,
+  "source_order_reversals": 0,
+  "invalid_settlement_rows": 0,
+  "invalid_available_day_rows": 0,
+  "coverage": [
+    {
+      "product": "ag",
+      "expected_days": 484,
+      "observed_days": 484,
+      "missing_days": []
+    },
+    {
+      "product": "au",
+      "expected_days": 484,
+      "observed_days": 484,
+      "missing_days": []
+    },
+    {
+      "product": "cu",
+      "expected_days": 484,
+      "observed_days": 484,
+      "missing_days": []
+    },
+    {
+      "product": "rb",
+      "expected_days": 484,
+      "observed_days": 484,
+      "missing_days": []
+    },
+    {
+      "product": "ru",
+      "expected_days": 484,
+      "observed_days": 484,
+      "missing_days": []
+    },
+    {
+      "product": "sc",
+      "expected_days": 484,
+      "observed_days": 484,
+      "missing_days": []
+    }
+  ]
+}

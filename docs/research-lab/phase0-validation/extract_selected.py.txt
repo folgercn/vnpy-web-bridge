@@ -1,0 +1,21 @@
+import os
+from pathlib import Path
+import tarfile,json,hashlib
+base=Path(os.environ.get('PHASE0_CASE_ROOT', '/tmp/vnpy-phase0-validation')); dest=base/'selected';dest.mkdir(exist_ok=True)
+names={'curve_contract_daily.csv','curve_features_daily.csv','official_trading_days_and_sessions.csv','contract_specs.csv','bbo_event_path_assumed_fill.csv','event_bbo_first_qualified.csv','official_fee_margin_history_6products_with_modeled_close_today.csv','official_pit_mapping_with_modeled_close_today_fee.csv'}
+expected_archives={
+ 'issue481_gap_resolution_supplement_20260831.tar.gz':'3371dc9feb55808885105dd62b7dc596855a85fe5a10e7a775d36e748a04e176',
+ 'issue481_event_bbo_supplement_20260831.tar.gz':'9166f29030aec9a8d54708f2a0a8c424660e67c3fa43ee50c5a45458e86fbc8e',
+ 'issue481_close_today_fee_model_20260831.tar.gz':'ec6dbfef2c3320dd5576db0aa531a2da9be0ac9fe4eebf58077dd1dfe33abf20'}
+manifest=[]
+for archive in sorted((base/'inputs').glob('*.tar.gz')):
+ assert archive.name in expected_archives and hashlib.sha256(archive.read_bytes()).hexdigest()==expected_archives[archive.name], 'archive hash mismatch'
+ with tarfile.open(archive) as t:
+  for m in t:
+   if not m.isfile() or Path(m.name).name not in names:continue
+   data=t.extractfile(m).read();target=dest/Path(m.name).name
+   if target.exists():raise RuntimeError('duplicate selected basename')
+   target.write_bytes(data)
+   manifest.append({'archive':archive.name,'archive_sha256':hashlib.sha256(archive.read_bytes()).hexdigest(),'member':m.name,'sha256':hashlib.sha256(data).hexdigest(),'bytes':len(data)})
+(base/'input-manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
+print(json.dumps(manifest,indent=2))

@@ -1,0 +1,10 @@
+{
+  "python_version": "3.12.4 (main, Jun  6 2024, 18:26:44) [Clang 15.0.0 (clang-1500.3.9.4)]",
+  "implementation": "CPython",
+  "platform": "macOS-26.6.2-x86_64-i386-64bit",
+  "machine": "x86_64",
+  "executable_sha256": "dc29238974c23b2bce27e7ac97e0b07d99e8dcb2f53cf2b6681c1a884a813344",
+  "external_dependencies": [],
+  "plan_sha256": "f25b38a72a9e66f3a716cd8048fd77b9d5a75b2d7f2bbfb02f09d290fc7cb817",
+  "analysis_script_sha256": "bce98d04365d8bda5200a14bcfffcb63fac6eb7ce0fae872bada6e077d940e75"
+}

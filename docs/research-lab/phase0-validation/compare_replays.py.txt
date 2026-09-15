@@ -1,0 +1,22 @@
+"""Compare both archived replay outputs without tolerances or input mutation."""
+import json,os
+from pathlib import Path
+B=Path(os.environ['PHASE0_CASE_ROOT'])
+def differences(a,b,path=''):
+ out=[]
+ if isinstance(a,dict) and isinstance(b,dict):
+  for k in sorted(a.keys()|b.keys()):
+   if k not in a or k not in b:out.append({'path':path+'/'+k,'historical':a.get(k),'current':b.get(k)})
+   else:out.extend(differences(a[k],b[k],path+'/'+k))
+ elif isinstance(a,list) and isinstance(b,list):
+  if len(a)!=len(b):out.append({'path':path,'historical_length':len(a),'current_length':len(b)})
+  else:
+   for i,(x,y) in enumerate(zip(a,b)):out.extend(differences(x,y,path+'/'+str(i)))
+ elif a!=b:out.append({'path':path,'historical':a,'current':b})
+ return out
+for name,expected in {'replay-summary.json':'93117efaa62798c5b35581de8d308dc15b16f1df30e5c2d85dabc0628df16243','paired-baseline-comparison.json':'fe48b34dbf2a1271b1063c61a7a3aebe2b7b1dea8bbd4975db6e203797d1ddd3'}.items():
+ import hashlib
+ assert hashlib.sha256((B/'inputs'/name).read_bytes()).hexdigest()==expected, 'historical baseline hash mismatch'
+result={name:differences(json.loads((B/'inputs'/name).read_text()),json.loads((B/'replay'/name).read_text())) for name in ['replay-summary.json','paired-baseline-comparison.json']}
+(B/'replay-comparison-differences.json').write_text(json.dumps(result,indent=2)+'\n')
+print({k:len(v) for k,v in result.items()})

@@ -1,0 +1,58 @@
+[
+  {
+    "archive": "issue481_close_today_fee_model_20260831.tar.gz",
+    "archive_sha256": "ec6dbfef2c3320dd5576db0aa531a2da9be0ac9fe4eebf58077dd1dfe33abf20",
+    "member": "research/entry_redesign/scripts/output/issue481_modeled_close_today_fee_20260831/official_fee_margin_history_6products_with_modeled_close_today.csv",
+    "sha256": "3d155cbcc9f491eeeda49248a3271784cf79979fe17d3a33908aeb14e05604c8",
+    "bytes": 19664432
+  },
+  {
+    "archive": "issue481_close_today_fee_model_20260831.tar.gz",
+    "archive_sha256": "ec6dbfef2c3320dd5576db0aa531a2da9be0ac9fe4eebf58077dd1dfe33abf20",
+    "member": "research/entry_redesign/scripts/output/issue481_modeled_close_today_fee_20260831/official_pit_mapping_with_modeled_close_today_fee.csv",
+    "sha256": "dfc3b986fc496fe4ec19b6bbf6d531a08e8fdb1093bf172dc1217abf66af336c",
+    "bytes": 721809
+  },
+  {
+    "archive": "issue481_event_bbo_supplement_20260831.tar.gz",
+    "archive_sha256": "9166f29030aec9a8d54708f2a0a8c424660e67c3fa43ee50c5a45458e86fbc8e",
+    "member": "research/entry_redesign/scripts/output/issue481_bbo_event_path_20260831/bbo_event_path_assumed_fill.csv",
+    "sha256": "dfe1a9dc6d8b5b2060b796eded73e74b9d280b9c810564522ae297a637aa96c4",
+    "bytes": 211977
+  },
+  {
+    "archive": "issue481_event_bbo_supplement_20260831.tar.gz",
+    "archive_sha256": "9166f29030aec9a8d54708f2a0a8c424660e67c3fa43ee50c5a45458e86fbc8e",
+    "member": "research/entry_redesign/scripts/output/issue481_bbo_coverage_audit_20260831/event_bbo_first_qualified.csv",
+    "sha256": "c9e4cb0c1a15277999786d4823b692415ee198d925beb4fd017a60ea71a14b90",
+    "bytes": 690895
+  },
+  {
+    "archive": "issue481_gap_resolution_supplement_20260831.tar.gz",
+    "archive_sha256": "3371dc9feb55808885105dd62b7dc596855a85fe5a10e7a775d36e748a04e176",
+    "member": "raw/exchange_official_calendar/issue481_2022_2024_20260831/official_trading_days_and_sessions.csv",
+    "sha256": "6503e6176c9458df3e42fd557d7c1826feeaa9ff73fed7dc34020672b112eeb1",
+    "bytes": 143892
+  },
+  {
+    "archive": "issue481_gap_resolution_supplement_20260831.tar.gz",
+    "archive_sha256": "3371dc9feb55808885105dd62b7dc596855a85fe5a10e7a775d36e748a04e176",
+    "member": "raw/tqsdk_contract_specs/issue481_20260831/contract_specs.csv",
+    "sha256": "5df7eb0d695ea44dbe6ed116e01c00d1ef6f46df31f1764e6068e208259b0587",
+    "bytes": 29820
+  },
+  {
+    "archive": "issue481_gap_resolution_supplement_20260831.tar.gz",
+    "archive_sha256": "3371dc9feb55808885105dd62b7dc596855a85fe5a10e7a775d36e748a04e176",
+    "member": "research/entry_redesign/scripts/output/issue481_official_curve_panel_20260831/curve_features_daily.csv",
+    "sha256": "fdeadf0644005453d738dea1df74f1d23928247bdacd99e5085f75ed08d948b9",
+    "bytes": 3306101
+  },
+  {
+    "archive": "issue481_gap_resolution_supplement_20260831.tar.gz",
+    "archive_sha256": "3371dc9feb55808885105dd62b7dc596855a85fe5a10e7a775d36e748a04e176",
+    "member": "research/entry_redesign/scripts/output/issue481_official_curve_panel_20260831/curve_contract_daily.csv",
+    "sha256": "f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351",
+    "bytes": 14187500
+  }
+]

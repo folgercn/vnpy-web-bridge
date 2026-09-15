@@ -1,0 +1,70 @@
+import os
+from pathlib import Path
+import json,hashlib,platform,sys,datetime,shutil,subprocess,math,statistics,csv,decimal
+B=Path(os.environ.get('PHASE0_CASE_ROOT', '/tmp/vnpy-phase0-validation'));D=Path(os.environ.get('PHASE0_RECORD_DIR', str(B/'records')));D.mkdir(exist_ok=True)
+
+def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
+def canon(v):
+ if v is None:return 'null'
+ if isinstance(v,bool):return 'true' if v else 'false'
+ if isinstance(v,int):return str(v)
+ if isinstance(v,str):return '"'+''.join('\\"' if x=='"' else '\\\\' if x=='\\' else '\\u%04x'%ord(x) if ord(x)<32 else x for x in v)+'"'
+ if isinstance(v,list):return '['+','.join(canon(x) for x in v)+']'
+ if isinstance(v,dict):return '{'+','.join(canon(k)+':'+canon(v[k]) for k in sorted(v))+'}'
+ raise ValueError(type(v))
+def digest(v):return hashlib.sha256(canon(v).encode()).hexdigest()
+def decimals(v):
+ if isinstance(v,float):return '0' if v==0 else format(decimal.Decimal(str(v)).normalize(),'f')
+ if isinstance(v,dict):return {k:decimals(x) for k,x in v.items()}
+ if isinstance(v,list):return [decimals(x) for x in v]
+ return v
+def load(p):return decimals(json.loads(p.read_text()))
+def write(p,v):p.write_text(json.dumps(v,ensure_ascii=False,indent=2)+'\n')
+def sealed(v,field):v[field]=digest(v);return v
+now=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='microseconds').replace('+00:00','Z')
+plan=load(B/'validation-plan.json');inputs=load(B/'input-manifest.json')
+# Keep full inputs and generated CSV/trade details local; archive references preserve originals.
+for name in ['validation-plan.json','input-manifest.json','replay-comparison-differences.json']:
+ write(D/name,load(B/name))
+for name in ['data-quality.json','data-quality-anomalies.json','factor-summary.json','calculation-environment.json']:
+ write(D/name,load(B/'calculations-r2'/name))
+# Case source is retained as an audit artifact, not installed into any execution module.
+for name in ['calculate_cases.py','extract_selected.py']:
+ shutil.copyfile(B/name,D/(name+'.txt'))
+env=load(B/'calculations-r2/calculation-environment.json')
+module_hashes={m.__name__:sha(Path(m.__file__)) for m in [math,statistics,csv,decimal,json,hashlib] if hasattr(m,'__file__')}
+env['loaded_module_file_sha256']=module_hashes
+env['environment_limit']='Selected module files + interpreter recorded, not a complete hermetic OS/stdlib image.'
+write(D/'runtime-lock.json',env)
+lock_hash=digest(env)
+legacy=load(B/'replay/replay-summary.json');diffs=load(B/'replay-comparison-differences.json')
+backtest_metrics={'historical_summary_sha256':sha(B/'inputs/replay-summary.json'),'current_summary_sha256':sha(B/'replay/replay-summary.json'),'events_input':legacy['events_input'],'events_applied':legacy['events_applied_before_stop'],'corrected_events':legacy['events_after_causal_correction'],'corrected_event_sha256':legacy['event_path']['corrected_canonical_sha256'],'target_changes_sha256':sha(B/'replay/target-changes.jsonl'),'historical_target_changes_sha256':'1a8d0e50e2f96b41e07d875415818021eb04f5683e289706b0488cefd8b294ee','summary_differences':diffs,'source_hashes_match_historical':legacy['source_files_sha256']==load(B/'inputs/replay-summary.json')['source_files_sha256'],'primary_candidate_full_dev':{k:{m:v['PRIMARY_2S']['CANDIDATE']['FULL_DEV'][m] for m in ['net_pnl_cny','fees_cny','filled_events','roll_events','max_drawdown_cny']} for k,v in legacy['standalone_accounts'].items()}}
+write(D/'backtest-facts.json',backtest_metrics)
+caseinfo=[('data_quality_example','data_quality','validation',plan['data_quality'],load(D/'data-quality.json'),['data-quality.json','data-quality-anomalies.json'],['curve_contract_daily.csv','official_trading_days_and_sessions.csv'], 'accept','本次所供派生曲线表的六品种日覆盖与列级检查通过；不能据此证明交易所原始payload完整、盘中连续或历史PIT合规。'),('statistical_factor_example','statistical_factor','exploration',plan['statistical_factor'],load(D/'factor-summary.json'),['factor-summary.json'],['curve_contract_daily.csv','official_trading_days_and_sessions.csv'],'accept','真实历史数据完成纯统计表达。IC与分组收益为负，未做显著性检验；标签重叠、事后研究、日级可得性凭据限制使结果不构成确认或可交易Alpha。'),('trading_backtest_example','trading_backtest','validation',plan['trading_backtest'],backtest_metrics,['backtest-facts.json'],['bbo_event_path_assumed_fill.csv','contract_specs.csv','curve_contract_daily.csv','event_bbo_first_qualified.csv','official_fee_margin_history_6products_with_modeled_close_today.csv','official_pit_mapping_with_modeled_close_today_fee.csv'],'improve','真实数据与固定模拟执行假设的历史复跑完成，保留STOP_ECONOMIC_GATE；603事件及成交明细hash相同，4项方向会计残差不同，未满足字节一致复现。不能提升为真实撮合或策略经济门槛通过。')]
+for case,typ,stage,method,metrics,files,source_names,recommendation,reason in caseinfo:
+ task=sealed({'schema_version':'research_lab.task.v2','hash_profile':'research-json-v1','task_id':case,'revision':'rev.1','research_type':typ,'objective':'验证真实历史案例能表达为研究协议并复核计算事实；不验收Alpha或冻结协议','data_requirements':{'products':['ag','au','cu','rb','ru','sc'],'dev_dates':['2023-01-03','2024-12-31'],'warmup_from':'2022-09-01'}},'task_content_hash')
+ snapshots={n:next(x['sha256'] for x in inputs if Path(x['member']).name==n) for n in source_names}
+ if typ=='trading_backtest':
+  snapshots['historical_replay_summary.json']=sha(B/'inputs/replay-summary.json')
+  snapshots['historical_paired_comparison.json']=sha(B/'inputs/paired-baseline-comparison.json')
+ spec=sealed({'schema_version':'research_lab.experiment.v2','hash_profile':'research-json-v1','spec_id':case+'-spec','revision':'rev.1','task_id':task['task_id'],'task_revision':task['revision'],'task_content_hash':task['task_content_hash'],'experiment_type':typ,'research_stage':stage,'method':method,'candidate_decision_criteria':{'purpose':plan['case_acceptance'],'plan_sha256':sha(B/'validation-plan.json')},'source_snapshot':snapshots},'spec_content_hash')
+ script=Path('/Users/fujun/node/vnpy/scripts/issue481_minimal_causal_replay.py') if typ=='trading_backtest' else B/'calculate_cases.py'
+ fingerprint={'hash_profile':'research-json-v1','fingerprint_schema_version':'phase0.validation_case_fingerprint.v1','code_revision':'0bb19e27a473c5742b3d1a054b9b967a6e041523','source_diff_fingerprint':sha(script),'record_mapping_script_sha256':sha(Path(__file__)),'comparison_script_sha256':sha(B/'compare_replays.py') if typ=='trading_backtest' else None,'feature_implementation':{'id':'frozen_issue481_replay' if typ=='trading_backtest' else 'phase0_offline_case_calculation','sha256':sha(script)},'dependency_lock_hash':lock_hash,'runtime_environment':env,'dataset_snapshot':spec['source_snapshot'],'effective_parameters':method,'scientific_time':task['data_requirements'],'random_seed':None,'random_seed_reason':'deterministic calculation, no stochastic sampling'}
+ fp=digest(fingerprint)
+ run=sealed({'schema_version':'research_lab.run.v2','hash_profile':'research-json-v1','run_id':case+'-run-20260915','run_status':'COMPLETED','spec_id':spec['spec_id'],'spec_revision':spec['revision'],'spec_content_hash':spec['spec_content_hash'],'trial_context':{'research_stage':stage,'trial_kind':None,'retry_of_run_id':None,'holdout_usage_state':'not_applicable' if typ=='data_quality' else 'unknown'},'resolved_computation_manifest':fingerprint,'scientific_fingerprint':fp,'timing':{'started_at':None,'completed_at':None,'recorded_at':now},'timing_missing_reason':'Retrospective protocol mapping: original process start/end timestamps were not captured; recorded_at is mapping time, not execution time.','process_exit_code':3 if typ=='trading_backtest' else 0},'run_content_hash')
+ artifacts=[{'relative_path':f,'media_type':'application/json','bytes':(D/f).stat().st_size,'content_sha256':sha(D/f)} for f in files]
+ if typ=='statistical_factor':
+  for f in ['factor-samples.csv','factor-daily.csv']:
+   p=B/'calculations-r2'/f
+   artifacts.append({'relative_path':'external/'+f,'media_type':'text/csv','bytes':p.stat().st_size,'content_sha256':sha(p)})
+ if typ=='trading_backtest':
+  p=B/'replay/target-changes.jsonl'
+  artifacts.append({'relative_path':'external/target-changes.jsonl','media_type':'application/x-ndjson','bytes':p.stat().st_size,'content_sha256':sha(p)})
+ evidence=sealed({'schema_version':'research_lab.evidence.v2','hash_profile':'research-json-v1','evidence_id':case+'-evidence','run_id':run['run_id'],'run_status_snapshot':run['run_status'],'run_content_hash':run['run_content_hash'],'execution_status':'COMPLETED','typed_metrics':metrics,'supporting_artifacts':artifacts},'evidence_content_hash')
+ review=sealed({'schema_version':'research_lab.review.v2','hash_profile':'research-json-v1','review_id':case+'-review','revision':'rev.1','evidence_id':evidence['evidence_id'],'evidence_content_hash':evidence['evidence_content_hash'],'reviewer':'Codex primary case assessment; independent quality review recorded separately','reviewed_at':now,'criteria_ref':{'id':'phase0-case-acceptance','revision':'rev.1','content_hash':sha(B/'validation-plan.json')},'recommendation':recommendation,'reason':reason},'review_content_hash')
+ write(D/(case+'.json'),{'protocol_status':'DRAFT_UNFROZEN','mapping_status':'RETROSPECTIVE_CASE_WALKTHROUGH_NOT_FORMAL_SCHEMA_VALIDATED','research_task':task,'experiment_spec':spec,'experiment_run':run,'result_evidence':evidence,'review_assessments':[review]})
+# Local complete artifact bundle keeps external rows out of Git while retaining exact facts.
+complete=B/'complete-artifacts';complete.mkdir(exist_ok=True)
+for f in ['factor-samples.csv','factor-daily.csv']:shutil.copyfile(B/'calculations-r2'/f,complete/f)
+shutil.copyfile(B/'replay/target-changes.jsonl',complete/'target-changes.jsonl')
+print('Created three retrospectively mapped case records and source artifacts; not frozen schema validation.')

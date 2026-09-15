@@ -1,0 +1,46 @@
+{
+  "replay-summary.json": [
+    {
+      "path": "/standalone_accounts/sc/PRIMARY_2S/CANDIDATE/DEV_2023/directional_pnl_identity_error_cny",
+      "historical": "0",
+      "current": "-0.0000000001"
+    },
+    {
+      "path": "/standalone_accounts/sc/PRIMARY_2S/CANDIDATE/FULL_DEV/directional_pnl_identity_error_cny",
+      "historical": "0.0000000001",
+      "current": "0"
+    },
+    {
+      "path": "/standalone_accounts/sc/STRESS_5S/CANDIDATE/DEV_2023/directional_pnl_identity_error_cny",
+      "historical": "0.0000000002",
+      "current": "0.0000000003"
+    },
+    {
+      "path": "/standalone_accounts/sc/STRESS_5S/PAIRED/DEV_2023/directional_pnl_identity_error_cny",
+      "historical": "0.0000000001",
+      "current": "0.0000000002"
+    }
+  ],
+  "paired-baseline-comparison.json": [
+    {
+      "path": "/by_product/sc/PRIMARY_2S/CANDIDATE/DEV_2023/directional_pnl_identity_error_cny",
+      "historical": "0",
+      "current": "-0.0000000001"
+    },
+    {
+      "path": "/by_product/sc/PRIMARY_2S/CANDIDATE/FULL_DEV/directional_pnl_identity_error_cny",
+      "historical": "0.0000000001",
+      "current": "0"
+    },
+    {
+      "path": "/by_product/sc/STRESS_5S/CANDIDATE/DEV_2023/directional_pnl_identity_error_cny",
+      "historical": "0.0000000002",
+      "current": "0.0000000003"
+    },
+    {
+      "path": "/by_product/sc/STRESS_5S/PAIRED/DEV_2023/directional_pnl_identity_error_cny",
+      "historical": "0.0000000001",
+      "current": "0.0000000002"
+    }
+  ]
+}

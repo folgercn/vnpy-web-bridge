@@ -1,0 +1,89 @@
+"""One-off Phase 0 historical case calculation; no services, trading or network."""
+import os
+from pathlib import Path
+import csv, json, math, hashlib, statistics, platform, sys
+from collections import Counter, defaultdict
+from decimal import Decimal, ROUND_HALF_EVEN
+B=Path(os.environ.get('PHASE0_CASE_ROOT', '/tmp/vnpy-phase0-validation')); I=B/'selected'; O=B/'calculations-r2'; O.mkdir(exist_ok=False)
+
+def sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
+def decimal(x):
+ if x is None:return None
+ if not math.isfinite(x):raise ValueError('nonfinite result')
+ d=Decimal(str(x)).quantize(Decimal('0.000000000001'),rounding=ROUND_HALF_EVEN)
+ return '0' if d==0 else format(d.normalize(),'f')
+def output(name,x):
+ p=O/name;p.write_text(json.dumps(x,ensure_ascii=False,indent=2)+'\n');return sha(p)
+def writecsv(name,rows):
+ p=O/name
+ with p.open('w',newline='') as f:
+  w=csv.DictWriter(f,fieldnames=list(rows[0]));w.writeheader();w.writerows(rows)
+ return sha(p)
+def read(name):
+ with (I/name).open(newline='') as f:return list(csv.DictReader(f))
+plan=json.loads((B/'validation-plan.json').read_text())
+rows=read('curve_contract_daily.csv');cal=read('official_trading_days_and_sessions.csv')
+excluded_after_dev=sum(r['source_official_day']>'2024-12-31' for r in rows)
+rows=[r for r in rows if r['source_official_day']<='2024-12-31']
+cal=[r for r in cal if r['official_trading_day']<='2024-12-31']
+days=sorted({r['official_trading_day'] for r in cal});idx={d:i for i,d in enumerate(days)}
+products=['ag','au','cu','rb','ru','sc'];dev=[d for d in days if '2023-01-03'<=d<='2024-12-31']
+selected=[r for r in rows if r['product'] in products and r['source_official_day'] in dev]
+keys=Counter((r['source_official_day'],r['exact_contract']) for r in selected)
+reversals=[];last={};invalid=[];availability=[]
+for r in selected:
+ d=r['source_official_day'];c=r['exact_contract']
+ if c in last and d<last[c]:reversals.append({'contract':c,'previous':last[c],'current':d})
+ last[c]=d
+ try: valid=math.isfinite(float(r['settlement'])) and float(r['settlement'])>0
+ except ValueError:valid=False
+ if not valid:invalid.append({'day':d,'contract':c,'settlement':r['settlement']})
+ if not r['available_official_day'] or r['available_official_day']<=d:availability.append({'day':d,'contract':c,'available':r['available_official_day']})
+coverage=[]
+for p in products:
+ observed={r['source_official_day'] for r in selected if r['product']==p}
+ missing=sorted(set(dev)-observed)
+ coverage.append({'product':p,'expected_days':len(dev),'observed_days':len(observed),'missing_days':missing})
+dq={'excluded_after_dev_rows':excluded_after_dev,'input_kind':'supplied_derived_panel','raw_input_sha256':sha(I/'curve_contract_daily.csv'),'calendar_sha256':sha(I/'official_trading_days_and_sessions.csv'),'dev_start':dev[0],'dev_end':dev[-1],'row_count':len(selected),'expected_product_days':len(dev)*len(products),'observed_product_days':sum(x['observed_days'] for x in coverage),'duplicate_key_excess_rows':sum(n-1 for n in keys.values()),'source_order_reversals':len(reversals),'invalid_settlement_rows':len(invalid),'invalid_available_day_rows':len(availability),'coverage':coverage}
+output('data-quality.json',dq);output('data-quality-anomalies.json',{'duplicates':[{'day':k[0],'contract':k[1],'rows':v} for k,v in keys.items() if v>1],'reversals':reversals,'invalid_settlement':invalid,'invalid_availability':availability})
+# Do not repair data silently: ambiguous duplicate keys cannot feed factor calculation.
+allkeys=Counter((r['source_official_day'],r['exact_contract']) for r in rows)
+assert max(allkeys.values())==1
+bykey={(r['source_official_day'],r['exact_contract']):r for r in rows}
+candidates=defaultdict(list)
+for r in selected:
+ if r['eligible_curve_contract']=='True':candidates[(r['source_official_day'],r['product'])].append(r)
+samples=[];exclusions=Counter()
+for d in dev:
+ t=idx[d]
+ for p in products:
+  cs=candidates[(d,p)]
+  if not cs:exclusions['no_eligible_contract']+=1;continue
+  r=sorted(cs,key=lambda r:(-float(r['open_interest']),r['exact_contract']))[0];c=r['exact_contract']
+  if t<20 or t+6>=len(days):exclusions['window_outside_snapshot']+=1;continue
+  window=[bykey.get((days[j],c)) for j in range(t-20,t+7)]
+  if any(x is None for x in window):exclusions['missing_exact_contract_window']+=1;continue
+  values=[float(x['settlement']) for x in window]
+  if any(not math.isfinite(v) or v<=0 for v in values):exclusions['invalid_settlement']+=1;continue
+  if any(not x['available_official_day'] or x['available_official_day']>days[t+1] for x in window[:21]):exclusions['feature_not_available_by_label_start']+=1;continue
+  feature=math.log(values[20]/values[0]);label=math.log(values[26]/values[21])
+  samples.append({'day':d,'product':p,'contract':c,'feature_start':days[t-20],'label_start':days[t+1],'label_end':days[t+6],'trend20':feature,'forward5_log_return':label})
+byday=defaultdict(list)
+for s in samples:byday[s['day']].append(s)
+daily=[]
+for d,group in sorted(byday.items()):
+ if len(group)<4:exclusions['cross_section_below_four']+=1;continue
+ x=[s['trend20'] for s in group];y=[s['forward5_log_return'] for s in group]
+ if statistics.pstdev(x)==0 or statistics.pstdev(y)==0:exclusions['zero_variance_cross_section']+=1;continue
+ ic=statistics.correlation(x,y)
+ ordered=sorted(group,key=lambda s:(s['trend20'],s['product']))
+ spread=statistics.mean(s['forward5_log_return'] for s in ordered[-2:])-statistics.mean(s['forward5_log_return'] for s in ordered[:2])
+ daily.append({'day':d,'sample_count':len(group),'ic':ic,'top2_minus_bottom2_log_return':spread})
+summary={}
+for name,subset in [('all',daily),('2023',[x for x in daily if x['day'].startswith('2023')]),('2024',[x for x in daily if x['day'].startswith('2024')])]:
+ summary[name]={'date_count':len(subset),'sample_count':sum(x['sample_count'] for x in subset),'mean_daily_cross_sectional_ic':decimal(statistics.mean(x['ic'] for x in subset)) if subset else None,'mean_top2_minus_bottom2_forward_log_return':decimal(statistics.mean(x['top2_minus_bottom2_log_return'] for x in subset)) if subset else None}
+writecsv('factor-samples.csv',[{k:decimal(v) if isinstance(v,float) else v for k,v in s.items()} for s in samples])
+writecsv('factor-daily.csv',[{k:decimal(v) if isinstance(v,float) else v for k,v in s.items()} for s in daily])
+output('factor-summary.json',{'research_stage':'exploration','method':'trend20_same_exact_contract_to_forward5_log_return','all_eligible_sample_count':len(samples),'reported_cross_section_sample_count':sum(x['sample_count'] for x in daily),'exclusions':dict(exclusions),'summary':summary,'metrics_precision':'12 decimal places half-even; means computed from unrounded per-day values','independence_claim':False,'trading_pnl_computed':False})
+output('calculation-environment.json',{'python_version':sys.version,'implementation':platform.python_implementation(),'platform':platform.platform(),'machine':platform.machine(),'executable_sha256':sha(Path(sys.executable).resolve()),'external_dependencies':[],'plan_sha256':sha(B/'validation-plan.json'),'analysis_script_sha256':sha(Path(__file__))})
+print(json.dumps({'data_quality':dq,'factor':summary,'exclusions':dict(exclusions)},indent=2))
