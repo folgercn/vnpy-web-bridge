@@ -53,7 +53,7 @@ tar -xzf "$case_dir/prepared-inputs.tar.gz" -C "$case_work/inputs"
 
 ```sh
 case_bundle=$(mktemp -d)
-tar -xzf research/phase0_data_quality/bundles/validation-rev1-corrected.tar.gz -C "$case_bundle"
+tar -xzf research/phase0_data_quality/bundles/validation-rev1-ci.tar.gz -C "$case_bundle"
 .venv/bin/python "$case_bundle/materials/case.py" verify --bundle "$case_bundle" --require-review
 ```
 

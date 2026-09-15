@@ -36,3 +36,9 @@
 修订 `2155b03` 将 README 调整为输入目录与输出目录同级，并在任何写入前拒绝输出位于输入目录内（含解析后的路径）。原样执行修订后的 README 命令成功生成并验证新 Run；嵌套输出被 `output must be outside inputs` 拒绝。新增回归后 focused tests 为 28 passed。
 
 随后对新建的 `validation-rev1-corrected`、`validation-rev2-corrected` 和 `replay-rev1-corrected` 完整包独立核验并写入新的 Review。三个包分别得到 192 / 179 / 0、60 / 48 / 0、192 / 179 / 0（行数 / 比较数 / 日期顺序违规），均按 `phase0-date-order-criteria@rev.1` 得到 `accept`。P1 修正增量未发现新的 P0/P1。
+
+## CI 兼容修正复核
+
+远端 CI 报告旧 Ruff `E731` 后，`4c4691c` 仅将 `verify` 内的局部 `lambda` 改为同参数、同返回值的具名函数。未改变验证顺序或语义。因源码摘要进入输入锁与科学指纹，实施者重新准备输入并重跑三包；本审阅会话只读核验后，为 `validation-rev1-ci`、`validation-rev2-ci` 和 `replay-rev1-ci` 写入新的 Review 与响应。
+
+三个 CI 对应包的行数 / 比较数 / 日期顺序违规仍为 192 / 179 / 0、60 / 48 / 0、192 / 179 / 0，均按同一 `phase0-date-order-criteria@rev.1` 得到 `accept`，且 `--require-review` 验证通过。该两行等价修正及其新包未发现 P0/P1。
