@@ -187,3 +187,19 @@ to retrieve the exact proposal input. `get_proposal(proposal_id)` and
 `get_task(task_id)` retain the one-version convenience form, but require
 `content_hash=` whenever that identity has multiple versions; Discovery never
 selects a latest artifact from timestamps or filename ordering.
+
+## Sol Research Orchestrator MVP
+
+`SolOrchestrator` consumes an explicit, versioned Astra `ResearchTask` and
+persists a JSON `ExperimentPlan` under `sol/plans/`. It records
+`received → planning → pending_approval → queued → running → review → archived`;
+failed execution records `failed → retry → queued` only within the supplied
+retry limit. A named human must call `approve()` before the local runner is
+eligible, and a runner executes only when the caller invokes `run_next()`.
+
+The only MVP worker is an in-process adapter to `ExperimentRunner`, whose
+existing ResultStore and Alpha Database writes remain the execution record.
+Sol does not create strategies, start a service or queue, select candidates,
+promote/deploy/trade, or let Astra run experiments. Critic review is skipped
+with audit evidence unless the caller attaches an existing persisted
+`validation_id`; Sol never fabricates a validation result from an experiment.
