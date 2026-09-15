@@ -1,0 +1,44 @@
+{
+  "status": "DRAFT_UNFROZEN",
+  "scope": "historical DEV 2023-01-03 through 2024-12-31; 2022 observations used only as feature warmup; no 2025+ values",
+  "data_quality": {
+    "input": "curve_contract_daily.csv supplied derived panel, not original exchange byte audit",
+    "checks": [
+      "product-day coverage against supplied official calendar",
+      "duplicate day-contract keys",
+      "per-contract source-order reversals",
+      "missing/nonpositive settlement",
+      "available-day strictly after source-day"
+    ]
+  },
+  "statistical_factor": {
+    "stage": "exploration",
+    "feature": "log settlement(t)/settlement(t-20 official days) for the same exact contract",
+    "label": "log settlement(t+6)/settlement(t+1), same contract",
+    "selection": "eligible_curve_contract=True, maximum t open_interest per product; ties exact_contract ascending",
+    "universe": [
+      "ag",
+      "au",
+      "cu",
+      "rb",
+      "ru",
+      "sc"
+    ],
+    "minimum_cross_section": 4,
+    "group_size": 2,
+    "metrics": [
+      "daily cross-sectional Pearson IC",
+      "daily top2 minus bottom2 forward log-return spread",
+      "2023 and 2024 split summaries"
+    ],
+    "precision": "float64 stdlib calculation; published decimal metrics rounded half-even to 12 decimal places; no hypothesis test or annualization",
+    "missing": "no fill; reject sample if any required t-20 through t+6 official-day settlement missing/nonpositive or availability-day unavailable",
+    "claims": "historical exploratory statistical exercise only, no execution PnL, no confirmation or historical collector availability proof"
+  },
+  "trading_backtest": {
+    "method": "unmodified scripts/issue481_minimal_causal_replay.py",
+    "criteria": "six input hashes match archived replay, 603 corrected events, output comparison to historical frozen replay; STOP_ECONOMIC_GATE is expected scientific outcome not tool failure",
+    "forbidden": "no parameter tuning, no new trades, no 2025+"
+  },
+  "case_acceptance": "protocol expression and reproducible historical calculation only; not strategy acceptance, protocol freeze or Phase0 closure"
+}

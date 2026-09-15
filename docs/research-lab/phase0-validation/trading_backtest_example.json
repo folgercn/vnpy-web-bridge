@@ -1,0 +1,292 @@
+{
+  "protocol_status": "DRAFT_UNFROZEN",
+  "mapping_status": "RETROSPECTIVE_CASE_WALKTHROUGH_NOT_FORMAL_SCHEMA_VALIDATED",
+  "research_task": {
+    "schema_version": "research_lab.task.v2",
+    "hash_profile": "research-json-v1",
+    "task_id": "trading_backtest_example",
+    "revision": "rev.1",
+    "research_type": "trading_backtest",
+    "objective": "验证真实历史案例能表达为研究协议并复核计算事实；不验收Alpha或冻结协议",
+    "data_requirements": {
+      "products": [
+        "ag",
+        "au",
+        "cu",
+        "rb",
+        "ru",
+        "sc"
+      ],
+      "dev_dates": [
+        "2023-01-03",
+        "2024-12-31"
+      ],
+      "warmup_from": "2022-09-01"
+    },
+    "task_content_hash": "19b45d03fcf457caeee74e785b30a22172c9783c910df02008740dfb6dc8e4cf"
+  },
+  "experiment_spec": {
+    "schema_version": "research_lab.experiment.v2",
+    "hash_profile": "research-json-v1",
+    "spec_id": "trading_backtest_example-spec",
+    "revision": "rev.1",
+    "task_id": "trading_backtest_example",
+    "task_revision": "rev.1",
+    "task_content_hash": "19b45d03fcf457caeee74e785b30a22172c9783c910df02008740dfb6dc8e4cf",
+    "experiment_type": "trading_backtest",
+    "research_stage": "validation",
+    "method": {
+      "method": "unmodified scripts/issue481_minimal_causal_replay.py",
+      "criteria": "six input hashes match archived replay, 603 corrected events, output comparison to historical frozen replay; STOP_ECONOMIC_GATE is expected scientific outcome not tool failure",
+      "forbidden": "no parameter tuning, no new trades, no 2025+"
+    },
+    "candidate_decision_criteria": {
+      "purpose": "protocol expression and reproducible historical calculation only; not strategy acceptance, protocol freeze or Phase0 closure",
+      "plan_sha256": "f25b38a72a9e66f3a716cd8048fd77b9d5a75b2d7f2bbfb02f09d290fc7cb817"
+    },
+    "source_snapshot": {
+      "bbo_event_path_assumed_fill.csv": "dfe1a9dc6d8b5b2060b796eded73e74b9d280b9c810564522ae297a637aa96c4",
+      "contract_specs.csv": "5df7eb0d695ea44dbe6ed116e01c00d1ef6f46df31f1764e6068e208259b0587",
+      "curve_contract_daily.csv": "f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351",
+      "event_bbo_first_qualified.csv": "c9e4cb0c1a15277999786d4823b692415ee198d925beb4fd017a60ea71a14b90",
+      "official_fee_margin_history_6products_with_modeled_close_today.csv": "3d155cbcc9f491eeeda49248a3271784cf79979fe17d3a33908aeb14e05604c8",
+      "official_pit_mapping_with_modeled_close_today_fee.csv": "dfc3b986fc496fe4ec19b6bbf6d531a08e8fdb1093bf172dc1217abf66af336c",
+      "historical_replay_summary.json": "93117efaa62798c5b35581de8d308dc15b16f1df30e5c2d85dabc0628df16243",
+      "historical_paired_comparison.json": "fe48b34dbf2a1271b1063c61a7a3aebe2b7b1dea8bbd4975db6e203797d1ddd3"
+    },
+    "spec_content_hash": "f7162aea9b9802ec8cefb3a9bea18fc696dad61c39cc4062e5bf0b61d278438c"
+  },
+  "experiment_run": {
+    "schema_version": "research_lab.run.v2",
+    "hash_profile": "research-json-v1",
+    "run_id": "trading_backtest_example-run-20260915",
+    "run_status": "COMPLETED",
+    "spec_id": "trading_backtest_example-spec",
+    "spec_revision": "rev.1",
+    "spec_content_hash": "f7162aea9b9802ec8cefb3a9bea18fc696dad61c39cc4062e5bf0b61d278438c",
+    "trial_context": {
+      "research_stage": "validation",
+      "trial_kind": null,
+      "retry_of_run_id": null,
+      "holdout_usage_state": "unknown"
+    },
+    "resolved_computation_manifest": {
+      "hash_profile": "research-json-v1",
+      "fingerprint_schema_version": "phase0.validation_case_fingerprint.v1",
+      "code_revision": "0bb19e27a473c5742b3d1a054b9b967a6e041523",
+      "source_diff_fingerprint": "3798178e2b265f6001dc607fe89add68f1f0f583ae85ddf62ddead38e677577c",
+      "record_mapping_script_sha256": "0c1cd4e74f14689a2779a693f3e9271ebebec41280233d6199cb73652fffbc3a",
+      "comparison_script_sha256": "d6267a4a6baeccdb1d5a5f066270cede804ca4431c0f03217383bcb3024a74ce",
+      "feature_implementation": {
+        "id": "frozen_issue481_replay",
+        "sha256": "3798178e2b265f6001dc607fe89add68f1f0f583ae85ddf62ddead38e677577c"
+      },
+      "dependency_lock_hash": "8231156b8a25b8b567599dac2a8c9cc78706537fe6651bdacd1b9c7656298dfa",
+      "runtime_environment": {
+        "python_version": "3.12.4 (main, Jun  6 2024, 18:26:44) [Clang 15.0.0 (clang-1500.3.9.4)]",
+        "implementation": "CPython",
+        "platform": "macOS-26.6.2-x86_64-i386-64bit",
+        "machine": "x86_64",
+        "executable_sha256": "dc29238974c23b2bce27e7ac97e0b07d99e8dcb2f53cf2b6681c1a884a813344",
+        "external_dependencies": [],
+        "plan_sha256": "f25b38a72a9e66f3a716cd8048fd77b9d5a75b2d7f2bbfb02f09d290fc7cb817",
+        "analysis_script_sha256": "bce98d04365d8bda5200a14bcfffcb63fac6eb7ce0fae872bada6e077d940e75",
+        "loaded_module_file_sha256": {
+          "math": "00cba86f9108487e6945302cfb409c30598d50aaa581385a6a4670bec8360a04",
+          "statistics": "b9ef01a757de37e9fbf13d32beeb9530c8271582cabec4998226dcb7e0613cd0",
+          "csv": "46004923196e98a67f87d30da64d070027c81f144f5ac91242fbfae33507dda8",
+          "decimal": "6cb648bf8c466ed08eaa46fb94d18b3e2f5e939946d4efe75bf6fd7ceb58a696",
+          "json": "d5d41e2c29049515d295d81a6d40b4890fbec8d8482cfb401630f8ef2f77e4d5",
+          "hashlib": "6dbdebf270868b391080e21dc9687eddfaf321c965ad979f68d3f5c423c613ab"
+        },
+        "environment_limit": "Selected module files + interpreter recorded, not a complete hermetic OS/stdlib image."
+      },
+      "dataset_snapshot": {
+        "bbo_event_path_assumed_fill.csv": "dfe1a9dc6d8b5b2060b796eded73e74b9d280b9c810564522ae297a637aa96c4",
+        "contract_specs.csv": "5df7eb0d695ea44dbe6ed116e01c00d1ef6f46df31f1764e6068e208259b0587",
+        "curve_contract_daily.csv": "f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351",
+        "event_bbo_first_qualified.csv": "c9e4cb0c1a15277999786d4823b692415ee198d925beb4fd017a60ea71a14b90",
+        "official_fee_margin_history_6products_with_modeled_close_today.csv": "3d155cbcc9f491eeeda49248a3271784cf79979fe17d3a33908aeb14e05604c8",
+        "official_pit_mapping_with_modeled_close_today_fee.csv": "dfc3b986fc496fe4ec19b6bbf6d531a08e8fdb1093bf172dc1217abf66af336c",
+        "historical_replay_summary.json": "93117efaa62798c5b35581de8d308dc15b16f1df30e5c2d85dabc0628df16243",
+        "historical_paired_comparison.json": "fe48b34dbf2a1271b1063c61a7a3aebe2b7b1dea8bbd4975db6e203797d1ddd3"
+      },
+      "effective_parameters": {
+        "method": "unmodified scripts/issue481_minimal_causal_replay.py",
+        "criteria": "six input hashes match archived replay, 603 corrected events, output comparison to historical frozen replay; STOP_ECONOMIC_GATE is expected scientific outcome not tool failure",
+        "forbidden": "no parameter tuning, no new trades, no 2025+"
+      },
+      "scientific_time": {
+        "products": [
+          "ag",
+          "au",
+          "cu",
+          "rb",
+          "ru",
+          "sc"
+        ],
+        "dev_dates": [
+          "2023-01-03",
+          "2024-12-31"
+        ],
+        "warmup_from": "2022-09-01"
+      },
+      "random_seed": null,
+      "random_seed_reason": "deterministic calculation, no stochastic sampling"
+    },
+    "scientific_fingerprint": "95e201c29add929704f500fea0a2cb82641681a9afb94457df9ffd1ea96f0cf0",
+    "timing": {
+      "started_at": null,
+      "completed_at": null,
+      "recorded_at": "2026-09-15T09:24:44.633286Z"
+    },
+    "timing_missing_reason": "Retrospective protocol mapping: original process start/end timestamps were not captured; recorded_at is mapping time, not execution time.",
+    "process_exit_code": 3,
+    "run_content_hash": "ebe3c8b33e25f7b71516ed08d7b627eec965f3c41547e5a9f4e3940d671723d1"
+  },
+  "result_evidence": {
+    "schema_version": "research_lab.evidence.v2",
+    "hash_profile": "research-json-v1",
+    "evidence_id": "trading_backtest_example-evidence",
+    "run_id": "trading_backtest_example-run-20260915",
+    "run_status_snapshot": "COMPLETED",
+    "run_content_hash": "ebe3c8b33e25f7b71516ed08d7b627eec965f3c41547e5a9f4e3940d671723d1",
+    "execution_status": "COMPLETED",
+    "typed_metrics": {
+      "historical_summary_sha256": "93117efaa62798c5b35581de8d308dc15b16f1df30e5c2d85dabc0628df16243",
+      "current_summary_sha256": "fb4175678f835ad2bd0a2d8321e2cfb7546959479615f935898907f8c58d2f19",
+      "events_input": 607,
+      "events_applied": 603,
+      "corrected_events": 603,
+      "corrected_event_sha256": "74915208177e188f65074290d68590eec7b4c4d811a8648c1d92a331d2cbd71c",
+      "target_changes_sha256": "1a8d0e50e2f96b41e07d875415818021eb04f5683e289706b0488cefd8b294ee",
+      "historical_target_changes_sha256": "1a8d0e50e2f96b41e07d875415818021eb04f5683e289706b0488cefd8b294ee",
+      "summary_differences": {
+        "replay-summary.json": [
+          {
+            "path": "/standalone_accounts/sc/PRIMARY_2S/CANDIDATE/DEV_2023/directional_pnl_identity_error_cny",
+            "historical": "0",
+            "current": "-0.0000000001"
+          },
+          {
+            "path": "/standalone_accounts/sc/PRIMARY_2S/CANDIDATE/FULL_DEV/directional_pnl_identity_error_cny",
+            "historical": "0.0000000001",
+            "current": "0"
+          },
+          {
+            "path": "/standalone_accounts/sc/STRESS_5S/CANDIDATE/DEV_2023/directional_pnl_identity_error_cny",
+            "historical": "0.0000000002",
+            "current": "0.0000000003"
+          },
+          {
+            "path": "/standalone_accounts/sc/STRESS_5S/PAIRED/DEV_2023/directional_pnl_identity_error_cny",
+            "historical": "0.0000000001",
+            "current": "0.0000000002"
+          }
+        ],
+        "paired-baseline-comparison.json": [
+          {
+            "path": "/by_product/sc/PRIMARY_2S/CANDIDATE/DEV_2023/directional_pnl_identity_error_cny",
+            "historical": "0",
+            "current": "-0.0000000001"
+          },
+          {
+            "path": "/by_product/sc/PRIMARY_2S/CANDIDATE/FULL_DEV/directional_pnl_identity_error_cny",
+            "historical": "0.0000000001",
+            "current": "0"
+          },
+          {
+            "path": "/by_product/sc/STRESS_5S/CANDIDATE/DEV_2023/directional_pnl_identity_error_cny",
+            "historical": "0.0000000002",
+            "current": "0.0000000003"
+          },
+          {
+            "path": "/by_product/sc/STRESS_5S/PAIRED/DEV_2023/directional_pnl_identity_error_cny",
+            "historical": "0.0000000001",
+            "current": "0.0000000002"
+          }
+        ]
+      },
+      "source_hashes_match_historical": true,
+      "primary_candidate_full_dev": {
+        "ag": {
+          "net_pnl_cny": "-1620.0892499997",
+          "fees_cny": "120.08925",
+          "filled_events": 25,
+          "roll_events": 0,
+          "max_drawdown_cny": "5407.6447499999"
+        },
+        "au": {
+          "net_pnl_cny": "0",
+          "fees_cny": "0",
+          "filled_events": 0,
+          "roll_events": 0,
+          "max_drawdown_cny": "0"
+        },
+        "cu": {
+          "net_pnl_cny": "10401.6037500004",
+          "fees_cny": "998.39625",
+          "filled_events": 60,
+          "roll_events": 4,
+          "max_drawdown_cny": "12409.1612499997"
+        },
+        "rb": {
+          "net_pnl_cny": "-1274.1689999998",
+          "fees_cny": "294.169",
+          "filled_events": 70,
+          "roll_events": 4,
+          "max_drawdown_cny": "3219.2409999997"
+        },
+        "ru": {
+          "net_pnl_cny": "-22737.5",
+          "fees_cny": "187.5",
+          "filled_events": 64,
+          "roll_events": 2,
+          "max_drawdown_cny": "26828.5"
+        },
+        "sc": {
+          "net_pnl_cny": "-117380.0000000062",
+          "fees_cny": "2280",
+          "filled_events": 123,
+          "roll_events": 8,
+          "max_drawdown_cny": "135490.0000000057"
+        }
+      }
+    },
+    "supporting_artifacts": [
+      {
+        "relative_path": "backtest-facts.json",
+        "media_type": "application/json",
+        "bytes": 3308,
+        "content_sha256": "ebcdf7cabbf1447db1cbc25ed068e10f860f38ecd4af0e0801c01621f52b1899"
+      },
+      {
+        "relative_path": "external/target-changes.jsonl",
+        "media_type": "application/x-ndjson",
+        "bytes": 1593988,
+        "content_sha256": "1a8d0e50e2f96b41e07d875415818021eb04f5683e289706b0488cefd8b294ee"
+      }
+    ],
+    "evidence_content_hash": "1781405cc4753b60c7485fcbe4a0eeb9987ffe8a5eda28cfd94c3f24fdd35358"
+  },
+  "review_assessments": [
+    {
+      "schema_version": "research_lab.review.v2",
+      "hash_profile": "research-json-v1",
+      "review_id": "trading_backtest_example-review",
+      "revision": "rev.1",
+      "evidence_id": "trading_backtest_example-evidence",
+      "evidence_content_hash": "1781405cc4753b60c7485fcbe4a0eeb9987ffe8a5eda28cfd94c3f24fdd35358",
+      "reviewer": "Codex primary case assessment; independent quality review recorded separately",
+      "reviewed_at": "2026-09-15T09:24:44.633286Z",
+      "criteria_ref": {
+        "id": "phase0-case-acceptance",
+        "revision": "rev.1",
+        "content_hash": "f25b38a72a9e66f3a716cd8048fd77b9d5a75b2d7f2bbfb02f09d290fc7cb817"
+      },
+      "recommendation": "improve",
+      "reason": "真实数据与固定模拟执行假设的历史复跑完成，保留STOP_ECONOMIC_GATE；603事件及成交明细hash相同，4项方向会计残差不同，未满足字节一致复现。不能提升为真实撮合或策略经济门槛通过。",
+      "review_content_hash": "eb09625dac5e60ea6914b2b52c57f3b4b92cf7ba378c7dd97c93a829280de0ac"
+    }
+  ]
+}

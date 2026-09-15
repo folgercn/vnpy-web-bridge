@@ -1,0 +1,101 @@
+{
+  "historical_summary_sha256": "93117efaa62798c5b35581de8d308dc15b16f1df30e5c2d85dabc0628df16243",
+  "current_summary_sha256": "fb4175678f835ad2bd0a2d8321e2cfb7546959479615f935898907f8c58d2f19",
+  "events_input": 607,
+  "events_applied": 603,
+  "corrected_events": 603,
+  "corrected_event_sha256": "74915208177e188f65074290d68590eec7b4c4d811a8648c1d92a331d2cbd71c",
+  "target_changes_sha256": "1a8d0e50e2f96b41e07d875415818021eb04f5683e289706b0488cefd8b294ee",
+  "historical_target_changes_sha256": "1a8d0e50e2f96b41e07d875415818021eb04f5683e289706b0488cefd8b294ee",
+  "summary_differences": {
+    "replay-summary.json": [
+      {
+        "path": "/standalone_accounts/sc/PRIMARY_2S/CANDIDATE/DEV_2023/directional_pnl_identity_error_cny",
+        "historical": "0",
+        "current": "-0.0000000001"
+      },
+      {
+        "path": "/standalone_accounts/sc/PRIMARY_2S/CANDIDATE/FULL_DEV/directional_pnl_identity_error_cny",
+        "historical": "0.0000000001",
+        "current": "0"
+      },
+      {
+        "path": "/standalone_accounts/sc/STRESS_5S/CANDIDATE/DEV_2023/directional_pnl_identity_error_cny",
+        "historical": "0.0000000002",
+        "current": "0.0000000003"
+      },
+      {
+        "path": "/standalone_accounts/sc/STRESS_5S/PAIRED/DEV_2023/directional_pnl_identity_error_cny",
+        "historical": "0.0000000001",
+        "current": "0.0000000002"
+      }
+    ],
+    "paired-baseline-comparison.json": [
+      {
+        "path": "/by_product/sc/PRIMARY_2S/CANDIDATE/DEV_2023/directional_pnl_identity_error_cny",
+        "historical": "0",
+        "current": "-0.0000000001"
+      },
+      {
+        "path": "/by_product/sc/PRIMARY_2S/CANDIDATE/FULL_DEV/directional_pnl_identity_error_cny",
+        "historical": "0.0000000001",
+        "current": "0"
+      },
+      {
+        "path": "/by_product/sc/STRESS_5S/CANDIDATE/DEV_2023/directional_pnl_identity_error_cny",
+        "historical": "0.0000000002",
+        "current": "0.0000000003"
+      },
+      {
+        "path": "/by_product/sc/STRESS_5S/PAIRED/DEV_2023/directional_pnl_identity_error_cny",
+        "historical": "0.0000000001",
+        "current": "0.0000000002"
+      }
+    ]
+  },
+  "source_hashes_match_historical": true,
+  "primary_candidate_full_dev": {
+    "ag": {
+      "net_pnl_cny": "-1620.0892499997",
+      "fees_cny": "120.08925",
+      "filled_events": 25,
+      "roll_events": 0,
+      "max_drawdown_cny": "5407.6447499999"
+    },
+    "au": {
+      "net_pnl_cny": "0",
+      "fees_cny": "0",
+      "filled_events": 0,
+      "roll_events": 0,
+      "max_drawdown_cny": "0"
+    },
+    "cu": {
+      "net_pnl_cny": "10401.6037500004",
+      "fees_cny": "998.39625",
+      "filled_events": 60,
+      "roll_events": 4,
+      "max_drawdown_cny": "12409.1612499997"
+    },
+    "rb": {
+      "net_pnl_cny": "-1274.1689999998",
+      "fees_cny": "294.169",
+      "filled_events": 70,
+      "roll_events": 4,
+      "max_drawdown_cny": "3219.2409999997"
+    },
+    "ru": {
+      "net_pnl_cny": "-22737.5",
+      "fees_cny": "187.5",
+      "filled_events": 64,
+      "roll_events": 2,
+      "max_drawdown_cny": "26828.5"
+    },
+    "sc": {
+      "net_pnl_cny": "-117380.0000000062",
+      "fees_cny": "2280",
+      "filled_events": 123,
+      "roll_events": 8,
+      "max_drawdown_cny": "135490.0000000057"
+    }
+  }
+}

@@ -1,0 +1,242 @@
+{
+  "protocol_status": "DRAFT_UNFROZEN",
+  "mapping_status": "RETROSPECTIVE_CASE_WALKTHROUGH_NOT_FORMAL_SCHEMA_VALIDATED",
+  "research_task": {
+    "schema_version": "research_lab.task.v2",
+    "hash_profile": "research-json-v1",
+    "task_id": "data_quality_example",
+    "revision": "rev.1",
+    "research_type": "data_quality",
+    "objective": "验证真实历史案例能表达为研究协议并复核计算事实；不验收Alpha或冻结协议",
+    "data_requirements": {
+      "products": [
+        "ag",
+        "au",
+        "cu",
+        "rb",
+        "ru",
+        "sc"
+      ],
+      "dev_dates": [
+        "2023-01-03",
+        "2024-12-31"
+      ],
+      "warmup_from": "2022-09-01"
+    },
+    "task_content_hash": "0b50b6167f27a5e97ab1f797011356c98760e9aa0983a2d0f7a94af67b2ff295"
+  },
+  "experiment_spec": {
+    "schema_version": "research_lab.experiment.v2",
+    "hash_profile": "research-json-v1",
+    "spec_id": "data_quality_example-spec",
+    "revision": "rev.1",
+    "task_id": "data_quality_example",
+    "task_revision": "rev.1",
+    "task_content_hash": "0b50b6167f27a5e97ab1f797011356c98760e9aa0983a2d0f7a94af67b2ff295",
+    "experiment_type": "data_quality",
+    "research_stage": "validation",
+    "method": {
+      "input": "curve_contract_daily.csv supplied derived panel, not original exchange byte audit",
+      "checks": [
+        "product-day coverage against supplied official calendar",
+        "duplicate day-contract keys",
+        "per-contract source-order reversals",
+        "missing/nonpositive settlement",
+        "available-day strictly after source-day"
+      ]
+    },
+    "candidate_decision_criteria": {
+      "purpose": "protocol expression and reproducible historical calculation only; not strategy acceptance, protocol freeze or Phase0 closure",
+      "plan_sha256": "f25b38a72a9e66f3a716cd8048fd77b9d5a75b2d7f2bbfb02f09d290fc7cb817"
+    },
+    "source_snapshot": {
+      "curve_contract_daily.csv": "f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351",
+      "official_trading_days_and_sessions.csv": "6503e6176c9458df3e42fd557d7c1826feeaa9ff73fed7dc34020672b112eeb1"
+    },
+    "spec_content_hash": "46bd4e5fec68b2610ebc2609036d250f1e0004fa01dec10fd760c8ee397821f7"
+  },
+  "experiment_run": {
+    "schema_version": "research_lab.run.v2",
+    "hash_profile": "research-json-v1",
+    "run_id": "data_quality_example-run-20260915",
+    "run_status": "COMPLETED",
+    "spec_id": "data_quality_example-spec",
+    "spec_revision": "rev.1",
+    "spec_content_hash": "46bd4e5fec68b2610ebc2609036d250f1e0004fa01dec10fd760c8ee397821f7",
+    "trial_context": {
+      "research_stage": "validation",
+      "trial_kind": null,
+      "retry_of_run_id": null,
+      "holdout_usage_state": "not_applicable"
+    },
+    "resolved_computation_manifest": {
+      "hash_profile": "research-json-v1",
+      "fingerprint_schema_version": "phase0.validation_case_fingerprint.v1",
+      "code_revision": "0bb19e27a473c5742b3d1a054b9b967a6e041523",
+      "source_diff_fingerprint": "bce98d04365d8bda5200a14bcfffcb63fac6eb7ce0fae872bada6e077d940e75",
+      "record_mapping_script_sha256": "0c1cd4e74f14689a2779a693f3e9271ebebec41280233d6199cb73652fffbc3a",
+      "comparison_script_sha256": null,
+      "feature_implementation": {
+        "id": "phase0_offline_case_calculation",
+        "sha256": "bce98d04365d8bda5200a14bcfffcb63fac6eb7ce0fae872bada6e077d940e75"
+      },
+      "dependency_lock_hash": "8231156b8a25b8b567599dac2a8c9cc78706537fe6651bdacd1b9c7656298dfa",
+      "runtime_environment": {
+        "python_version": "3.12.4 (main, Jun  6 2024, 18:26:44) [Clang 15.0.0 (clang-1500.3.9.4)]",
+        "implementation": "CPython",
+        "platform": "macOS-26.6.2-x86_64-i386-64bit",
+        "machine": "x86_64",
+        "executable_sha256": "dc29238974c23b2bce27e7ac97e0b07d99e8dcb2f53cf2b6681c1a884a813344",
+        "external_dependencies": [],
+        "plan_sha256": "f25b38a72a9e66f3a716cd8048fd77b9d5a75b2d7f2bbfb02f09d290fc7cb817",
+        "analysis_script_sha256": "bce98d04365d8bda5200a14bcfffcb63fac6eb7ce0fae872bada6e077d940e75",
+        "loaded_module_file_sha256": {
+          "math": "00cba86f9108487e6945302cfb409c30598d50aaa581385a6a4670bec8360a04",
+          "statistics": "b9ef01a757de37e9fbf13d32beeb9530c8271582cabec4998226dcb7e0613cd0",
+          "csv": "46004923196e98a67f87d30da64d070027c81f144f5ac91242fbfae33507dda8",
+          "decimal": "6cb648bf8c466ed08eaa46fb94d18b3e2f5e939946d4efe75bf6fd7ceb58a696",
+          "json": "d5d41e2c29049515d295d81a6d40b4890fbec8d8482cfb401630f8ef2f77e4d5",
+          "hashlib": "6dbdebf270868b391080e21dc9687eddfaf321c965ad979f68d3f5c423c613ab"
+        },
+        "environment_limit": "Selected module files + interpreter recorded, not a complete hermetic OS/stdlib image."
+      },
+      "dataset_snapshot": {
+        "curve_contract_daily.csv": "f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351",
+        "official_trading_days_and_sessions.csv": "6503e6176c9458df3e42fd557d7c1826feeaa9ff73fed7dc34020672b112eeb1"
+      },
+      "effective_parameters": {
+        "input": "curve_contract_daily.csv supplied derived panel, not original exchange byte audit",
+        "checks": [
+          "product-day coverage against supplied official calendar",
+          "duplicate day-contract keys",
+          "per-contract source-order reversals",
+          "missing/nonpositive settlement",
+          "available-day strictly after source-day"
+        ]
+      },
+      "scientific_time": {
+        "products": [
+          "ag",
+          "au",
+          "cu",
+          "rb",
+          "ru",
+          "sc"
+        ],
+        "dev_dates": [
+          "2023-01-03",
+          "2024-12-31"
+        ],
+        "warmup_from": "2022-09-01"
+      },
+      "random_seed": null,
+      "random_seed_reason": "deterministic calculation, no stochastic sampling"
+    },
+    "scientific_fingerprint": "550911a8642525a6eb631e10a66e13e0d46e58c31c824eaf670dff16cf8b51e3",
+    "timing": {
+      "started_at": null,
+      "completed_at": null,
+      "recorded_at": "2026-09-15T09:24:44.633286Z"
+    },
+    "timing_missing_reason": "Retrospective protocol mapping: original process start/end timestamps were not captured; recorded_at is mapping time, not execution time.",
+    "process_exit_code": 0,
+    "run_content_hash": "ec8d75f554dd7bc5f988b90f468ad4fdd97ba35df6e3abdba8f38cdb3aa896d7"
+  },
+  "result_evidence": {
+    "schema_version": "research_lab.evidence.v2",
+    "hash_profile": "research-json-v1",
+    "evidence_id": "data_quality_example-evidence",
+    "run_id": "data_quality_example-run-20260915",
+    "run_status_snapshot": "COMPLETED",
+    "run_content_hash": "ec8d75f554dd7bc5f988b90f468ad4fdd97ba35df6e3abdba8f38cdb3aa896d7",
+    "execution_status": "COMPLETED",
+    "typed_metrics": {
+      "excluded_after_dev_rows": 46116,
+      "input_kind": "supplied_derived_panel",
+      "raw_input_sha256": "f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351",
+      "calendar_sha256": "6503e6176c9458df3e42fd557d7c1826feeaa9ff73fed7dc34020672b112eeb1",
+      "dev_start": "2023-01-03",
+      "dev_end": "2024-12-31",
+      "row_count": 35816,
+      "expected_product_days": 2904,
+      "observed_product_days": 2904,
+      "duplicate_key_excess_rows": 0,
+      "source_order_reversals": 0,
+      "invalid_settlement_rows": 0,
+      "invalid_available_day_rows": 0,
+      "coverage": [
+        {
+          "product": "ag",
+          "expected_days": 484,
+          "observed_days": 484,
+          "missing_days": []
+        },
+        {
+          "product": "au",
+          "expected_days": 484,
+          "observed_days": 484,
+          "missing_days": []
+        },
+        {
+          "product": "cu",
+          "expected_days": 484,
+          "observed_days": 484,
+          "missing_days": []
+        },
+        {
+          "product": "rb",
+          "expected_days": 484,
+          "observed_days": 484,
+          "missing_days": []
+        },
+        {
+          "product": "ru",
+          "expected_days": 484,
+          "observed_days": 484,
+          "missing_days": []
+        },
+        {
+          "product": "sc",
+          "expected_days": 484,
+          "observed_days": 484,
+          "missing_days": []
+        }
+      ]
+    },
+    "supporting_artifacts": [
+      {
+        "relative_path": "data-quality.json",
+        "media_type": "application/json",
+        "bytes": 1258,
+        "content_sha256": "d680d166aa1aa1e96ed0adcaa1bd080a85f176840f1b827f7cb02f346ce9a34e"
+      },
+      {
+        "relative_path": "data-quality-anomalies.json",
+        "media_type": "application/json",
+        "bytes": 100,
+        "content_sha256": "4a4ed458da1bc2b557d946405baf654571c3a19f603ff2c28ff915aad17f626f"
+      }
+    ],
+    "evidence_content_hash": "e4267703e606a2e54bba860634de046443badcd339e50628caf905b4add9c2e6"
+  },
+  "review_assessments": [
+    {
+      "schema_version": "research_lab.review.v2",
+      "hash_profile": "research-json-v1",
+      "review_id": "data_quality_example-review",
+      "revision": "rev.1",
+      "evidence_id": "data_quality_example-evidence",
+      "evidence_content_hash": "e4267703e606a2e54bba860634de046443badcd339e50628caf905b4add9c2e6",
+      "reviewer": "Codex primary case assessment; independent quality review recorded separately",
+      "reviewed_at": "2026-09-15T09:24:44.633286Z",
+      "criteria_ref": {
+        "id": "phase0-case-acceptance",
+        "revision": "rev.1",
+        "content_hash": "f25b38a72a9e66f3a716cd8048fd77b9d5a75b2d7f2bbfb02f09d290fc7cb817"
+      },
+      "recommendation": "accept",
+      "reason": "本次所供派生曲线表的六品种日覆盖与列级检查通过；不能据此证明交易所原始payload完整、盘中连续或历史PIT合规。",
+      "review_content_hash": "9b1291718d278a1311195b67f3a3c413753ebd62d63ec0bebb4edcbc7a3c58ff"
+    }
+  ]
+}

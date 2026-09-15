@@ -1,0 +1,19 @@
+{
+  "python_version": "3.12.4 (main, Jun  6 2024, 18:26:44) [Clang 15.0.0 (clang-1500.3.9.4)]",
+  "implementation": "CPython",
+  "platform": "macOS-26.6.2-x86_64-i386-64bit",
+  "machine": "x86_64",
+  "executable_sha256": "dc29238974c23b2bce27e7ac97e0b07d99e8dcb2f53cf2b6681c1a884a813344",
+  "external_dependencies": [],
+  "plan_sha256": "f25b38a72a9e66f3a716cd8048fd77b9d5a75b2d7f2bbfb02f09d290fc7cb817",
+  "analysis_script_sha256": "bce98d04365d8bda5200a14bcfffcb63fac6eb7ce0fae872bada6e077d940e75",
+  "loaded_module_file_sha256": {
+    "math": "00cba86f9108487e6945302cfb409c30598d50aaa581385a6a4670bec8360a04",
+    "statistics": "b9ef01a757de37e9fbf13d32beeb9530c8271582cabec4998226dcb7e0613cd0",
+    "csv": "46004923196e98a67f87d30da64d070027c81f144f5ac91242fbfae33507dda8",
+    "decimal": "6cb648bf8c466ed08eaa46fb94d18b3e2f5e939946d4efe75bf6fd7ceb58a696",
+    "json": "d5d41e2c29049515d295d81a6d40b4890fbec8d8482cfb401630f8ef2f77e4d5",
+    "hashlib": "6dbdebf270868b391080e21dc9687eddfaf321c965ad979f68d3f5c423c613ab"
+  },
+  "environment_limit": "Selected module files + interpreter recorded, not a complete hermetic OS/stdlib image."
+}

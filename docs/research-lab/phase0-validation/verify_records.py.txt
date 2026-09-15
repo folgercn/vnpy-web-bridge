@@ -1,0 +1,41 @@
+import os
+from pathlib import Path
+import json,hashlib,re,shutil
+B=Path(os.environ.get('PHASE0_CASE_ROOT', '/tmp/vnpy-phase0-validation'));D=Path(os.environ.get('PHASE0_RECORD_DIR', str(B/'records')))
+def canonical(v):
+ if v is None:return 'null'
+ if isinstance(v,bool):return str(v).lower()
+ if isinstance(v,int):
+  assert abs(v)<=9007199254740991;return str(v)
+ if isinstance(v,str):
+  assert not any(0xd800<=ord(c)<=0xdfff for c in v)
+  return '"'+''.join('\\"' if c=='"' else '\\\\' if c=='\\' else '\\u%04x'%ord(c) if ord(c)<32 else c for c in v)+'"'
+ if isinstance(v,list):return '['+','.join(canonical(x) for x in v)+']'
+ if isinstance(v,dict):
+  assert all(k and all(32<=ord(c)<=126 for c in k) for k in v)
+  return '{'+','.join(canonical(k)+':'+canonical(v[k]) for k in sorted(v))+'}'
+ raise AssertionError(type(v))
+def digest(x):return hashlib.sha256(canonical(x).encode()).hexdigest()
+def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
+checks=0
+for p in sorted(D.glob('*_example.json')):
+ x=json.loads(p.read_text());assert x['protocol_status']=='DRAFT_UNFROZEN'
+ pairs=[(x['research_task'],'task_content_hash'),(x['experiment_spec'],'spec_content_hash'),(x['experiment_run'],'run_content_hash'),(x['result_evidence'],'evidence_content_hash'),(x['review_assessments'][0],'review_content_hash')]
+ for obj,key in pairs:
+  body={k:v for k,v in obj.items() if k!=key};assert obj[key]==digest(body),(p,key);checks+=1
+ task,spec,run,ev,review=[obj for obj,key in pairs]
+ assert spec['task_content_hash']==task['task_content_hash']
+ assert run['spec_content_hash']==spec['spec_content_hash']
+ assert ev['run_content_hash']==run['run_content_hash']
+ assert review['evidence_content_hash']==ev['evidence_content_hash']
+ assert run['scientific_fingerprint']==digest(run['resolved_computation_manifest'])
+ assert run['run_status']==ev['run_status_snapshot']=='COMPLETED'
+ assert not {'evidence_validity','audit_conclusion','research_conclusion','recommendation'}&ev.keys()
+ for a in ev['supporting_artifacts']:
+  f=B/'complete-artifacts'/Path(a['relative_path']).name if a['relative_path'].startswith('external/') else D/a['relative_path']
+  assert f.stat().st_size==a['bytes'] and sha(f)==a['content_sha256'],f
+ print('PASS',p.name,'record hashes, upstream chain, scientific fingerprint and complete artifacts')
+assert len(list(D.glob('*_example.json')))==3
+# Assemble only a new local bundle; existing complete bundle must never be overwritten.
+bundle=B/'bundle';shutil.copytree(D,bundle);shutil.copytree(B/'complete-artifacts',bundle/'external')
+print('PASS',checks,'object hashes; complete bundle assembled')
