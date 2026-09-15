@@ -56,6 +56,24 @@ mutate('missing_manifest_output', request, lambda x: x['expected_outputs'].pop(1
 mutate('wrong_schema_version', request, lambda x: x['expected_outputs'][0].update(schema_version='research_lab.review.v2'))
 mutate('unknown_operation', request, lambda x: x.update(operation='start_worker'))
 mutate('review_missing_scope', review, lambda x: x.pop('review_scope'))
+mutate('review_missing_criteria_ref', review, lambda x: x.pop('criteria_ref'))
+for field in ['id', 'revision', 'content_hash']:
+    mutate('criteria_missing_' + field, review, lambda x, f=field: x['criteria_ref'].pop(f))
+mutate('criteria_empty_id', review, lambda x: x['criteria_ref'].update(id=''))
+mutate('criteria_revision_zero', review, lambda x: x['criteria_ref'].update(revision='rev.0'))
+mutate('criteria_revision_bad_format', review, lambda x: x['criteria_ref'].update(revision='2'))
+mutate('criteria_null_hash', review, lambda x: x['criteria_ref'].update(content_hash=None))
+mutate('criteria_short_hash', review, lambda x: x['criteria_ref'].update(content_hash='abcd'))
+mutate('criteria_uppercase_hash', review, lambda x: x['criteria_ref'].update(content_hash='A' * 64))
+mutate('criteria_unknown_field', review, lambda x: x['criteria_ref'].update(latest=True))
+mutate('criteria_not_on_execute_request', request, lambda x: x.update(criteria_ref=copy.deepcopy(review['criteria_ref'])))
+re_review = copy.deepcopy(review)
+re_review['handoff_id'] = 'fixture-review-with-criteria-rev2'
+re_review['criteria_ref'].update(revision='rev.2', content_hash='1' * 64)
+assert re_review['context_refs'] == review['context_refs']
+assert re_review['artifact_requirements'] == review['artifact_requirements']
+check('same_evidence_new_criteria_revision', re_review, True)
+
 mutate('review_missing_artifacts', review, lambda x: x['artifact_requirements'].update(exact_refs=[]))
 mutate('artifact_missing_revision', review, lambda x: x['artifact_requirements']['exact_refs'][0].pop('manifest_revision'))
 mutate('artifact_hash_not_bound', review, lambda x: x['artifact_requirements']['exact_refs'][0].update(content_sha256=None))
@@ -92,4 +110,6 @@ for op, sender, recipient, output in [('review_evidence', 'critic', 'execution',
     if op == 'review_evidence':
         value['review_scope'] = 'failure_diagnosis'
     check(op + '_complete_shape', value, True)
+    if op == 'review_evidence':
+        mutate('criteria_not_duplicated_in_response', value, lambda x: x.update(criteria_ref=copy.deepcopy(review['criteria_ref'])))
 print(f'PASS: {checks} structural checks; synthetic shapes only, no execution or semantic admission.')

@@ -105,6 +105,11 @@
         "schema_version": "research_lab.review.v2"
       }
     ],
-    "review_scope": "research_assessment"
+    "review_scope": "research_assessment",
+    "criteria_ref": {
+      "id": "fixture-quality-review-criteria",
+      "revision": "rev.1",
+      "content_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
   }
 }

@@ -84,6 +84,9 @@
         "research_assessment",
         "failure_diagnosis"
       ]
+    },
+    "criteria_ref": {
+      "$ref": "#/$defs/criteria_ref"
     }
   },
   "required": [
@@ -193,6 +196,29 @@
         "artifact_id",
         "role",
         "content_sha256"
+      ]
+    },
+    "criteria_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "type": "string",
+          "pattern": "^rev\\.[1-9][0-9]*$"
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "id",
+        "revision",
+        "content_hash"
       ]
     },
     "expected_object": {
@@ -692,6 +718,11 @@
               "required": [
                 "review_scope"
               ]
+            },
+            {
+              "required": [
+                "criteria_ref"
+              ]
             }
           ]
         }
@@ -852,6 +883,11 @@
               "required": [
                 "review_scope"
               ]
+            },
+            {
+              "required": [
+                "criteria_ref"
+              ]
             }
           ]
         }
@@ -910,7 +946,10 @@
                     }
                   ]
                 }
-              }
+              },
+              "required": [
+                "criteria_ref"
+              ]
             },
             "else": {
               "properties": {
@@ -920,6 +959,11 @@
                 "recipient_role": {
                   "const": "execution"
                 }
+              },
+              "not": {
+                "required": [
+                  "criteria_ref"
+                ]
               }
             }
           },
@@ -1096,6 +1140,11 @@
             {
               "required": [
                 "review_scope"
+              ]
+            },
+            {
+              "required": [
+                "criteria_ref"
               ]
             }
           ]

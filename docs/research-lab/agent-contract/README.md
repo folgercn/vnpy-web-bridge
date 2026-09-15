@@ -36,6 +36,7 @@
 | artifact_requirements | 请求必填；固定 role profile、必需角色集和当前已存在 Artifact 的 exact_refs |
 | expected_outputs | 请求必填；输出对象类型与 schema_version 列表；不提前分配伪造结果摘要 |
 | status / output_refs / problem | 仅响应使用；成功交接交付真实输出引用，非成功返回明确问题，二者互斥 |
+| criteria_ref | 仅 review_evidence 请求必填：判据 id、非零 revision、64 位小写 content_hash；不得从 Spec 或模型默认值猜测 |
 | review_scope | 仅 review_evidence 请求/响应必填：research_assessment / failure_diagnosis |
 
 `object_ref` 含 object_type、object_id、content_hash；Task/Spec/Manifest/Review 还必须有非零 revision。Run/Evidence 以不可变 id+hash 引用，**不凭空新增 revision**。正式引用不允许 null 摘要。字段中的 object_type 必须和引用槽位一致，不能把 Review 冒充 Spec。
@@ -53,6 +54,12 @@ Artifact 精确引用含 `manifest_id/manifest_revision/manifest_content_hash/ar
 
 ## 3. Review Contract
 
+`review_evidence` 请求根级必须显式携带 `criteria_ref: {id, revision, content_hash}`，选定本次评审标准；它是对上位判据引用的交接表达，不新增注册服务或研究对象类型。接收方须解析并核对对应不可变定义；缺引用/格式错误拒绝，定义不可取得则 blocked，版本不支持则 unsupported，摘要不符拒绝。不得从 Spec、历史 Review 或模型默认规则中隐式选择一版。
+
+响应不再复制 criteria_ref，继续交付精确 Review 引用。消费方必须通过 in_reply_to 找到原请求，读取实际输出 Review，并逐项核对其 criteria_ref 的 id/revision/content_hash 与请求一致；任何差异拒绝作为该请求的有效交付。该跨对象核对属于语义准入，单份 Handoff Schema 无法证明，当前未实现 Runtime。
+
+同一份 Evidence 可以先按 rev.1，再用新 handoff_id 指定 rev.2 重评；请求仅改变判据引用及交接标识，原 Task/Spec/Run/Evidence/Artifact 不变。第二次输出新增 Review 或新 Review revision，保留第一次结果；事后标准不能冒充原 Spec 预登记判据。
+
 Critic 必须先校验 Evidence、Manifest 与 Run 的精确引用、内容摘要/载荷及指标口径，再按 #541/#542 的消费边界评审。
 
 | Review 字段/内容 | 规则 |
@@ -60,7 +67,7 @@ Critic 必须先校验 Evidence、Manifest 与 Run 的精确引用、内容摘�
 | schema_version、hash_profile、review_id、revision、review_content_hash | 沿用上位 Review；record hash 只排除自身根摘要，保留证据与判据引用；新 revision 不覆写旧版 |
 | evidence_id / evidence_content_hash | 精确绑定已存在的终态事实；经 Evidence 的 Manifest 引用定位载荷，不另建循环摘要 |
 | reviewer / reviewed_at | 实际评审组件或人的身份记录、合法 UTC 微秒时间；不是密码学认证或权限许可 |
-| criteria_ref | 版本化判据 id/revision/内容摘要；同时对照 Spec 预声明目标。事后变更必须如实标记，不能伪称预登记 |
+| criteria_ref | 必须与本次请求 criteria_ref 的 id/revision/content_hash 完全一致；同时对照 Spec 预声明目标。事后变更必须如实标记，不能伪称预登记 |
 | recommendation / reason | accept / improve / reject 及可核验理由；引用相关 artifact_id/指标事实，不输出 Agent 私有思维链或覆写事实 |
 
 本轮没有新建第二份 Review 实体 Schema；交接只约束输出类型/版本/引用，Review 内容继续由上位协议及最终唯一 Schema 验证。
@@ -94,10 +101,10 @@ Critic 必须先校验 Evidence、Manifest 与 Run 的精确引用、内容摘�
 | --- | --- |
 | 未知字段、角色/operation 组合、请求响应字段分离 | 参与者实际身份、有效授权和能力；角色名不能授权运行 |
 | 引用槽位类型、合法摘要格式、适用 revision、必需输入类型 | 解析真实对象及摘要、Task→Spec→Run→Manifest→Evidence 一致性；Run/证据真实终态 |
-| operation 所需输出类型、状态/code 一致、未知结果阻断 | 响应 in_reply_to/operation/方向/scope 与原请求一致、输出确实属于该请求；重复冲突与幂等处理 |
+| operation 所需输出类型、状态/code 一致、未知结果阻断 | 响应 in_reply_to/operation/方向/scope 与原请求一致、输出确实属于该请求，实际 Review.criteria_ref 与请求逐项一致；重复冲突与幂等处理 |
 | review_evidence 至少一个 exact_ref；字段完整性 | 固定 profile 完整必需角色与分片集、实际载荷摘要/schema、#541 S1–S7；至少一个引用不等于完整证据 |
 | 正式形状拒绝 null 摘要；非成功原因字段必填 | research-json-v1 原始解析约束及规范记录 hash；输入浮点/重复键/Unicode，不能靠 JSON Schema 单独保证 |
-| 输出对象的版本标签与类型对应 | 方法/内容 Schema 的不可变定义源及版本解析；不支持时明确报错 |
+| 输出对象版本与类型对应、评审请求判据引用必填及格式 | 方法/内容 Schema 的不可变定义源及版本解析；不支持时明确报错 |
 
 人工作用是检查目标、科学方法与来源证据的合理性，不是豁免自动拒绝条件。未来准入器尚未完成之前，不得因文档和离线形状通过开放 Runtime。
 
@@ -106,7 +113,7 @@ Critic 必须先校验 Evidence、Manifest 与 Run 的精确引用、内容摘�
 所有 `handoff-*.json` 和 `response-*.json` 外层均写 `SYNTHETIC_SHAPE_ONLY_NOT_EXECUTABLE`。其中零摘要只是固定测试常量，**不是算出的真实对象/文件摘要**；没有真实 Run/Evidence/授权，语义准入必然不通过。Schema 仅校验包装内的 `handoff`。包装不是正式协议的一部分，不能忽略包装后宣称样例已可执行。
 
 - Research → Execution：声明数据质量案例预期输出角色，exact_refs 为空，不伪造尚未执行的输出文件。
-- Execution → Critic：演示 Manifest+逐角色引用及 research_assessment，不声称存在真实历史绑定。
+- Execution → Critic：演示 Manifest+逐角色引用、显式 criteria_ref 及 research_assessment，不声称存在真实历史绑定。
 - Critic → Research：保留 Review 及证据来源，输出新 Spec 提案，绝不修改旧记录。
 - 四份 response 演示阻塞/拒绝/缺件/不支持，尤其结果未知时不能自动重试。
 
@@ -116,6 +123,6 @@ Critic 必须先校验 Evidence、Manifest 与 Run 的精确引用、内容摘�
 .venv/bin/python docs/research-lab/agent-contract/verify_contract.py.txt
 ```
 
-这是离线审计脚本文本，不是接入生产的 validator。反例覆盖缺 Task/Spec、缺 revision/hash、错误引用类型、错误角色/输出、错误响应状态、无原因、未绑定摘要、越权添加执行字段。未做真实 bundle、消息投递或 v2 输入驱动计算。
+这是离线审计脚本文本，不是接入生产的 validator。判据用例额外覆盖缺 id/revision/hash、非法版本/摘要、非评审请求携带判据和同 Evidence 改用 rev.2；输出 Review 选错版本/摘要必须由上述跨对象语义核对拒绝，不列作已通过的结构校验。反例覆盖缺 Task/Spec、缺 revision/hash、错误引用类型、错误角色/输出、错误响应状态、无原因、未绑定摘要、越权添加执行字段。未做真实 bundle、消息投递或 v2 输入驱动计算。
 
 下一步是极小的正向 v2 案例：从真实绑定 Task/Spec 开始，验证准入、实际 Run、Artifact、Evidence 和独立 Review；不能复用 #540 回溯映射冒充正向执行。#498 决定冻结，再逐项判断 #538 退出。本次不提前增加 Runtime。
