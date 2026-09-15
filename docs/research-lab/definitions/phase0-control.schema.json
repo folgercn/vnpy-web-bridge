@@ -1,0 +1,575 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "research_task": {
+      "type": "object",
+      "properties": {
+        "data_requirements": {
+          "type": "object",
+          "properties": {
+            "date_end_exclusive": {
+              "type": "string",
+              "minLength": 1
+            },
+            "date_start": {
+              "type": "string",
+              "minLength": 1
+            },
+            "fields": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "products": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "required": [
+            "date_end_exclusive",
+            "date_start",
+            "fields",
+            "products"
+          ],
+          "additionalProperties": false
+        },
+        "hash_profile": {
+          "const": "research-json-v1"
+        },
+        "objective": {
+          "type": "string",
+          "minLength": 1
+        },
+        "research_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "type": "string",
+          "pattern": "^rev\\.[1-9][0-9]*$"
+        },
+        "schema_version": {
+          "const": "research_lab.task.v2"
+        },
+        "task_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "data_requirements",
+        "hash_profile",
+        "objective",
+        "research_type",
+        "revision",
+        "schema_version",
+        "task_content_hash",
+        "task_id"
+      ],
+      "additionalProperties": false
+    },
+    "experiment_run": {
+      "type": "object",
+      "properties": {
+        "hash_profile": {
+          "const": "research-json-v1"
+        },
+        "input_lock_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "process_exit_code": {
+          "enum": [
+            0,
+            1
+          ]
+        },
+        "resolved_computation_manifest": {
+          "type": "object",
+          "properties": {
+            "calendar_rule": {
+              "type": "null"
+            },
+            "code_revision": {
+              "type": "string",
+              "minLength": 1
+            },
+            "dependency_lock_hash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "fingerprint_schema_version": {
+              "type": "string",
+              "minLength": 1
+            },
+            "hash_profile": {
+              "type": "string",
+              "minLength": 1
+            },
+            "holdout_usage_state": {
+              "type": "string",
+              "minLength": 1
+            },
+            "method_definition_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "normalization_rule_version": {
+              "type": "string",
+              "minLength": 1
+            },
+            "random_seed": {
+              "type": "null"
+            },
+            "raw_bytes_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "receipt_evidence": {
+              "type": "null"
+            },
+            "resolved_parameters": {
+              "type": "object",
+              "properties": {
+                "strict": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "strict"
+              ],
+              "additionalProperties": false
+            },
+            "scientific_time": {
+              "type": "object",
+              "properties": {
+                "end": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "start": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              },
+              "required": [
+                "end",
+                "start"
+              ],
+              "additionalProperties": false
+            },
+            "source_diff_fingerprint": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "universe": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "required": [
+            "calendar_rule",
+            "code_revision",
+            "dependency_lock_hash",
+            "fingerprint_schema_version",
+            "hash_profile",
+            "holdout_usage_state",
+            "method_definition_sha256",
+            "normalization_rule_version",
+            "random_seed",
+            "raw_bytes_sha256",
+            "receipt_evidence",
+            "resolved_parameters",
+            "scientific_time",
+            "source_diff_fingerprint",
+            "universe"
+          ],
+          "additionalProperties": false
+        },
+        "run_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "run_status": {
+          "enum": [
+            "COMPLETED",
+            "FAILED"
+          ]
+        },
+        "schema_version": {
+          "const": "research_lab.run.v2"
+        },
+        "scientific_fingerprint": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "spec_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "spec_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "spec_revision": {
+          "type": "string",
+          "pattern": "^rev\\.[1-9][0-9]*$"
+        },
+        "timing": {
+          "type": "object",
+          "properties": {
+            "completed_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "started_at": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          "required": [
+            "completed_at",
+            "started_at"
+          ],
+          "additionalProperties": false
+        },
+        "trial_context": {
+          "type": "object",
+          "properties": {
+            "holdout_usage_state": {
+              "type": "string",
+              "minLength": 1
+            },
+            "research_stage": {
+              "type": "string",
+              "minLength": 1
+            },
+            "retry_of_run_id": {
+              "type": "null"
+            },
+            "trial_kind": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "holdout_usage_state",
+            "research_stage",
+            "retry_of_run_id",
+            "trial_kind"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "hash_profile",
+        "input_lock_sha256",
+        "process_exit_code",
+        "resolved_computation_manifest",
+        "run_content_hash",
+        "run_id",
+        "run_status",
+        "schema_version",
+        "scientific_fingerprint",
+        "spec_content_hash",
+        "spec_id",
+        "spec_revision",
+        "timing",
+        "trial_context"
+      ],
+      "additionalProperties": false
+    },
+    "result_evidence": {
+      "type": "object",
+      "properties": {
+        "evidence_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "evidence_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "execution_status": {
+          "enum": [
+            "COMPLETED",
+            "FAILED"
+          ]
+        },
+        "hash_profile": {
+          "const": "research-json-v1"
+        },
+        "manifest_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "manifest_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "manifest_revision": {
+          "type": "string",
+          "pattern": "^rev\\.[1-9][0-9]*$"
+        },
+        "missing_reason": {
+          "type": [
+            "null",
+            "string"
+          ]
+        },
+        "run_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "run_status_snapshot": {
+          "enum": [
+            "COMPLETED",
+            "FAILED"
+          ]
+        },
+        "schema_version": {
+          "const": "research_lab.evidence.v2"
+        },
+        "supporting_artifacts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "content_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "manifest_content_hash": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "manifest_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "manifest_revision": {
+                "type": "string",
+                "pattern": "^rev\\.[1-9][0-9]*$"
+              },
+              "role": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "artifact_id",
+              "content_sha256",
+              "manifest_content_hash",
+              "manifest_id",
+              "manifest_revision",
+              "role"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "typed_metrics": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "metric": {
+                    "type": "object",
+                    "properties": {
+                      "calculation_definition": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "calculation_definition_version": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "metric_name": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "precision_rule": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "sample_scope": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "undefined_policy": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "unit": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "required": [
+                      "calculation_definition",
+                      "calculation_definition_version",
+                      "metric_name",
+                      "precision_rule",
+                      "sample_scope",
+                      "undefined_policy",
+                      "unit"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "sample_count": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "value": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "metric",
+                  "sample_count",
+                  "value"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "evidence_content_hash",
+        "evidence_id",
+        "execution_status",
+        "hash_profile",
+        "manifest_content_hash",
+        "manifest_id",
+        "manifest_revision",
+        "missing_reason",
+        "run_content_hash",
+        "run_id",
+        "run_status_snapshot",
+        "schema_version",
+        "supporting_artifacts",
+        "typed_metrics"
+      ],
+      "additionalProperties": false
+    },
+    "review": {
+      "type": "object",
+      "properties": {
+        "criteria_ref": {
+          "type": "object",
+          "properties": {
+            "content_hash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "revision": {
+              "type": "string",
+              "pattern": "^rev\\.[1-9][0-9]*$"
+            }
+          },
+          "required": [
+            "content_hash",
+            "id",
+            "revision"
+          ],
+          "additionalProperties": false
+        },
+        "evidence_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "evidence_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hash_profile": {
+          "const": "research-json-v1"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "recommendation": {
+          "enum": [
+            "accept",
+            "improve",
+            "reject"
+          ]
+        },
+        "review_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "review_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reviewed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "reviewer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "type": "string",
+          "pattern": "^rev\\.[1-9][0-9]*$"
+        },
+        "schema_version": {
+          "const": "research_lab.review.v2"
+        }
+      },
+      "required": [
+        "criteria_ref",
+        "evidence_content_hash",
+        "evidence_id",
+        "hash_profile",
+        "reason",
+        "recommendation",
+        "review_content_hash",
+        "review_id",
+        "reviewed_at",
+        "reviewer",
+        "revision",
+        "schema_version"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

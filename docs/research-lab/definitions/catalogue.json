@@ -1,0 +1,115 @@
+{
+  "schema_version": "research_lab.definition_catalogue.v1",
+  "entries": [
+    {
+      "kind": "payload",
+      "name": "phase0.dataset_metadata",
+      "revision": "rev.1",
+      "content_hash": "8e3430967ec47606d93e0233b3983e729c9ebd6cde15f1b9f98d1b66afb3dba4",
+      "locator": "materials/payload.schema.json#/$defs/dataset_metadata",
+      "file": "phase0-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "dataset_metadata"
+      ],
+      "role": "dataset_metadata"
+    },
+    {
+      "kind": "payload",
+      "name": "phase0.environment_lock",
+      "revision": "rev.1",
+      "content_hash": "eff97f8ce08adb394cce95bc9552aeb05ec9ed7cff232f050fb267db5435e5f7",
+      "locator": "materials/payload.schema.json#/$defs/environment_lock",
+      "file": "phase0-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "environment_lock"
+      ],
+      "role": "environment_lock"
+    },
+    {
+      "kind": "payload",
+      "name": "phase0.failure_diagnostics",
+      "revision": "rev.1",
+      "content_hash": "b8334dba9c699752853e433452a31a8739204ad5ea6839e835cfa7992d04f9f2",
+      "locator": "materials/payload.schema.json#/$defs/failure_diagnostics",
+      "file": "phase0-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "failure_diagnostics"
+      ],
+      "role": "failure_diagnostics"
+    },
+    {
+      "kind": "payload",
+      "name": "phase0.method_definition",
+      "revision": "rev.1",
+      "content_hash": "24536284b3a8dffb73ebcdfdbc51211b53157e496cf6ed23658b8c57b2fd9d74",
+      "locator": "materials/payload.schema.json#/$defs/method_definition",
+      "file": "phase0-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "method_definition"
+      ],
+      "role": "method_definition"
+    },
+    {
+      "kind": "payload",
+      "name": "phase0.quality_anomalies",
+      "revision": "rev.1",
+      "content_hash": "c8c7e1b5e0de3c9cef06e64656a9c0805fb9a1c05525004299eb526eae9ecbec",
+      "locator": "materials/payload.schema.json#/$defs/quality_anomalies",
+      "file": "phase0-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "quality_anomalies"
+      ],
+      "role": "quality_anomalies"
+    },
+    {
+      "kind": "payload",
+      "name": "phase0.quality_summary",
+      "revision": "rev.1",
+      "content_hash": "b74c330071d4ee15b6c58ed39037030045b4017cbdd792a8a8d459f53ddba1c2",
+      "locator": "materials/payload.schema.json#/$defs/quality_summary",
+      "file": "phase0-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "quality_summary"
+      ],
+      "role": "quality_summary"
+    },
+    {
+      "kind": "payload",
+      "name": "phase0.replay_instructions",
+      "revision": "rev.1",
+      "content_hash": "93e8b9e2d194828bbb07d6653d4b6f47f320c786eec2e985d6c12c2ce23b4ca8",
+      "locator": "materials/payload.schema.json#/$defs/replay_instructions",
+      "file": "phase0-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "replay_instructions"
+      ],
+      "role": "replay_instructions"
+    },
+    {
+      "kind": "method",
+      "name": "candidate.phase0.source_order.rev1",
+      "revision": "rev.1",
+      "content_hash": "59110ee50808fef39fe920c8137b798014ba6aef7ba235fa71c6330bd5eacba5",
+      "locator": "phase0-method.json",
+      "file": "phase0-method.json",
+      "pointer": [],
+      "source_path": "research/phase0_data_quality/quality.py"
+    },
+    {
+      "kind": "criteria",
+      "name": "phase0-date-order-criteria",
+      "revision": "rev.1",
+      "content_hash": "5b0705750fa07a19905abbc2ee5567828a200246b32ce5a9c554989fe1f8c03f",
+      "locator": "phase0-criteria.json",
+      "file": "phase0-criteria.json",
+      "pointer": []
+    }
+  ]
+}
