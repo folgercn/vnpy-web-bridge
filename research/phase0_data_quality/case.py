@@ -317,7 +317,8 @@ def run_case(materials, bundle):
 def verify(bundle, require_review=False):
     b = Path(bundle)
     prepared, task, spec, criteria, method = admission(b / 'materials')
-    load = lambda name: parse(safe_read(b, name + '.json'))
+    def load(name):
+        return parse(safe_read(b, name + '.json'))
     run, manifest, evidence, request, lock = (load(n) for n in ('run', 'manifest', 'evidence', 'review-request', 'input-lock'))
     keys(run, 'schema_version hash_profile run_id spec_id spec_revision spec_content_hash run_status trial_context resolved_computation_manifest scientific_fingerprint input_lock_sha256 timing process_exit_code run_content_hash')
     keys(manifest, 'schema_version hash_profile manifest_id revision run_id run_content_hash experiment_type artifact_profile entries manifest_content_hash')
