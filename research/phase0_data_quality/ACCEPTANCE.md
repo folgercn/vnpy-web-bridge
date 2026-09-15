@@ -4,20 +4,20 @@
 
 ## 真实执行
 
-实现固定于 `ae873050187292c4b4bedb89d73ae3ef6fe6b60b` 后，运行 `prepare.py` 两次，
+实现固定于 `2155b03` 后，运行 `prepare.py` 两次，
 分别持久保存 rev.1 与 rev.2 输入；随后运行三个独立输出目录。不是 #540 的事后对象映射。
 运行环境为 Python 3.12.14，其他环境/源码/固定定义摘要见包内 `payload/environment_lock.json`、`materials/preparation.json` 和 `input-lock.json`。
 
 | 包 | Run | Spec 区间（UTC 日期标签闭开） | 行数 | 比较次数 | 顺序缺陷 |
 | --- | --- | --- | ---: | ---: | ---: |
-| `validation-rev1` | `run-186e54a0b8b34af4a130445bef9daf2e` | 2023-01-03—2023-02-01 | 192 | 179 | 0 |
-| `validation-rev2` | `run-9711ed3804c54484b3adcf6be30b9541` | 2023-01-03—2023-01-10 | 60 | 48 | 0 |
-| `replay-rev1` | `run-6a94e7d00a7c46acabade897b33fd050` | 2023-01-03—2023-02-01 | 192 | 179 | 0 |
+| `validation-rev1-corrected` | `run-1f1ed5a273c5457586dd774a971f2f19` | 2023-01-03—2023-02-01 | 192 | 179 | 0 |
+| `validation-rev2-corrected` | `run-8e0b4021f5954de59747ef540f60ad2d` | 2023-01-03—2023-01-10 | 60 | 48 | 0 |
+| `replay-rev1-corrected` | `run-0df06c25259642fea112f7fce44e77d4` | 2023-01-03—2023-02-01 | 192 | 179 | 0 |
 
 三包输入子集原始字节摘要均为 `fa9a07c2cd55dc04e3300b01ef6ae0fabfb9d0c2b8813796758612cec6a8da19`。
 三包源码摘要相同。rev.2 只改 Spec 日期终点与 revision，事实计数实际改变。
-rev.1 两次科学指纹均为 `fec6026cdfd6b8c3aa1032f584cd3b23e09dafbce5d8b64cd2afca892baadd75`；
-rev.2 为 `9da4db88787bd1805623aa6e6d73e60084aac1239206aac3aae45fa76e74a141`。
+rev.1 两次科学指纹均为 `e9fd8849a8b2c67bcae83effa6a74d778bee56510cfbdf9489217a1e494f972f`；
+rev.2 为 `343cf17ff275be110d889ee7ad34a7808ba79dd3055dcd5a6d5b5fcf559d2d25`。
 每次真实开始/结束时间保留在各 `run.json`，其前置锁定时间在 `input-lock.json`，输入准备时间在 `materials/preparation.json`。
 这是本机动作顺序证据，不是外部可信确认性预登记。
 
@@ -30,7 +30,7 @@ rev.2 为 `9da4db88787bd1805623aa6e6d73e60084aac1239206aac3aae45fa76e74a141`。
 
 ## 检查分层
 
-- 本地 focused tests：**27 passed**，包括上位 canonical hash 正向固定向量；合成故障与评审 fixture 不混入真实包。
+- 本地 focused tests：**28 passed**，包括上位 canonical hash 正向固定向量；合成故障与评审 fixture 不混入真实包。
 - 现有 CI 契约测试：**9 passed**。
 - Ruff、Python 编译和 diff 空白检查：通过。
 - 真实执行：上表三次，全部 COMPLETED；输出包计数由实际 Spec 与原始子集计算。
@@ -39,10 +39,17 @@ rev.2 为 `9da4db88787bd1805623aa6e6d73e60084aac1239206aac3aae45fa76e74a141`。
 
 ## 交付与未覆盖
 
-三个完整包在 [bundles/](bundles/)，包的 SHA-256、Run/Spec/Evidence/Review 摘要见 [交付索引](bundle-index.json)。
+三个完整包在 [bundles/](bundles/)，包的 SHA-256、Run/Spec/Evidence/Review 摘要见 [交付索引](corrected-bundle-index.json)。
 `prepared-inputs.tar.gz` 是未执行的 rev.1 准备材料，供重跑与测试；不是带 Review 的完整结果包。
 仓库提交仅保留最终真实包，`.work/` 开发目录不属于交付。
 
 未覆盖：其他研究类型执行器、交易日历/OHLC/receipt/PIT、confirmation、跨任务暴露登记、通用消息/调度/鉴权、
 防恶意修改与崩溃后自动恢复、完整 hermetic 环境。一次日期顺序检查不代表历史数据可直接用于任何金融研究，
 更不代表协议已冻结。#498 仍需按既有清单逐项签收。
+
+## 定点整改记录
+
+初版 README 把输出放进输入目录，实际复现导致递归复制。独立复核发现这一 P1 后，
+`2155b03` 修正示例为兄弟目录，并在任何写入前拒绝输入目录内部的输出路径；新增回归并实际重跑 README 命令通过。
+上表及 `corrected-bundle-index.json` 对应修正版新 Run；源码包装变更导致新科学指纹，不冒充同指纹技术重试。
+初版三个归档和 `bundle-index.json` 保持原字节作为历史，不覆盖旧 Run/Evidence/Review；当前复现入口以 `-corrected` 包为准。

@@ -28,3 +28,11 @@
 本次独立核验未发现 P0/P1。已覆盖：预先锁定输入与 Spec 驱动范围、质量缺陷与执行失败分离的实现测试、干净目录消费、损坏交付拒绝、以及 Review 与 `criteria_ref` 的绑定。
 
 未覆盖：真实交易所原始数据、日历/PIT 证据、其他研究类型、通用 Runner/Agent Runtime 和 Protocol Freeze 签收。
+
+## P1 复核与修正后复验
+
+初版结论后，按 README 原样将输出目录置于输入目录内进行复现，触发了递归复制并最终因路径过长失败。这是 P1：文档承诺的复现命令不能完成。
+
+修订 `2155b03` 将 README 调整为输入目录与输出目录同级，并在任何写入前拒绝输出位于输入目录内（含解析后的路径）。原样执行修订后的 README 命令成功生成并验证新 Run；嵌套输出被 `output must be outside inputs` 拒绝。新增回归后 focused tests 为 28 passed。
+
+随后对新建的 `validation-rev1-corrected`、`validation-rev2-corrected` 和 `replay-rev1-corrected` 完整包独立核验并写入新的 Review。三个包分别得到 192 / 179 / 0、60 / 48 / 0、192 / 179 / 0（行数 / 比较数 / 日期顺序违规），均按 `phase0-date-order-criteria@rev.1` 得到 `accept`。P1 修正增量未发现新的 P0/P1。
