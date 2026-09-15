@@ -1,0 +1,710 @@
+{
+    "bundles": [
+        {
+            "byte_length": 27712,
+            "path": "bundles/validation-rev1.tar.gz",
+            "records": {
+                "evidence": {
+                    "evidence_content_hash": "89445437ce037dd95b941e22a911d23d4a39f9c101288fb94ea0dea2d27efd04",
+                    "evidence_id": "evidence-run-186e54a0b8b34af4a130445bef9daf2e",
+                    "execution_status": "COMPLETED",
+                    "hash_profile": "research-json-v1",
+                    "manifest_content_hash": "1e6683d56db84948cce0f437809dff92be7b3273343bb57a5d97b3005eb722f5",
+                    "manifest_id": "manifest-run-186e54a0b8b34af4a130445bef9daf2e",
+                    "manifest_revision": "rev.1",
+                    "missing_reason": null,
+                    "run_content_hash": "7d2f3127142e64fb76ab7ba96436dbaee052490a04e75126c26bb7fc1f3e41d8",
+                    "run_id": "run-186e54a0b8b34af4a130445bef9daf2e",
+                    "run_status_snapshot": "COMPLETED",
+                    "schema_version": "research_lab.evidence.v2",
+                    "supporting_artifacts": [
+                        {
+                            "artifact_id": "dataset_metadata",
+                            "content_sha256": "e0a7095e14fb4023ef8c38374773eda16b8bf77356f91054f9061eb65b6a6259",
+                            "manifest_content_hash": "1e6683d56db84948cce0f437809dff92be7b3273343bb57a5d97b3005eb722f5",
+                            "manifest_id": "manifest-run-186e54a0b8b34af4a130445bef9daf2e",
+                            "manifest_revision": "rev.1",
+                            "role": "dataset_metadata"
+                        },
+                        {
+                            "artifact_id": "method_definition",
+                            "content_sha256": "6838c60f0053949b1b578d42a911c343ae2e97f220ccf180941d6ac6d65480f0",
+                            "manifest_content_hash": "1e6683d56db84948cce0f437809dff92be7b3273343bb57a5d97b3005eb722f5",
+                            "manifest_id": "manifest-run-186e54a0b8b34af4a130445bef9daf2e",
+                            "manifest_revision": "rev.1",
+                            "role": "method_definition"
+                        },
+                        {
+                            "artifact_id": "environment_lock",
+                            "content_sha256": "75ea46e949c30b09a9b44ac61f622c534824c79c02f7e31168fb1fc17b9b82da",
+                            "manifest_content_hash": "1e6683d56db84948cce0f437809dff92be7b3273343bb57a5d97b3005eb722f5",
+                            "manifest_id": "manifest-run-186e54a0b8b34af4a130445bef9daf2e",
+                            "manifest_revision": "rev.1",
+                            "role": "environment_lock"
+                        },
+                        {
+                            "artifact_id": "replay_instructions",
+                            "content_sha256": "eed49820c80e0ebcb3f852f55805095e2b2fa6aad0238ba3b385e5111ac864b6",
+                            "manifest_content_hash": "1e6683d56db84948cce0f437809dff92be7b3273343bb57a5d97b3005eb722f5",
+                            "manifest_id": "manifest-run-186e54a0b8b34af4a130445bef9daf2e",
+                            "manifest_revision": "rev.1",
+                            "role": "replay_instructions"
+                        },
+                        {
+                            "artifact_id": "quality_summary",
+                            "content_sha256": "9d7ddedeff0a638ee44ae215ff7c670fecc53b55b7f061d62d3629734c4eb779",
+                            "manifest_content_hash": "1e6683d56db84948cce0f437809dff92be7b3273343bb57a5d97b3005eb722f5",
+                            "manifest_id": "manifest-run-186e54a0b8b34af4a130445bef9daf2e",
+                            "manifest_revision": "rev.1",
+                            "role": "quality_summary"
+                        },
+                        {
+                            "artifact_id": "quality_anomalies",
+                            "content_sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+                            "manifest_content_hash": "1e6683d56db84948cce0f437809dff92be7b3273343bb57a5d97b3005eb722f5",
+                            "manifest_id": "manifest-run-186e54a0b8b34af4a130445bef9daf2e",
+                            "manifest_revision": "rev.1",
+                            "role": "quality_anomalies"
+                        }
+                    ],
+                    "typed_metrics": [
+                        {
+                            "metric": {
+                                "calculation_definition": "Compare adjacent selected dates within each exact_contract in original source order. Count current <= previous when strict=true, otherwise current < previous. Report comparisons as denominator, duplicate excess keys and reversals separately. Zero comparisons is a defined zero count, not proof of coverage.",
+                                "calculation_definition_version": "phase0.source_order.rev1",
+                                "metric_name": "timestamp_monotonicity_violations",
+                                "precision_rule": "exact_integer",
+                                "sample_scope": "selected rows, adjacent within exact_contract, original CSV order",
+                                "undefined_policy": "null_with_reason_not_zero",
+                                "unit": "integer_count"
+                            },
+                            "sample_count": 179,
+                            "value": 0
+                        }
+                    ]
+                },
+                "review": {
+                    "criteria_ref": {
+                        "content_hash": "5b0705750fa07a19905abbc2ee5567828a200246b32ce5a9c554989fe1f8c03f",
+                        "id": "phase0-date-order-criteria",
+                        "revision": "rev.1"
+                    },
+                    "evidence_content_hash": "89445437ce037dd95b941e22a911d23d4a39f9c101288fb94ea0dea2d27efd04",
+                    "evidence_id": "evidence-run-186e54a0b8b34af4a130445bef9daf2e",
+                    "hash_profile": "research-json-v1",
+                    "reason": "独立复核：timestamp_monotonicity_violations=0，comparison_count=179；判据 maximum=0、minimum_comparisons=1，因此本次仅限日期源序检查的结论为接受。不覆盖日历完整性、PIT、交易所原始字节、Alpha 或 Protocol v2 冻结。",
+                    "recommendation": "accept",
+                    "review_content_hash": "e4ccd5a9ea78283a96380d2d22fe0aff44c3ab0d518f6facb8219ead159de3b5",
+                    "review_id": "review-independent-run-186e54a0b8b34af4a130445bef9daf2e",
+                    "reviewed_at": "2026-09-15T13:51:41.323514Z",
+                    "reviewer": "Codex /root/forward_dq_review independent reviewer",
+                    "revision": "rev.1",
+                    "schema_version": "research_lab.review.v2"
+                },
+                "run": {
+                    "hash_profile": "research-json-v1",
+                    "input_lock_sha256": "2c26c71940225094587d22120153d379c60631ec588f695866156725a2f15676",
+                    "process_exit_code": 0,
+                    "resolved_computation_manifest": {
+                        "calendar_rule": null,
+                        "code_revision": "ae873050187292c4b4bedb89d73ae3ef6fe6b60b",
+                        "dependency_lock_hash": "fdc0de7ca124f0b11d41685fb6291d9ebc5e19b2cbe935af884d3258ace256c7",
+                        "fingerprint_schema_version": "phase0.data_quality.fingerprint.rev1",
+                        "hash_profile": "research-json-v1",
+                        "holdout_usage_state": "not_applicable",
+                        "method_definition_sha256": "6838c60f0053949b1b578d42a911c343ae2e97f220ccf180941d6ac6d65480f0",
+                        "normalization_rule_version": "phase0.date-column-as-utc-label.rev1",
+                        "random_seed": null,
+                        "raw_bytes_sha256": "fa9a07c2cd55dc04e3300b01ef6ae0fabfb9d0c2b8813796758612cec6a8da19",
+                        "receipt_evidence": null,
+                        "resolved_parameters": {
+                            "strict": true
+                        },
+                        "scientific_time": {
+                            "end": "2023-02-01T00:00:00.000000Z",
+                            "start": "2023-01-03T00:00:00.000000Z"
+                        },
+                        "source_diff_fingerprint": "a5fe30acabae6dce227c39352c1dda5400838ca97190fd9995cb86e9386f33df",
+                        "universe": [
+                            "rb"
+                        ]
+                    },
+                    "run_content_hash": "7d2f3127142e64fb76ab7ba96436dbaee052490a04e75126c26bb7fc1f3e41d8",
+                    "run_id": "run-186e54a0b8b34af4a130445bef9daf2e",
+                    "run_status": "COMPLETED",
+                    "schema_version": "research_lab.run.v2",
+                    "scientific_fingerprint": "fec6026cdfd6b8c3aa1032f584cd3b23e09dafbce5d8b64cd2afca892baadd75",
+                    "spec_content_hash": "bd4cba75ee4688305344b3665fba29d712029a6b465c81ce6ef937ea3a1acde5",
+                    "spec_id": "spec-phase0-rb-date-order",
+                    "spec_revision": "rev.1",
+                    "timing": {
+                        "completed_at": "2026-09-15T13:50:20.013713Z",
+                        "started_at": "2026-09-15T13:50:20.013471Z"
+                    },
+                    "trial_context": {
+                        "holdout_usage_state": "not_applicable",
+                        "research_stage": "validation",
+                        "retry_of_run_id": null,
+                        "trial_kind": null
+                    }
+                }
+            },
+            "sha256": "920199003c8efa6d8b4b1dee70811c9f00bcb19cecfe13799d44a0146260eaa0",
+            "spec": {
+                "candidate_decision_criteria": {
+                    "max_allowed_timestamp_reversals": 0
+                },
+                "dataset_requirements": {
+                    "dataset_reference_uri": "candidate://phase0/derived-rb-dates",
+                    "frequencies": [
+                        "1d"
+                    ],
+                    "normalization_rule_version": "phase0.date-column-as-utc-label.rev1",
+                    "pit_constraints": "No historical receipt or PIT certification. source_official_day is a date label, not arrival time.",
+                    "provider_kind": "local_derived_subset",
+                    "required_fields": [
+                        "source_official_day",
+                        "product",
+                        "exact_contract"
+                    ],
+                    "snapshot_selection_mode": "fixed_snapshot",
+                    "snapshot_sha256": "fa9a07c2cd55dc04e3300b01ef6ae0fabfb9d0c2b8813796758612cec6a8da19",
+                    "time_range": {
+                        "end": "2023-02-01T00:00:00.000000Z",
+                        "start": "2023-01-03T00:00:00.000000Z"
+                    },
+                    "universe": [
+                        "rb"
+                    ]
+                },
+                "experiment_type": "data_quality",
+                "hash_profile": "research-json-v1",
+                "holdout_policy": {
+                    "mode": "not_used",
+                    "reason": "Historical derived rows; date-order audit only; no confirmation or PIT claim."
+                },
+                "metric_specifications": [
+                    {
+                        "calculation_definition": "Compare adjacent selected dates within each exact_contract in original source order. Count current <= previous when strict=true, otherwise current < previous. Report comparisons as denominator, duplicate excess keys and reversals separately. Zero comparisons is a defined zero count, not proof of coverage.",
+                        "calculation_definition_version": "phase0.source_order.rev1",
+                        "metric_name": "timestamp_monotonicity_violations",
+                        "precision_rule": "exact_integer",
+                        "sample_scope": "selected rows, adjacent within exact_contract, original CSV order",
+                        "undefined_policy": "null_with_reason_not_zero",
+                        "unit": "integer_count"
+                    }
+                ],
+                "quality_checks": [
+                    {
+                        "check_id": "source_order",
+                        "failure_action": "record",
+                        "implementation_ref": "candidate.phase0.source_order.rev1",
+                        "parameters": []
+                    }
+                ],
+                "rejection_policy": {
+                    "forbid_unknown_fields": true,
+                    "reject_unregistered_implementation": true,
+                    "reject_unsupported_data_sources": true
+                },
+                "research_stage": "validation",
+                "revision": "rev.1",
+                "schema_version": "research_lab.experiment.v2",
+                "seed_proposal": null,
+                "spec_content_hash": "bd4cba75ee4688305344b3665fba29d712029a6b465c81ce6ef937ea3a1acde5",
+                "spec_id": "spec-phase0-rb-date-order",
+                "task_content_hash": "006fd80ec74c4ecc713271a6980e3df838aca2f02c51361a5c1a5702d5097443",
+                "task_id": "task-phase0-rb-date-order",
+                "task_revision": "rev.1",
+                "trial_kind_proposal": null,
+                "validation_config": {
+                    "method": "full_sample_scan"
+                }
+            },
+            "verification": {
+                "facts": {
+                    "comparison_count": 179,
+                    "duplicate_key_excess_rows": 0,
+                    "row_count": 192,
+                    "source_order_reversals": 0,
+                    "timestamp_monotonicity_violations": 0
+                },
+                "review_present": true,
+                "run_id": "run-186e54a0b8b34af4a130445bef9daf2e",
+                "run_status": "COMPLETED",
+                "scientific_fingerprint": "fec6026cdfd6b8c3aa1032f584cd3b23e09dafbce5d8b64cd2afca892baadd75"
+            }
+        },
+        {
+            "byte_length": 27688,
+            "path": "bundles/validation-rev2.tar.gz",
+            "records": {
+                "evidence": {
+                    "evidence_content_hash": "416dc6a94eda23ddeb813d388de64989fb3f4ba94c25c3d01aab6abc14408a8f",
+                    "evidence_id": "evidence-run-9711ed3804c54484b3adcf6be30b9541",
+                    "execution_status": "COMPLETED",
+                    "hash_profile": "research-json-v1",
+                    "manifest_content_hash": "e0ae27f6b0d831fc30c897e395b2e0afb67282113d0ffb8102b8617aee945dc1",
+                    "manifest_id": "manifest-run-9711ed3804c54484b3adcf6be30b9541",
+                    "manifest_revision": "rev.1",
+                    "missing_reason": null,
+                    "run_content_hash": "276793c58dcbf2cb13d74ce50fccf4b3014ad8784235e26e8db53807204534fa",
+                    "run_id": "run-9711ed3804c54484b3adcf6be30b9541",
+                    "run_status_snapshot": "COMPLETED",
+                    "schema_version": "research_lab.evidence.v2",
+                    "supporting_artifacts": [
+                        {
+                            "artifact_id": "dataset_metadata",
+                            "content_sha256": "205dd3160a6554b71f577b72aba1af80242ca3133d90412f906adf35aacc0351",
+                            "manifest_content_hash": "e0ae27f6b0d831fc30c897e395b2e0afb67282113d0ffb8102b8617aee945dc1",
+                            "manifest_id": "manifest-run-9711ed3804c54484b3adcf6be30b9541",
+                            "manifest_revision": "rev.1",
+                            "role": "dataset_metadata"
+                        },
+                        {
+                            "artifact_id": "method_definition",
+                            "content_sha256": "6838c60f0053949b1b578d42a911c343ae2e97f220ccf180941d6ac6d65480f0",
+                            "manifest_content_hash": "e0ae27f6b0d831fc30c897e395b2e0afb67282113d0ffb8102b8617aee945dc1",
+                            "manifest_id": "manifest-run-9711ed3804c54484b3adcf6be30b9541",
+                            "manifest_revision": "rev.1",
+                            "role": "method_definition"
+                        },
+                        {
+                            "artifact_id": "environment_lock",
+                            "content_sha256": "75ea46e949c30b09a9b44ac61f622c534824c79c02f7e31168fb1fc17b9b82da",
+                            "manifest_content_hash": "e0ae27f6b0d831fc30c897e395b2e0afb67282113d0ffb8102b8617aee945dc1",
+                            "manifest_id": "manifest-run-9711ed3804c54484b3adcf6be30b9541",
+                            "manifest_revision": "rev.1",
+                            "role": "environment_lock"
+                        },
+                        {
+                            "artifact_id": "replay_instructions",
+                            "content_sha256": "eed49820c80e0ebcb3f852f55805095e2b2fa6aad0238ba3b385e5111ac864b6",
+                            "manifest_content_hash": "e0ae27f6b0d831fc30c897e395b2e0afb67282113d0ffb8102b8617aee945dc1",
+                            "manifest_id": "manifest-run-9711ed3804c54484b3adcf6be30b9541",
+                            "manifest_revision": "rev.1",
+                            "role": "replay_instructions"
+                        },
+                        {
+                            "artifact_id": "quality_summary",
+                            "content_sha256": "4926e960a7bb2f33b7afd3c7db12f2e8cbaebf358d76de73fd8f92d3ad431a00",
+                            "manifest_content_hash": "e0ae27f6b0d831fc30c897e395b2e0afb67282113d0ffb8102b8617aee945dc1",
+                            "manifest_id": "manifest-run-9711ed3804c54484b3adcf6be30b9541",
+                            "manifest_revision": "rev.1",
+                            "role": "quality_summary"
+                        },
+                        {
+                            "artifact_id": "quality_anomalies",
+                            "content_sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+                            "manifest_content_hash": "e0ae27f6b0d831fc30c897e395b2e0afb67282113d0ffb8102b8617aee945dc1",
+                            "manifest_id": "manifest-run-9711ed3804c54484b3adcf6be30b9541",
+                            "manifest_revision": "rev.1",
+                            "role": "quality_anomalies"
+                        }
+                    ],
+                    "typed_metrics": [
+                        {
+                            "metric": {
+                                "calculation_definition": "Compare adjacent selected dates within each exact_contract in original source order. Count current <= previous when strict=true, otherwise current < previous. Report comparisons as denominator, duplicate excess keys and reversals separately. Zero comparisons is a defined zero count, not proof of coverage.",
+                                "calculation_definition_version": "phase0.source_order.rev1",
+                                "metric_name": "timestamp_monotonicity_violations",
+                                "precision_rule": "exact_integer",
+                                "sample_scope": "selected rows, adjacent within exact_contract, original CSV order",
+                                "undefined_policy": "null_with_reason_not_zero",
+                                "unit": "integer_count"
+                            },
+                            "sample_count": 48,
+                            "value": 0
+                        }
+                    ]
+                },
+                "review": {
+                    "criteria_ref": {
+                        "content_hash": "5b0705750fa07a19905abbc2ee5567828a200246b32ce5a9c554989fe1f8c03f",
+                        "id": "phase0-date-order-criteria",
+                        "revision": "rev.1"
+                    },
+                    "evidence_content_hash": "416dc6a94eda23ddeb813d388de64989fb3f4ba94c25c3d01aab6abc14408a8f",
+                    "evidence_id": "evidence-run-9711ed3804c54484b3adcf6be30b9541",
+                    "hash_profile": "research-json-v1",
+                    "reason": "独立复核：timestamp_monotonicity_violations=0，comparison_count=48；判据 maximum=0、minimum_comparisons=1，因此本次仅限日期源序检查的结论为接受。不覆盖日历完整性、PIT、交易所原始字节、Alpha 或 Protocol v2 冻结。",
+                    "recommendation": "accept",
+                    "review_content_hash": "81bcbaade726182999e1829352ccefefae20e5eb1d6b3e0fc07255c9163206ca",
+                    "review_id": "review-independent-run-9711ed3804c54484b3adcf6be30b9541",
+                    "reviewed_at": "2026-09-15T13:51:41.324878Z",
+                    "reviewer": "Codex /root/forward_dq_review independent reviewer",
+                    "revision": "rev.1",
+                    "schema_version": "research_lab.review.v2"
+                },
+                "run": {
+                    "hash_profile": "research-json-v1",
+                    "input_lock_sha256": "ad54eae9d20556fe317f5f91b5fedac4768d0f6cc0bdaf8f2c8adaa6568ca5e3",
+                    "process_exit_code": 0,
+                    "resolved_computation_manifest": {
+                        "calendar_rule": null,
+                        "code_revision": "ae873050187292c4b4bedb89d73ae3ef6fe6b60b",
+                        "dependency_lock_hash": "fdc0de7ca124f0b11d41685fb6291d9ebc5e19b2cbe935af884d3258ace256c7",
+                        "fingerprint_schema_version": "phase0.data_quality.fingerprint.rev1",
+                        "hash_profile": "research-json-v1",
+                        "holdout_usage_state": "not_applicable",
+                        "method_definition_sha256": "6838c60f0053949b1b578d42a911c343ae2e97f220ccf180941d6ac6d65480f0",
+                        "normalization_rule_version": "phase0.date-column-as-utc-label.rev1",
+                        "random_seed": null,
+                        "raw_bytes_sha256": "fa9a07c2cd55dc04e3300b01ef6ae0fabfb9d0c2b8813796758612cec6a8da19",
+                        "receipt_evidence": null,
+                        "resolved_parameters": {
+                            "strict": true
+                        },
+                        "scientific_time": {
+                            "end": "2023-01-10T00:00:00.000000Z",
+                            "start": "2023-01-03T00:00:00.000000Z"
+                        },
+                        "source_diff_fingerprint": "a5fe30acabae6dce227c39352c1dda5400838ca97190fd9995cb86e9386f33df",
+                        "universe": [
+                            "rb"
+                        ]
+                    },
+                    "run_content_hash": "276793c58dcbf2cb13d74ce50fccf4b3014ad8784235e26e8db53807204534fa",
+                    "run_id": "run-9711ed3804c54484b3adcf6be30b9541",
+                    "run_status": "COMPLETED",
+                    "schema_version": "research_lab.run.v2",
+                    "scientific_fingerprint": "9da4db88787bd1805623aa6e6d73e60084aac1239206aac3aae45fa76e74a141",
+                    "spec_content_hash": "7cf310b57efeb4b3c3ed8c06c43c47ee76077b0d7399fc358b82f94b8b0a897f",
+                    "spec_id": "spec-phase0-rb-date-order",
+                    "spec_revision": "rev.2",
+                    "timing": {
+                        "completed_at": "2026-09-15T13:50:20.102695Z",
+                        "started_at": "2026-09-15T13:50:20.102483Z"
+                    },
+                    "trial_context": {
+                        "holdout_usage_state": "not_applicable",
+                        "research_stage": "validation",
+                        "retry_of_run_id": null,
+                        "trial_kind": null
+                    }
+                }
+            },
+            "sha256": "c6404ced76d397f1631103e74280c20e48ee2a0631389c98605f64f1b50ae2ac",
+            "spec": {
+                "candidate_decision_criteria": {
+                    "max_allowed_timestamp_reversals": 0
+                },
+                "dataset_requirements": {
+                    "dataset_reference_uri": "candidate://phase0/derived-rb-dates",
+                    "frequencies": [
+                        "1d"
+                    ],
+                    "normalization_rule_version": "phase0.date-column-as-utc-label.rev1",
+                    "pit_constraints": "No historical receipt or PIT certification. source_official_day is a date label, not arrival time.",
+                    "provider_kind": "local_derived_subset",
+                    "required_fields": [
+                        "source_official_day",
+                        "product",
+                        "exact_contract"
+                    ],
+                    "snapshot_selection_mode": "fixed_snapshot",
+                    "snapshot_sha256": "fa9a07c2cd55dc04e3300b01ef6ae0fabfb9d0c2b8813796758612cec6a8da19",
+                    "time_range": {
+                        "end": "2023-01-10T00:00:00.000000Z",
+                        "start": "2023-01-03T00:00:00.000000Z"
+                    },
+                    "universe": [
+                        "rb"
+                    ]
+                },
+                "experiment_type": "data_quality",
+                "hash_profile": "research-json-v1",
+                "holdout_policy": {
+                    "mode": "not_used",
+                    "reason": "Historical derived rows; date-order audit only; no confirmation or PIT claim."
+                },
+                "metric_specifications": [
+                    {
+                        "calculation_definition": "Compare adjacent selected dates within each exact_contract in original source order. Count current <= previous when strict=true, otherwise current < previous. Report comparisons as denominator, duplicate excess keys and reversals separately. Zero comparisons is a defined zero count, not proof of coverage.",
+                        "calculation_definition_version": "phase0.source_order.rev1",
+                        "metric_name": "timestamp_monotonicity_violations",
+                        "precision_rule": "exact_integer",
+                        "sample_scope": "selected rows, adjacent within exact_contract, original CSV order",
+                        "undefined_policy": "null_with_reason_not_zero",
+                        "unit": "integer_count"
+                    }
+                ],
+                "quality_checks": [
+                    {
+                        "check_id": "source_order",
+                        "failure_action": "record",
+                        "implementation_ref": "candidate.phase0.source_order.rev1",
+                        "parameters": []
+                    }
+                ],
+                "rejection_policy": {
+                    "forbid_unknown_fields": true,
+                    "reject_unregistered_implementation": true,
+                    "reject_unsupported_data_sources": true
+                },
+                "research_stage": "validation",
+                "revision": "rev.2",
+                "schema_version": "research_lab.experiment.v2",
+                "seed_proposal": null,
+                "spec_content_hash": "7cf310b57efeb4b3c3ed8c06c43c47ee76077b0d7399fc358b82f94b8b0a897f",
+                "spec_id": "spec-phase0-rb-date-order",
+                "task_content_hash": "006fd80ec74c4ecc713271a6980e3df838aca2f02c51361a5c1a5702d5097443",
+                "task_id": "task-phase0-rb-date-order",
+                "task_revision": "rev.1",
+                "trial_kind_proposal": null,
+                "validation_config": {
+                    "method": "full_sample_scan"
+                }
+            },
+            "verification": {
+                "facts": {
+                    "comparison_count": 48,
+                    "duplicate_key_excess_rows": 0,
+                    "row_count": 60,
+                    "source_order_reversals": 0,
+                    "timestamp_monotonicity_violations": 0
+                },
+                "review_present": true,
+                "run_id": "run-9711ed3804c54484b3adcf6be30b9541",
+                "run_status": "COMPLETED",
+                "scientific_fingerprint": "9da4db88787bd1805623aa6e6d73e60084aac1239206aac3aae45fa76e74a141"
+            }
+        },
+        {
+            "byte_length": 27702,
+            "path": "bundles/replay-rev1.tar.gz",
+            "records": {
+                "evidence": {
+                    "evidence_content_hash": "02819d1a436bff630adbb25dbece6921362bc606793a781b27dcb3e5ce27964c",
+                    "evidence_id": "evidence-run-6a94e7d00a7c46acabade897b33fd050",
+                    "execution_status": "COMPLETED",
+                    "hash_profile": "research-json-v1",
+                    "manifest_content_hash": "318fc72fa79f2e7f4bf6fe17682c668c9be9dc07933546feff3ccaa0d1b4e602",
+                    "manifest_id": "manifest-run-6a94e7d00a7c46acabade897b33fd050",
+                    "manifest_revision": "rev.1",
+                    "missing_reason": null,
+                    "run_content_hash": "f8bf55b87af0a0752e7c598892739205135770f88235719ca182500842396d6b",
+                    "run_id": "run-6a94e7d00a7c46acabade897b33fd050",
+                    "run_status_snapshot": "COMPLETED",
+                    "schema_version": "research_lab.evidence.v2",
+                    "supporting_artifacts": [
+                        {
+                            "artifact_id": "dataset_metadata",
+                            "content_sha256": "e0a7095e14fb4023ef8c38374773eda16b8bf77356f91054f9061eb65b6a6259",
+                            "manifest_content_hash": "318fc72fa79f2e7f4bf6fe17682c668c9be9dc07933546feff3ccaa0d1b4e602",
+                            "manifest_id": "manifest-run-6a94e7d00a7c46acabade897b33fd050",
+                            "manifest_revision": "rev.1",
+                            "role": "dataset_metadata"
+                        },
+                        {
+                            "artifact_id": "method_definition",
+                            "content_sha256": "6838c60f0053949b1b578d42a911c343ae2e97f220ccf180941d6ac6d65480f0",
+                            "manifest_content_hash": "318fc72fa79f2e7f4bf6fe17682c668c9be9dc07933546feff3ccaa0d1b4e602",
+                            "manifest_id": "manifest-run-6a94e7d00a7c46acabade897b33fd050",
+                            "manifest_revision": "rev.1",
+                            "role": "method_definition"
+                        },
+                        {
+                            "artifact_id": "environment_lock",
+                            "content_sha256": "75ea46e949c30b09a9b44ac61f622c534824c79c02f7e31168fb1fc17b9b82da",
+                            "manifest_content_hash": "318fc72fa79f2e7f4bf6fe17682c668c9be9dc07933546feff3ccaa0d1b4e602",
+                            "manifest_id": "manifest-run-6a94e7d00a7c46acabade897b33fd050",
+                            "manifest_revision": "rev.1",
+                            "role": "environment_lock"
+                        },
+                        {
+                            "artifact_id": "replay_instructions",
+                            "content_sha256": "eed49820c80e0ebcb3f852f55805095e2b2fa6aad0238ba3b385e5111ac864b6",
+                            "manifest_content_hash": "318fc72fa79f2e7f4bf6fe17682c668c9be9dc07933546feff3ccaa0d1b4e602",
+                            "manifest_id": "manifest-run-6a94e7d00a7c46acabade897b33fd050",
+                            "manifest_revision": "rev.1",
+                            "role": "replay_instructions"
+                        },
+                        {
+                            "artifact_id": "quality_summary",
+                            "content_sha256": "9d7ddedeff0a638ee44ae215ff7c670fecc53b55b7f061d62d3629734c4eb779",
+                            "manifest_content_hash": "318fc72fa79f2e7f4bf6fe17682c668c9be9dc07933546feff3ccaa0d1b4e602",
+                            "manifest_id": "manifest-run-6a94e7d00a7c46acabade897b33fd050",
+                            "manifest_revision": "rev.1",
+                            "role": "quality_summary"
+                        },
+                        {
+                            "artifact_id": "quality_anomalies",
+                            "content_sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+                            "manifest_content_hash": "318fc72fa79f2e7f4bf6fe17682c668c9be9dc07933546feff3ccaa0d1b4e602",
+                            "manifest_id": "manifest-run-6a94e7d00a7c46acabade897b33fd050",
+                            "manifest_revision": "rev.1",
+                            "role": "quality_anomalies"
+                        }
+                    ],
+                    "typed_metrics": [
+                        {
+                            "metric": {
+                                "calculation_definition": "Compare adjacent selected dates within each exact_contract in original source order. Count current <= previous when strict=true, otherwise current < previous. Report comparisons as denominator, duplicate excess keys and reversals separately. Zero comparisons is a defined zero count, not proof of coverage.",
+                                "calculation_definition_version": "phase0.source_order.rev1",
+                                "metric_name": "timestamp_monotonicity_violations",
+                                "precision_rule": "exact_integer",
+                                "sample_scope": "selected rows, adjacent within exact_contract, original CSV order",
+                                "undefined_policy": "null_with_reason_not_zero",
+                                "unit": "integer_count"
+                            },
+                            "sample_count": 179,
+                            "value": 0
+                        }
+                    ]
+                },
+                "review": {
+                    "criteria_ref": {
+                        "content_hash": "5b0705750fa07a19905abbc2ee5567828a200246b32ce5a9c554989fe1f8c03f",
+                        "id": "phase0-date-order-criteria",
+                        "revision": "rev.1"
+                    },
+                    "evidence_content_hash": "02819d1a436bff630adbb25dbece6921362bc606793a781b27dcb3e5ce27964c",
+                    "evidence_id": "evidence-run-6a94e7d00a7c46acabade897b33fd050",
+                    "hash_profile": "research-json-v1",
+                    "reason": "独立复核：timestamp_monotonicity_violations=0，comparison_count=179；判据 maximum=0、minimum_comparisons=1，因此本次仅限日期源序检查的结论为接受。不覆盖日历完整性、PIT、交易所原始字节、Alpha 或 Protocol v2 冻结。",
+                    "recommendation": "accept",
+                    "review_content_hash": "7ff79e29d06b04d72a710bc56b971451009c15393fa35dbf2d600ce76b00a1f7",
+                    "review_id": "review-independent-run-6a94e7d00a7c46acabade897b33fd050",
+                    "reviewed_at": "2026-09-15T13:51:41.325953Z",
+                    "reviewer": "Codex /root/forward_dq_review independent reviewer",
+                    "revision": "rev.1",
+                    "schema_version": "research_lab.review.v2"
+                },
+                "run": {
+                    "hash_profile": "research-json-v1",
+                    "input_lock_sha256": "129661e148bc146c0c7497e26691ff1afad5df6340b7f8f4ea3fbdc4bb19a6b4",
+                    "process_exit_code": 0,
+                    "resolved_computation_manifest": {
+                        "calendar_rule": null,
+                        "code_revision": "ae873050187292c4b4bedb89d73ae3ef6fe6b60b",
+                        "dependency_lock_hash": "fdc0de7ca124f0b11d41685fb6291d9ebc5e19b2cbe935af884d3258ace256c7",
+                        "fingerprint_schema_version": "phase0.data_quality.fingerprint.rev1",
+                        "hash_profile": "research-json-v1",
+                        "holdout_usage_state": "not_applicable",
+                        "method_definition_sha256": "6838c60f0053949b1b578d42a911c343ae2e97f220ccf180941d6ac6d65480f0",
+                        "normalization_rule_version": "phase0.date-column-as-utc-label.rev1",
+                        "random_seed": null,
+                        "raw_bytes_sha256": "fa9a07c2cd55dc04e3300b01ef6ae0fabfb9d0c2b8813796758612cec6a8da19",
+                        "receipt_evidence": null,
+                        "resolved_parameters": {
+                            "strict": true
+                        },
+                        "scientific_time": {
+                            "end": "2023-02-01T00:00:00.000000Z",
+                            "start": "2023-01-03T00:00:00.000000Z"
+                        },
+                        "source_diff_fingerprint": "a5fe30acabae6dce227c39352c1dda5400838ca97190fd9995cb86e9386f33df",
+                        "universe": [
+                            "rb"
+                        ]
+                    },
+                    "run_content_hash": "f8bf55b87af0a0752e7c598892739205135770f88235719ca182500842396d6b",
+                    "run_id": "run-6a94e7d00a7c46acabade897b33fd050",
+                    "run_status": "COMPLETED",
+                    "schema_version": "research_lab.run.v2",
+                    "scientific_fingerprint": "fec6026cdfd6b8c3aa1032f584cd3b23e09dafbce5d8b64cd2afca892baadd75",
+                    "spec_content_hash": "bd4cba75ee4688305344b3665fba29d712029a6b465c81ce6ef937ea3a1acde5",
+                    "spec_id": "spec-phase0-rb-date-order",
+                    "spec_revision": "rev.1",
+                    "timing": {
+                        "completed_at": "2026-09-15T13:50:20.192056Z",
+                        "started_at": "2026-09-15T13:50:20.191806Z"
+                    },
+                    "trial_context": {
+                        "holdout_usage_state": "not_applicable",
+                        "research_stage": "validation",
+                        "retry_of_run_id": null,
+                        "trial_kind": null
+                    }
+                }
+            },
+            "sha256": "6e1d84c2481a20fbc5d9f221e593e4d8c9c5b6bc68b391a029bf54c0816ca743",
+            "spec": {
+                "candidate_decision_criteria": {
+                    "max_allowed_timestamp_reversals": 0
+                },
+                "dataset_requirements": {
+                    "dataset_reference_uri": "candidate://phase0/derived-rb-dates",
+                    "frequencies": [
+                        "1d"
+                    ],
+                    "normalization_rule_version": "phase0.date-column-as-utc-label.rev1",
+                    "pit_constraints": "No historical receipt or PIT certification. source_official_day is a date label, not arrival time.",
+                    "provider_kind": "local_derived_subset",
+                    "required_fields": [
+                        "source_official_day",
+                        "product",
+                        "exact_contract"
+                    ],
+                    "snapshot_selection_mode": "fixed_snapshot",
+                    "snapshot_sha256": "fa9a07c2cd55dc04e3300b01ef6ae0fabfb9d0c2b8813796758612cec6a8da19",
+                    "time_range": {
+                        "end": "2023-02-01T00:00:00.000000Z",
+                        "start": "2023-01-03T00:00:00.000000Z"
+                    },
+                    "universe": [
+                        "rb"
+                    ]
+                },
+                "experiment_type": "data_quality",
+                "hash_profile": "research-json-v1",
+                "holdout_policy": {
+                    "mode": "not_used",
+                    "reason": "Historical derived rows; date-order audit only; no confirmation or PIT claim."
+                },
+                "metric_specifications": [
+                    {
+                        "calculation_definition": "Compare adjacent selected dates within each exact_contract in original source order. Count current <= previous when strict=true, otherwise current < previous. Report comparisons as denominator, duplicate excess keys and reversals separately. Zero comparisons is a defined zero count, not proof of coverage.",
+                        "calculation_definition_version": "phase0.source_order.rev1",
+                        "metric_name": "timestamp_monotonicity_violations",
+                        "precision_rule": "exact_integer",
+                        "sample_scope": "selected rows, adjacent within exact_contract, original CSV order",
+                        "undefined_policy": "null_with_reason_not_zero",
+                        "unit": "integer_count"
+                    }
+                ],
+                "quality_checks": [
+                    {
+                        "check_id": "source_order",
+                        "failure_action": "record",
+                        "implementation_ref": "candidate.phase0.source_order.rev1",
+                        "parameters": []
+                    }
+                ],
+                "rejection_policy": {
+                    "forbid_unknown_fields": true,
+                    "reject_unregistered_implementation": true,
+                    "reject_unsupported_data_sources": true
+                },
+                "research_stage": "validation",
+                "revision": "rev.1",
+                "schema_version": "research_lab.experiment.v2",
+                "seed_proposal": null,
+                "spec_content_hash": "bd4cba75ee4688305344b3665fba29d712029a6b465c81ce6ef937ea3a1acde5",
+                "spec_id": "spec-phase0-rb-date-order",
+                "task_content_hash": "006fd80ec74c4ecc713271a6980e3df838aca2f02c51361a5c1a5702d5097443",
+                "task_id": "task-phase0-rb-date-order",
+                "task_revision": "rev.1",
+                "trial_kind_proposal": null,
+                "validation_config": {
+                    "method": "full_sample_scan"
+                }
+            },
+            "verification": {
+                "facts": {
+                    "comparison_count": 179,
+                    "duplicate_key_excess_rows": 0,
+                    "row_count": 192,
+                    "source_order_reversals": 0,
+                    "timestamp_monotonicity_violations": 0
+                },
+                "review_present": true,
+                "run_id": "run-6a94e7d00a7c46acabade897b33fd050",
+                "run_status": "COMPLETED",
+                "scientific_fingerprint": "fec6026cdfd6b8c3aa1032f584cd3b23e09dafbce5d8b64cd2afca892baadd75"
+            }
+        }
+    ],
+    "status": "DRAFT_UNFROZEN"
+}
