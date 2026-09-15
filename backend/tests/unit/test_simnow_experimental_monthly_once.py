@@ -139,7 +139,7 @@ def test_same_month_restart_reuses_bundle_and_preserves_target_bytes_and_mtime(
     assert stat.S_IMODE(bundle_path.parent.stat().st_mode) == 0o755
 
 
-def test_same_route_with_changed_daily_metadata_preserves_target_bytes_and_mtime(
+def test_same_route_with_changed_daily_metadata_rebinds_current_route_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _projection, _freeze, evidence = _static_outputs()
@@ -148,19 +148,26 @@ def test_same_route_with_changed_daily_metadata_preserves_target_bytes_and_mtime
     _install_producers(monkeypatch, snapshot=snapshot)
     first = _run(paths)
     target_before = paths["target_path"].read_bytes()
-    target_mtime_before = paths["target_path"].stat().st_mtime_ns
+    before = json.loads(target_before)
 
     paths["daily_pit_route_path"].write_bytes(
         _raw(_route(snapshot, metadata={"research_artifact_id": "daily-next"}))
     )
 
-    assert _run(paths) == {
-        "status": "NO_NEW_TARGET",
-        "target_id": first["target_id"],
-        "monthly_bundle_created": False,
-    }
-    assert paths["target_path"].read_bytes() == target_before
-    assert paths["target_path"].stat().st_mtime_ns == target_mtime_before
+    result = _run(paths)
+    after = json.loads(paths["target_path"].read_bytes())
+    assert result["status"] == "MATERIALIZED"
+    assert result["target_id"] != first["target_id"]
+    assert after["monthly_quantity_sha256"] == before["monthly_quantity_sha256"]
+    assert after["daily_route_sha256"] == materializer._sha256(
+        paths["daily_pit_route_path"].read_bytes()
+    )
+    assert [row["quantity"] for row in after["targets"]] == [
+        row["quantity"] for row in before["targets"]
+    ]
+    assert [row["exact_contract"] for row in after["targets"]] == [
+        row["exact_contract"] for row in before["targets"]
+    ]
 
 
 def test_route_change_reuses_monthly_bytes_and_updates_only_exact_contract(

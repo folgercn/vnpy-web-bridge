@@ -30,10 +30,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
-
-import commodity_c_fast_pure_producer_kernel as frozen  # noqa: E402
+import commodity_c_fast_pure_producer_kernel as frozen
 
 SOURCE_SCHEMA_VERSION = "commodity_relative_vol_position_manager_source_view_v1"
 SOURCE_PURPOSE = "VERIFIED_BOUNDED_PIT_BASELINE_INPUT_ONLY"
@@ -1104,13 +1101,16 @@ def produce_snapshot(
         source_month_number,
         calendar.monthrange(source_year, source_month_number)[1],
     )
-    if cutoff_at.astimezone(CHINA_TZ).date() != input_cutoff_day:
+    cutoff_local_day = cutoff_at.astimezone(CHINA_TZ).date()
+    if (
+        batch["execution_lane"] != "simnow_shakedown"
+        and cutoff_local_day != input_cutoff_day
+    ) or (
+        batch["execution_lane"] == "simnow_shakedown"
+        and cutoff_local_day.strftime("%Y-%m") != source_month
+    ):
         raise SnapshotProducerError(
             "cutoff timestamp is not on the source-month PIT boundary"
-        )
-    if generated_at.astimezone(CHINA_TZ).date() != execution_day:
-        raise SnapshotProducerError(
-            "source view must be generated on the baseline execution day"
         )
     normalized_calendar, expected_official_days = _validate_official_calendar(
         source["official_calendar"],
@@ -1118,6 +1118,29 @@ def produce_snapshot(
         input_cutoff_day=input_cutoff_day,
         execution_day=execution_day,
     )
+    generated_local = generated_at.astimezone(CHINA_TZ)
+    research_day = _iso_date(
+        normalized_calendar["research_as_of_official_day"],
+        "official calendar research_as_of_official_day",
+    )
+    if (
+        batch["execution_lane"] == "simnow_shakedown"
+        and cutoff_local_day != research_day
+    ):
+        raise SnapshotProducerError(
+            "SimNow cutoff timestamp is not on the completed research day"
+        )
+    if not (
+        generated_local.date() == execution_day
+        or (
+            batch["execution_lane"] == "simnow_shakedown"
+            and generated_local.date() == research_day
+            and generated_local.hour >= 20
+        )
+    ):
+        raise SnapshotProducerError(
+            "source view must be generated on the baseline execution TradingDay"
+        )
     normalized_returns, daily_return_values = _validate_daily_returns(
         source,
         input_cutoff_day=input_cutoff_day,

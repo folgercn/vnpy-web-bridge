@@ -1,0 +1,6 @@
+interface:
+  display_name: "Vnpy Release"
+  short_description: "核验或准备按 SHA 和区域的 Lab 发布"
+  default_prompt: "Use $vnpy-release to check existing CD before preparing a scoped SIMNOW_LAB release."
+policy:
+  allow_implicit_invocation: false

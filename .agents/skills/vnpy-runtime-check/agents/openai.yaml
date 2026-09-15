@@ -1,0 +1,6 @@
+interface:
+  display_name: "Vnpy Runtime Check"
+  short_description: "定向只读检查 Lab、M2 或 Dashboard 状态"
+  default_prompt: "Use $vnpy-runtime-check to inspect the specified vnpy runtime object read-only."
+policy:
+  allow_implicit_invocation: true

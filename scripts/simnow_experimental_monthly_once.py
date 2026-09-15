@@ -256,14 +256,22 @@ def _target_lock(path: Path):
 def materialize_monthly_once(
     *,
     source_month: str,
-    static_source_path: Path,
-    thermostat_source_path: Path,
+    static_source_path: Path | None = None,
+    thermostat_source_path: Path | None = None,
+    static_source_raw: bytes | None = None,
+    thermostat_source_raw: bytes | None = None,
     monthly_bundle_directory: Path,
-    daily_pit_route_path: Path,
+    daily_pit_route_path: Path | None = None,
+    daily_pit_route_raw: bytes | None = None,
     target_path: Path,
     generated_at: str | None = None,
 ) -> dict[str, Any]:
     """Reuse/create one monthly bundle and atomically update its route target."""
+
+    if (static_source_raw is None) != (thermostat_source_raw is None):
+        raise ExperimentalMonthlyError("monthly producer source bytes are incomplete")
+    if daily_pit_route_raw is None and daily_pit_route_path is None:
+        raise ExperimentalMonthlyError("daily PIT route input is incomplete")
 
     bundle_path = _bundle_path(monthly_bundle_directory, source_month)
     current = _read_current_target(target_path)
@@ -275,13 +283,18 @@ def materialize_monthly_once(
         existing = _read_existing_bundle(bundle_path, source_month=source_month)
         created_bundle = False
         if existing is None:
-            bundle = _produce_bundle(
-                static_source_raw=_read_producer_source(
+            if static_source_raw is None:
+                if static_source_path is None or thermostat_source_path is None:
+                    raise ExperimentalMonthlyError("monthly producer source paths are incomplete")
+                static_source_raw = _read_producer_source(
                     static_source_path, label="STATIC_CORE_EQUAL source"
-                ),
-                thermostat_source_raw=_read_producer_source(
+                )
+                thermostat_source_raw = _read_producer_source(
                     thermostat_source_path, label="thermostat source"
-                ),
+                )
+            bundle = _produce_bundle(
+                static_source_raw=static_source_raw,
+                thermostat_source_raw=thermostat_source_raw,
                 source_month=source_month,
             )
             bundle, bundle_raw, created_bundle = _create_only_bundle(
@@ -294,12 +307,18 @@ def materialize_monthly_once(
         current = _read_current_target(target_path)
         current_value = None if current is None else current[0]
         _require_target_month_advances(current_value, source_month)
-        try:
-            daily_route, daily_route_raw = read_json_stable(
-                daily_pit_route_path, label="daily PIT route"
-            )
-        except ExperimentalTargetError as exc:
-            raise ExperimentalMonthlyError(str(exc)) from exc
+        if daily_pit_route_raw is None:
+            try:
+                daily_route, daily_route_raw = read_json_stable(
+                    daily_pit_route_path, label="daily PIT route"
+                )
+            except ExperimentalTargetError as exc:
+                raise ExperimentalMonthlyError(str(exc)) from exc
+        else:
+            daily_route_raw = daily_pit_route_raw
+            daily_route = _json_object(daily_route_raw, label="daily PIT route")
+            if canonical_json_line(daily_route) != daily_pit_route_raw:
+                raise ExperimentalMonthlyError("daily PIT route must be canonical JSON")
         if (
             current_value is not None
             and current_value["source_month"] == source_month
@@ -330,10 +349,15 @@ def materialize_monthly_once(
                 raise ExperimentalMonthlyError(
                     "existing experimental target quantity vector differs"
                 )
-            if all(
+            same_exact_routes = all(
                 current_rows[product]["exact_contract"]
                 == expected_rows[product]["exact_contract"]
                 for product in expected_rows
+            )
+            if (
+                same_exact_routes
+                and current_value["daily_route_sha256"]
+                == hashlib.sha256(daily_route_raw).hexdigest()
             ):
                 return {
                     "status": "NO_NEW_TARGET",

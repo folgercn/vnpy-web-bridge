@@ -1,0 +1,27 @@
+schema_version: research_lab.experiment.v1
+experiment_id: buy-hold-local-csv-demo-001
+strategy:
+  name: buy_and_hold
+factor:
+  name: close_return
+features:
+  - name: close_return
+  - name: simple_moving_average
+    version: v1
+    parameters:
+      window: 2
+universe: [DEMO]
+dataset:
+  name: demo_ohlcv
+  provider: local_csv
+  path: research_lab/examples/data/demo_ohlcv.csv
+parameters: {}
+execution:
+  initial_capital: 100000.0
+  position_size: 1.0
+cost_model:
+  bps: 2.0
+validation:
+  method: in_sample
+output:
+  format: json

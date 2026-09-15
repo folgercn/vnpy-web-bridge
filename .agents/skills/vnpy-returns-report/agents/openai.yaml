@@ -1,0 +1,6 @@
+interface:
+  display_name: "Vnpy Returns Report"
+  short_description: "只读核验 Lab 指定区间的权益和覆盖"
+  default_prompt: "Use $vnpy-returns-report to report a specified SIMNOW_LAB period with coverage gaps preserved."
+policy:
+  allow_implicit_invocation: true
