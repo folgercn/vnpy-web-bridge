@@ -1,0 +1,59 @@
+{
+  "template_status": "SYNTHETIC_SHAPE_ONLY_NOT_EXECUTABLE",
+  "note": "Zero digests are test constants, not computed object or file hashes. No actual Run, Evidence or authorization exists.",
+  "handoff": {
+    "schema_version": "research_lab.agent_handoff.v2",
+    "handoff_id": "fixture-revise_spec",
+    "message_kind": "request",
+    "operation": "revise_spec",
+    "sender_role": "critic",
+    "recipient_role": "research",
+    "context_refs": {
+      "research_task": {
+        "object_type": "research_task",
+        "object_id": "fixture-research-task",
+        "content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "revision": "rev.1"
+      },
+      "experiment_spec": {
+        "object_type": "experiment_spec",
+        "object_id": "fixture-experiment-spec",
+        "content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "revision": "rev.1"
+      },
+      "experiment_run": {
+        "object_type": "experiment_run",
+        "object_id": "fixture-experiment-run",
+        "content_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "artifact_manifest": {
+        "object_type": "artifact_manifest",
+        "object_id": "fixture-artifact-manifest",
+        "content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "revision": "rev.1"
+      },
+      "result_evidence": {
+        "object_type": "result_evidence",
+        "object_id": "fixture-result-evidence",
+        "content_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "review": {
+        "object_type": "review",
+        "object_id": "fixture-review",
+        "content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "revision": "rev.1"
+      }
+    },
+    "artifact_requirements": {
+      "role_profile_ref": "research_lab.artifact_roles.v2.candidate1",
+      "required_roles": [],
+      "exact_refs": []
+    },
+    "expected_outputs": [
+      {
+        "object_type": "experiment_spec",
+        "schema_version": "research_lab.experiment.v2"
+      }
+    ]
+  }
+}

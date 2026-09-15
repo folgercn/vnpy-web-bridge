@@ -1,0 +1,24 @@
+{
+  "template_status": "SYNTHETIC_SHAPE_ONLY_NOT_EXECUTABLE",
+  "note": "Zero digests are test constants, not computed object or file hashes. No actual Run, Evidence or authorization exists.",
+  "handoff": {
+    "schema_version": "research_lab.agent_handoff.v2",
+    "handoff_id": "fixture-response-unsupported",
+    "message_kind": "response",
+    "operation": "execute_spec",
+    "sender_role": "execution",
+    "recipient_role": "research",
+    "context_refs": {},
+    "in_reply_to": "fixture-execute_spec",
+    "status": "unsupported",
+    "problem": {
+      "code": "capability_unsupported",
+      "reason": "Requested method version is not supported by this consumer.",
+      "affected_items": [
+        "spec_or_delivery_reference"
+      ],
+      "resume_condition": "Supply corrected exact references and verified facts; re-evaluate, never auto-retry.",
+      "execution_outcome": "not_started"
+    }
+  }
+}

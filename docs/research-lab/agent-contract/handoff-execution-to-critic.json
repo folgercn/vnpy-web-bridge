@@ -1,0 +1,115 @@
+{
+  "template_status": "SYNTHETIC_SHAPE_ONLY_NOT_EXECUTABLE",
+  "note": "Zero digests are test constants, not computed object or file hashes. No actual Run, Evidence or authorization exists.",
+  "handoff": {
+    "schema_version": "research_lab.agent_handoff.v2",
+    "handoff_id": "fixture-review_evidence",
+    "message_kind": "request",
+    "operation": "review_evidence",
+    "sender_role": "execution",
+    "recipient_role": "critic",
+    "context_refs": {
+      "research_task": {
+        "object_type": "research_task",
+        "object_id": "fixture-research-task",
+        "content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "revision": "rev.1"
+      },
+      "experiment_spec": {
+        "object_type": "experiment_spec",
+        "object_id": "fixture-experiment-spec",
+        "content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "revision": "rev.1"
+      },
+      "experiment_run": {
+        "object_type": "experiment_run",
+        "object_id": "fixture-experiment-run",
+        "content_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "artifact_manifest": {
+        "object_type": "artifact_manifest",
+        "object_id": "fixture-artifact-manifest",
+        "content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "revision": "rev.1"
+      },
+      "result_evidence": {
+        "object_type": "result_evidence",
+        "object_id": "fixture-result-evidence",
+        "content_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "artifact_requirements": {
+      "role_profile_ref": "research_lab.artifact_roles.v2.candidate1",
+      "required_roles": [
+        "dataset_metadata",
+        "method_definition",
+        "environment_lock",
+        "replay_instructions",
+        "quality_summary",
+        "quality_anomalies"
+      ],
+      "exact_refs": [
+        {
+          "manifest_id": "fixture-artifact-manifest",
+          "manifest_revision": "rev.1",
+          "manifest_content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "artifact_id": "fixture-dataset_metadata",
+          "role": "dataset_metadata",
+          "content_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "manifest_id": "fixture-artifact-manifest",
+          "manifest_revision": "rev.1",
+          "manifest_content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "artifact_id": "fixture-method_definition",
+          "role": "method_definition",
+          "content_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "manifest_id": "fixture-artifact-manifest",
+          "manifest_revision": "rev.1",
+          "manifest_content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "artifact_id": "fixture-environment_lock",
+          "role": "environment_lock",
+          "content_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "manifest_id": "fixture-artifact-manifest",
+          "manifest_revision": "rev.1",
+          "manifest_content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "artifact_id": "fixture-replay_instructions",
+          "role": "replay_instructions",
+          "content_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "manifest_id": "fixture-artifact-manifest",
+          "manifest_revision": "rev.1",
+          "manifest_content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "artifact_id": "fixture-quality_summary",
+          "role": "quality_summary",
+          "content_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "manifest_id": "fixture-artifact-manifest",
+          "manifest_revision": "rev.1",
+          "manifest_content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "artifact_id": "fixture-quality_anomalies",
+          "role": "quality_anomalies",
+          "content_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    },
+    "expected_outputs": [
+      {
+        "object_type": "review",
+        "schema_version": "research_lab.review.v2"
+      }
+    ],
+    "review_scope": "research_assessment",
+    "criteria_ref": {
+      "id": "fixture-quality-review-criteria",
+      "revision": "rev.1",
+      "content_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  }
+}
