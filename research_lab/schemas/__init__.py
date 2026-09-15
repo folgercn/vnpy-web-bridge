@@ -11,7 +11,7 @@ from .validation import (
 from .critic import CriticFinding, CriticReview
 from .alpha import AlphaIdea, ExperimentRecord, FailurePattern, FactorKnowledge, LiteratureReference
 from .astra import ResearchMaterial, ResearchProposal, ResearchTask
-from .sol import ExperimentPlan, PlanEvent, SolTaskInput, WorkerDescriptor
+from .sol import ExperimentPlan, PlanEvent, SolTaskInput, WorkerCapabilities, WorkerDescriptor
 
 __all__ = [
     "ExperimentResult", "ExperimentSpec", "FeatureRequest", "ParameterStability",
@@ -22,5 +22,5 @@ __all__ = [
     "CriticFinding", "CriticReview",
     "AlphaIdea", "ExperimentRecord", "FailurePattern", "FactorKnowledge", "LiteratureReference",
     "ResearchMaterial", "ResearchProposal", "ResearchTask",
-    "ExperimentPlan", "PlanEvent", "SolTaskInput", "WorkerDescriptor",
+    "ExperimentPlan", "PlanEvent", "SolTaskInput", "WorkerCapabilities", "WorkerDescriptor",
 ]

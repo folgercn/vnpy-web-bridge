@@ -6,13 +6,16 @@ import tempfile
 import unittest
 import json
 
+from pydantic import ValidationError
+
 from research_lab.alpha_database import AlphaDatabase
 from research_lab.astra import AstraDiscovery
 from research_lab.runners import ExperimentRunner
 from research_lab.schemas import (
     ExperimentRecord, ExperimentResult, ResearchMaterial, SolTaskInput, ValidationSpec, WorkerDescriptor,
 )
-from research_lab.sol import SolOrchestrator, SolStateError
+from research_lab.sol import CriticReviewAdapter, SolOrchestrator, SolStateError
+from research_lab.sol.state_machine import require_transition, retry_permitted
 from research_lab.validation import WalkForwardValidationEngine
 
 
@@ -113,6 +116,71 @@ class SolOrchestratorTest(unittest.TestCase):
             self.assertEqual(reviewed.review_status, "reviewed")
             self.assertIsNotNone(reviewed.critic_review_id)
             self.assertIsNotNone(sol.store.get_critic_review(reviewed.critic_review_id))
+
+    def test_injected_persisted_validation_reviewer_is_called(self) -> None:
+        class RecordingReviewer:
+            def __init__(self, store) -> None:
+                self.store = store
+                self.calls: list[tuple[str, str]] = []
+
+            def review_persisted(self, validation_id: str, *, candidate_id: str):
+                self.calls.append((validation_id, candidate_id))
+                return CriticReviewAdapter(self.store).review_persisted(
+                    validation_id, candidate_id=candidate_id,
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "output"
+            runner = ExperimentRunner.local(root)
+            reviewer = RecordingReviewer(runner.store)
+            sol = SolOrchestrator.local(root, runner=runner, reviewer=reviewer)
+            plan = sol.receive(SolTaskInput(task=task(root)))
+            sol.approve(plan.plan_id, approved_by="researcher")
+            review_plan = sol.run_next()
+            validation = WalkForwardValidationEngine.local(root).run(ValidationSpec(
+                schema_version="research_lab.validation.v1", validation_id="sol-adapter-validation-001",
+                method="walk_forward", train_size=2, test_size=2, step_size=2,
+                experiment=task(root).experiment,
+            ))
+            reviewed = sol.review(sol.attach_validation(review_plan.plan_id, validation.validation_id).plan_id)
+
+            self.assertEqual(reviewer.calls, [(validation.validation_id, EXPERIMENT["experiment_id"])])
+            self.assertIsNotNone(sol.store.get_critic_review(reviewed.critic_review_id))
+
+    def test_default_critic_adapter_and_worker_capabilities_remain_local_metadata(self) -> None:
+        class DeclaredWorker:
+            descriptor = WorkerDescriptor(
+                worker_id="zzz-declared", available=False,
+                capabilities={
+                    "cpu_cores": 8, "memory_mib": 16384,
+                    "supported_engines": ["deterministic"],
+                    "supported_datasets": ["special-dataset"],
+                    "supported_features": ["special-feature"],
+                },
+            )
+
+            def execute(self, _plan):
+                raise AssertionError("unavailable declared worker must not execute")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "output"
+            sol = SolOrchestrator.local(root)
+            self.assertIsInstance(sol.reviewer, CriticReviewAdapter)
+            sol.register_worker(DeclaredWorker())
+
+            persisted = {item.worker_id: item for item in sol.workers()}["zzz-declared"]
+            self.assertEqual(persisted.capabilities.cpu_cores, 8)
+            self.assertEqual(persisted.capabilities.supported_features, ["special-feature"])
+            self.assertEqual(sol.workers()[0].capabilities.supported_engines, ["deterministic"])
+            self.assertEqual(sol._select_worker().descriptor.worker_id, "local-runner-v1")
+            with self.assertRaises(ValidationError):
+                WorkerDescriptor(worker_id="invalid-capability", capabilities={"supported_engines": ["remote"]})
+
+    def test_state_machine_rejects_illegal_transition_and_retry_limit(self) -> None:
+        with self.assertRaisesRegex(SolStateError, "illegal Sol transition"):
+            require_transition("pending_approval", "review")
+        self.assertTrue(retry_permitted(0, 1))
+        self.assertFalse(retry_permitted(1, 1))
 
     def test_receive_is_idempotent_and_illegal_transitions_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

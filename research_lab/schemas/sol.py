@@ -15,6 +15,18 @@ PlanStatus = Literal[
 ]
 
 
+class WorkerCapabilities(BaseModel):
+    """Static, local worker declarations; they do not drive scheduling in this MVP."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cpu_cores: int = Field(default=1, ge=1, le=256)
+    memory_mib: int = Field(default=0, ge=0, le=1_048_576)
+    supported_engines: list[Literal["deterministic"]] = Field(default_factory=lambda: ["deterministic"], max_length=4)
+    supported_datasets: list[str] = Field(default_factory=list, max_length=32)
+    supported_features: list[str] = Field(default_factory=list, max_length=64)
+
+
 class WorkerDescriptor(BaseModel):
     """One local, explicitly registered execution capability."""
 
@@ -23,6 +35,7 @@ class WorkerDescriptor(BaseModel):
     worker_id: str = Field(min_length=3, max_length=128)
     kind: Literal["runner"] = "runner"
     available: bool = True
+    capabilities: WorkerCapabilities = Field(default_factory=WorkerCapabilities)
 
 
 class PlanEvent(BaseModel):

@@ -10,16 +10,14 @@ from pathlib import Path
 from typing import Protocol
 
 from research_lab.config import ResearchLabConfig
-from research_lab.critic import CriticAgent
 from research_lab.alpha_database import AlphaDatabase
 from research_lab.astra import AstraDiscovery
 from research_lab.database import ResultStore
 from research_lab.runners import ExperimentRunner
 from research_lab.schemas import ExperimentPlan, ExperimentRecord, ExperimentResult, PlanEvent, SolTaskInput, WorkerDescriptor
-
-
-class SolStateError(ValueError):
-    """Raised when a caller requests a lifecycle transition without evidence."""
+from research_lab.schemas.sol import PlanStatus
+from .review import CriticReviewAdapter, PersistedValidationReviewer
+from .state_machine import SolStateError, require_transition, retry_permitted, validate_state_chain
 
 
 class RunnerWorker(Protocol):
@@ -46,7 +44,12 @@ class SolOrchestrator:
     Astra invoke a runner. Every execution begins only through ``run_next``.
     """
 
-    def __init__(self, config: ResearchLabConfig, runner: ExperimentRunner | None = None) -> None:
+    def __init__(
+        self,
+        config: ResearchLabConfig,
+        runner: ExperimentRunner | None = None,
+        reviewer: PersistedValidationReviewer | None = None,
+    ) -> None:
         self.config = config
         self.store = runner.store if runner is not None else ResultStore(config)
         self.runner = runner or ExperimentRunner(self.store)
@@ -57,11 +60,17 @@ class SolOrchestrator:
         self.integrity_key_path = self.root / ".plan-integrity.key"
         self._integrity_key = self._load_integrity_key()
         self._workers: dict[str, RunnerWorker] = {}
+        self.reviewer = reviewer or CriticReviewAdapter(self.store)
         self.register_worker(LocalRunnerWorker(self.runner))
 
     @classmethod
-    def local(cls, root: Path | str, runner: ExperimentRunner | None = None) -> "SolOrchestrator":
-        return cls(ResearchLabConfig(Path(root)), runner)
+    def local(
+        cls,
+        root: Path | str,
+        runner: ExperimentRunner | None = None,
+        reviewer: PersistedValidationReviewer | None = None,
+    ) -> "SolOrchestrator":
+        return cls(ResearchLabConfig(Path(root)), runner, reviewer)
 
     def register_worker(self, worker: RunnerWorker) -> WorkerDescriptor:
         self._workers[worker.descriptor.worker_id] = worker
@@ -149,7 +158,7 @@ class SolOrchestrator:
 
     def _handle_failure(self, plan: ExperimentPlan, message: str, result_experiment_id: str | None = None) -> ExperimentPlan:
         failed = self._transition(plan, "failed", "runner returned failed result", result_experiment_id=result_experiment_id, error_message=message)
-        if failed.retry_count >= failed.max_retries:
+        if not retry_permitted(failed.retry_count, failed.max_retries):
             return failed
         retry = self._transition(failed, "retry", "retry policy permits another explicit attempt", retry_count=failed.retry_count + 1)
         return self._transition(retry, "queued", "retry requeued; explicit run_next remains required")
@@ -168,7 +177,9 @@ class SolOrchestrator:
             raise SolStateError("only completed plans in review can be reviewed")
         if plan.validation_id is None:
             return self._save(plan.model_copy(update={"review_status": "skipped", "events": [*plan.events, PlanEvent(status="review", reason="Critic skipped: no explicit persisted validation_id attached")]}))
-        review = CriticAgent(self.store).review_persisted(plan.validation_id, candidate_id=plan.experiment.experiment_id)
+        if self.store.get_validation(plan.validation_id) is None:
+            raise SolStateError("validation_id must name an existing persisted ValidationResult")
+        review = self.reviewer.review_persisted(plan.validation_id, candidate_id=plan.experiment.experiment_id)
         return self._save(plan.model_copy(update={"critic_review_id": review.review_id, "review_status": "reviewed", "events": [*plan.events, PlanEvent(status="review", reason=f"Critic reviewed persisted validation {plan.validation_id}")]}))
 
     def archive(self, plan_id: str) -> ExperimentPlan:
@@ -191,7 +202,8 @@ class SolOrchestrator:
             raise SolStateError(f"plan not found: {plan_id}")
         return plan
 
-    def _transition(self, plan: ExperimentPlan, status: str, reason: str, **updates: object) -> ExperimentPlan:
+    def _transition(self, plan: ExperimentPlan, status: PlanStatus, reason: str, **updates: object) -> ExperimentPlan:
+        require_transition(plan.status, status)
         payload = {**updates, "status": status, "events": [*plan.events, PlanEvent(status=status, reason=reason)]}
         return self._save(plan.model_copy(update=payload))
 
@@ -248,24 +260,7 @@ class SolOrchestrator:
         expected_plan = self._digest(plan.model_copy(update={"integrity_hash": ""}).model_dump(mode="json", exclude={"integrity_hash"}))
         if not hmac.compare_digest(plan.integrity_hash, expected_plan):
             raise SolStateError(f"plan integrity error: {plan.plan_id}")
-        self._validate_state_chain(plan)
-
-    @staticmethod
-    def _validate_state_chain(plan: ExperimentPlan) -> None:
-        states = [event.status for event in plan.events]
-        initial = ["received", "planning", "pending_approval"]
-        if states[:3] != initial or plan.status != states[-1]:
-            raise SolStateError(f"plan state chain is not reachable: {plan.plan_id}")
-        allowed = {
-            "pending_approval": {"queued"}, "queued": {"running"}, "running": {"review", "failed"},
-            "failed": {"retry"}, "retry": {"queued"}, "review": {"review", "archived"},
-        }
-        for prior, current in zip(states[2:], states[3:]):
-            if current not in allowed.get(prior, set()):
-                raise SolStateError(f"plan state chain is not reachable: {plan.plan_id}")
-        if any(state in {"queued", "running", "retry", "failed", "review", "archived"} for state in states):
-            if not plan.approved_by or plan.approved_at is None:
-                raise SolStateError(f"approved state lacks an approval record: {plan.plan_id}")
+        validate_state_chain(plan)
 
     def _digest(self, payload: object) -> str:
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")

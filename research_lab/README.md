@@ -203,9 +203,14 @@ versions before accepting a handoff.
 
 The only MVP worker is an in-process adapter to `ExperimentRunner`, whose
 existing ResultStore and Alpha Database writes remain the execution record.
+`WorkerDescriptor.capabilities` records static CPU, memory, engine, dataset,
+and feature declarations in `sol/workers.json`; it is queryable audit metadata
+only and does not monitor resources or change local worker selection.
 Even a `completed` worker callback cannot enter review unless its experiment ID
 matches the plan and its completed result is already present in both stores.
 Sol does not create strategies, start a service or queue, select candidates,
-promote/deploy/trade, or let Astra run experiments. Critic review is skipped
+promote/deploy/trade, or let Astra run experiments. Sol depends on a minimal
+persisted-validation review interface; its default local adapter invokes
+Critic. Critic review is skipped
 with audit evidence unless the caller attaches an existing persisted
 `validation_id`; Sol never fabricates a validation result from an experiment.
