@@ -1,0 +1,170 @@
+{
+  "schema_version": "research_lab.experiment.v2",
+  "revision": "rev.1",
+  "spec_id": "spec-dq-rb-hc-audit-001",
+  "task_id": "task-dq-rb-hc-continuity-audit",
+  "task_revision": "rev.1",
+  "task_content_hash": null,
+  "spec_content_hash": null,
+  "hash_profile": "research-json-v1",
+  "research_stage": "validation",
+  "trial_kind_proposal": null,
+  "experiment_type": "data_quality",
+  "description": "SHFE 螺纹钢与热轧卷板历史连续日线及分钟线连续性、价格包络线与换月缺口完整性审计规格",
+  "dataset_requirements": {
+    "provider_kind": "candidate_warehouse_reference",
+    "catalog_name": "commodity_c_fast_source_view",
+    "dataset_reference_uri": "candidate://futures/shfe/rb_hc_continuous_v1",
+    "snapshot_selection_mode": "fixed_snapshot",
+    "snapshot_sha256": null,
+    "universe": [
+      "RB.SHFE",
+      "HC.SHFE"
+    ],
+    "frequencies": [
+      "1m",
+      "1d"
+    ],
+    "time_range": {
+      "start": "2019-12-31T16:00:00.000000Z",
+      "end": "2023-12-31T15:59:59.000000Z"
+    },
+    "required_fields": [
+      "timestamp",
+      "symbol",
+      "open",
+      "high",
+      "low",
+      "close",
+      "volume",
+      "open_interest"
+    ],
+    "pit_constraints": "Timestamps must adhere to exchange official calendar. Availability must be determined by actual release timestamp receipts; unverified release times must block PIT compliance.",
+    "timing_receipt_requirements": {
+      "receipt_type": "exchange_daily_bulletin_timestamp",
+      "required_fields": [
+        "publish_timestamp",
+        "bulletin_id"
+      ],
+      "max_receipt_lag_seconds": 3600
+    }
+  },
+  "seed_proposal": null,
+  "quality_checks": [
+    {
+      "check_id": "monotonic_timestamps",
+      "implementation_ref": "candidate.research_lab.quality_checks.v1.monotonic_timestamps",
+      "parameters": [
+        {
+          "name": "strict",
+          "value_type": "boolean",
+          "unit": "dimensionless",
+          "value": true
+        },
+        {
+          "name": "max_allowed_reversals",
+          "value_type": "integer",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "failure_action": "record"
+    },
+    {
+      "check_id": "price_envelope_validity",
+      "implementation_ref": "candidate.research_lab.quality_checks.v1.price_envelope",
+      "parameters": [
+        {
+          "name": "require_positive_low",
+          "value_type": "boolean",
+          "unit": "dimensionless",
+          "value": true
+        }
+      ],
+      "failure_action": "record"
+    },
+    {
+      "check_id": "volume_oi_nonnegativity",
+      "implementation_ref": "candidate.research_lab.quality_checks.v1.nonnegative_volume_oi",
+      "parameters": [
+        {
+          "name": "allow_zero",
+          "value_type": "boolean",
+          "unit": "dimensionless",
+          "value": true
+        }
+      ],
+      "failure_action": "record"
+    },
+    {
+      "check_id": "roll_continuity_audit",
+      "implementation_ref": "candidate.research_lab.quality_checks.v1.roll_continuity",
+      "parameters": [
+        {
+          "name": "max_unexplained_gap_days",
+          "value_type": "integer",
+          "unit": "count",
+          "value": 0
+        }
+      ],
+      "failure_action": "record"
+    }
+  ],
+  "validation_config": {
+    "method": "full_sample_scan"
+  },
+  "candidate_decision_criteria": {
+    "max_allowed_envelope_violations": 0,
+    "max_allowed_timestamp_reversals": 0,
+    "max_allowed_unexplained_gaps": 0,
+    "min_required_completeness_ratio": "0.9999"
+  },
+  "metric_specifications": [
+    {
+      "metric_name": "completeness_ratio",
+      "calculation_definition_version": "candidate.research_lab.metrics.v1.completeness_ratio",
+      "unit": "decimal_ratio",
+      "sample_scope": "all_expected_calendar_trading_bars",
+      "precision_rule": "Round final value to 8 decimal places, ROUND_HALF_EVEN; serialize canonical Decimal without trailing zeroes; do not round intermediate calculations.",
+      "undefined_policy": "null_with_reason_not_zero",
+      "calculation_definition": "Count distinct observed (symbol, frequency, expected calendar slot) keys intersecting the expected set, divided by expected key count. Duplicates do not improve coverage. Missing/unverified exchange calendar makes the metric undefined."
+    },
+    {
+      "metric_name": "timestamp_monotonicity_violations",
+      "calculation_definition_version": "candidate.research_lab.metrics.v1.timestamp_monotonicity",
+      "unit": "integer_count",
+      "sample_scope": "full_universe_records",
+      "precision_rule": "exact_integer",
+      "undefined_policy": "null_with_reason_not_zero",
+      "calculation_definition": "Count adjacent records in original source order within each symbol/frequency with timestamp <= previous timestamp. Do not sort before checking. Empty groups have zero comparisons; also report sample count."
+    },
+    {
+      "metric_name": "price_envelope_violations",
+      "calculation_definition_version": "candidate.research_lab.metrics.v1.price_envelope_violations",
+      "unit": "integer_count",
+      "sample_scope": "full_universe_records",
+      "precision_rule": "exact_integer",
+      "undefined_policy": "null_with_reason_not_zero",
+      "calculation_definition": "Count records where any OHLC is missing/nonfinite, low <= 0, low > min(open,close), high < max(open,close), or low > high. Count each invalid row once."
+    },
+    {
+      "metric_name": "unexplained_roll_gaps_count",
+      "calculation_definition_version": "candidate.research_lab.metrics.v1.unexplained_roll_gaps",
+      "unit": "integer_count",
+      "sample_scope": "main_roll_window_events",
+      "precision_rule": "exact_integer",
+      "undefined_policy": "null_with_reason_not_zero",
+      "calculation_definition": "Count expected trading-calendar slots missing within declared roll windows after subtracting explicitly versioned scheduled closures. Without a pinned roll-window and calendar definition the metric is undefined."
+    }
+  ],
+  "rejection_policy": {
+    "forbid_unknown_fields": true,
+    "reject_unregistered_implementation": true,
+    "reject_unsupported_data_sources": true
+  },
+  "holdout_policy": {
+    "mode": "not_used",
+    "reason": "Exploratory/diagnostic example; no independent confirmation claim. Out-of-sample diagnostics are not sealed confirmation."
+  },
+  "strategy_spec": {}
+}

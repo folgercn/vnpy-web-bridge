@@ -1,0 +1,199 @@
+{
+  "schema_version": "research_lab.experiment.v2",
+  "revision": "rev.1",
+  "spec_id": "spec-backtest-rb-trend-001",
+  "task_id": "task-backtest-commodity-intraday-swing-trend",
+  "task_revision": "rev.1",
+  "task_content_hash": null,
+  "spec_content_hash": null,
+  "hash_profile": "research-json-v1",
+  "research_stage": "exploration",
+  "trial_kind_proposal": "parameter_search",
+  "experiment_type": "trading_backtest",
+  "backtest_profile": "futures",
+  "description": "SHFE 螺纹钢日内波段突破策略在逼真撮合与成本模型下的样本外回测规格",
+  "dataset_requirements": {
+    "provider_kind": "candidate_warehouse_reference",
+    "catalog_name": "commodity_c_fast_source_view",
+    "dataset_reference_uri": "candidate://futures/shfe/rb_15m_bbo_2023_v1",
+    "snapshot_selection_mode": "fixed_snapshot",
+    "snapshot_sha256": null,
+    "universe": [
+      "RB.SHFE"
+    ],
+    "frequencies": [
+      "15m"
+    ],
+    "time_range": {
+      "start": "2022-12-31T16:00:00.000000Z",
+      "end": "2023-12-31T15:59:59.000000Z"
+    },
+    "required_fields": [
+      "timestamp",
+      "symbol",
+      "open",
+      "high",
+      "low",
+      "close",
+      "volume",
+      "open_interest",
+      "bid_price_1",
+      "ask_price_1",
+      "bid_volume_1",
+      "ask_volume_1"
+    ],
+    "pit_constraints": "BBO quotes and bar intervals must have verified exchange timestamp receipts. Missing BBO must reject next_bar_open_with_bbo_clip fill assumption."
+  },
+  "seed_proposal": 1234,
+  "contract_specifications": {
+    "target_symbol": "RB",
+    "exchange": "SHFE",
+    "multiplier": "10",
+    "multiplier_unit": "tons_per_lot",
+    "price_tick": "1",
+    "price_currency": "CNY",
+    "margin_ratio": "0.1"
+  },
+  "roll_policy": {
+    "roll_execution_model": "sequential_close_old_then_open_new",
+    "roll_execution_order": "1. submit order to close expiring main contract; 2. upon fill confirmation, submit order to open incoming main contract. Atomic netting across distinct contracts is prohibited.",
+    "trigger_condition": "next_contract_oi_exceeds_main_for_2_consecutive_days",
+    "roll_execution_window": "day_session_first_30m",
+    "max_roll_slippage_ticks": 2,
+    "continuous_to_exact_mapping": "Trading orders must bind exact contract codes (e.g. rb2305, rb2310); continuous index series is used solely for research signal generation."
+  },
+  "strategy_spec": {
+    "strategy_name": "intraday_swing_breakout_v1",
+    "implementation_ref": "candidate.research_lab.strategies.v1.intraday_swing_breakout",
+    "parameters": [
+      {
+        "name": "trend_fast_period",
+        "value_type": "integer",
+        "unit": "count",
+        "value": 21
+      },
+      {
+        "name": "trend_slow_period",
+        "value_type": "integer",
+        "unit": "count",
+        "value": 63
+      },
+      {
+        "name": "breakout_bars",
+        "value_type": "integer",
+        "unit": "count",
+        "value": 10
+      },
+      {
+        "name": "stop_loss_atr_multiplier",
+        "value_type": "decimal",
+        "unit": "dimensionless",
+        "value": "2"
+      },
+      {
+        "name": "max_holding_days",
+        "value_type": "integer",
+        "unit": "count",
+        "value": 5
+      }
+    ]
+  },
+  "execution_config": {
+    "initial_capital": "1000000",
+    "capital_currency": "CNY",
+    "position_sizing": {
+      "mode": "fixed_lots",
+      "lots_per_trade": 1
+    },
+    "fill_assumption": "next_bar_open_with_bbo_clip",
+    "signal_availability_rule": "Use only completed bars and quotes whose verified receipt precedes the decision; fill at the subsequent bar, reject missing or late receipt.",
+    "model_definition_version": "candidate.next_bar_bbo.v1"
+  },
+  "cost_model": {
+    "commission_open_bps": "1",
+    "commission_close_yesterday_bps": "1",
+    "commission_close_today_bps": "0.5",
+    "commission_unit": "bps_of_turnover_unilateral",
+    "fixed_commission_per_lot_cny": "0",
+    "slippage_ticks_per_side": 1,
+    "slippage_unit": "ticks_unilateral",
+    "missing_fee_policy": "reject_execution",
+    "model_definition_version": "candidate.additive_bps_fixed_per_side.v1"
+  },
+  "validation_config": {
+    "method": "out_of_sample_holdout",
+    "in_sample_range": {
+      "start": "2022-12-31T16:00:00.000000Z",
+      "end": "2023-09-30T15:59:59.000000Z"
+    },
+    "out_of_sample_range": {
+      "start": "2023-09-30T16:00:00.000000Z",
+      "end": "2023-12-31T15:59:59.000000Z"
+    }
+  },
+  "candidate_decision_criteria": {
+    "min_sharpe_ratio": "1",
+    "max_drawdown_limit": "0.15",
+    "min_trade_count": 30
+  },
+  "metric_specifications": [
+    {
+      "metric_name": "sharpe_ratio",
+      "calculation_definition_version": "candidate.research_lab.metrics.v1.annualized_sharpe_ratio",
+      "unit": "dimensionless_annualized_ratio",
+      "sample_scope": "daily_equity_returns_oos",
+      "precision_rule": "Round final value to 8 decimal places, ROUND_HALF_EVEN; serialize canonical Decimal without trailing zeroes; do not round intermediate calculations.",
+      "annualization_days": 252,
+      "sampling_frequency": "exchange_trading_day_close",
+      "risk_free_rate": "0",
+      "cash_flow_treatment": "No external deposits or withdrawals; reject this metric profile if any occur. Include all realized/unrealized mark-to-market PnL, per-side fees and slippage.",
+      "undefined_policy": "null_with_reason_not_zero",
+      "calculation_definition": "On consecutive OOS daily net-equity observations compute simple r_t=E_t/E_(t-1)-1. Convert annual effective risk-free rate rf to daily (1+rf)^(1/A)-1; x_t=r_t-rf_daily. Sharpe=sqrt(A)*mean(x)/sample_std(x,ddof=1). Undefined for fewer than 2 returns, nonpositive previous equity, missing daily marks or zero standard deviation.",
+      "return_definition": "CNY daily net marked-to-market equity, exchange trading-day close, unadjusted exact-contract fills; OOS initial mark included.",
+      "risk_free_rate_convention": "annual_effective_decimal_converted_geometrically_to_daily"
+    },
+    {
+      "metric_name": "max_drawdown",
+      "calculation_definition_version": "candidate.research_lab.metrics.v1.max_drawdown",
+      "unit": "decimal_ratio",
+      "sample_scope": "daily_equity_curve_oos",
+      "precision_rule": "Round final value to 8 decimal places, ROUND_HALF_EVEN; serialize canonical Decimal without trailing zeroes; do not round intermediate calculations.",
+      "undefined_policy": "null_with_reason_not_zero",
+      "calculation_definition": "Include initial OOS equity E_0, compute running peak P_t=max(E_0..E_t) and max_t(1-E_t/P_t) on daily net-equity marks. Undefined for missing marks or nonpositive peak. Value is a positive loss ratio, not a negative return.",
+      "cash_flow_treatment": "No external deposits or withdrawals; reject this metric profile if any occur. Include all realized/unrealized mark-to-market PnL, per-side fees and slippage.",
+      "return_definition": "CNY daily net marked-to-market equity, exchange trading-day close, unadjusted exact-contract fills; OOS initial mark included.",
+      "sampling_frequency": "exchange_trading_day_close"
+    },
+    {
+      "metric_name": "total_return",
+      "calculation_definition_version": "candidate.research_lab.metrics.v1.cumulative_total_return",
+      "unit": "decimal_ratio",
+      "sample_scope": "full_oos_holding_period",
+      "precision_rule": "Round final value to 8 decimal places, ROUND_HALF_EVEN; serialize canonical Decimal without trailing zeroes; do not round intermediate calculations.",
+      "cash_flow_treatment": "No external deposits or withdrawals; reject this metric profile if any occur. Include all realized/unrealized mark-to-market PnL, per-side fees and slippage.",
+      "undefined_policy": "null_with_reason_not_zero",
+      "calculation_definition": "Final OOS net equity divided by initial OOS equity minus 1. Include initial mark; undefined for nonpositive initial equity or missing endpoints. Uses marked-to-market equity including unrealized positions, commissions and slippage.",
+      "return_definition": "CNY daily net marked-to-market equity, exchange trading-day close, unadjusted exact-contract fills; OOS initial mark included.",
+      "sampling_frequency": "exchange_trading_day_close"
+    },
+    {
+      "metric_name": "trade_count",
+      "calculation_definition_version": "candidate.research_lab.metrics.v1.execution_trade_count",
+      "unit": "integer_count",
+      "sample_scope": "oos_executed_fills",
+      "precision_rule": "exact_integer",
+      "undefined_policy": "null_with_reason_not_zero",
+      "calculation_definition": "Count individual nonzero executed fill records in OOS, including partial fills and separate roll close/open fills; do not count orders, rejected orders or round trips. Empty complete execution ledger gives zero; missing ledger is undefined."
+    }
+  ],
+  "rejection_policy": {
+    "forbid_unknown_fields": true,
+    "reject_unregistered_implementation": true,
+    "reject_cross_currency_settlement": true,
+    "reject_unsupported_order_types": true
+  },
+  "holdout_policy": {
+    "mode": "not_used",
+    "reason": "Exploratory/diagnostic example; no independent confirmation claim. Out-of-sample diagnostics are not sealed confirmation."
+  }
+}
