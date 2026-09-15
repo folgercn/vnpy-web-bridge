@@ -43,6 +43,17 @@ def task(root: Path, **changes: object):
 
 
 class SolOrchestratorTest(unittest.TestCase):
+    def _attached_validation_plan(self, sol: SolOrchestrator, root: Path, validation_id: str):
+        plan = sol.receive(SolTaskInput(task=task(root)))
+        sol.approve(plan.plan_id, approved_by="researcher")
+        review_plan = sol.run_next()
+        validation = WalkForwardValidationEngine.local(root).run(ValidationSpec(
+            schema_version="research_lab.validation.v1", validation_id=validation_id,
+            method="walk_forward", train_size=2, test_size=2, step_size=2,
+            experiment=task(root).experiment,
+        ))
+        return sol.attach_validation(review_plan.plan_id, validation.validation_id)
+
     def test_approved_cycle_persists_runner_result_and_alpha_record(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "output"
@@ -146,6 +157,68 @@ class SolOrchestratorTest(unittest.TestCase):
 
             self.assertEqual(reviewer.calls, [(validation.validation_id, EXPERIMENT["experiment_id"])])
             self.assertIsNotNone(sol.store.get_critic_review(reviewed.critic_review_id))
+
+    def test_reviewer_result_must_be_persisted_before_review_can_complete(self) -> None:
+        class UnpersistedReviewer:
+            def __init__(self, store) -> None:
+                self.store = store
+
+            def review_persisted(self, validation_id: str, *, candidate_id: str):
+                stored = CriticReviewAdapter(self.store).review_persisted(validation_id, candidate_id=candidate_id)
+                return stored.model_copy(update={"review_id": "unpersisted-review-001"})
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "output"
+            runner = ExperimentRunner.local(root)
+            sol = SolOrchestrator.local(root, runner=runner, reviewer=UnpersistedReviewer(runner.store))
+            attached = self._attached_validation_plan(sol, root, "sol-unpersisted-validation-001")
+
+            with self.assertRaisesRegex(SolStateError, "exactly match a persisted"):
+                sol.review(attached.plan_id)
+            current = sol.get_plan(attached.plan_id)
+            self.assertEqual(current.status, "review")
+            self.assertEqual(current.review_status, "awaiting_validation")
+            self.assertIsNone(current.critic_review_id)
+            with self.assertRaisesRegex(SolStateError, "review must be explicitly"):
+                sol.archive(attached.plan_id)
+
+    def test_reviewer_result_validation_must_match_the_plan(self) -> None:
+        class ValidationMismatchReviewer:
+            def __init__(self, store) -> None:
+                self.store = store
+
+            def review_persisted(self, validation_id: str, *, candidate_id: str):
+                review = CriticReviewAdapter(self.store).review_persisted(validation_id, candidate_id=candidate_id)
+                return self.store.save_critic_review(review.model_copy(update={"validation_id": "other-validation-001"}))
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "output"
+            runner = ExperimentRunner.local(root)
+            sol = SolOrchestrator.local(root, runner=runner, reviewer=ValidationMismatchReviewer(runner.store))
+            attached = self._attached_validation_plan(sol, root, "sol-validation-mismatch-001")
+
+            with self.assertRaisesRegex(SolStateError, "validation_id does not match"):
+                sol.review(attached.plan_id)
+            self.assertEqual(sol.get_plan(attached.plan_id).review_status, "awaiting_validation")
+
+    def test_reviewer_result_candidate_must_match_the_plan_experiment(self) -> None:
+        class CandidateMismatchReviewer:
+            def __init__(self, store) -> None:
+                self.store = store
+
+            def review_persisted(self, validation_id: str, *, candidate_id: str):
+                review = CriticReviewAdapter(self.store).review_persisted(validation_id, candidate_id=candidate_id)
+                return self.store.save_critic_review(review.model_copy(update={"candidate_id": "other-candidate-001"}))
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "output"
+            runner = ExperimentRunner.local(root)
+            sol = SolOrchestrator.local(root, runner=runner, reviewer=CandidateMismatchReviewer(runner.store))
+            attached = self._attached_validation_plan(sol, root, "sol-candidate-mismatch-001")
+
+            with self.assertRaisesRegex(SolStateError, "candidate_id does not match"):
+                sol.review(attached.plan_id)
+            self.assertEqual(sol.get_plan(attached.plan_id).review_status, "awaiting_validation")
 
     def test_default_critic_adapter_and_worker_capabilities_remain_local_metadata(self) -> None:
         class DeclaredWorker:

@@ -180,6 +180,13 @@ class SolOrchestrator:
         if self.store.get_validation(plan.validation_id) is None:
             raise SolStateError("validation_id must name an existing persisted ValidationResult")
         review = self.reviewer.review_persisted(plan.validation_id, candidate_id=plan.experiment.experiment_id)
+        stored_review = self.store.get_critic_review(review.review_id)
+        if stored_review is None or stored_review != review:
+            raise SolStateError("reviewer result must exactly match a persisted CriticReview")
+        if review.validation_id != plan.validation_id or stored_review.validation_id != plan.validation_id:
+            raise SolStateError("persisted CriticReview validation_id does not match the plan")
+        if review.candidate_id != plan.experiment.experiment_id or stored_review.candidate_id != plan.experiment.experiment_id:
+            raise SolStateError("persisted CriticReview candidate_id does not match the plan experiment")
         return self._save(plan.model_copy(update={"critic_review_id": review.review_id, "review_status": "reviewed", "events": [*plan.events, PlanEvent(status="review", reason=f"Critic reviewed persisted validation {plan.validation_id}")]}))
 
     def archive(self, plan_id: str) -> ExperimentPlan:
