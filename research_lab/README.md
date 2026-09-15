@@ -107,3 +107,25 @@ not a selection or promotion decision. This deterministic MVP supports only
 multi-symbol portfolio validation, TQSDK, live data, queues, Critic Agent, LLM
 evaluation, and Astra discovery are outside this milestone. The versioned
 validation result is the stable local handoff boundary for a future Critic.
+
+## Critic review
+
+`research_lab.critic-review.v1` is a deterministic, local independent review
+of a persisted `ValidationResult`. It records fold-boundary evidence and
+reviews OOS degradation, while reporting missing feature-time lineage,
+candidate selection history, parameter stability, cost sensitivity, and market-regime evidence as
+`insufficient_evidence`. Its `accept` / `improve` / `reject` recommendation is
+only a research handoff; it cannot select, promote, deploy, or trade a
+candidate.
+
+After running the example validation, review its stored result:
+
+```bash
+PYTHONPATH=. .venv-research-lab/bin/python -m research_lab.critic --validation-id demo-walk-forward-001 --output /tmp/research-lab-validation-output
+```
+
+The Critic writes `artifacts/<review>.critic.json`, a Markdown risk report,
+and indexes review history in `research_lab.sqlite3`. `ResultStore` can query
+the local Alpha-Database-compatible record by `validation_id`, `candidate_id`,
+or a non-pass finding category. This milestone does not add an Alpha Database,
+LLM/Astra/Sol, a worker queue, TQSDK, or realtime data.

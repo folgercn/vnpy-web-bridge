@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 
 from research_lab.config import ResearchLabConfig
-from research_lab.schemas import ExperimentResult, SweepResult, ValidationResult
+from research_lab.schemas import CriticReview, ExperimentResult, SweepResult, ValidationResult
 
 
 class ResultStore:
@@ -41,6 +41,33 @@ class ResultStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS critic_reviews (
+                    review_id TEXT PRIMARY KEY,
+                    validation_id TEXT NOT NULL,
+                    candidate_id TEXT NOT NULL,
+                    recommendation TEXT NOT NULL,
+                    artifact_location TEXT NOT NULL,
+                    report_location TEXT,
+                    result_json TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_critic_validation ON critic_reviews(validation_id)")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_critic_candidate ON critic_reviews(candidate_id)")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS critic_findings (
+                    review_id TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    assessment TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    PRIMARY KEY (review_id, category)
+                )
+                """
+            )
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_critic_failure_category ON critic_findings(category, assessment)")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS validation_results (
@@ -151,6 +178,62 @@ class ResultStore:
                 "SELECT result_json FROM validation_results WHERE validation_id = ?", (validation_id,)
             ).fetchone()
         return ValidationResult.model_validate_json(row["result_json"]) if row else None
+
+    def save_critic_review(self, result: CriticReview) -> CriticReview:
+        artifact_path = self.config.artifacts_dir / f"{result.review_id}.critic.json"
+        stored = result.model_copy(update={"artifact_location": str(artifact_path)})
+        self._write_json(artifact_path, stored.model_dump(mode="json"))
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO critic_reviews (
+                    review_id, validation_id, candidate_id, recommendation,
+                    artifact_location, report_location, result_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(review_id) DO UPDATE SET
+                    validation_id=excluded.validation_id, candidate_id=excluded.candidate_id,
+                    recommendation=excluded.recommendation, artifact_location=excluded.artifact_location,
+                    report_location=excluded.report_location, result_json=excluded.result_json
+                """,
+                (stored.review_id, stored.validation_id, stored.candidate_id,
+                 stored.recommendation, stored.artifact_location, stored.report_location,
+                 stored.model_dump_json()),
+            )
+            connection.execute("DELETE FROM critic_findings WHERE review_id = ?", (stored.review_id,))
+            connection.executemany(
+                "INSERT INTO critic_findings (review_id, category, assessment, severity) VALUES (?, ?, ?, ?)",
+                [(stored.review_id, item.category, item.assessment, item.severity) for item in stored.findings],
+            )
+        return stored
+
+    def get_critic_review(self, review_id: str) -> CriticReview | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT result_json FROM critic_reviews WHERE review_id = ?", (review_id,)
+            ).fetchone()
+        return CriticReview.model_validate_json(row["result_json"]) if row else None
+
+    def query_critic_reviews(
+        self, *, validation_id: str | None = None, candidate_id: str | None = None,
+        category: str | None = None,
+    ) -> list[CriticReview]:
+        clauses: list[str] = []
+        values: list[str] = []
+        for column, value in (("validation_id", validation_id), ("candidate_id", candidate_id)):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                values.append(value)
+        statement = "SELECT DISTINCT critic_reviews.result_json FROM critic_reviews"
+        if category is not None:
+            statement += " JOIN critic_findings ON critic_findings.review_id = critic_reviews.review_id"
+            clauses.append("critic_findings.category = ? AND critic_findings.assessment != 'pass'")
+            values.append(category)
+        if clauses:
+            statement += " WHERE " + " AND ".join(clauses)
+        statement += " ORDER BY critic_reviews.review_id"
+        with self._connect() as connection:
+            rows = connection.execute(statement, values).fetchall()
+        return [CriticReview.model_validate_json(row["result_json"]) for row in rows]
 
     def query(
         self,
