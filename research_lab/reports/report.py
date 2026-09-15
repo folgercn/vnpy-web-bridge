@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from research_lab.schemas import ExperimentResult, SweepResult, ValidationResult
+from research_lab.schemas import CriticReview, ExperimentResult, SweepResult, ValidationResult
 
 
 def write_report(root: Path, result: ExperimentResult) -> Path:
@@ -104,4 +104,31 @@ def write_validation_report(root: Path, result: ValidationResult) -> Path:
         "It does not implement a Critic Agent, candidate selection, LLM evaluation, live data, or promotion.",
     ])
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def write_critic_report(root: Path, result: CriticReview) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"{result.review_id}.critic.report.md"
+    lines = [
+        f"# Critic review {result.review_id}", "",
+        f"- Validation: `{result.validation_id}`",
+        f"- Candidate: `{result.candidate_id}`",
+        f"- Research recommendation: **{result.recommendation}**",
+        f"- Evidence confidence: {result.confidence:.3f}",
+        "- Boundary: this is a local research review, never a promotion, deployment, or trading decision.",
+        "", "## Findings", "",
+    ]
+    for item in result.findings:
+        lines.extend([
+            f"### {item.category}", "",
+            f"- Assessment: {item.assessment} ({item.severity})",
+            f"- {item.summary}",
+            "- Evidence:",
+            *[f"  - {evidence}" for evidence in item.evidence],
+        ])
+        if item.required_additional_tests:
+            lines.extend(["- Required additional tests:", *[f"  - {test}" for test in item.required_additional_tests]])
+        lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
     return path
