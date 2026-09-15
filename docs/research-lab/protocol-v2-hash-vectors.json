@@ -1,0 +1,212 @@
+{
+  "profile": "research-json-v1",
+  "status": "DRAFT_UNFROZEN",
+  "positive": [
+    {
+      "name": "basic",
+      "raw_json": "{\"a\":1,\"b\":\"test\"}",
+      "field_types": {},
+      "self_hash_field": null,
+      "canonical_utf8": "{\"a\":1,\"b\":\"test\"}",
+      "sha256": "1e5d5cdc877a04ceb3d86ec5d57f088a03eef89a4d0669556f3feebfbd59868b"
+    },
+    {
+      "name": "reordered",
+      "raw_json": " { \"b\": \"test\", \"a\": 1 } ",
+      "field_types": {},
+      "self_hash_field": null,
+      "canonical_utf8": "{\"a\":1,\"b\":\"test\"}",
+      "sha256": "1e5d5cdc877a04ceb3d86ec5d57f088a03eef89a4d0669556f3feebfbd59868b"
+    },
+    {
+      "name": "null",
+      "raw_json": "{\"a\":null}",
+      "field_types": {},
+      "self_hash_field": null,
+      "canonical_utf8": "{\"a\":null}",
+      "sha256": "d091f9c83c091f79652fe8786375b3fe4ce0861a56f5bfbafedbe431877ff0e8"
+    },
+    {
+      "name": "missing",
+      "raw_json": "{}",
+      "field_types": {},
+      "self_hash_field": null,
+      "canonical_utf8": "{}",
+      "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "name": "array",
+      "raw_json": "{\"a\":[2,1,1]}",
+      "field_types": {},
+      "self_hash_field": null,
+      "canonical_utf8": "{\"a\":[2,1,1]}",
+      "sha256": "eaa475e7605e99c5121e10b1adf64fd815a86e2a7f7bcf38334151825efb1ed8"
+    },
+    {
+      "name": "array_reordered",
+      "raw_json": "{\"a\":[1,2,1]}",
+      "field_types": {},
+      "self_hash_field": null,
+      "canonical_utf8": "{\"a\":[1,2,1]}",
+      "sha256": "ce115c225d06bad7085b15e8da0d6a1d4834ab5bb363623d20445a24a398dd9f"
+    },
+    {
+      "name": "unicode_control",
+      "raw_json": "{\"text\":\"研究\\n\\t/\\\"\\\\\"}",
+      "field_types": {},
+      "self_hash_field": null,
+      "canonical_utf8": "{\"text\":\"研究\\u000a\\u0009/\\\"\\\\\"}",
+      "sha256": "e377d269b69a996124a73400a6e386e3ee26d0e6681f24884408a155170cc716"
+    },
+    {
+      "name": "unicode_composed",
+      "raw_json": "{\"a\":\"é\"}",
+      "field_types": {},
+      "self_hash_field": null,
+      "canonical_utf8": "{\"a\":\"é\"}",
+      "sha256": "b3a092a6af48807fa9482b2ee140105575daa26d5b24b3c0e60a7e2dee6683b1"
+    },
+    {
+      "name": "unicode_decomposed",
+      "raw_json": "{\"a\":\"é\"}",
+      "field_types": {},
+      "self_hash_field": null,
+      "canonical_utf8": "{\"a\":\"é\"}",
+      "sha256": "30ab99c636f80168ea5dda59939352b6022c12941d2ffd3fd7d18fa7acd8565c"
+    },
+    {
+      "name": "decimal",
+      "raw_json": "{\"rate\":\"0.1\"}",
+      "field_types": {
+        "rate": "decimal"
+      },
+      "self_hash_field": null,
+      "canonical_utf8": "{\"rate\":\"0.1\"}",
+      "sha256": "ea1a94d523344135d03a3e0a188ef84b2bf347b741ece0c69ca2c57ebaa8406c"
+    },
+    {
+      "name": "utc",
+      "raw_json": "{\"at\":\"2024-01-01T00:00:00.000000Z\"}",
+      "field_types": {
+        "at": "timestamp"
+      },
+      "self_hash_field": null,
+      "canonical_utf8": "{\"at\":\"2024-01-01T00:00:00.000000Z\"}",
+      "sha256": "2e40e003b7e199bc0d067eadb784ddfe1f695d18c22e1ca484d5c5c0fd21943c"
+    },
+    {
+      "name": "integer_bounds",
+      "raw_json": "{\"min\":-9007199254740991,\"max\":9007199254740991}",
+      "field_types": {},
+      "self_hash_field": null,
+      "canonical_utf8": "{\"max\":9007199254740991,\"min\":-9007199254740991}",
+      "sha256": "63546eb60913dcb1cdd5118f7bf4885beed344af930c8a9d5f38fad243fd4819"
+    },
+    {
+      "name": "self_hash",
+      "raw_json": "{\"spec_content_hash\":\"ignored\",\"task_content_hash\":\"upstream-A\",\"nested\":{\"spec_content_hash\":\"retained\"}}",
+      "field_types": {},
+      "self_hash_field": "spec_content_hash",
+      "canonical_utf8": "{\"nested\":{\"spec_content_hash\":\"retained\"},\"task_content_hash\":\"upstream-A\"}",
+      "sha256": "a502917e98661caa25261f9657f84e7a61fdad74083d955dd3fd480d13504ee2"
+    },
+    {
+      "name": "upstream_change",
+      "raw_json": "{\"spec_content_hash\":\"ignored\",\"task_content_hash\":\"upstream-B\",\"nested\":{\"spec_content_hash\":\"retained\"}}",
+      "field_types": {},
+      "self_hash_field": "spec_content_hash",
+      "canonical_utf8": "{\"nested\":{\"spec_content_hash\":\"retained\"},\"task_content_hash\":\"upstream-B\"}",
+      "sha256": "0471957abdd1e9dbcfd34a1853e8c67f7b8d56bea44cf90d7643ddb470828389"
+    }
+  ],
+  "negative": [
+    {
+      "name": "float",
+      "raw_json": "{\"a\":1.0}",
+      "field_types": {},
+      "expected": "reject_before_hash"
+    },
+    {
+      "name": "exponent",
+      "raw_json": "{\"a\":1e0}",
+      "field_types": {},
+      "expected": "reject_before_hash"
+    },
+    {
+      "name": "negative_zero",
+      "raw_json": "{\"a\":-0}",
+      "field_types": {},
+      "expected": "reject_before_hash"
+    },
+    {
+      "name": "nonfinite",
+      "raw_json": "{\"a\":NaN}",
+      "field_types": {},
+      "expected": "reject_before_hash"
+    },
+    {
+      "name": "out_of_range",
+      "raw_json": "{\"a\":9007199254740992}",
+      "field_types": {},
+      "expected": "reject_before_hash"
+    },
+    {
+      "name": "duplicate",
+      "raw_json": "{\"a\":1,\"\\u0061\":2}",
+      "field_types": {},
+      "expected": "reject_before_hash"
+    },
+    {
+      "name": "surrogate",
+      "raw_json": "{\"a\":\"\\ud800\"}",
+      "field_types": {},
+      "expected": "reject_before_hash"
+    },
+    {
+      "name": "non_ascii_key",
+      "raw_json": "{\"字\":1}",
+      "field_types": {},
+      "expected": "reject_before_hash"
+    },
+    {
+      "name": "decimal_trailing_zero",
+      "raw_json": "{\"a\":\"0.10\"}",
+      "field_types": {
+        "a": "decimal"
+      },
+      "expected": "reject_before_hash"
+    },
+    {
+      "name": "decimal_negative_zero",
+      "raw_json": "{\"a\":\"-0\"}",
+      "field_types": {
+        "a": "decimal"
+      },
+      "expected": "reject_before_hash"
+    },
+    {
+      "name": "timestamp_offset",
+      "raw_json": "{\"a\":\"2024-01-01T08:00:00+08:00\"}",
+      "field_types": {
+        "a": "timestamp"
+      },
+      "expected": "reject_before_hash"
+    },
+    {
+      "name": "timestamp_invalid_date",
+      "raw_json": "{\"a\":\"2024-02-30T00:00:00.000000Z\"}",
+      "field_types": {
+        "a": "timestamp"
+      },
+      "expected": "reject_before_hash"
+    },
+    {
+      "name": "timestamp_precision",
+      "raw_json": "{\"a\":\"2024-01-01T00:00:00.0000001Z\"}",
+      "field_types": {
+        "a": "timestamp"
+      },
+      "expected": "reject_before_hash"
+    }
+  ]
+}

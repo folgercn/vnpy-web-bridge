@@ -5,6 +5,8 @@
 > - **协议状态**: `DRAFT_UNFROZEN` (语义设计与候选字段走查草案，待主控与人工确认评审后正式冻结)
 > - **设计约束**: 本阶段仅完成语义定义与样例走查，消除 Agent 沟通歧义；不等于设计已终审验收，更不宣称关闭 #538 或 #498。禁止提前实现 Worker Runtime、Task Queue、Research Farm、Astra 自动发现或 Sol 调度系统。
 
+本轮四项冻结缺口的精确候选规则见 [Freeze Gap Closure](protocol-v2-freeze-gap-closure.md)：Hash、Evidence/Review、研究阶段和 Revision/Run。保持草案，待 #498 最终审查。
+
 ---
 
 ## 1. 架构定位与设计背景
@@ -40,7 +42,7 @@
 | **`ResearchTask`** | 为什么研究？验证什么？ | 科学/业务问题、研究目标（`objective`）、背景来源、预期证据类型、逻辑数据需求声明（标的、周期、字段、时序可得性约束） | **绝不包含物理文件路径**、主机节点、随机种子或物理执行参数；数据审计任务无需硬凑先验假设。 |
 | **`ExperimentSpec`** | 准备如何验证？具备何种规格？ | 类型化方法引用、候选判据声明（`candidate_decision_criteria`）、逻辑数据提供者要求、时序验证与防泄漏切分规则、交易成本与撮合模型 | 严格 `extra="forbid"`，拒绝未知输入；纯统计不含回测参数；随机种子作为候选提议（`seed_proposal`）。 |
 | **`ExperimentRun`** | 实际执行了什么？在何种环境下？ | 实际加载的数据集快照、已展开生效参数与默认值、执行代码版本与未跟踪源码差异、实际随机种子、运行环境指纹 | **所有计算输入在执行前锁定**；未物理执行或执行失败时，未解析字段严格保留为 `null` 并注明原因；记录客观运行事实，不评价证据优劣。 |
-| **`ResultEvidence`** | 产出了什么证据？结果如何？ | 物理计算事实指标（Typed Metrics）、度量元信息（单位、样本量、成本口径）、初始有效性评估、工件引用清单 | **真实物理 Evidence 仅绑定终态 Run**；未执行/不可算为 null，合法零值如实记录；**后续独立评审在顶层外部集合追加，严禁覆写计算事实**。 |
+| **`ResultEvidence`** | 产出了什么证据？结果如何？ | 物理计算事实指标（Typed Metrics）、度量元信息（单位、样本量、成本口径）、事实性诊断、工件引用清单 | **真实物理 Evidence 仅绑定终态 Run**；未执行/不可算为 null，合法零值如实记录；**所有评价均在顶层外部 Review 集合追加，严禁覆写计算事实**。 |
 
 ### 2.2 逐层强哈希绑定与排除规则
 四个核心对象通过实体标识、修订号与终态哈希形成不可变引用链：
@@ -69,6 +71,7 @@
    - `run_status_snapshot` 必须与 Run 的 `run_status` 严格保持一致。
 
 ### 2.4 独立评审结论追加机制（Append-Only Top-Level Reviews）
+所有初始/后续评价均在 Review；版本、判据引用、精确证据绑定与不可变规则见 [Gap Closure §2](protocol-v2-freeze-gap-closure.md#2-evidence-与-review)。
 - 评审记录（`review_assessments`）位于与实验对象同级的**顶层外部集合**，避免作为内部字段追加时导致原始 `ResultEvidence` 的 content hash 发生改变；
 - 评审记录严格引用 `evidence_id` 与 `evidence_content_hash`；
 - 评审人记录审核意见（`recommendation`: `accept` | `improve` | `reject`）、适用市场范围与裁定理由；
@@ -81,16 +84,16 @@
 ### 3.1 多重检验追踪、试验上下文与判据边界
 为使 Deflated Sharpe Ratio (DSR)、PBO 或 Bonferroni 校正具备真实依据，协议在试验上下文中确立最小归属元数据：
 1. **假设族归属（`hypothesis_family_id`）**：声明该试验所属的研究假设族/探索空间（如 `hf-commodity-carry-v1`）；
-2. **试验性质（`exploration_kind`）**：
+2. **尝试方式（`trial_kind`）**，与 Spec 的 `research_stage`（exploration / validation / confirmation）分离；阶段和预登记规则见 [Gap Closure §3](protocol-v2-freeze-gap-closure.md#3-research-stage-与搜索方式分离)：
    - `parameter_search`：新参数组合尝试，计入多重检验自由度消耗；
    - `replicate_reseed` / `replicate_refold`：固定参数下的随机种子或折数重复，用于评估方差与稳定性；**若研究者事后仅挑取最佳结果汇报，则同样引入选择偏差，协议中立记录所有轨迹，不替上层武断定性**；
    - `technical_retry`：技术重试，不计入参数探索；
 3. **试验序号（`trial_index`）**：未执行时严格为 `null`，严禁在草案期凭空编造虚假试验序号；
 4. **候选判据位置**：预先确定的决策判据定义在 `ExperimentSpec.candidate_decision_criteria`，属于预先声明的验收目标；`ExperimentRun` 仅记录实际运行结果，不侵入判据定义；
-5. **封存集使用记录（`holdout_usage_state`）**：未实证时必须为 `null` 或 `"unknown"`；Holdout 状态必须绑定底层数据集哈希、时间范围以及**跨 Task/Spec 假设族的使用历史记录**，换了任务或规格 ID 绝不能重置封存集的消耗计数。
+5. **封存集使用记录（`holdout_usage_state`）**：涉及 holdout 但未实证时必须为 `null` 或 `"unknown"`；无假设且不使用 holdout 的 data_quality 审计明确为 `"not_applicable"`，不得用于规避已有 holdout 检验；Holdout 状态必须绑定底层数据集哈希、时间范围以及**跨 Task/Spec 假设族的使用历史记录**，换了任务或规格 ID 绝不能重置封存集的消耗计数。
 
 ### 3.2 技术重试（Technical Retry）的严格边界
-- **充要条件**：必须保持**完全相同的 `spec_revision`** 与**完全相同的科学计算输入指纹**；参数、种子、代码或数据的任何更改，均属于新科学配置，严禁标记为技术重试；
+- **必要条件**：针对技术失败/中断，必须保持**完全相同的 `(spec_id, spec_revision, spec_content_hash)`** 与**完全相同的科学计算输入指纹**；参数、种子、代码或数据的任何更改，均属于新科学配置，严禁标记为技术重试；
 - **引用与幂等要求**：技术重试生成全新的独立 `run_id`，并记录 `retry_of_run_id: "<prior_run_id>"`；重复结果不重复计数，迟到结果不得覆盖另一 run。
 
 ### 3.3 按研究类型覆盖科学计算指纹（Scientific Fingerprint）
@@ -108,7 +111,7 @@
 
 **哈希安全边界与规范化说明**：
 - **哈希不等于身份认证**：记录哈希仅提供内容完整性与防意外损坏校验，禁止宣称“仅凭哈希即可实现防篡改或身份认证”（后者依赖签名与权限体系）；
-- **规范化边界待确认**：简单的 `sort_keys=True` 并不等于完整的 RFC 8785 标准；数值浮点精度、Unicode 规范化及 NaN/Infinity 边界目前属于候选方案，待 #498 确认；协议不承诺跨 CPU 架构或编译器的 bitwise 绝对一致。
+- **规范化候选规则已明确，待冻结审查**：采用 [research-json-v1](protocol-v2-freeze-gap-closure.md#1-hash-canonicalizationresearch-json-v1) 受限 profile 和固定向量，不声称 RFC 8785；协议不承诺跨 CPU 架构或编译器的计算结果 bitwise 绝对一致。
 
 ---
 
@@ -142,8 +145,8 @@
 
 ### 5.1 三层正交解耦模型
 1. **第一层：执行状态（`execution_status`）**：`COMPLETED` | `RUNTIME_ERROR` | `TIMEOUT` | `DATA_UNAVAILABLE` | `NOT_EXECUTED`；
-2. **第二层：证据有效性（`evidence_validity`）**：`VALID` | `VALID_BUT_UNDERPOWERED`（合规但样本不足）| `INVALID_DATA_LEAKAGE` | `INVALID_EXECUTION_ASSUMPTION` | `NOT_EVALUATED`；
-3. **第三层：研究/审计结论**：
+2. **第二层：外部 Review 的证据有效性（`evidence_validity`，禁止存入 Evidence）**：`VALID` | `VALID_BUT_UNDERPOWERED`（合规但样本不足）| `INVALID_DATA_LEAKAGE` | `INVALID_EXECUTION_ASSUMPTION` | `NOT_EVALUATED`；
+3. **第三层：外部 Review 的研究/审计结论（禁止存入 Evidence）**：
    - 因子与策略回测（`research_conclusion`）：`HYPOTHESIS_SUPPORTED` | `NEGATIVE_EVIDENCE_RECORDED` | `HYPOTHESIS_REJECTED` | `INCONCLUSIVE`；
    - 数据质量审计（`audit_conclusion`）：`OBJECTIVE_SATISFIED` | `AUDIT_GAPS_IDENTIFIED` | `PENDING_EXECUTION`。
 
@@ -188,9 +191,9 @@
 
 | 指标字段 | 度量单位 / 格式 | 符号 / 方向规范 | 年化与计算口径 | 缺失与异常处理 |
 | :--- | :--- | :--- | :--- | :--- |
-| `total_return` | 小数比例 (decimal) | 正数表示盈利，负数表示亏损 | 全区间累积收益率，按实际权益序列计算 | 未运行或数据缺失为 null；期末净值回到起点或全期恒定均为合法数值 0.0 |
-| `annualized_return`| 小数比例 (decimal) | 正数表示年化盈利，负数表示亏损 | 基于 252 交易日按**复利年化**计算 | 未运行或数据缺失为 null；期末净值等于起点时为合法数值 0.0 |
-| `max_drawdown` | 非负小数比例 (decimal) | 恒为非负数 (如 0.15 表示回撤 15%) | 净值峰谷回撤深度最大值，按实际权益序列计算 | 未运行或数据缺失为 null；净值单调上涨或全期无回撤时为合法数值 0.0 |
+| `total_return` | 小数比例 (decimal) | 正数表示盈利，负数表示亏损 | 全区间累积收益率，按实际权益序列计算 | 未运行或数据缺失为 null；期末净值回到起点或全期恒定均为合法数值 `"0"` |
+| `annualized_return`| 小数比例 (decimal) | 正数表示年化盈利，负数表示亏损 | 基于 252 交易日按**复利年化**计算 | 未运行或数据缺失为 null；期末净值等于起点时为合法数值 `"0"` |
+| `max_drawdown` | 非负小数比例 (decimal) | 恒为非负数 (如 0.15 表示回撤 15%) | 净值峰谷回撤深度最大值，按实际权益序列计算 | 未运行或数据缺失为 null；净值单调上涨或全期无回撤时为合法数值 `"0"` |
 | `sharpe_ratio` | 无量纲年化比率 | 正负均可 | 日频超额收益率年化，乘以 $\sqrt{252}$ | 按实际超额收益序列计算；仅在未运行、数据不足或收益方差为 0 等不可定义时为 null 并注明原因 |
 | `calmar_ratio` | 无量纲年化比率 | 正负均可 | `annualized_return / max_drawdown` | 按实际年化收益与最大回撤计算；未运行、数据不足或最大回撤为 0 等不可定义时为 null 并注明原因 |
 | `trade_count` | 非负整数 | 计数 | 样本期内有效撮合成交总笔数 | 未运行为 null；已执行确认无交易撮合时，记录为真实有效观测值 0 |
@@ -265,7 +268,7 @@
 | `cost_model.bps` | `legacy_cost_bps` | 原样保留无单位基点比例，不标称真实手续费 |
 | `dataset.prices`/`path`| `legacy_dataset_input` | 保留原始输入形式，不标记为已锁定物理快照 |
 | `status` | `execution_status: "completed" \| "failed"` | 原样保留小写物理执行状态 |
-| *(隐式缺失)* | `evidence_validity: "NOT_EVALUATED"` | 历史资产诚实标记未评估，不伪造 VALID |
+| *(隐式缺失)* | Legacy 视图显示“无历史评审” | 不生成 v2 Evidence 评价字段或伪造 Review |
 | `metrics.*` | `legacy_metrics.*` | 原样映射 `total_return`, `sharpe`, `max_drawdown` 等原指标 |
 
 未来拟复用已有 `ExperimentRunner`（位于 [`../../research_lab/runners/runner.py`](../../research_lab/runners/runner.py)），按版本分流，不另建全新 Runner；现有测试（如 [`../../research_lab/tests/test_mvp.py`](../../research_lab/tests/test_mvp.py)）继续保持通过。
@@ -340,7 +343,7 @@ Phase 0 全量验收通过 (#538 达成) → Phase 1 Runner/Result Loop → Phas
 
 ### 12.1 哈希规范化与身份
 
-需选定并版本化精确序列化算法，给出跨实现测试向量，明确数字表示、Unicode、数组顺序、非有限数与自身摘要排除规则。不能用简单排序宣称符合 RFC 8785，也不能为得到相同摘要而擅自截断有效参数精度。内容完整性摘要与科学计算指纹的覆盖范围分别测试；不新增签名或身份体系。
+本轮已提交 [research-json-v1 精确规则与固定向量](protocol-v2-freeze-gap-closure.md)，包括 UTF-8、ASCII 键排序、Decimal 字符串、时间、null/missing、默认值及摘要排除。待 #498 审查签收；#511 尚未实现正式校验器与跨语言契约测试。指标产生小数时的科学精度规则仍随 §12.2 确认，不能由 Hash 层擅自舍入。
 
 ### 12.2 指标和判据
 
@@ -349,7 +352,7 @@ Phase 0 全量验收通过 (#538 达成) → Phase 1 Runner/Result Loop → Phas
 - 权益采样、年化天数、无风险基准、外部现金流处理及非正权益时的定义域。
 - 截面最低有效标的数、有效日期数、并列秩与缺失处理；样本量不是独立样本量。
 - HAC 所检验的 IC 序列、滞后阶数选择、有限样本限制及 p 值的近似分布。不能仅凭 lag=horizon-1 宣称已消除全部相关性。
-- 探索与确认阶段、比较基准、主指标、选择规则及其预先锁定时点；参数、fold、seed 重复与研究族关联的具体表达。事后修改判据形成新修订并保留历史，不能包装成事前验证。
+- 研究阶段与预登记规则已在 Gap Closure §3 明确；每个具体案例仍须绑定比较基准、主指标、选择规则、fold/seed 方案及实际预登记凭据，不能包装成已完成确认。
 
 ### 12.3 三类案例的数据和能力清单
 

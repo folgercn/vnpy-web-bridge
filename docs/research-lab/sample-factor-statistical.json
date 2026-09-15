@@ -1,7 +1,7 @@
 {
   "$schema_draft_comment": "Candidate specification and semantic walk-through for protocol v2. NOT a frozen schema or executed experiment. All paths/parameters are candidate hypotheses only.",
   "protocol_status": "DRAFT_UNFROZEN",
-  "draft_version": "0.5.0",
+  "draft_version": "0.6.0",
   "research_task": {
     "schema_version": "research_lab.task.v2",
     "revision": "rev.1",
@@ -14,11 +14,20 @@
     "hypothesis": "期限结构处于现货溢价 (Backwardation) 状态的品种，在未来20日持有期内表现出截面统计上的正向收益相关性；该假设为待检验的经验假说，非必然因果推论。",
     "expected_edge": "在20日预测期内，展期收益率因子的截面秩相关系数 (Rank IC) 样本均值期望大于 0，且分层组合表现出正向收益利差。",
     "data_requirements": {
-      "universe": ["ag.SHFE", "au.SHFE", "cu.SHFE", "rb.SHFE", "ru.SHFE", "sc.INE"],
-      "frequencies": ["1d"],
+      "universe": [
+        "ag.SHFE",
+        "au.SHFE",
+        "cu.SHFE",
+        "rb.SHFE",
+        "ru.SHFE",
+        "sc.INE"
+      ],
+      "frequencies": [
+        "1d"
+      ],
       "time_range": {
-        "start": "2021-01-01T00:00:00+08:00",
-        "end": "2024-12-31T23:59:59+08:00"
+        "start": "2020-12-31T16:00:00.000000Z",
+        "end": "2024-12-31T15:59:59.000000Z"
       },
       "required_fields": [
         "trading_date",
@@ -40,7 +49,14 @@
     "priority": "P1",
     "created_at": null,
     "_created_at_reason": "Unexecuted candidate draft; physical creation timestamp will be recorded on task dispatch.",
-    "tags": ["factor_research", "carry", "term_structure", "commodity_futures", "pit_alignment"]
+    "tags": [
+      "factor_research",
+      "carry",
+      "term_structure",
+      "commodity_futures",
+      "pit_alignment"
+    ],
+    "hash_profile": "research-json-v1"
   },
   "experiment_spec": {
     "schema_version": "research_lab.experiment.v2",
@@ -57,15 +73,18 @@
       "provider_kind": "candidate_warehouse_reference",
       "catalog_name": "commodity_term_structure_pit_view",
       "dataset_reference_uri": "candidate://futures/commodity_settlement_curves_v1",
-      "_target_comment": "Candidate URI for walk-through only; does not imply warehouse exists in repository."
+      "_target_comment": "Candidate URI for walk-through only; does not imply warehouse exists in repository.",
+      "snapshot_selection_mode": "fixed_snapshot",
+      "snapshot_sha256": null,
+      "_snapshot_reason": "Unbound candidate; execution blocked until exact snapshot is bound. No implicit latest selection."
     },
     "method_parameters": {
       "seed_proposal": 42,
       "_seed_proposal_comment": "Proposed random seed for cross-validation split generation; actual run seed resolved in Run."
     },
     "candidate_decision_criteria": {
-      "min_mean_rank_ic": 0.03,
-      "min_t_statistic_hac": 1.96
+      "min_mean_rank_ic": "0.03",
+      "min_t_statistic_hac": "1.96"
     },
     "feature_specification": {
       "feature_name": "annualized_roll_yield",
@@ -111,7 +130,9 @@
       "reject_backtest_metrics_in_pure_statistical_spec": true,
       "reject_unmitigated_label_overlaps": true,
       "reject_unregistered_implementation": true
-    }
+    },
+    "hash_profile": "research-json-v1",
+    "research_stage": "exploration"
   },
   "experiment_run": {
     "schema_version": "research_lab.run.v2",
@@ -125,15 +146,16 @@
     "_run_content_hash_reason": "Run content hash generated upon reaching final state, excluding run_content_hash itself; null in unexecuted draft.",
     "trial_context": {
       "hypothesis_family_id": "hf-commodity-term-structure-carry-v1",
-      "exploration_kind": "parameter_search",
       "is_retry": false,
       "retry_of_run_id": null,
-      "_retry_semantics_note": "A technical retry must share the exact spec_revision and scientific computation fingerprint with the failed run, generating a distinct run_id referencing retry_of_run_id.",
+      "_retry_semantics_note": "Technical retry requires the exact spec_id/spec_revision/spec_content_hash and locked scientific fingerprint, with a new run_id referencing the interrupted run.",
       "trial_index": null,
       "_trial_index_reason": "Run is unexecuted; trial index is strictly null rather than fabricated.",
       "holdout_usage_state": "unknown",
       "_holdout_usage_state_reason": "No empirical verification; holdout state must bind underlying dataset hash and family usage history across tasks.",
-      "retry_count": 0
+      "retry_count": 0,
+      "trial_kind": "parameter_search",
+      "research_stage": "exploration"
     },
     "resolved_dataset_snapshot": {
       "dataset_uri": null,
@@ -163,7 +185,8 @@
       "started_at": null,
       "completed_at": null
     },
-    "worker_identity": null
+    "worker_identity": null,
+    "hash_profile": "research-json-v1"
   },
   "result_evidence": {
     "template_purpose": "candidate_evidence_structure_walkthrough_only; not a real executed evidence",
@@ -177,10 +200,6 @@
     "_evidence_content_hash_reason": "Evidence content hash excludes evidence_content_hash itself; null in unexecuted draft.",
     "execution_status": "NOT_EXECUTED",
     "_execution_status_reason": "Draft candidate walk-through; actual statistical computation pending runner.",
-    "evidence_validity": "NOT_EVALUATED",
-    "_evidence_validity_reason": "Cannot assess validity before physical execution and leakage audit.",
-    "research_conclusion": "INCONCLUSIVE",
-    "_research_conclusion_reason": "Experiment has not been executed on physical data; hypothesis is currently unverified.",
     "metric_metadata": {
       "metric_schema_version": "research_lab.metrics.statistical_factor.v1",
       "sample_scope": "ag, au, cu, rb, ru, sc 2021-2024",
@@ -207,8 +226,9 @@
       },
       "_forbidden_metrics_explanation": "Pure statistical research strictly excludes trading backtest metrics (e.g. Sharpe ratio, max drawdown, total PnL) to maintain scientific demarcation."
     },
-    "_metrics_policy": "Unexecuted or mathematically undefined metrics are null. If executed, genuine zero observations are retained as 0.0.",
-    "supporting_artifacts": []
+    "_metrics_policy": "Unexecuted/undefined values are null with reasons. Observed zero is integer 0 for counts, canonical Decimal string \"0\" for decimal metrics; never substitute zero for missing.",
+    "supporting_artifacts": [],
+    "hash_profile": "research-json-v1"
   },
   "review_assessments": []
 }

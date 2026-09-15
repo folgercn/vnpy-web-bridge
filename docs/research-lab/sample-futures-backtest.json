@@ -1,7 +1,7 @@
 {
   "$schema_draft_comment": "Candidate specification and semantic walk-through for protocol v2. NOT a frozen schema or executed experiment. All paths/cost parameters are candidate hypotheses only, NOT verified exchange rules.",
   "protocol_status": "DRAFT_UNFROZEN",
-  "draft_version": "0.5.0",
+  "draft_version": "0.6.0",
   "research_task": {
     "schema_version": "research_lab.task.v2",
     "revision": "rev.1",
@@ -15,11 +15,16 @@
     "hypothesis": "日线级别 PIT 趋势（21日/63日均线）作为方向过滤器，结合15分钟日盘突破进场，可能在特定震荡与单边切换阶段呈现动量收益；该假设仅为经验假说，在不同市场周期具有条件适用性。",
     "expected_edge": "在候选摩擦设定下，策略期望年化夏普比率大于 1.0，最大回撤控制在预设容忍度以内。",
     "data_requirements": {
-      "universe": ["RB.SHFE"],
-      "frequencies": ["15m", "1d"],
+      "universe": [
+        "RB.SHFE"
+      ],
+      "frequencies": [
+        "15m",
+        "1d"
+      ],
       "time_range": {
-        "start": "2023-01-01T00:00:00+08:00",
-        "end": "2023-12-31T23:59:59+08:00"
+        "start": "2022-12-31T16:00:00.000000Z",
+        "end": "2023-12-31T15:59:59.000000Z"
       },
       "required_fields": [
         "timestamp",
@@ -45,7 +50,15 @@
     "priority": "P1",
     "created_at": null,
     "_created_at_reason": "Unexecuted candidate draft; physical creation timestamp will be recorded on task dispatch.",
-    "tags": ["trading_backtest", "futures_profile", "trend_following", "shfe_rb", "cost_model", "roll_rules"]
+    "tags": [
+      "trading_backtest",
+      "futures_profile",
+      "trend_following",
+      "shfe_rb",
+      "cost_model",
+      "roll_rules"
+    ],
+    "hash_profile": "research-json-v1"
   },
   "experiment_spec": {
     "schema_version": "research_lab.experiment.v2",
@@ -63,24 +76,27 @@
       "provider_kind": "candidate_warehouse_reference",
       "catalog_name": "commodity_c_fast_source_view",
       "dataset_reference_uri": "candidate://futures/shfe/rb_15m_bbo_2023_v1",
-      "_target_comment": "Candidate URI for walk-through only; does not imply warehouse exists in repository."
+      "_target_comment": "Candidate URI for walk-through only; does not imply warehouse exists in repository.",
+      "snapshot_selection_mode": "fixed_snapshot",
+      "snapshot_sha256": null,
+      "_snapshot_reason": "Unbound candidate; execution blocked until exact snapshot is bound. No implicit latest selection."
     },
     "method_parameters": {
       "seed_proposal": 1234,
       "_seed_proposal_comment": "Proposed random seed for stochastic components (if any); run seed resolved in Run."
     },
     "candidate_decision_criteria": {
-      "min_sharpe_ratio": 1.0,
-      "max_drawdown_limit": 0.15
+      "min_sharpe_ratio": "1",
+      "max_drawdown_limit": "0.15"
     },
     "contract_specifications": {
       "target_symbol": "RB",
       "exchange": "SHFE",
-      "multiplier": 10.0,
+      "multiplier": "10",
       "multiplier_unit": "tons_per_lot",
-      "price_tick": 1.0,
+      "price_tick": "1",
       "price_currency": "CNY",
-      "margin_ratio": 0.10,
+      "margin_ratio": "0.1",
       "_contract_spec_comment": "Candidate parameters for walk-through; actual live trading requires verified exchange regulatory specs."
     },
     "roll_policy": {
@@ -99,13 +115,13 @@
         "trend_fast_period": 21,
         "trend_slow_period": 63,
         "breakout_bars": 10,
-        "stop_loss_atr_multiplier": 2.0,
+        "stop_loss_atr_multiplier": "2",
         "max_holding_days": 5
       },
       "_strategy_note": "Candidate parameterization for walk-through; not identical to frozen #481 contract."
     },
     "execution_config": {
-      "initial_capital": 1000000.0,
+      "initial_capital": "1000000",
       "capital_currency": "CNY",
       "position_sizing": {
         "mode": "fixed_lots",
@@ -114,11 +130,11 @@
       "fill_assumption": "next_bar_open_with_bbo_clip"
     },
     "cost_model": {
-      "commission_open_bps": 1.0,
-      "commission_close_yesterday_bps": 1.0,
-      "commission_close_today_bps": 0.5,
+      "commission_open_bps": "1",
+      "commission_close_yesterday_bps": "1",
+      "commission_close_today_bps": "0.5",
       "commission_unit": "bps_of_turnover_unilateral",
-      "fixed_commission_per_lot_cny": 0.0,
+      "fixed_commission_per_lot_cny": "0",
       "slippage_ticks_per_side": 1,
       "slippage_unit": "ticks_unilateral",
       "fee_metadata_gap": true,
@@ -127,12 +143,12 @@
     "validation_config": {
       "method": "out_of_sample_holdout",
       "in_sample_range": {
-        "start": "2023-01-01T00:00:00+08:00",
-        "end": "2023-09-30T23:59:59+08:00"
+        "start": "2022-12-31T16:00:00.000000Z",
+        "end": "2023-09-30T15:59:59.000000Z"
       },
       "out_of_sample_range": {
-        "start": "2023-10-01T00:00:00+08:00",
-        "end": "2023-12-31T23:59:59+08:00"
+        "start": "2023-09-30T16:00:00.000000Z",
+        "end": "2023-12-31T15:59:59.000000Z"
       }
     },
     "rejection_policy": {
@@ -140,7 +156,9 @@
       "reject_cross_currency_settlement": true,
       "reject_unsupported_order_types": true,
       "reject_unregistered_implementation": true
-    }
+    },
+    "hash_profile": "research-json-v1",
+    "research_stage": "exploration"
   },
   "experiment_run": {
     "schema_version": "research_lab.run.v2",
@@ -154,15 +172,16 @@
     "_run_content_hash_reason": "Run content hash generated upon reaching final state, excluding run_content_hash itself; null in unexecuted draft.",
     "trial_context": {
       "hypothesis_family_id": "hf-futures-trend-following-v1",
-      "exploration_kind": "parameter_search",
       "is_retry": false,
       "retry_of_run_id": null,
-      "_retry_semantics_note": "A technical retry must share the exact spec_revision and scientific computation fingerprint with the failed run, generating a distinct run_id referencing retry_of_run_id.",
+      "_retry_semantics_note": "Technical retry requires the exact spec_id/spec_revision/spec_content_hash and locked scientific fingerprint, with a new run_id referencing the interrupted run.",
       "trial_index": null,
       "_trial_index_reason": "Run is unexecuted; trial index is strictly null rather than fabricated.",
       "holdout_usage_state": "unknown",
       "_holdout_usage_state_reason": "Holdout state must bind underlying dataset hash and family usage history across tasks; unknown until verified.",
-      "retry_count": 0
+      "retry_count": 0,
+      "trial_kind": "parameter_search",
+      "research_stage": "exploration"
     },
     "resolved_dataset_snapshot": {
       "dataset_uri": null,
@@ -192,7 +211,8 @@
       "started_at": null,
       "completed_at": null
     },
-    "worker_identity": null
+    "worker_identity": null,
+    "hash_profile": "research-json-v1"
   },
   "result_evidence": {
     "template_purpose": "candidate_evidence_structure_walkthrough_only; not a real executed evidence",
@@ -206,10 +226,6 @@
     "_evidence_content_hash_reason": "Evidence content hash excludes evidence_content_hash itself; null in unexecuted draft.",
     "execution_status": "NOT_EXECUTED",
     "_execution_status_reason": "Draft candidate walk-through; actual backtest replay pending runner.",
-    "evidence_validity": "NOT_EVALUATED",
-    "_evidence_validity_reason": "Cannot assess validity before physical bar replay, fill matching and audit checks.",
-    "research_conclusion": "INCONCLUSIVE",
-    "_research_conclusion_reason": "Backtest has not been executed; conclusion remains unverified.",
     "metric_metadata": {
       "metric_schema_version": "research_lab.metrics.futures_backtest.v1",
       "sample_scope": "RB.SHFE 2023 15m",
@@ -242,8 +258,9 @@
       }
     },
     "_negative_evidence_semantics_note": "Negative return is an objective numerical observation. Whether it supports or rejects the hypothesis depends on predefined target criteria, benchmark performance, and independent review. It does NOT automatically mean strategy failure or immediate factor blacklisting.",
-    "_metrics_policy": "Unexecuted or mathematically undefined metrics are null. If executed, metrics are computed from actual equity/excess return series; zero return occurs if final equity equals initial (or genuinely constant); zero drawdown occurs if equity never drops below peak; Sharpe is null when unexecuted, sample insufficient, or variance is 0.",
-    "supporting_artifacts": []
+    "_metrics_policy": "Unexecuted/undefined values are null with reasons. Observed zero is integer 0 for counts, canonical Decimal string \"0\" for decimal metrics; never substitute zero for missing.",
+    "supporting_artifacts": [],
+    "hash_profile": "research-json-v1"
   },
   "review_assessments": []
 }
