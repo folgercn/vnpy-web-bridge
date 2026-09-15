@@ -147,6 +147,37 @@ class AstraDiscoveryTest(unittest.TestCase):
             self.assertEqual(discovery.get_proposal(blocked_proposal.proposal_id), blocked_proposal)
             self.assertEqual(discovery.get_task(ready_task.task_id), ready_task)
             self.assertEqual(discovery.get_task(blocked_task.task_id), blocked_task)
+            self.assertEqual(
+                discovery.get_material(ready_proposal.material_id, content_hash=ready_proposal.material_content_hash),
+                material().model_copy(update={"content_hash": ready_proposal.material_content_hash}),
+            )
+            self.assertEqual(
+                discovery.get_material(blocked_proposal.material_id, content_hash=blocked_proposal.material_content_hash),
+                material(hypothesis=None).model_copy(update={"content_hash": blocked_proposal.material_content_hash}),
+            )
+            with self.assertRaisesRegex(ValueError, "content_hash is required"):
+                discovery.get_material("paper-close-return-001")
+
+    def test_alpha_history_change_creates_a_new_proposal_and_task_version(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "output"
+            discovery = AstraDiscovery.local(root)
+            ready_proposal, ready_task = discovery.discover(material())
+            database = AlphaDatabase(ResearchLabConfig(root))
+            database.save_failure_pattern(FailurePattern(
+                pattern_id="failure-after-discovery-001", source_kind="experiment", source_id="old-run-002",
+                factor_name="close_return", category="BACKTEST_FAILED", severity="critical",
+                summary="A later recorded failure.", evidence=["recorded after the first discovery"],
+            ))
+            blocked_proposal, blocked_task = discovery.discover(material())
+
+            self.assertEqual(ready_proposal.status, "ready")
+            self.assertEqual(blocked_proposal.status, "blocked")
+            self.assertNotEqual(ready_proposal.proposal_id, blocked_proposal.proposal_id)
+            self.assertNotEqual(ready_task.task_id, blocked_task.task_id)
+            self.assertEqual(discovery.get_proposal(blocked_proposal.proposal_id), blocked_proposal)
+            self.assertEqual(discovery.get_task(ready_task.task_id), ready_task)
+            self.assertEqual(discovery.get_task(blocked_task.task_id), blocked_task)
 
 
 if __name__ == "__main__":

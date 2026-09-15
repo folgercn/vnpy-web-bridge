@@ -40,8 +40,14 @@ class AstraDiscovery:
         """Store a supplied local research record; this method never fetches data."""
         return self._save(material, material.material_id)
 
-    def get_material(self, material_id: str) -> ResearchMaterial | None:
-        return self._get(ResearchMaterial, material_id)
+    def get_material(self, material_id: str, *, content_hash: str | None = None) -> ResearchMaterial | None:
+        """Load one material version; callers must name a hash when versions coexist."""
+        items = [item for item in self._all(ResearchMaterial) if item.material_id == material_id]
+        if content_hash is not None:
+            return next((item for item in items if item.content_hash == content_hash), None)
+        if len(items) > 1:
+            raise ValueError("multiple material versions found; content_hash is required")
+        return items[0] if items else None
 
     def query_materials(self, *, source_kind: str | None = None, factor_name: str | None = None) -> list[ResearchMaterial]:
         return [item for item in self._all(ResearchMaterial) if (
@@ -85,8 +91,15 @@ class AstraDiscovery:
         critical_failures = [pattern for pattern in failures if pattern.severity == "critical"]
         reasons.extend(f"HISTORICAL_CRITICAL_FAILURE:{pattern.pattern_id}" for pattern in critical_failures)
         notes = [f"{pattern.pattern_id}: {pattern.summary}" for pattern in failures]
+        discovery_input_hash = _hash({
+            "material_content_hash": material.content_hash,
+            "idea_hashes": sorted(idea.content_hash for idea in ideas),
+            "experiment_hashes": sorted(record.content_hash for record in experiments),
+            "failure_hashes": sorted(pattern.content_hash for pattern in failures),
+            "literature_hashes": sorted(reference.content_hash for reference in literature),
+        })
         return ResearchProposal(
-            proposal_id=_identity("proposal", material.material_id, material.content_hash),
+            proposal_id=_identity("proposal", material.material_id, material.content_hash, discovery_input_hash),
             material_id=material.material_id, material_content_hash=material.content_hash,
             title=material.title, hypothesis=material.hypothesis, economic_logic=material.economic_logic,
             expected_edge=material.expected_edge, required_data=material.required_data,
@@ -115,7 +128,7 @@ class AstraDiscovery:
         if reasons:
             experiment = None
         return ResearchTask(
-            task_id=_identity("task", proposal.proposal_id), proposal_id=proposal.proposal_id,
+            task_id=_identity("task", proposal.proposal_id, proposal.content_hash), proposal_id=proposal.proposal_id,
             proposal_content_hash=proposal.content_hash,
             status="blocked" if reasons else "ready",
             experiment=experiment, evidence=proposal.evidence,

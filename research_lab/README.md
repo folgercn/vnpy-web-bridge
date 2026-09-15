@@ -178,8 +178,11 @@ can consume a ready artifact without changing `ExperimentRunner`; Astra itself
 creates no queue, scheduler, worker, experiment run, promotion, deployment, or
 trading action.
 
-Proposal IDs include the stored material SHA-256, and task IDs reference that
-versioned proposal plus its content hash. Revisions that reuse a caller's
-material ID and timestamp therefore remain distinct, auditable artifacts; a
-future consumer reads a specific proposal/task ID rather than guessing a latest
-version from timestamp or filename ordering.
+Proposal IDs include the stored material SHA-256 and a hash of the linked Alpha
+Database asset snapshot; task IDs additionally include the proposal content
+hash. Revisions that reuse a caller's material ID and timestamp, or re-discovery
+after relevant Alpha Database history changes, therefore remain distinct,
+auditable artifacts. Use `get_material(material_id, content_hash=proposal.material_content_hash)`
+to retrieve the exact proposal input. A future consumer reads a specific
+proposal/task ID rather than guessing a latest version from timestamp or
+filename ordering.
