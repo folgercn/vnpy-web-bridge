@@ -242,6 +242,7 @@ def handoff(task, spec, run, manifest, evidence, criteria):
 
 def run_case(materials, bundle):
     materials, bundle = Path(materials), Path(bundle)
+    require(not bundle.resolve().is_relative_to(materials.resolve()), 'output must be outside inputs')
     prepared, task, spec, criteria, method = admission(materials)
     raw = safe_read(materials, 'input.csv')  # stable bytes bound BEFORE calculation
     env = environment()

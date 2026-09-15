@@ -42,8 +42,9 @@ Run 不反向引用 Manifest/Evidence；Manifest 不收录控制记录。
 ```sh
 case_dir=research/phase0_data_quality
 case_work=$(mktemp -d)
-tar -xzf "$case_dir/prepared-inputs.tar.gz" -C "$case_work"
-.venv/bin/python "$case_dir/case.py" run --inputs "$case_work" --bundle "$case_work/new-run"
+mkdir "$case_work/inputs"
+tar -xzf "$case_dir/prepared-inputs.tar.gz" -C "$case_work/inputs"
+.venv/bin/python "$case_dir/case.py" run --inputs "$case_work/inputs" --bundle "$case_work/new-run"
 .venv/bin/python "$case_dir/case.py" verify --bundle "$case_work/new-run"
 .venv/bin/python -m pytest -q "$case_dir/test_case.py"
 ```

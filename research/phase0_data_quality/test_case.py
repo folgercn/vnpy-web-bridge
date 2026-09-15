@@ -193,3 +193,10 @@ def test_upstream_positive_hash_vectors():
             value.pop(vector['self_hash_field'], None)
         assert case.canonical(value) == vector['canonical_utf8'], vector['name']
         assert case.digest(value) == vector['sha256'], vector['name']
+
+
+def test_output_cannot_be_inside_inputs(materials):
+    for out in (materials, materials / 'new-run'):
+        with pytest.raises(ValueError, match='outside inputs'):
+            case.run_case(materials, out)
+    assert not (materials / 'new-run').exists()
