@@ -214,3 +214,20 @@ persisted-validation review interface; its default local adapter invokes
 Critic. Critic review is skipped
 with audit evidence unless the caller attaches an existing persisted
 `validation_id`; Sol never fabricates a validation result from an experiment.
+
+## Research Farm Worker Runtime MVP
+
+`research_lab.farm` adds an explicitly invoked, local SQLite file-backed task
+queue outside Sol. `WorkerRuntime.register()`, `heartbeat()`, `claim_task()`,
+`execute()`, and `report_result()` persist worker evidence, atomically lease a
+single task, execute the unchanged `ExperimentRunner`, and return only the
+matching ResultStore and Alpha Database result to Sol. A task binds the exact
+approved queued plan ID, Astra task/proposal hashes, and pre-claim plan
+integrity hash. Expired leases are recovered on the next explicit claim; old
+owners cannot overwrite a newer attempt. `LocalProcessWorker.run_once()` starts
+one local child process and exits; it is not a daemon or network service.
+
+`TaskQueue` is the replacement boundary. This MVP provides only
+`SQLiteTaskQueue`; it does not include Redis, Celery, Kubernetes, M2/cloud/GPU
+workers, real-time data, automatic Astra calls, strategy selection, promotion,
+deployment, or trading.

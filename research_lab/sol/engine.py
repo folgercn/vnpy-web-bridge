@@ -7,17 +7,20 @@ import os
 import secrets
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from research_lab.config import ResearchLabConfig
 from research_lab.alpha_database import AlphaDatabase
 from research_lab.astra import AstraDiscovery
 from research_lab.database import ResultStore
 from research_lab.runners import ExperimentRunner
-from research_lab.schemas import ExperimentPlan, ExperimentRecord, ExperimentResult, PlanEvent, SolTaskInput, WorkerDescriptor
+from research_lab.schemas import ExperimentPlan, ExperimentRecord, ExperimentResult, FarmResultCallback, FarmTask, PlanEvent, SolTaskInput, WorkerDescriptor
 from research_lab.schemas.sol import PlanStatus
 from .review import CriticReviewAdapter, PersistedValidationReviewer
 from .state_machine import SolStateError, require_transition, retry_permitted, validate_state_chain
+
+if TYPE_CHECKING:
+    from research_lab.farm import TaskQueue
 
 
 class RunnerWorker(Protocol):
@@ -156,6 +159,70 @@ class SolOrchestrator:
             message = "completed callback was not the matching persisted ResultStore and Alpha Database result"
         return self._handle_failure(running, message, result.experiment_id)
 
+    def submit_to_farm(self, plan_id: str, queue: "TaskQueue") -> FarmTask:
+        """Submit only the exact human-approved queued plan to a Farm queue."""
+        plan = self._required(plan_id)
+        if plan.status != "queued" or not plan.approved_by or plan.approved_at is None:
+            raise SolStateError("only approved queued plans can be submitted to Farm")
+        return queue.submit(plan)
+
+    def claim_farm_task(self, task: FarmTask, *, worker_id: str) -> ExperimentPlan:
+        """Bind an active queue lease to the queued Sol plan before execution."""
+        plan = self._required(task.plan_id)
+        if not plan.approved_by or plan.approved_at is None:
+            raise SolStateError("Farm can only claim an approved plan")
+        if task.task_content_hash != plan.task_content_hash or task.proposal_content_hash != plan.proposal_content_hash:
+            raise SolStateError("Farm task does not match the approved Sol plan version")
+        if plan.status == "running":
+            # A queue lease may expire after Sol recorded running. The next
+            # atomic claim takes ownership without fabricating another state.
+            return self._save(plan.model_copy(update={
+                "worker_id": worker_id, "farm_task_id": task.task_id, "farm_attempt": task.attempt,
+            }))
+        if plan.status != "queued" or task.plan_integrity_hash != plan.integrity_hash:
+            raise SolStateError("Farm can only claim the matching approved queued plan")
+        return self._transition(plan, "running", f"Farm claimed task {task.task_id} attempt {task.attempt}",
+                                worker_id=worker_id, farm_task_id=task.task_id, farm_attempt=task.attempt)
+
+    def report_farm_result(self, task: FarmTask, callback: FarmResultCallback) -> ExperimentPlan:
+        """Accept only an active-Farm callback whose result exists in both stores."""
+        plan = self._required(task.plan_id)
+        if (plan.status != "running" or plan.worker_id != callback.worker_id
+                or plan.farm_task_id != task.task_id or plan.farm_attempt != callback.attempt
+                or callback.result.experiment_id != plan.experiment.experiment_id):
+            raise SolStateError("Farm callback does not match the active Sol execution")
+        if not self._result_is_persisted(plan, callback.result):
+            raise SolStateError("Farm callback result is not the matching persisted ResultStore and Alpha Database result")
+        if callback.result.status == "completed":
+            return self._transition(plan, "review", "Farm completed and persisted result", result_experiment_id=callback.result.experiment_id,
+                                    review_status="awaiting_validation")
+        return self._handle_failure(plan, callback.result.error_message or callback.result.error_code or "Farm runner failed",
+                                    callback.result.experiment_id)
+
+    def report_farm_exception(self, task: FarmTask, worker_id: str, attempt: int, message: str) -> ExperimentPlan:
+        """Record an execution exception after queue ownership was established.
+
+        No unpersisted payload is promoted as a result; this only invokes Sol's
+        existing failure and retry state machine.
+        """
+        plan = self._required(task.plan_id)
+        if (plan.status != "running" or plan.worker_id != worker_id
+                or plan.farm_task_id != task.task_id or plan.farm_attempt != attempt):
+            raise SolStateError("Farm exception does not match the active Sol execution")
+        return self._handle_failure(plan, f"Farm attempt {attempt}: {message}")
+
+    def resume_farm_retry(self, task: FarmTask) -> ExperimentPlan:
+        """Finish the existing ``retry -> queued`` transition after a restart.
+
+        This is recovery for an already approved, attempt-bound Farm failure;
+        it neither creates a new approval nor changes the retry count.
+        """
+        plan = self._required(task.plan_id)
+        if (plan.status != "retry" or not plan.approved_by or plan.approved_at is None
+                or plan.farm_task_id != task.task_id or plan.farm_attempt != task.attempt):
+            raise SolStateError("Farm retry recovery does not match the active approved attempt")
+        return self._transition(plan, "queued", "Farm recovery completed persisted retry requeue")
+
     def _handle_failure(self, plan: ExperimentPlan, message: str, result_experiment_id: str | None = None) -> ExperimentPlan:
         failed = self._transition(plan, "failed", "runner returned failed result", result_experiment_id=result_experiment_id, error_message=message)
         if not retry_permitted(failed.retry_count, failed.max_retries):
@@ -221,13 +288,16 @@ class SolOrchestrator:
         return plan
 
     def _completed_result_is_persisted(self, plan: ExperimentPlan, result: ExperimentResult) -> bool:
+        return result.status == "completed" and self._result_is_persisted(plan, result)
+
+    def _result_is_persisted(self, plan: ExperimentPlan, result: ExperimentResult) -> bool:
         if result.experiment_id != plan.experiment.experiment_id:
             return False
         stored = self.store.get(result.experiment_id)
         archived = AlphaDatabase(self.store.config).get_experiment(result.experiment_id)
         return bool(
-            stored is not None and stored.status == "completed" and stored == result
-            and archived is not None and archived.status == "completed"
+            stored is not None and stored == result
+            and archived is not None and archived.status == result.status
             and _result_fingerprint(stored) == _alpha_record_fingerprint(archived)
         )
 
