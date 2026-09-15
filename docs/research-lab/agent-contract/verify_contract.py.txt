@@ -1,0 +1,95 @@
+"""Offline contract-shape audit only. No agent invocation or runtime admission."""
+import copy
+import json
+from pathlib import Path
+
+from jsonschema import Draft202012Validator
+
+HERE = Path(__file__).resolve().parent
+schema = json.loads((HERE / 'agent-handoff.schema.json').read_text())
+Draft202012Validator.check_schema(schema)
+validator = Draft202012Validator(schema)
+checks = 0
+
+
+def check(name, value, valid):
+    global checks
+    errors = list(validator.iter_errors(value))
+    assert (not errors) == valid, (name, [e.message for e in errors])
+    checks += 1
+    print(('ACCEPT ' if valid else 'REJECT ') + name)
+
+
+samples = {}
+for file in sorted(HERE.glob('*.json')):
+    if file.name.endswith('.schema.json'):
+        continue
+    wrapper = json.loads(file.read_text())
+    assert wrapper['template_status'] == 'SYNTHETIC_SHAPE_ONLY_NOT_EXECUTABLE'
+    samples[file.stem] = wrapper['handoff']
+    check(file.name, wrapper['handoff'], True)
+request = samples['handoff-research-to-execution']
+review = samples['handoff-execution-to-critic']
+
+
+def mutate(name, base, change, valid=False):
+    value = copy.deepcopy(base)
+    change(value)
+    check(name, value, valid)
+
+
+mutate('unknown_root_field', request, lambda x: x.update(worker='host'))
+mutate('missing_task', request, lambda x: x['context_refs'].pop('research_task'))
+mutate('missing_spec', request, lambda x: x['context_refs'].pop('experiment_spec'))
+mutate('missing_revision', request, lambda x: x['context_refs']['experiment_spec'].pop('revision'))
+mutate('zero_revision', request, lambda x: x['context_refs']['experiment_spec'].update(revision='rev.0'))
+mutate('null_hash', request, lambda x: x['context_refs']['experiment_spec'].update(content_hash=None))
+mutate('missing_hash', request, lambda x: x['context_refs']['experiment_spec'].pop('content_hash'))
+mutate('wrong_reference_type', request, lambda x: x['context_refs']['experiment_spec'].update(object_type='review'))
+mutate('critic_dispatch', request, lambda x: x.update(sender_role='critic'))
+mutate('wrong_recipient', request, lambda x: x.update(recipient_role='research'))
+mutate('invented_run_revision', review, lambda x: x['context_refs']['experiment_run'].update(revision='rev.1'))
+mutate('request_claims_accepted', request, lambda x: x.update(status='completed'))
+mutate('request_claims_outputs', request, lambda x: x.update(output_refs=[x['context_refs']['experiment_spec']]))
+mutate('missing_expected_outputs', request, lambda x: x.pop('expected_outputs'))
+mutate('missing_manifest_output', request, lambda x: x['expected_outputs'].pop(1))
+mutate('wrong_schema_version', request, lambda x: x['expected_outputs'][0].update(schema_version='research_lab.review.v2'))
+mutate('unknown_operation', request, lambda x: x.update(operation='start_worker'))
+mutate('review_missing_scope', review, lambda x: x.pop('review_scope'))
+mutate('review_missing_artifacts', review, lambda x: x['artifact_requirements'].update(exact_refs=[]))
+mutate('artifact_missing_revision', review, lambda x: x['artifact_requirements']['exact_refs'][0].pop('manifest_revision'))
+mutate('artifact_hash_not_bound', review, lambda x: x['artifact_requirements']['exact_refs'][0].update(content_sha256=None))
+mutate('exact_ref_cannot_add_path', review, lambda x: x['artifact_requirements']['exact_refs'][0].update(path='/tmp/metrics.json'))
+mutate('failure_diagnosis_shape', review, lambda x: x.update(review_scope='failure_diagnosis'), True)
+# Research may reference existing Review as feedback; reading is not mutation authority.
+mutate('research_can_read_review', request, lambda x: x['context_refs'].update(review=copy.deepcopy(samples['handoff-critic-to-research']['context_refs']['review'])), True)
+for status in ['blocked', 'rejected', 'incomplete', 'unsupported']:
+    base = samples['response-' + status]
+    mutate(status + '_missing_reason', base, lambda x: x['problem'].pop('reason'))
+    mutate(status + '_empty_affected', base, lambda x: x['problem'].update(affected_items=[]))
+    mutate(status + '_no_reply', base, lambda x: x.pop('in_reply_to'))
+    mutate(status + '_cannot_claim_output', base, lambda x: x.update(output_refs=[copy.deepcopy(request['context_refs']['experiment_spec'])]))
+mutate('unknown_outcome_must_block', samples['response-incomplete'], lambda x: x['problem'].update(execution_outcome='unknown'))
+mutate('wrong_error_code', samples['response-rejected'], lambda x: x['problem'].update(code='capability_unsupported'))
+mutate('unknown_code_requires_unknown_outcome', samples['response-blocked'], lambda x: x['problem'].update(execution_outcome='known'))
+# Complete handoff can contain a FAILED Run: Run status/content is an external semantic check.
+complete = {k: copy.deepcopy(v) for k, v in samples['response-incomplete'].items() if k != 'problem'}
+complete['status'] = 'completed'
+complete['output_refs'] = [copy.deepcopy(review['context_refs'][t]) for t in ['experiment_run', 'artifact_manifest', 'result_evidence']]
+check('complete_execution_delivery_shape', complete, True)
+mutate('complete_no_outputs', complete, lambda x: x.pop('output_refs'))
+mutate('complete_cannot_deliver_review', complete, lambda x: x['output_refs'].__setitem__(0, copy.deepcopy(samples['handoff-critic-to-research']['context_refs']['review'])))
+mutate('complete_cannot_have_problem', complete, lambda x: x.update(problem=copy.deepcopy(samples['response-incomplete']['problem'])))
+prepare = copy.deepcopy(request)
+prepare.update(operation='prepare_spec', recipient_role='research')
+prepare['context_refs'] = {'research_task': copy.deepcopy(request['context_refs']['research_task'])}
+prepare['artifact_requirements']['required_roles'] = []
+prepare['expected_outputs'] = [{'object_type': 'experiment_spec', 'schema_version': 'research_lab.experiment.v2'}]
+check('prepare_spec_shape', prepare, True)
+for op, sender, recipient, output in [('review_evidence', 'critic', 'execution', samples['handoff-critic-to-research']['context_refs']['review']), ('revise_spec', 'research', 'critic', request['context_refs']['experiment_spec'])]:
+    value = copy.deepcopy(complete)
+    value.update(operation=op, sender_role=sender, recipient_role=recipient, output_refs=[copy.deepcopy(output)])
+    if op == 'review_evidence':
+        value['review_scope'] = 'failure_diagnosis'
+    check(op + '_complete_shape', value, True)
+print(f'PASS: {checks} structural checks; synthetic shapes only, no execution or semantic admission.')

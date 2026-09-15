@@ -1,0 +1,1270 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bktrader.local/schemas/research-agent-handoff-v2.schema.json",
+  "title": "Agent handoff candidate — DRAFT_UNFROZEN",
+  "description": "Static shape only; not authorization, dispatch, execution or protocol freeze. External reference, role-profile and scientific checks remain mandatory.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "research_lab.agent_handoff.v2"
+    },
+    "handoff_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "message_kind": {
+      "enum": [
+        "request",
+        "response"
+      ]
+    },
+    "operation": {
+      "enum": [
+        "prepare_spec",
+        "execute_spec",
+        "review_evidence",
+        "revise_spec"
+      ]
+    },
+    "sender_role": {
+      "enum": [
+        "research",
+        "execution",
+        "critic"
+      ]
+    },
+    "recipient_role": {
+      "enum": [
+        "research",
+        "execution",
+        "critic"
+      ]
+    },
+    "context_refs": {
+      "$ref": "#/$defs/context_refs"
+    },
+    "artifact_requirements": {
+      "$ref": "#/$defs/requirements"
+    },
+    "expected_outputs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/expected_object"
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "in_reply_to": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": [
+        "completed",
+        "blocked",
+        "rejected",
+        "incomplete",
+        "unsupported"
+      ]
+    },
+    "output_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/object_ref"
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "problem": {
+      "$ref": "#/$defs/problem"
+    },
+    "review_scope": {
+      "enum": [
+        "research_assessment",
+        "failure_diagnosis"
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "handoff_id",
+    "message_kind",
+    "operation",
+    "sender_role",
+    "recipient_role",
+    "context_refs"
+  ],
+  "$defs": {
+    "object_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "object_type": {
+          "enum": [
+            "research_task",
+            "experiment_spec",
+            "experiment_run",
+            "artifact_manifest",
+            "result_evidence",
+            "review"
+          ]
+        },
+        "object_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "type": "string",
+          "pattern": "^rev\\.[1-9][0-9]*$"
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "object_type",
+        "object_id",
+        "content_hash"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "object_type": {
+                "enum": [
+                  "research_task",
+                  "experiment_spec",
+                  "artifact_manifest",
+                  "review"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "revision"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "revision"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "artifact_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "manifest_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "manifest_revision": {
+          "type": "string",
+          "pattern": "^rev\\.[1-9][0-9]*$"
+        },
+        "manifest_content_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "artifact_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1
+        },
+        "content_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "manifest_id",
+        "manifest_revision",
+        "manifest_content_hash",
+        "artifact_id",
+        "role",
+        "content_sha256"
+      ]
+    },
+    "expected_object": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "object_type": {
+          "enum": [
+            "research_task",
+            "experiment_spec",
+            "experiment_run",
+            "artifact_manifest",
+            "result_evidence",
+            "review"
+          ]
+        },
+        "schema_version": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "object_type",
+        "schema_version"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "object_type": {
+                "const": "research_task"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "schema_version": {
+                "const": "research_lab.task.v2"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "object_type": {
+                "const": "experiment_spec"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "schema_version": {
+                "const": "research_lab.experiment.v2"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "object_type": {
+                "const": "experiment_run"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "schema_version": {
+                "const": "research_lab.run.v2"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "object_type": {
+                "const": "artifact_manifest"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "schema_version": {
+                "const": "research_lab.artifact_manifest.v2"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "object_type": {
+                "const": "result_evidence"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "schema_version": {
+                "const": "research_lab.evidence.v2"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "object_type": {
+                "const": "review"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "schema_version": {
+                "const": "research_lab.review.v2"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "requirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "role_profile_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "required_roles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "exact_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/artifact_ref"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "role_profile_ref",
+        "required_roles",
+        "exact_refs"
+      ]
+    },
+    "problem": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "enum": [
+            "dependency_unavailable",
+            "invalid_input",
+            "missing_delivery",
+            "capability_unsupported",
+            "execution_outcome_unknown"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "affected_items": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "resume_condition": {
+          "type": "string",
+          "minLength": 1
+        },
+        "execution_outcome": {
+          "enum": [
+            "not_started",
+            "known",
+            "unknown"
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "reason",
+        "affected_items",
+        "resume_condition",
+        "execution_outcome"
+      ]
+    },
+    "context_refs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "research_task": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/object_ref"
+            },
+            {
+              "properties": {
+                "object_type": {
+                  "const": "research_task"
+                }
+              }
+            }
+          ]
+        },
+        "experiment_spec": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/object_ref"
+            },
+            {
+              "properties": {
+                "object_type": {
+                  "const": "experiment_spec"
+                }
+              }
+            }
+          ]
+        },
+        "experiment_run": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/object_ref"
+            },
+            {
+              "properties": {
+                "object_type": {
+                  "const": "experiment_run"
+                }
+              }
+            }
+          ]
+        },
+        "artifact_manifest": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/object_ref"
+            },
+            {
+              "properties": {
+                "object_type": {
+                  "const": "artifact_manifest"
+                }
+              }
+            }
+          ]
+        },
+        "result_evidence": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/object_ref"
+            },
+            {
+              "properties": {
+                "object_type": {
+                  "const": "result_evidence"
+                }
+              }
+            }
+          ]
+        },
+        "review": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/object_ref"
+            },
+            {
+              "properties": {
+                "object_type": {
+                  "const": "review"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "required": []
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "message_kind": {
+            "const": "request"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "artifact_requirements",
+          "expected_outputs"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "status"
+              ]
+            },
+            {
+              "required": [
+                "in_reply_to"
+              ]
+            },
+            {
+              "required": [
+                "output_refs"
+              ]
+            },
+            {
+              "required": [
+                "problem"
+              ]
+            }
+          ]
+        }
+      },
+      "else": {
+        "required": [
+          "in_reply_to",
+          "status"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "artifact_requirements"
+              ]
+            },
+            {
+              "required": [
+                "expected_outputs"
+              ]
+            }
+          ]
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "completed"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "output_refs"
+              ],
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "problem"
+                    ]
+                  }
+                ]
+              }
+            },
+            "else": {
+              "required": [
+                "problem"
+              ],
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "output_refs"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "prepare_spec"
+          }
+        }
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "message_kind": {
+                  "const": "request"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "sender_role": {
+                  "const": "research"
+                },
+                "recipient_role": {
+                  "const": "research"
+                },
+                "context_refs": {
+                  "required": [
+                    "research_task"
+                  ]
+                },
+                "expected_outputs": {
+                  "minItems": 1,
+                  "maxItems": 1,
+                  "allOf": [
+                    {
+                      "contains": {
+                        "properties": {
+                          "object_type": {
+                            "const": "experiment_spec"
+                          }
+                        },
+                        "required": [
+                          "object_type"
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "sender_role": {
+                  "const": "research"
+                },
+                "recipient_role": {
+                  "const": "research"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "message_kind": {
+                  "const": "response"
+                },
+                "status": {
+                  "const": "completed"
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "properties": {
+                "output_refs": {
+                  "minItems": 1,
+                  "maxItems": 1,
+                  "allOf": [
+                    {
+                      "contains": {
+                        "properties": {
+                          "object_type": {
+                            "const": "experiment_spec"
+                          }
+                        },
+                        "required": [
+                          "object_type"
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "review_scope"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "execute_spec"
+          }
+        }
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "message_kind": {
+                  "const": "request"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "sender_role": {
+                  "const": "research"
+                },
+                "recipient_role": {
+                  "const": "execution"
+                },
+                "context_refs": {
+                  "required": [
+                    "research_task",
+                    "experiment_spec"
+                  ]
+                },
+                "expected_outputs": {
+                  "minItems": 3,
+                  "maxItems": 3,
+                  "allOf": [
+                    {
+                      "contains": {
+                        "properties": {
+                          "object_type": {
+                            "const": "experiment_run"
+                          }
+                        },
+                        "required": [
+                          "object_type"
+                        ]
+                      }
+                    },
+                    {
+                      "contains": {
+                        "properties": {
+                          "object_type": {
+                            "const": "artifact_manifest"
+                          }
+                        },
+                        "required": [
+                          "object_type"
+                        ]
+                      }
+                    },
+                    {
+                      "contains": {
+                        "properties": {
+                          "object_type": {
+                            "const": "result_evidence"
+                          }
+                        },
+                        "required": [
+                          "object_type"
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "sender_role": {
+                  "const": "execution"
+                },
+                "recipient_role": {
+                  "const": "research"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "message_kind": {
+                  "const": "response"
+                },
+                "status": {
+                  "const": "completed"
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "properties": {
+                "output_refs": {
+                  "minItems": 3,
+                  "maxItems": 3,
+                  "allOf": [
+                    {
+                      "contains": {
+                        "properties": {
+                          "object_type": {
+                            "const": "experiment_run"
+                          }
+                        },
+                        "required": [
+                          "object_type"
+                        ]
+                      }
+                    },
+                    {
+                      "contains": {
+                        "properties": {
+                          "object_type": {
+                            "const": "artifact_manifest"
+                          }
+                        },
+                        "required": [
+                          "object_type"
+                        ]
+                      }
+                    },
+                    {
+                      "contains": {
+                        "properties": {
+                          "object_type": {
+                            "const": "result_evidence"
+                          }
+                        },
+                        "required": [
+                          "object_type"
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "review_scope"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "review_evidence"
+          }
+        }
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "message_kind": {
+                  "const": "request"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "sender_role": {
+                  "const": "execution"
+                },
+                "recipient_role": {
+                  "const": "critic"
+                },
+                "context_refs": {
+                  "required": [
+                    "research_task",
+                    "experiment_spec",
+                    "experiment_run",
+                    "artifact_manifest",
+                    "result_evidence"
+                  ]
+                },
+                "expected_outputs": {
+                  "minItems": 1,
+                  "maxItems": 1,
+                  "allOf": [
+                    {
+                      "contains": {
+                        "properties": {
+                          "object_type": {
+                            "const": "review"
+                          }
+                        },
+                        "required": [
+                          "object_type"
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "sender_role": {
+                  "const": "critic"
+                },
+                "recipient_role": {
+                  "const": "execution"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "message_kind": {
+                  "const": "request"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "artifact_requirements": {
+                  "properties": {
+                    "exact_refs": {
+                      "minItems": 1
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "message_kind": {
+                  "const": "response"
+                },
+                "status": {
+                  "const": "completed"
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "properties": {
+                "output_refs": {
+                  "minItems": 1,
+                  "maxItems": 1,
+                  "allOf": [
+                    {
+                      "contains": {
+                        "properties": {
+                          "object_type": {
+                            "const": "review"
+                          }
+                        },
+                        "required": [
+                          "object_type"
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "required": [
+          "review_scope"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "revise_spec"
+          }
+        }
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "message_kind": {
+                  "const": "request"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "sender_role": {
+                  "const": "critic"
+                },
+                "recipient_role": {
+                  "const": "research"
+                },
+                "context_refs": {
+                  "required": [
+                    "research_task",
+                    "experiment_spec",
+                    "experiment_run",
+                    "artifact_manifest",
+                    "result_evidence",
+                    "review"
+                  ]
+                },
+                "expected_outputs": {
+                  "minItems": 1,
+                  "maxItems": 1,
+                  "allOf": [
+                    {
+                      "contains": {
+                        "properties": {
+                          "object_type": {
+                            "const": "experiment_spec"
+                          }
+                        },
+                        "required": [
+                          "object_type"
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "sender_role": {
+                  "const": "research"
+                },
+                "recipient_role": {
+                  "const": "critic"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "message_kind": {
+                  "const": "response"
+                },
+                "status": {
+                  "const": "completed"
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "properties": {
+                "output_refs": {
+                  "minItems": 1,
+                  "maxItems": 1,
+                  "allOf": [
+                    {
+                      "contains": {
+                        "properties": {
+                          "object_type": {
+                            "const": "experiment_spec"
+                          }
+                        },
+                        "required": [
+                          "object_type"
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "review_scope"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "blocked"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "problem": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "dependency_unavailable",
+                  "execution_outcome_unknown"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "rejected"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "problem": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "invalid_input"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "incomplete"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "problem": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "missing_delivery"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "unsupported"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "problem": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "capability_unsupported"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "problem": {
+            "properties": {
+              "execution_outcome": {
+                "const": "unknown"
+              }
+            },
+            "required": [
+              "execution_outcome"
+            ]
+          }
+        },
+        "required": [
+          "problem"
+        ]
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "const": "blocked"
+          },
+          "problem": {
+            "properties": {
+              "code": {
+                "const": "execution_outcome_unknown"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "problem": {
+            "properties": {
+              "code": {
+                "const": "execution_outcome_unknown"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          }
+        },
+        "required": [
+          "problem"
+        ]
+      },
+      "then": {
+        "properties": {
+          "problem": {
+            "properties": {
+              "execution_outcome": {
+                "const": "unknown"
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
