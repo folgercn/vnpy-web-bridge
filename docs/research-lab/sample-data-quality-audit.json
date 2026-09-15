@@ -1,0 +1,203 @@
+{
+  "$schema_draft_comment": "Candidate specification and semantic walk-through for protocol v2. NOT a frozen schema or executed experiment. All paths/thresholds are candidate hypotheses only.",
+  "protocol_status": "DRAFT_UNFROZEN",
+  "draft_version": "0.5.0",
+  "research_task": {
+    "schema_version": "research_lab.task.v2",
+    "revision": "rev.1",
+    "task_id": "task-dq-rb-hc-continuity-audit",
+    "task_content_hash": null,
+    "_task_content_hash_reason": "Hash calculation excludes task_content_hash itself; null in unexecuted draft.",
+    "research_type": "data_quality",
+    "title": "SHFE 螺纹钢与热轧卷板主力连续日线及换月缺口完整性审计",
+    "objective": "审计候选历史日线与分钟线时序的连续性、价格包络物理关系与换月日记录完整度，排查时间戳倒挂与数据断流缺口。",
+    "hypothesis": null,
+    "_hypothesis_omission_reason": "Data quality audit focuses on physical dataset hygiene and integrity; no prior economic causality hypothesis is required.",
+    "expected_edge": null,
+    "data_requirements": {
+      "universe": ["RB.SHFE", "HC.SHFE"],
+      "frequencies": ["1m", "1d"],
+      "time_range": {
+        "start": "2020-01-01T00:00:00+08:00",
+        "end": "2023-12-31T23:59:59+08:00"
+      },
+      "required_fields": [
+        "timestamp",
+        "symbol",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "open_interest"
+      ],
+      "pit_constraints": "Timestamps must adhere to exchange official calendar. Availability must be determined by actual release timestamp receipts; unverified release times must block PIT compliance."
+    },
+    "validation_plan": [
+      "run_timestamp_monotonicity_check",
+      "run_price_envelope_coherence_check",
+      "run_volume_oi_nonnegativity_check",
+      "run_main_roll_window_completeness_check"
+    ],
+    "priority": "P0",
+    "created_at": null,
+    "_created_at_reason": "Unexecuted candidate draft; physical creation timestamp will be recorded on task dispatch.",
+    "tags": ["data_hygiene", "shfe", "commodity_futures", "continuity_audit"]
+  },
+  "experiment_spec": {
+    "schema_version": "research_lab.experiment.v2",
+    "revision": "rev.1",
+    "spec_id": "spec-dq-rb-hc-audit-001",
+    "task_id": "task-dq-rb-hc-continuity-audit",
+    "task_revision": "rev.1",
+    "task_content_hash": null,
+    "_task_content_hash_reason": "Hash of upstream task is bound here (and included in spec hash calculation); null in unexecuted draft.",
+    "spec_content_hash": null,
+    "_spec_content_hash_reason": "Spec hash excludes spec_content_hash itself; null in unexecuted draft.",
+    "experiment_type": "data_quality",
+    "dataset_target": {
+      "provider_kind": "candidate_warehouse_reference",
+      "catalog_name": "commodity_c_fast_source_view",
+      "dataset_reference_uri": "candidate://futures/shfe/rb_hc_continuous_v1",
+      "_target_comment": "Candidate URI for walk-through only; does not imply warehouse or dataset is mounted or exists in repository."
+    },
+    "method_parameters": {
+      "seed_proposal": null,
+      "_seed_proposal_reason": "Deterministic data quality scan; no stochastic process involved."
+    },
+    "candidate_decision_criteria": {
+      "max_allowed_envelope_violations": 0,
+      "max_allowed_timestamp_reversals": 0
+    },
+    "quality_checks": [
+      {
+        "check_id": "monotonic_timestamps",
+        "implementation_ref": "candidate.research_lab.quality_checks.v1.monotonic_timestamps",
+        "_implementation_ref_status": "candidate_unregistered_symbol; runner will reject execution if implementation is missing or unapproved",
+        "parameters": { "strict": true, "max_allowed_reversals": 0 }
+      },
+      {
+        "check_id": "price_envelope_validity",
+        "implementation_ref": "candidate.research_lab.quality_checks.v1.price_envelope",
+        "_implementation_ref_status": "candidate_unregistered_symbol; runner will reject execution if implementation is missing or unapproved",
+        "parameters": { "require_positive_low": true }
+      },
+      {
+        "check_id": "volume_oi_nonnegativity",
+        "implementation_ref": "candidate.research_lab.quality_checks.v1.nonnegative_volume_oi",
+        "_implementation_ref_status": "candidate_unregistered_symbol; runner will reject execution if implementation is missing or unapproved",
+        "parameters": { "allow_zero": true }
+      },
+      {
+        "check_id": "roll_continuity_audit",
+        "implementation_ref": "candidate.research_lab.quality_checks.v1.roll_continuity",
+        "_implementation_ref_status": "candidate_unregistered_symbol; runner will reject execution if implementation is missing or unapproved",
+        "parameters": { "max_unexplained_gap_days": 0 }
+      }
+    ],
+    "validation_config": {
+      "method": "full_sample_scan"
+    },
+    "rejection_policy": {
+      "forbid_unknown_fields": true,
+      "reject_unsupported_data_sources": true,
+      "reject_unregistered_implementation": true
+    }
+  },
+  "experiment_run": {
+    "schema_version": "research_lab.run.v2",
+    "run_id": "run-dq-rb-hc-audit-preview",
+    "run_status": "NOT_DISPATCHED",
+    "spec_id": "spec-dq-rb-hc-audit-001",
+    "spec_revision": "rev.1",
+    "spec_content_hash": null,
+    "_spec_content_hash_reason": "Bound spec hash is included in run computation; null in unexecuted draft.",
+    "run_content_hash": null,
+    "_run_content_hash_reason": "Run content hash generated upon reaching final state (COMPLETED/FAILED), excluding run_content_hash itself; null in unexecuted draft.",
+    "trial_context": {
+      "hypothesis_family_id": null,
+      "_hypothesis_family_id_reason": "Data quality audit is non-hypothesis testing.",
+      "exploration_kind": null,
+      "is_retry": false,
+      "retry_of_run_id": null,
+      "_retry_semantics_note": "A technical retry must share the exact spec_revision and scientific computation fingerprint with the failed run, generating a distinct run_id referencing retry_of_run_id.",
+      "trial_index": null,
+      "_trial_index_reason": "Run is unexecuted; trial count is strictly null rather than fabricated.",
+      "holdout_usage_state": "not_applicable",
+      "retry_count": 0
+    },
+    "resolved_dataset_snapshot": {
+      "dataset_uri": null,
+      "_dataset_uri_reason": "Physical dataset not mounted or resolved in design phase.",
+      "raw_bytes_sha256": null,
+      "_raw_bytes_sha256_reason": "Raw ingested bytes digest is fundamental for data quality audit to detect duplicate/disordered lines; null in unexecuted draft.",
+      "normalized_dataset_sha256": null,
+      "_normalized_dataset_sha256_reason": "Normalized dataset transformation not performed; pending run.",
+      "transformation_provenance": null,
+      "_transformation_provenance_reason": "Deduplication/normalization provenance retained only upon actual data transformation.",
+      "pit_verification_status": null,
+      "_pit_verification_reason": "Actual availability timestamp verification pending ingestion."
+    },
+    "execution_fingerprint": {
+      "code_git_commit": null,
+      "_code_git_commit_reason": "Execution not dispatched; awaiting runner authorization.",
+      "source_diff_fingerprint": null,
+      "_source_diff_fingerprint_reason": "Working tree diff hash (including untracked source diff) not computed for unexecuted draft.",
+      "dependency_lock_hash": null,
+      "_dependency_lock_hash_reason": "Runtime environment not frozen in Phase 0 design stage.",
+      "runtime_environment": null,
+      "random_seed": null,
+      "_random_seed_reason": "Run is unexecuted; actual resolved seed is strictly null."
+    },
+    "timing": {
+      "scheduled_at": null,
+      "started_at": null,
+      "completed_at": null
+    },
+    "worker_identity": null
+  },
+  "result_evidence": {
+    "template_purpose": "candidate_evidence_structure_walkthrough_only; not a real executed evidence",
+    "schema_version": "research_lab.evidence.v2",
+    "evidence_id": "evidence-dq-rb-hc-audit-preview",
+    "run_id": "run-dq-rb-hc-audit-preview",
+    "run_status_snapshot": "NOT_DISPATCHED",
+    "run_content_hash": null,
+    "_run_content_hash_reason": "Bound final run hash is included in evidence computation; null in unexecuted draft.",
+    "evidence_content_hash": null,
+    "_evidence_content_hash_reason": "Evidence content hash excludes evidence_content_hash itself; null in unexecuted draft.",
+    "execution_status": "NOT_EXECUTED",
+    "_execution_status_reason": "Draft semantic walk-through; physical execution pending runner.",
+    "evidence_validity": "NOT_EVALUATED",
+    "_evidence_validity_reason": "Audit execution has not taken place.",
+    "audit_conclusion": "PENDING_EXECUTION",
+    "_audit_conclusion_reason": "Data audit reports compliance against target objectives (not economic hypothesis acceptance/rejection).",
+    "research_conclusion": null,
+    "_research_conclusion_reason": "Data quality audits evaluate objective fulfillment rather than economic hypotheses.",
+    "metric_metadata": {
+      "metric_schema_version": "research_lab.metrics.data_quality.v1",
+      "sample_scope": "RB.SHFE and HC.SHFE 2020-2023",
+      "sample_count": null,
+      "missing_reason": "Unexecuted walk-through draft; all metrics strictly null.",
+      "cost_basis": "not_applicable",
+      "unit_definitions": {
+        "completeness_ratio": "decimal in [0.0, 1.0]",
+        "violation_counts": "integer count >= 0"
+      }
+    },
+    "typed_metrics": {
+      "data_quality_metrics": {
+        "total_records_checked": null,
+        "timestamp_monotonicity_violations": null,
+        "price_envelope_violations": null,
+        "negative_volume_or_oi_count": null,
+        "unexplained_roll_gaps_count": null,
+        "missing_bar_intervals": null,
+        "completeness_ratio": null
+      }
+    },
+    "_metrics_policy": "Unexecuted or uncomputable metrics are null. If executed, valid zero observations are recorded as numeric 0, not null.",
+    "supporting_artifacts": []
+  },
+  "review_assessments": []
+}

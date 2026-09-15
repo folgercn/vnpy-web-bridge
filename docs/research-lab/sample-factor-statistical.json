@@ -1,0 +1,214 @@
+{
+  "$schema_draft_comment": "Candidate specification and semantic walk-through for protocol v2. NOT a frozen schema or executed experiment. All paths/parameters are candidate hypotheses only.",
+  "protocol_status": "DRAFT_UNFROZEN",
+  "draft_version": "0.5.0",
+  "research_task": {
+    "schema_version": "research_lab.task.v2",
+    "revision": "rev.1",
+    "task_id": "task-stat-term-structure-carry",
+    "task_content_hash": null,
+    "_task_content_hash_reason": "Hash calculation excludes task_content_hash itself; null in unexecuted draft.",
+    "research_type": "statistical_factor",
+    "title": "国内商品期货跨期期限结构展期收益率20日截面相关性候选走查",
+    "objective": "检验基于官方结算价构建的年化展期收益率 (Annualized Roll Yield) 对主力合约未来20日向前对数收益率的截面统计相关性与分层单调性特征（候选走查样例，非通用参数规定）。",
+    "hypothesis": "期限结构处于现货溢价 (Backwardation) 状态的品种，在未来20日持有期内表现出截面统计上的正向收益相关性；该假设为待检验的经验假说，非必然因果推论。",
+    "expected_edge": "在20日预测期内，展期收益率因子的截面秩相关系数 (Rank IC) 样本均值期望大于 0，且分层组合表现出正向收益利差。",
+    "data_requirements": {
+      "universe": ["ag.SHFE", "au.SHFE", "cu.SHFE", "rb.SHFE", "ru.SHFE", "sc.INE"],
+      "frequencies": ["1d"],
+      "time_range": {
+        "start": "2021-01-01T00:00:00+08:00",
+        "end": "2024-12-31T23:59:59+08:00"
+      },
+      "required_fields": [
+        "trading_date",
+        "symbol",
+        "open",
+        "close",
+        "settlement_price",
+        "open_interest",
+        "contract_maturity_date",
+        "actual_release_timestamp"
+      ],
+      "pit_constraints": "Daily settlement prices and open interests are available strictly after actual exchange release timestamps. Unverified availability timestamps block execution. Evaluated signal must align to next legal trading session open."
+    },
+    "validation_plan": [
+      "purged_time_series_split_with_embargo",
+      "compute_daily_cross_sectional_rank_ic_series",
+      "hac_adjusted_t_statistic_evaluation"
+    ],
+    "priority": "P1",
+    "created_at": null,
+    "_created_at_reason": "Unexecuted candidate draft; physical creation timestamp will be recorded on task dispatch.",
+    "tags": ["factor_research", "carry", "term_structure", "commodity_futures", "pit_alignment"]
+  },
+  "experiment_spec": {
+    "schema_version": "research_lab.experiment.v2",
+    "revision": "rev.1",
+    "spec_id": "spec-stat-carry-roll-yield-001",
+    "task_id": "task-stat-term-structure-carry",
+    "task_revision": "rev.1",
+    "task_content_hash": null,
+    "_task_content_hash_reason": "Hash of upstream task is bound here (and included in spec hash calculation); null in unexecuted draft.",
+    "spec_content_hash": null,
+    "_spec_content_hash_reason": "Spec hash excludes spec_content_hash itself; null in unexecuted draft.",
+    "experiment_type": "statistical_factor",
+    "dataset_target": {
+      "provider_kind": "candidate_warehouse_reference",
+      "catalog_name": "commodity_term_structure_pit_view",
+      "dataset_reference_uri": "candidate://futures/commodity_settlement_curves_v1",
+      "_target_comment": "Candidate URI for walk-through only; does not imply warehouse exists in repository."
+    },
+    "method_parameters": {
+      "seed_proposal": 42,
+      "_seed_proposal_comment": "Proposed random seed for cross-validation split generation; actual run seed resolved in Run."
+    },
+    "candidate_decision_criteria": {
+      "min_mean_rank_ic": 0.03,
+      "min_t_statistic_hac": 1.96
+    },
+    "feature_specification": {
+      "feature_name": "annualized_roll_yield",
+      "implementation_ref": "candidate.research_lab.factors.v1.annualized_roll_yield",
+      "_implementation_ref_status": "candidate_unregistered_symbol; runner will reject execution if implementation is missing or unapproved",
+      "near_far_contract_selection_rule": "Sort active contracts by contract_maturity_date ascending; near is earliest maturity with open_interest > threshold, far is subsequent maturity with open_interest > threshold. Do not assume main is earlier than sub_main.",
+      "parameters": {
+        "min_open_interest_threshold": 10000
+      },
+      "pit_alignment": {
+        "required_receipt": "actual_release_timestamp",
+        "signal_decision_point": "next_trading_day_open"
+      }
+    },
+    "target_specification": {
+      "target_name": "forward_log_return_20d",
+      "implementation_ref": "candidate.research_lab.targets.v1.forward_log_return",
+      "_implementation_ref_status": "candidate_unregistered_symbol; runner will reject execution if implementation is missing or unapproved",
+      "horizon_trading_days": 20,
+      "return_interval": "Open_{t+1} to Close_{t+20}"
+    },
+    "split_and_leakage_control": {
+      "method": "purged_time_series_split",
+      "train_window_days": 504,
+      "test_window_days": 126,
+      "step_size_days": 126,
+      "leakage_mitigation": {
+        "purging_rule": "Purge all training observations whose 20-day return intervals overlap with test evaluation windows (horizon=20 trading days).",
+        "embargo_days": 5,
+        "embargo_rationale": "Candidate embargo buffer post-test to alleviate autoregressive residual spillover; does not eliminate all serial correlation."
+      }
+    },
+    "statistical_metrics_requested": [
+      "ic_pearson_cross_sectional",
+      "rank_ic_spearman_cross_sectional",
+      "ic_ir_cross_sectional",
+      "t_statistic_hac_adjusted",
+      "p_value_hac_adjusted",
+      "quantile_five_spread"
+    ],
+    "rejection_policy": {
+      "forbid_unknown_fields": true,
+      "reject_backtest_metrics_in_pure_statistical_spec": true,
+      "reject_unmitigated_label_overlaps": true,
+      "reject_unregistered_implementation": true
+    }
+  },
+  "experiment_run": {
+    "schema_version": "research_lab.run.v2",
+    "run_id": "run-stat-carry-roll-yield-preview",
+    "run_status": "NOT_DISPATCHED",
+    "spec_id": "spec-stat-carry-roll-yield-001",
+    "spec_revision": "rev.1",
+    "spec_content_hash": null,
+    "_spec_content_hash_reason": "Bound spec hash is included in run computation; null in unexecuted draft.",
+    "run_content_hash": null,
+    "_run_content_hash_reason": "Run content hash generated upon reaching final state, excluding run_content_hash itself; null in unexecuted draft.",
+    "trial_context": {
+      "hypothesis_family_id": "hf-commodity-term-structure-carry-v1",
+      "exploration_kind": "parameter_search",
+      "is_retry": false,
+      "retry_of_run_id": null,
+      "_retry_semantics_note": "A technical retry must share the exact spec_revision and scientific computation fingerprint with the failed run, generating a distinct run_id referencing retry_of_run_id.",
+      "trial_index": null,
+      "_trial_index_reason": "Run is unexecuted; trial index is strictly null rather than fabricated.",
+      "holdout_usage_state": "unknown",
+      "_holdout_usage_state_reason": "No empirical verification; holdout state must bind underlying dataset hash and family usage history across tasks.",
+      "retry_count": 0
+    },
+    "resolved_dataset_snapshot": {
+      "dataset_uri": null,
+      "_dataset_uri_reason": "Physical dataset not mounted or resolved in design phase.",
+      "raw_bytes_sha256": null,
+      "_raw_bytes_sha256_reason": "Raw ingested bytes digest not computed; execution pending.",
+      "normalized_dataset_sha256": null,
+      "_normalized_dataset_sha256_reason": "Normalized dataset transformation not performed; pending run.",
+      "transformation_provenance": null,
+      "_transformation_provenance_reason": "Lineage retained only upon actual data transformation.",
+      "pit_verification_status": null,
+      "_pit_verification_reason": "Physical actual release timestamp verification pending physical run."
+    },
+    "execution_fingerprint": {
+      "code_git_commit": null,
+      "_code_git_commit_reason": "Execution not dispatched; awaiting runner authorization.",
+      "source_diff_fingerprint": null,
+      "_source_diff_fingerprint_reason": "Working tree diff hash (including untracked source diff) not computed for unexecuted draft.",
+      "dependency_lock_hash": null,
+      "_dependency_lock_hash_reason": "Runtime environment not frozen in Phase 0 design stage.",
+      "runtime_environment": null,
+      "random_seed": null,
+      "_random_seed_reason": "Run is unexecuted; actual resolved seed is strictly null. Proposed seed stored in Spec."
+    },
+    "timing": {
+      "scheduled_at": null,
+      "started_at": null,
+      "completed_at": null
+    },
+    "worker_identity": null
+  },
+  "result_evidence": {
+    "template_purpose": "candidate_evidence_structure_walkthrough_only; not a real executed evidence",
+    "schema_version": "research_lab.evidence.v2",
+    "evidence_id": "evidence-stat-carry-roll-yield-preview",
+    "run_id": "run-stat-carry-roll-yield-preview",
+    "run_status_snapshot": "NOT_DISPATCHED",
+    "run_content_hash": null,
+    "_run_content_hash_reason": "Bound final run hash is included in evidence computation; null in unexecuted draft.",
+    "evidence_content_hash": null,
+    "_evidence_content_hash_reason": "Evidence content hash excludes evidence_content_hash itself; null in unexecuted draft.",
+    "execution_status": "NOT_EXECUTED",
+    "_execution_status_reason": "Draft candidate walk-through; actual statistical computation pending runner.",
+    "evidence_validity": "NOT_EVALUATED",
+    "_evidence_validity_reason": "Cannot assess validity before physical execution and leakage audit.",
+    "research_conclusion": "INCONCLUSIVE",
+    "_research_conclusion_reason": "Experiment has not been executed on physical data; hypothesis is currently unverified.",
+    "metric_metadata": {
+      "metric_schema_version": "research_lab.metrics.statistical_factor.v1",
+      "sample_scope": "ag, au, cu, rb, ru, sc 2021-2024",
+      "sample_count": null,
+      "missing_reason": "Unexecuted walk-through draft; all metrics strictly null.",
+      "cost_basis": "gross_of_cost",
+      "unit_definitions": {
+        "ic_pearson_cross_sectional": "mean of daily cross-sectional Pearson correlation coefficients; sample_size=number of cross-sectional trading days T",
+        "rank_ic_spearman_cross_sectional": "mean of daily cross-sectional Spearman rank correlations; sample_size=T",
+        "ic_ir_cross_sectional": "dimensionless ratio (mean Rank IC / sample standard deviation of Rank IC)",
+        "t_statistic_hac_adjusted": "Newey-West HAC adjusted t-statistic accounting for autocorrelation induced by overlapping 20-day return horizon (lag=19)",
+        "p_value_hac_adjusted": "two-tailed p-value corresponding to HAC adjusted t-statistic in [0.0, 1.0]",
+        "quantile_five_spread": "raw 20-day forward log return sample mean of top quantile minus bottom quantile (decimal return spread, not annualized)"
+      }
+    },
+    "typed_metrics": {
+      "statistical_factor_metrics": {
+        "ic_pearson_cross_sectional": null,
+        "rank_ic_spearman_cross_sectional": null,
+        "ic_ir_cross_sectional": null,
+        "t_statistic_hac_adjusted": null,
+        "p_value_hac_adjusted": null,
+        "quantile_five_spread": null
+      },
+      "_forbidden_metrics_explanation": "Pure statistical research strictly excludes trading backtest metrics (e.g. Sharpe ratio, max drawdown, total PnL) to maintain scientific demarcation."
+    },
+    "_metrics_policy": "Unexecuted or mathematically undefined metrics are null. If executed, genuine zero observations are retained as 0.0.",
+    "supporting_artifacts": []
+  },
+  "review_assessments": []
+}
