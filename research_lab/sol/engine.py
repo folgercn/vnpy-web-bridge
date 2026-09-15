@@ -15,7 +15,7 @@ from research_lab.alpha_database import AlphaDatabase
 from research_lab.astra import AstraDiscovery
 from research_lab.database import ResultStore
 from research_lab.runners import ExperimentRunner
-from research_lab.schemas import ExperimentPlan, ExperimentResult, PlanEvent, SolTaskInput, WorkerDescriptor
+from research_lab.schemas import ExperimentPlan, ExperimentRecord, ExperimentResult, PlanEvent, SolTaskInput, WorkerDescriptor
 
 
 class SolStateError(ValueError):
@@ -209,6 +209,7 @@ class SolOrchestrator:
         return bool(
             stored is not None and stored.status == "completed" and stored == result
             and archived is not None and archived.status == "completed"
+            and _result_fingerprint(stored) == _alpha_record_fingerprint(archived)
         )
 
     def _load_integrity_key(self) -> bytes:
@@ -286,3 +287,31 @@ class SolOrchestrator:
 def _plan_id(task_id: str, content_hash: str) -> str:
     prefix = f"sol-{task_id}-{content_hash[:12]}"
     return prefix if len(prefix) <= 128 else f"sol-{hashlib.sha256(prefix.encode()).hexdigest()[:32]}"
+
+
+def _result_fingerprint(result: ExperimentResult) -> str:
+    """Stable equality key for a ResultStore row and its Alpha projection."""
+    payload = {
+        "experiment_id": result.experiment_id, "status": result.status,
+        "strategy_name": result.strategy_name, "factor_name": result.factor_name,
+        "result_artifact": result.artifact_location, "report_location": result.report_location,
+        "error_code": result.error_code, "error_message": result.error_message,
+        "metrics": result.metrics.model_dump() if result.metrics else None,
+    }
+    return _fingerprint(payload)
+
+
+def _alpha_record_fingerprint(record: ExperimentRecord) -> str:
+    payload = {
+        "experiment_id": record.experiment_id, "status": record.status,
+        "strategy_name": record.strategy_name, "factor_name": record.factor_name,
+        "result_artifact": record.result_artifact, "report_location": record.report_location,
+        "error_code": record.error_code, "error_message": record.error_message,
+        "metrics": record.metrics,
+    }
+    return _fingerprint(payload)
+
+
+def _fingerprint(payload: object) -> str:
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()

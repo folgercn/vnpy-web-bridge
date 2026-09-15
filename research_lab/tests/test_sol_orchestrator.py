@@ -9,7 +9,9 @@ import json
 from research_lab.alpha_database import AlphaDatabase
 from research_lab.astra import AstraDiscovery
 from research_lab.runners import ExperimentRunner
-from research_lab.schemas import ExperimentResult, ResearchMaterial, SolTaskInput, ValidationSpec, WorkerDescriptor
+from research_lab.schemas import (
+    ExperimentRecord, ExperimentResult, ResearchMaterial, SolTaskInput, ValidationSpec, WorkerDescriptor,
+)
 from research_lab.sol import SolOrchestrator, SolStateError
 from research_lab.validation import WalkForwardValidationEngine
 
@@ -177,6 +179,39 @@ class SolOrchestratorTest(unittest.TestCase):
             self.assertEqual(failed.status, "failed")
             self.assertIn("not the matching persisted", failed.error_message)
             self.assertIsNone(sol.store.get(EXPERIMENT["experiment_id"]))
+
+    def test_stale_alpha_record_with_same_experiment_id_cannot_enter_review(self) -> None:
+        class StoredResultWorker:
+            descriptor = WorkerDescriptor(worker_id="aaa-stored")
+
+            def __init__(self, result):
+                self.result = result
+
+            def execute(self, _plan):
+                return self.result
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "output"
+            sol = SolOrchestrator.local(root)
+            plan = sol.receive(SolTaskInput(task=task(root)))
+            stored = sol.store.save(ExperimentResult(
+                experiment_id=EXPERIMENT["experiment_id"], status="completed", strategy_name="buy_and_hold",
+                factor_name="close_return", metrics={"total_return": 0.1, "sharpe": 1.0, "max_drawdown": 0.1,
+                                                      "turnover": 1.0, "transaction_cost": 1.0, "final_equity": 1100.0},
+            ))
+            database = AlphaDatabase(sol.store.config)
+            database.save_experiment(ExperimentRecord(
+                experiment_id=stored.experiment_id, status="completed", strategy_name="flat",
+                factor_name="stale_factor", result_artifact=stored.artifact_location,
+                report_location=stored.report_location, metrics=stored.metrics.model_dump(),
+            ))
+            sol.approve(plan.plan_id, approved_by="researcher")
+            sol.register_worker(StoredResultWorker(stored))
+            failed = sol.run_next()
+
+            self.assertEqual(failed.status, "failed")
+            self.assertIn("not the matching persisted", failed.error_message)
+            self.assertEqual(database.get_experiment(stored.experiment_id).factor_name, "stale_factor")
 
 
 if __name__ == "__main__":
