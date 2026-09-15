@@ -205,8 +205,18 @@ class AlphaDatabase:
 
     def _save(self, asset: Asset, identity: str) -> Asset:
         directory = self.root / _ASSET_PATH[type(asset)]
-        stored = asset.model_copy(update={"created_commit": asset.created_commit or self.created_commit})
-        payload = stored.model_dump(mode="json", exclude={"content_hash", "created_at"})
+        stored = asset.model_copy(update={
+            "created_commit": asset.created_commit or self.created_commit,
+            "integrity_version": "content-hash.v2",
+        })
+        for existing in self._all(type(asset)):
+            if (
+                _identity_for(existing) == identity
+                and existing.integrity_version == "content-hash.v2"
+                and _semantic_hash(existing) == _semantic_hash(stored)
+            ):
+                return existing
+        payload = stored.model_dump(mode="json", exclude={"content_hash"})
         content_hash = _content_hash(payload)
         stored = stored.model_copy(update={"content_hash": content_hash})
         base_path = directory / f"{_asset_filename(identity)}--{content_hash}"
@@ -233,12 +243,19 @@ class AlphaDatabase:
 
     @staticmethod
     def _verify_asset(path: Path, asset: Asset) -> None:
-        """Verify versioned assets while accepting pre-versioning history."""
+        """Verify v2 assets fully while retaining pre-v2 historical reads."""
         if not asset.content_hash:
             return
-        expected = _content_hash(asset.model_dump(mode="json", exclude={"content_hash", "created_at"}))
+        if asset.integrity_version == "content-hash.v2":
+            expected = _content_hash(asset.model_dump(mode="json", exclude={"content_hash"}))
+        else:
+            # PR #533's first content-addressed format did not cover timestamps.
+            # Keep those assets readable, but never create another one that way.
+            expected = _content_hash(asset.model_dump(
+                mode="json", exclude={"content_hash", "created_at", "integrity_version"},
+            ))
         if asset.content_hash != expected or not path.stem.endswith(f"--{asset.content_hash}"):
-            raise ValueError(f"asset content hash mismatch: {path}")
+            raise ValueError(f"asset integrity error: content hash mismatch: {path}")
 
     @staticmethod
     def _validation_lineage(validation: ValidationResult | None) -> tuple[str | None, str | None]:
@@ -315,6 +332,13 @@ def _append_unique_mapping(items: list[dict[str, Any]], values: list[dict[str, A
 def _content_hash(payload: object) -> str:
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _semantic_hash(asset: Asset) -> str:
+    """Stable deduplication identity for idempotent ResultStore projection."""
+    return _content_hash(asset.model_dump(
+        mode="json", exclude={"content_hash", "created_at", "created_commit", "integrity_version"},
+    ))
 
 
 def _structured_summary(asset: Asset) -> dict[str, str]:

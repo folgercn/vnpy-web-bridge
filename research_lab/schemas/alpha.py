@@ -21,6 +21,9 @@ class _AlphaAsset(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     content_hash: str = ""
     created_commit: str = ""
+    # Empty marks pre-integrity assets so their historical hash convention can
+    # still be read; newly saved assets receive content-hash.v2.
+    integrity_version: str = ""
 
 
 class AlphaIdea(_AlphaAsset):

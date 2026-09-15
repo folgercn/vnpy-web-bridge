@@ -228,12 +228,12 @@ class AlphaDatabaseTest(unittest.TestCase):
             self.assertTrue(all(item.created_commit == "test-commit-499" for item in history))
             self.assertEqual(database.get_experiment("versioned-record-001"), changed)
             self.assertEqual(len(list((database.root / "experiments").glob("versioned-record-001--*.json"))), 2)
-            tampered_path = next((database.root / "experiments").glob("versioned-record-001--*.json"))
+            tampered_path = database.root / "experiments" / f"versioned-record-001--{first.content_hash}.json"
             tampered = json.loads(tampered_path.read_text(encoding="utf-8"))
-            tampered["strategy_name"] = "tampered"
+            tampered["created_at"] = "2030-01-01T00:00:00+00:00"
             tampered_path.write_text(json.dumps(tampered), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "content hash mismatch"):
-                database.query_experiments(factor_name="versioned-factor")
+            with self.assertRaisesRegex(ValueError, "asset integrity error"):
+                database.get_experiment("versioned-record-001")
 
     def test_markdown_marks_missing_evidence_and_records_available_lineage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
