@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import quote
@@ -38,8 +40,14 @@ class AlphaDatabase:
     or trade candidates.
     """
 
-    def __init__(self, config: ResearchLabConfig, *, result_store: ResultStore | None = None) -> None:
+    def __init__(
+        self, config: ResearchLabConfig, *, result_store: ResultStore | None = None,
+        created_commit: str | None = None,
+    ) -> None:
         self.config = config
+        # Injection keeps tests and offline research runs deterministic. The
+        # fallback is deliberately explicit rather than guessing a repository.
+        self.created_commit = created_commit or "unavailable"
         self.root = config.root / "alpha_database"
         for directory in _ASSET_PATH.values():
             (self.root / directory).mkdir(parents=True, exist_ok=True)
@@ -75,7 +83,11 @@ class AlphaDatabase:
             metrics=result.metrics.model_dump() if result.metrics else None,
         )
         self.save_experiment(record)
-        self._update_factor(record.factor_name, record.experiment_id, record.strategy_name)
+        feature_lineage, dataset_lineage = self._result_lineage(result)
+        self._update_factor(
+            record.factor_name, record.experiment_id, record.strategy_name,
+            feature_lineage=feature_lineage, dataset_lineage=dataset_lineage,
+        )
         if result.status == "failed":
             self.save_failure_pattern(FailurePattern(
                 pattern_id=f"{result.experiment_id}-failure",
@@ -94,6 +106,7 @@ class AlphaDatabase:
         self, review: CriticReview, *, validation: ValidationResult | None = None,
     ) -> list[FailurePattern]:
         strategy_name, factor_name = self._validation_lineage(validation)
+        feature_lineage, dataset_lineage = self._validation_asset_lineage(validation)
         patterns: list[FailurePattern] = []
         for finding in review.findings:
             if finding.assessment == "pass":
@@ -111,6 +124,11 @@ class AlphaDatabase:
             )
             self.save_failure_pattern(pattern)
             patterns.append(pattern)
+        if factor_name:
+            self._update_factor(
+                factor_name, validation_result_id=review.validation_id,
+                feature_lineage=feature_lineage, dataset_lineage=dataset_lineage,
+            )
         return patterns
 
     def save_idea(self, idea: AlphaIdea) -> AlphaIdea:
@@ -131,7 +149,7 @@ class AlphaDatabase:
     def save_literature_reference(self, reference: LiteratureReference) -> LiteratureReference:
         saved = self._save(reference, reference.reference_id)
         for factor_name in saved.factor_names:
-            self._update_factor(factor_name)
+            self._update_factor(factor_name, literature_reference_id=saved.reference_id)
         return saved
 
     def get_experiment(self, experiment_id: str) -> ExperimentRecord | None:
@@ -168,36 +186,59 @@ class AlphaDatabase:
 
     def _update_factor(
         self, factor_name: str, experiment_id: str | None = None, strategy_name: str | None = None,
-        failure_pattern_id: str | None = None,
+        failure_pattern_id: str | None = None, feature_lineage: list[dict[str, Any]] | None = None,
+        dataset_lineage: list[dict[str, Any]] | None = None, literature_reference_id: str | None = None,
+        validation_result_id: str | None = None,
     ) -> None:
         current = self.get_factor_knowledge(factor_name) or FactorKnowledge(factor_name=factor_name)
         updated = current.model_copy(update={
+            "created_at": datetime.now(timezone.utc),
             "experiment_ids": _append_unique(current.experiment_ids, experiment_id),
             "strategy_names": _append_unique(current.strategy_names, strategy_name),
             "failure_pattern_ids": _append_unique(current.failure_pattern_ids, failure_pattern_id),
+            "feature_lineage": _append_unique_mapping(current.feature_lineage, feature_lineage or []),
+            "dataset_lineage": _append_unique_mapping(current.dataset_lineage, dataset_lineage or []),
+            "literature_reference_ids": _append_unique(current.literature_reference_ids, literature_reference_id),
+            "validation_result_ids": _append_unique(current.validation_result_ids, validation_result_id),
         })
         self.save_factor_knowledge(updated)
 
     def _save(self, asset: Asset, identity: str) -> Asset:
         directory = self.root / _ASSET_PATH[type(asset)]
-        base_path = directory / _asset_filename(identity)
-        payload = asset.model_dump(mode="json")
-        self._write_json(base_path.with_suffix(".json"), payload)
-        self._write_text(base_path.with_suffix(".md"), self._markdown(asset))
-        return asset
+        stored = asset.model_copy(update={"created_commit": asset.created_commit or self.created_commit})
+        payload = stored.model_dump(mode="json", exclude={"content_hash", "created_at"})
+        content_hash = _content_hash(payload)
+        stored = stored.model_copy(update={"content_hash": content_hash})
+        base_path = directory / f"{_asset_filename(identity)}--{content_hash}"
+        json_path = base_path.with_suffix(".json")
+        if not json_path.exists():
+            self._write_json(json_path, stored.model_dump(mode="json"))
+            self._write_text(base_path.with_suffix(".md"), self._markdown(stored))
+        return stored
 
     def _load(self, model: type[Asset], identity: str) -> Asset | None:
-        path = self.root / _ASSET_PATH[model] / f"{_asset_filename(identity)}.json"
-        if not path.is_file():
+        matches = [asset for asset in self._all(model) if _identity_for(asset) == identity]
+        if not matches:
             return None
-        asset = model.model_validate_json(path.read_text(encoding="utf-8"))
-        if _identity_for(asset) != identity:
-            raise ValueError(f"asset identity mismatch for {identity}")
-        return asset
+        return max(matches, key=lambda asset: (asset.created_at, asset.content_hash))
 
     def _all(self, model: type[Asset]) -> list[Asset]:
         directory = self.root / _ASSET_PATH[model]
-        return [model.model_validate_json(path.read_text(encoding="utf-8")) for path in sorted(directory.glob("*.json"))]
+        assets: list[Asset] = []
+        for path in sorted(directory.glob("*.json")):
+            asset = model.model_validate_json(path.read_text(encoding="utf-8"))
+            self._verify_asset(path, asset)
+            assets.append(asset)
+        return assets
+
+    @staticmethod
+    def _verify_asset(path: Path, asset: Asset) -> None:
+        """Verify versioned assets while accepting pre-versioning history."""
+        if not asset.content_hash:
+            return
+        expected = _content_hash(asset.model_dump(mode="json", exclude={"content_hash", "created_at"}))
+        if asset.content_hash != expected or not path.stem.endswith(f"--{asset.content_hash}"):
+            raise ValueError(f"asset content hash mismatch: {path}")
 
     @staticmethod
     def _validation_lineage(validation: ValidationResult | None) -> tuple[str | None, str | None]:
@@ -207,14 +248,39 @@ class AlphaDatabase:
         return result.strategy_name, result.factor_name
 
     @staticmethod
+    def _result_lineage(result: ExperimentResult) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        features = result.details.get("features")
+        if not isinstance(features, list) or not all(isinstance(item, dict) for item in features):
+            return [], []
+        feature_lineage = [dict(item) for item in features]
+        dataset_lineage = [
+            {"input_data_identity": item["input_data_identity"]}
+            for item in feature_lineage if isinstance(item.get("input_data_identity"), str)
+        ]
+        return feature_lineage, dataset_lineage
+
+    @classmethod
+    def _validation_asset_lineage(cls, validation: ValidationResult | None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        if validation is None:
+            return [], []
+        features: list[dict[str, Any]] = []
+        datasets: list[dict[str, Any]] = []
+        for fold in validation.folds:
+            for result in (fold.in_sample, fold.out_of_sample):
+                result_features, result_datasets = cls._result_lineage(result)
+                features = _append_unique_mapping(features, result_features)
+                datasets = _append_unique_mapping(datasets, result_datasets)
+        return features, datasets
+
+    @staticmethod
     def _markdown(asset: Asset) -> str:
         payload: dict[str, Any] = asset.model_dump(mode="json")
         title = payload.get("title") or payload.get("experiment_id") or payload.get("pattern_id") or payload.get("factor_name")
+        summary = _structured_summary(asset)
         lines = [f"# {title}", "", "This is a local research asset. It is not a promotion, deployment, or trading decision.", ""]
-        for key, value in payload.items():
-            if key == "title":
-                continue
-            lines.extend((f"## {key}", "", "```json", json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2), """```""", ""))
+        for field in ("hypothesis", "evidence", "conclusion", "next_action"):
+            lines.extend((f"## {field}", "", summary[field], ""))
+        lines.extend(("## asset", "", "```json", json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2), "```", ""))
         return "\n".join(lines)
 
     @staticmethod
@@ -233,6 +299,47 @@ class AlphaDatabase:
 
 def _append_unique(items: list[str], value: str | None) -> list[str]:
     return items if value is None or value in items else [*items, value]
+
+
+def _append_unique_mapping(items: list[dict[str, Any]], values: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    combined = list(items)
+    encoded = {json.dumps(item, sort_keys=True, separators=(",", ":")) for item in combined}
+    for value in values:
+        key = json.dumps(value, sort_keys=True, separators=(",", ":"))
+        if key not in encoded:
+            combined.append(value)
+            encoded.add(key)
+    return combined
+
+
+def _content_hash(payload: object) -> str:
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _structured_summary(asset: Asset) -> dict[str, str]:
+    unavailable = "unavailable: this asset does not record it. Required evidence: record it in the source research result."
+    if isinstance(asset, AlphaIdea):
+        return {
+            "hypothesis": asset.hypothesis,
+            "evidence": unavailable,
+            "conclusion": unavailable,
+            "next_action": "required evidence: run a recorded experiment or validation against this idea.",
+        }
+    if isinstance(asset, ExperimentRecord):
+        evidence = json.dumps(asset.metrics, ensure_ascii=False, sort_keys=True) if asset.metrics else (
+            "unavailable: no performance metrics were recorded. Required evidence: persisted experiment metrics."
+        )
+        return {"hypothesis": unavailable, "evidence": evidence, "conclusion": f"recorded experiment status: {asset.status}.", "next_action": unavailable}
+    if isinstance(asset, FailurePattern):
+        evidence = "\n".join(f"- {item}" for item in asset.evidence) if asset.evidence else (
+            "unavailable: no failure evidence was recorded. Required evidence: source logs, metrics, or validation findings."
+        )
+        return {"hypothesis": unavailable, "evidence": evidence, "conclusion": asset.summary, "next_action": "required evidence: reproduce or test the recorded failure condition."}
+    if isinstance(asset, LiteratureReference):
+        evidence = f"citation: {asset.citation}" + (f"\nsource: {asset.url}" if asset.url else "\nsource unavailable: a URL was not recorded.")
+        return {"hypothesis": unavailable, "evidence": evidence, "conclusion": unavailable, "next_action": "required evidence: review the cited source against a recorded experiment or validation."}
+    return {"hypothesis": unavailable, "evidence": unavailable, "conclusion": unavailable, "next_action": "required evidence: link a recorded experiment, validation, failure pattern, or literature source."}
 
 
 def _identity_for(asset: Asset) -> str:

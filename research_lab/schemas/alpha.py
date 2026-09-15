@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -15,8 +15,12 @@ class _AlphaAsset(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    asset_version: Literal["research_lab.alpha-database.v1"] = "research_lab.alpha-database.v1"
+    # This is intentionally data rather than a model literal: a later reader
+    # can retain a versioned historical asset even after the schema evolves.
+    asset_version: str = Field(default="research_lab.alpha-database.v1", min_length=1)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    content_hash: str = ""
+    created_commit: str = ""
 
 
 class AlphaIdea(_AlphaAsset):
@@ -78,6 +82,10 @@ class FactorKnowledge(_AlphaAsset):
     experiment_ids: list[str] = Field(default_factory=list)
     strategy_names: list[str] = Field(default_factory=list)
     failure_pattern_ids: list[str] = Field(default_factory=list)
+    feature_lineage: list[dict[str, Any]] = Field(default_factory=list)
+    dataset_lineage: list[dict[str, Any]] = Field(default_factory=list)
+    literature_reference_ids: list[str] = Field(default_factory=list)
+    validation_result_ids: list[str] = Field(default_factory=list)
 
 
 class LiteratureReference(_AlphaAsset):

@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import shutil
 import tempfile
 import unittest
+from datetime import datetime, timezone
 
 from research_lab.alpha_database import AlphaDatabase
 from research_lab.config import ResearchLabConfig
 from research_lab.critic import CriticAgent
 from research_lab.database import ResultStore
 from research_lab.runners import ExperimentRunner
-from research_lab.schemas import AlphaIdea, ExperimentResult, FactorKnowledge, LiteratureReference
+from research_lab.schemas import AlphaIdea, ExperimentRecord, ExperimentResult, FactorKnowledge, LiteratureReference
 from research_lab.validation import WalkForwardValidationEngine
 
 
@@ -88,8 +90,12 @@ class AlphaDatabaseTest(unittest.TestCase):
             knowledge = database.get_factor_knowledge("close_return")
             self.assertEqual(knowledge.experiment_ids, [result.experiment_id])
             asset_root = root / "output" / "alpha_database"
-            self.assertTrue((asset_root / "experiments" / "alpha-record-001.json").is_file())
-            self.assertIn("not a promotion", (asset_root / "experiments" / "alpha-record-001.md").read_text(encoding="utf-8"))
+            experiment_assets = list((asset_root / "experiments").glob("alpha-record-001--*.json"))
+            self.assertEqual(len(experiment_assets), 1)
+            markdown = experiment_assets[0].with_suffix(".md").read_text(encoding="utf-8")
+            self.assertIn("not a promotion", markdown)
+            for heading in ("## hypothesis", "## evidence", "## conclusion", "## next_action"):
+                self.assertIn(heading, markdown)
 
     def test_failed_experiment_is_archived_once_with_a_failure_pattern(self) -> None:
         class BrokenAdapter:
@@ -199,7 +205,65 @@ class AlphaDatabaseTest(unittest.TestCase):
 
             self.assertEqual(len(list((database.root / "ideas").glob("*.json"))), 1)
             self.assertEqual(len(database.query_factor_knowledge(factor_name="close_return")), 1)
-            self.assertTrue((database.root / "literature" / "paper-momentum.md").is_file())
+            self.assertEqual(len(list((database.root / "literature").glob("paper-momentum--*.md"))), 1)
+
+    def test_changed_asset_keeps_versioned_history_and_injected_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = AlphaDatabase(
+                ResearchLabConfig(Path(directory) / "output"), created_commit="test-commit-499",
+            )
+            first = database.save_experiment(ExperimentRecord(
+                experiment_id="versioned-record-001", status="completed", strategy_name="flat",
+                factor_name="versioned-factor", created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ))
+            changed = database.save_experiment(ExperimentRecord(
+                experiment_id="versioned-record-001", status="failed", strategy_name="flat",
+                factor_name="versioned-factor", error_code="BACKTEST_FAILED",
+                created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            ))
+
+            history = database.query_experiments(factor_name="versioned-factor")
+            self.assertEqual({item.status for item in history}, {"completed", "failed"})
+            self.assertEqual({item.content_hash for item in history}, {first.content_hash, changed.content_hash})
+            self.assertTrue(all(item.created_commit == "test-commit-499" for item in history))
+            self.assertEqual(database.get_experiment("versioned-record-001"), changed)
+            self.assertEqual(len(list((database.root / "experiments").glob("versioned-record-001--*.json"))), 2)
+            tampered_path = next((database.root / "experiments").glob("versioned-record-001--*.json"))
+            tampered = json.loads(tampered_path.read_text(encoding="utf-8"))
+            tampered["strategy_name"] = "tampered"
+            tampered_path.write_text(json.dumps(tampered), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "content hash mismatch"):
+                database.query_experiments(factor_name="versioned-factor")
+
+    def test_markdown_marks_missing_evidence_and_records_available_lineage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with_feature = EXPERIMENT_YAML.replace(
+                "factor:\n", "features:\n  - name: close_return\nfactor:\n",
+            ).replace("alpha-record-001", "lineage-record-001")
+            ExperimentRunner.local(root / "output").run_yaml(self._write(root, "experiment.yaml", with_feature))
+            validation_yaml = VALIDATION_YAML.replace(
+                "factor:\n", "features:\n    - name: close_return\n  factor:\n",
+            )
+            validation = WalkForwardValidationEngine.local(root / "output").run_yaml(
+                self._write(root, "validation.yaml", validation_yaml)
+            )
+            CriticAgent.local(root / "output").review(validation)
+            database = AlphaDatabase(ResearchLabConfig(root / "output"))
+            database.save_literature_reference(LiteratureReference(
+                reference_id="lineage-paper-001", title="Lineage", citation="Author (2026)",
+                factor_names=["close_return"],
+            ))
+
+            knowledge = database.get_factor_knowledge("close_return")
+            self.assertTrue(knowledge.feature_lineage)
+            self.assertEqual(knowledge.feature_lineage[0]["feature"]["name"], "close_return")
+            self.assertTrue(knowledge.dataset_lineage[0]["input_data_identity"])
+            self.assertIn(validation.validation_id, knowledge.validation_result_ids)
+            self.assertIn("lineage-paper-001", knowledge.literature_reference_ids)
+            factor_markdown = next((database.root / "factors").glob("close_return--*.md")).read_text(encoding="utf-8")
+            self.assertIn("## evidence", factor_markdown)
+            self.assertIn("unavailable: this asset does not record it", factor_markdown)
 
 
 if __name__ == "__main__":
