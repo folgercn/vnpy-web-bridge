@@ -55,8 +55,9 @@ class AstraDiscovery:
             and (factor_name is None or factor_name in item.factor_names)
         )]
 
-    def get_proposal(self, proposal_id: str) -> ResearchProposal | None:
-        return self._get(ResearchProposal, proposal_id)
+    def get_proposal(self, proposal_id: str, *, content_hash: str | None = None) -> ResearchProposal | None:
+        """Load one proposal version; callers must name a hash when versions coexist."""
+        return self._get(ResearchProposal, proposal_id, content_hash=content_hash)
 
     def query_proposals(self, *, material_id: str | None = None, status: str | None = None) -> list[ResearchProposal]:
         return [item for item in self._all(ResearchProposal) if (
@@ -64,8 +65,9 @@ class AstraDiscovery:
             and (status is None or item.status == status)
         )]
 
-    def get_task(self, task_id: str) -> ResearchTask | None:
-        return self._get(ResearchTask, task_id)
+    def get_task(self, task_id: str, *, content_hash: str | None = None) -> ResearchTask | None:
+        """Load one task version; callers must name a hash when versions coexist."""
+        return self._get(ResearchTask, task_id, content_hash=content_hash)
 
     def query_tasks(self, *, proposal_id: str | None = None, status: str | None = None) -> list[ResearchTask]:
         return [item for item in self._all(ResearchTask) if (
@@ -148,9 +150,13 @@ class AstraDiscovery:
             _atomic_write(path, json.dumps(stored.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, indent=2) + "\n")
         return stored
 
-    def _get(self, model: type[Artifact], identity: str) -> Artifact | None:
+    def _get(self, model: type[Artifact], identity: str, *, content_hash: str | None = None) -> Artifact | None:
         items = [item for item in self._all(model) if self._identity(item) == identity]
-        return max(items, key=lambda item: (item.created_at, item.content_hash)) if items else None
+        if content_hash is not None:
+            return next((item for item in items if item.content_hash == content_hash), None)
+        if len(items) > 1:
+            raise ValueError("multiple artifact versions found; content_hash is required")
+        return items[0] if items else None
 
     def _all(self, model: type[Artifact]) -> list[Artifact]:
         result: list[Artifact] = []

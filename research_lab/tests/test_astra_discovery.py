@@ -179,6 +179,37 @@ class AstraDiscoveryTest(unittest.TestCase):
             self.assertEqual(discovery.get_task(ready_task.task_id), ready_task)
             self.assertEqual(discovery.get_task(blocked_task.task_id), blocked_task)
 
+    def test_proposal_and_task_versions_require_content_hash_for_same_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            discovery = AstraDiscovery.local(Path(directory) / "output")
+            proposal, task = discovery.discover(material())
+            revised_proposal = discovery._save(
+                proposal.model_copy(update={"title": "Revised close return hypothesis"}), proposal.proposal_id,
+            )
+            revised_task = discovery._save(
+                task.model_copy(update={"evidence": [*task.evidence, "revised task evidence"]}), task.task_id,
+            )
+            persisted = AstraDiscovery.local(Path(directory) / "output")
+
+            self.assertNotEqual(proposal.content_hash, revised_proposal.content_hash)
+            self.assertNotEqual(task.content_hash, revised_task.content_hash)
+            with self.assertRaisesRegex(ValueError, "content_hash is required"):
+                persisted.get_proposal(proposal.proposal_id)
+            with self.assertRaisesRegex(ValueError, "content_hash is required"):
+                persisted.get_task(task.task_id)
+            self.assertEqual(
+                persisted.get_proposal(proposal.proposal_id, content_hash=proposal.content_hash), proposal,
+            )
+            self.assertEqual(
+                persisted.get_proposal(proposal.proposal_id, content_hash=revised_proposal.content_hash), revised_proposal,
+            )
+            self.assertEqual(persisted.get_task(task.task_id, content_hash=task.content_hash), task)
+            self.assertEqual(
+                persisted.get_task(task.task_id, content_hash=revised_task.content_hash), revised_task,
+            )
+            self.assertIsNone(persisted.get_proposal("unknown-proposal-001"))
+            self.assertIsNone(persisted.get_task("unknown-task-001"))
+
 
 if __name__ == "__main__":
     unittest.main()

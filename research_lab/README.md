@@ -183,6 +183,7 @@ Database asset snapshot; task IDs additionally include the proposal content
 hash. Revisions that reuse a caller's material ID and timestamp, or re-discovery
 after relevant Alpha Database history changes, therefore remain distinct,
 auditable artifacts. Use `get_material(material_id, content_hash=proposal.material_content_hash)`
-to retrieve the exact proposal input. A future consumer reads a specific
-proposal/task ID rather than guessing a latest version from timestamp or
-filename ordering.
+to retrieve the exact proposal input. `get_proposal(proposal_id)` and
+`get_task(task_id)` retain the one-version convenience form, but require
+`content_hash=` whenever that identity has multiple versions; Discovery never
+selects a latest artifact from timestamps or filename ordering.
