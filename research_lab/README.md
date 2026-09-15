@@ -157,3 +157,33 @@ history, failure categories, and factor knowledge. This is a filesystem
 projection of ResultStore's existing research history, not SQLite/Postgres, a
 knowledge graph, a vector database, Astra/Sol, LLM functionality, or a
 promotion/deployment/trading mechanism.
+
+## Astra Discovery Prototype
+
+`AstraDiscovery` is a local deterministic proposal generator. Give it explicit
+`ResearchMaterial` records with supplied summaries, evidence, and (when a
+runnable follow-up is intended) an explicit `ExperimentSpec` payload. It stores
+material, proposals, and `ResearchTask` artifacts under `astra_discovery/`.
+Materials may represent an explicitly observed market anomaly, but this package
+does not fetch public sources, connect to live market data, invoke an LLM, or
+run a scanner.
+
+Each proposal includes the stated hypothesis, economic logic, expected edge,
+required data, validation plan, and linked Alpha Database ideas, experiments,
+failures, and literature. A critical historical failure for the same factor is
+recorded and blocks the task. Missing proposal fields or an absent/invalid
+`ExperimentSpec` also produces a `blocked` task instead of invented YAML.
+`ResearchTask.experiment` is an `ExperimentSpec`, so a later Sol integration
+can consume a ready artifact without changing `ExperimentRunner`; Astra itself
+creates no queue, scheduler, worker, experiment run, promotion, deployment, or
+trading action.
+
+Proposal IDs include the stored material SHA-256 and a hash of the linked Alpha
+Database asset snapshot; task IDs additionally include the proposal content
+hash. Revisions that reuse a caller's material ID and timestamp, or re-discovery
+after relevant Alpha Database history changes, therefore remain distinct,
+auditable artifacts. Use `get_material(material_id, content_hash=proposal.material_content_hash)`
+to retrieve the exact proposal input. `get_proposal(proposal_id)` and
+`get_task(task_id)` retain the one-version convenience form, but require
+`content_hash=` whenever that identity has multiple versions; Discovery never
+selects a latest artifact from timestamps or filename ordering.

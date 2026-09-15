@@ -184,6 +184,14 @@ class AlphaDatabase:
         records = self._all(FactorKnowledge)
         return [record for record in records if factor_name is None or record.factor_name == factor_name]
 
+    def query_ideas(self, *, factor_name: str | None = None) -> list[AlphaIdea]:
+        records = self._all(AlphaIdea)
+        return [record for record in records if factor_name is None or factor_name in record.factor_names]
+
+    def query_literature(self, *, factor_name: str | None = None) -> list[LiteratureReference]:
+        records = self._all(LiteratureReference)
+        return [record for record in records if factor_name is None or factor_name in record.factor_names]
+
     def _update_factor(
         self, factor_name: str, experiment_id: str | None = None, strategy_name: str | None = None,
         failure_pattern_id: str | None = None, feature_lineage: list[dict[str, Any]] | None = None,

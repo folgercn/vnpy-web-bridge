@@ -10,6 +10,7 @@ from .validation import (
 )
 from .critic import CriticFinding, CriticReview
 from .alpha import AlphaIdea, ExperimentRecord, FailurePattern, FactorKnowledge, LiteratureReference
+from .astra import ResearchMaterial, ResearchProposal, ResearchTask
 
 __all__ = [
     "ExperimentResult", "ExperimentSpec", "FeatureRequest", "ParameterStability",
@@ -19,4 +20,5 @@ __all__ = [
     "ValidationFoldResult", "ValidationResult", "ValidationSpec",
     "CriticFinding", "CriticReview",
     "AlphaIdea", "ExperimentRecord", "FailurePattern", "FactorKnowledge", "LiteratureReference",
+    "ResearchMaterial", "ResearchProposal", "ResearchTask",
 ]
