@@ -196,9 +196,15 @@ persists a JSON `ExperimentPlan` under `sol/plans/`. It records
 failed execution records `failed → retry → queued` only within the supplied
 retry limit. A named human must call `approve()` before the local runner is
 eligible, and a runner executes only when the caller invokes `run_next()`.
+Each plan has an HMAC-sealed event chain using a local owner-only key, and is
+rejected on reload if its JSON was changed or its state path cannot be reached
+from the recorded approval. Sol re-reads the exact Astra task and proposal
+versions before accepting a handoff.
 
 The only MVP worker is an in-process adapter to `ExperimentRunner`, whose
 existing ResultStore and Alpha Database writes remain the execution record.
+Even a `completed` worker callback cannot enter review unless its experiment ID
+matches the plan and its completed result is already present in both stores.
 Sol does not create strategies, start a service or queue, select candidates,
 promote/deploy/trade, or let Astra run experiments. Critic review is skipped
 with audit evidence unless the caller attaches an existing persisted

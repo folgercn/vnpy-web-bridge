@@ -33,6 +33,8 @@ class PlanEvent(BaseModel):
     status: PlanStatus
     reason: str = Field(min_length=1)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    previous_hash: str | None = None
+    integrity_hash: str = ""
 
 
 class ExperimentPlan(BaseModel):
@@ -58,6 +60,7 @@ class ExperimentPlan(BaseModel):
     review_status: Literal["awaiting_validation", "reviewed", "skipped"] | None = None
     error_message: str | None = None
     events: list[PlanEvent] = Field(min_length=1)
+    integrity_hash: str = ""
 
 
 class SolTaskInput(BaseModel):

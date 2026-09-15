@@ -9,7 +9,7 @@ import json
 from research_lab.alpha_database import AlphaDatabase
 from research_lab.astra import AstraDiscovery
 from research_lab.runners import ExperimentRunner
-from research_lab.schemas import ResearchMaterial, SolTaskInput, ValidationSpec
+from research_lab.schemas import ExperimentResult, ResearchMaterial, SolTaskInput, ValidationSpec, WorkerDescriptor
 from research_lab.sol import SolOrchestrator, SolStateError
 from research_lab.validation import WalkForwardValidationEngine
 
@@ -125,6 +125,58 @@ class SolOrchestratorTest(unittest.TestCase):
                 sol.approve(first.plan_id, approved_by="researcher")
             with self.assertRaisesRegex(SolStateError, "only review plans"):
                 sol.archive(first.plan_id)
+
+    def test_tampered_plan_json_cannot_bypass_human_approval_after_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "output"
+            sol = SolOrchestrator.local(root)
+            plan = sol.receive(SolTaskInput(task=task(root)))
+            path = root / "sol" / "plans" / f"{plan.plan_id}.json"
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["status"] = "queued"
+            payload["events"].append({
+                "status": "queued", "reason": "forged approval",
+                "created_at": "2026-09-15T00:00:00Z", "previous_hash": None, "integrity_hash": "forged",
+            })
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            restarted = SolOrchestrator.local(root)
+            with self.assertRaisesRegex(SolStateError, "integrity error"):
+                restarted.get_plan(plan.plan_id)
+            with self.assertRaisesRegex(SolStateError, "integrity error"):
+                restarted.run_next()
+
+    def test_receive_rejects_an_astra_task_not_equal_to_the_persisted_version(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "output"
+            stored_task = task(root)
+            tampered = stored_task.model_copy(update={"evidence": [*stored_task.evidence, "forged evidence"]})
+            with self.assertRaisesRegex(SolStateError, "does not match"):
+                SolOrchestrator.local(root).receive(SolTaskInput(task=tampered))
+
+    def test_forged_completed_worker_callback_cannot_enter_review(self) -> None:
+        class ForgedWorker:
+            descriptor = WorkerDescriptor(worker_id="aaa-forged")
+
+            def execute(self, plan):
+                return ExperimentResult(
+                    experiment_id=plan.experiment.experiment_id, status="completed",
+                    strategy_name=plan.experiment.strategy.name, factor_name=plan.experiment.factor.name,
+                    metrics={"total_return": 1.0, "sharpe": 1.0, "max_drawdown": 0.0,
+                             "turnover": 0.0, "transaction_cost": 0.0, "final_equity": 2000.0},
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "output"
+            sol = SolOrchestrator.local(root)
+            plan = sol.receive(SolTaskInput(task=task(root)))
+            sol.approve(plan.plan_id, approved_by="researcher")
+            sol.register_worker(ForgedWorker())
+            failed = sol.run_next()
+
+            self.assertEqual(failed.status, "failed")
+            self.assertIn("not the matching persisted", failed.error_message)
+            self.assertIsNone(sol.store.get(EXPERIMENT["experiment_id"]))
 
 
 if __name__ == "__main__":

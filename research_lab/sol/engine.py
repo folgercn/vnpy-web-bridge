@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
 from research_lab.config import ResearchLabConfig
 from research_lab.critic import CriticAgent
+from research_lab.alpha_database import AlphaDatabase
+from research_lab.astra import AstraDiscovery
 from research_lab.database import ResultStore
 from research_lab.runners import ExperimentRunner
 from research_lab.schemas import ExperimentPlan, ExperimentResult, PlanEvent, SolTaskInput, WorkerDescriptor
@@ -50,6 +54,8 @@ class SolOrchestrator:
         self.plans_dir = self.root / "plans"
         self.plans_dir.mkdir(parents=True, exist_ok=True)
         self.registry_path = self.root / "workers.json"
+        self.integrity_key_path = self.root / ".plan-integrity.key"
+        self._integrity_key = self._load_integrity_key()
         self._workers: dict[str, RunnerWorker] = {}
         self.register_worker(LocalRunnerWorker(self.runner))
 
@@ -73,6 +79,16 @@ class SolOrchestrator:
             raise SolStateError("only ready Astra tasks with an ExperimentSpec can be received")
         if not task.content_hash:
             raise SolStateError("Astra task content_hash is required for an auditable handoff")
+        discovery = AstraDiscovery(self.config)
+        persisted_task = discovery.get_task(task.task_id, content_hash=task.content_hash)
+        persisted_proposal = discovery.get_proposal(task.proposal_id, content_hash=task.proposal_content_hash)
+        if persisted_task is None or persisted_proposal is None:
+            raise SolStateError("Astra task and proposal versions must be persisted before Sol can receive them")
+        if persisted_task != task or (
+            persisted_task.proposal_id != persisted_proposal.proposal_id
+            or persisted_task.proposal_content_hash != persisted_proposal.content_hash
+        ):
+            raise SolStateError("Astra handoff does not match its persisted task/proposal versions")
         plan_id = _plan_id(task.task_id, task.content_hash)
         existing = self.get_plan(plan_id)
         if existing is not None:
@@ -93,10 +109,17 @@ class SolOrchestrator:
 
     def get_plan(self, plan_id: str) -> ExperimentPlan | None:
         path = self.plans_dir / f"{plan_id}.json"
-        return ExperimentPlan.model_validate_json(path.read_text(encoding="utf-8")) if path.exists() else None
+        if not path.exists():
+            return None
+        try:
+            plan = ExperimentPlan.model_validate_json(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise SolStateError(f"invalid plan JSON: {plan_id}") from exc
+        self._verify_plan(plan)
+        return plan
 
     def query_plans(self, *, status: str | None = None) -> list[ExperimentPlan]:
-        plans = [ExperimentPlan.model_validate_json(path.read_text(encoding="utf-8")) for path in sorted(self.plans_dir.glob("*.json"))]
+        plans = [self.get_plan(path.stem) for path in sorted(self.plans_dir.glob("*.json"))]
         return [plan for plan in plans if status is None or plan.status == status]
 
     def approve(self, plan_id: str, *, approved_by: str) -> ExperimentPlan:
@@ -117,9 +140,12 @@ class SolOrchestrator:
             result = worker.execute(running)
         except Exception as exc:
             return self._handle_failure(running, str(exc))
-        if result.status == "completed":
+        if result.status == "completed" and self._completed_result_is_persisted(running, result):
             return self._transition(running, "review", "runner completed and persisted result", result_experiment_id=result.experiment_id, review_status="awaiting_validation")
-        return self._handle_failure(running, result.error_message or result.error_code or "runner failed", result.experiment_id)
+        message = result.error_message or result.error_code or "runner failed"
+        if result.status == "completed":
+            message = "completed callback was not the matching persisted ResultStore and Alpha Database result"
+        return self._handle_failure(running, message, result.experiment_id)
 
     def _handle_failure(self, plan: ExperimentPlan, message: str, result_experiment_id: str | None = None) -> ExperimentPlan:
         failed = self._transition(plan, "failed", "runner returned failed result", result_experiment_id=result_experiment_id, error_message=message)
@@ -170,9 +196,79 @@ class SolOrchestrator:
         return self._save(plan.model_copy(update=payload))
 
     def _save(self, plan: ExperimentPlan) -> ExperimentPlan:
+        plan = self._seal(plan)
         path = self.plans_dir / f"{plan.plan_id}.json"
         self._write_json(path, plan.model_dump(mode="json"))
         return plan
+
+    def _completed_result_is_persisted(self, plan: ExperimentPlan, result: ExperimentResult) -> bool:
+        if result.experiment_id != plan.experiment.experiment_id:
+            return False
+        stored = self.store.get(result.experiment_id)
+        archived = AlphaDatabase(self.store.config).get_experiment(result.experiment_id)
+        return bool(
+            stored is not None and stored.status == "completed" and stored == result
+            and archived is not None and archived.status == "completed"
+        )
+
+    def _load_integrity_key(self) -> bytes:
+        if self.integrity_key_path.exists():
+            return self.integrity_key_path.read_bytes()
+        key = secrets.token_bytes(32)
+        temporary = self.integrity_key_path.with_suffix(".tmp")
+        try:
+            temporary.write_bytes(key)
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, self.integrity_key_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return key
+
+    def _seal(self, plan: ExperimentPlan) -> ExperimentPlan:
+        previous: str | None = None
+        events: list[PlanEvent] = []
+        for event in plan.events:
+            payload = event.model_dump(mode="json", exclude={"previous_hash", "integrity_hash"})
+            digest = self._digest({"previous_hash": previous, **payload})
+            events.append(event.model_copy(update={"previous_hash": previous, "integrity_hash": digest}))
+            previous = digest
+        unsigned = plan.model_copy(update={"events": events, "integrity_hash": ""})
+        integrity_hash = self._digest(unsigned.model_dump(mode="json", exclude={"integrity_hash"}))
+        return unsigned.model_copy(update={"integrity_hash": integrity_hash})
+
+    def _verify_plan(self, plan: ExperimentPlan) -> None:
+        previous: str | None = None
+        for event in plan.events:
+            payload = event.model_dump(mode="json", exclude={"previous_hash", "integrity_hash"})
+            expected = self._digest({"previous_hash": previous, **payload})
+            if event.previous_hash != previous or not hmac.compare_digest(event.integrity_hash, expected):
+                raise SolStateError(f"plan event integrity error: {plan.plan_id}")
+            previous = event.integrity_hash
+        expected_plan = self._digest(plan.model_copy(update={"integrity_hash": ""}).model_dump(mode="json", exclude={"integrity_hash"}))
+        if not hmac.compare_digest(plan.integrity_hash, expected_plan):
+            raise SolStateError(f"plan integrity error: {plan.plan_id}")
+        self._validate_state_chain(plan)
+
+    @staticmethod
+    def _validate_state_chain(plan: ExperimentPlan) -> None:
+        states = [event.status for event in plan.events]
+        initial = ["received", "planning", "pending_approval"]
+        if states[:3] != initial or plan.status != states[-1]:
+            raise SolStateError(f"plan state chain is not reachable: {plan.plan_id}")
+        allowed = {
+            "pending_approval": {"queued"}, "queued": {"running"}, "running": {"review", "failed"},
+            "failed": {"retry"}, "retry": {"queued"}, "review": {"review", "archived"},
+        }
+        for prior, current in zip(states[2:], states[3:]):
+            if current not in allowed.get(prior, set()):
+                raise SolStateError(f"plan state chain is not reachable: {plan.plan_id}")
+        if any(state in {"queued", "running", "retry", "failed", "review", "archived"} for state in states):
+            if not plan.approved_by or plan.approved_at is None:
+                raise SolStateError(f"approved state lacks an approval record: {plan.plan_id}")
+
+    def _digest(self, payload: object) -> str:
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hmac.new(self._integrity_key, encoded, hashlib.sha256).hexdigest()
 
     def _worker_descriptors(self) -> list[WorkerDescriptor]:
         return [worker.descriptor for _, worker in sorted(self._workers.items())]
