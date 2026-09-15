@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+from research_lab.alpha_database import AlphaDatabase
 from research_lab.config import ResearchLabConfig
 from research_lab.database import ResultStore
 from research_lab.schemas import CriticFinding, CriticReview, ValidationResult
@@ -61,7 +62,9 @@ class CriticAgent:
         from research_lab.reports import write_critic_report
 
         report_path = write_critic_report(self.store.config.artifacts_dir, stored)
-        return self.store.save_critic_review(stored.model_copy(update={"report_location": str(report_path)}))
+        stored = self.store.save_critic_review(stored.model_copy(update={"report_location": str(report_path)}))
+        AlphaDatabase(self.store.config, result_store=self.store).archive_critic_review(stored, validation=result)
+        return stored
 
     @staticmethod
     def _candidate_id(result: ValidationResult) -> str:

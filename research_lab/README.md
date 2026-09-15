@@ -127,5 +127,33 @@ PYTHONPATH=. .venv-research-lab/bin/python -m research_lab.critic --validation-i
 The Critic writes `artifacts/<review>.critic.json`, a Markdown risk report,
 and indexes review history in `research_lab.sqlite3`. `ResultStore` can query
 the local Alpha-Database-compatible record by `validation_id`, `candidate_id`,
-or a non-pass finding category. This milestone does not add an Alpha Database,
-LLM/Astra/Sol, a worker queue, TQSDK, or realtime data.
+or a non-pass finding category. It does not add LLM/Astra/Sol, a worker queue,
+TQSDK, or realtime data.
+
+## Alpha Database
+
+Every `ExperimentRunner` result is also archived under
+`alpha_database/experiments/` as deterministic JSON and Markdown assets, so a
+research directory can be committed and reviewed with Git. Each saved asset
+records `asset_version`, a content-derived `content_hash`, and `created_commit`
+(or the explicit offline fallback `unavailable`). The filename binds identity
+and content hash: a changed asset with the same identity creates a second,
+queryable historical version instead of replacing the earlier one. Pass
+`created_commit=` to `AlphaDatabase(...)` when an offline workflow has stable
+provenance to record.
+
+Markdown uses fixed `hypothesis`, `evidence`, `conclusion`, and `next_action`
+sections. Missing source data is labelled `unavailable` with the required
+evidence; the archive does not invent a research conclusion. Failed experiments
+add a failure pattern; Critic non-pass findings add evidence-backed failure
+patterns under `alpha_database/failure_patterns/`. Factor knowledge records
+experiments, failures, available feature and dataset hashes, literature
+references, and validation IDs. It only records lineage present in the source
+result. The same local store can also save `AlphaIdea` and `LiteratureReference`
+assets.
+
+Use `AlphaDatabase(ResearchLabConfig(output_root))` to query experiment
+history, failure categories, and factor knowledge. This is a filesystem
+projection of ResultStore's existing research history, not SQLite/Postgres, a
+knowledge graph, a vector database, Astra/Sol, LLM functionality, or a
+promotion/deployment/trading mechanism.
