@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 
 from research_lab.alpha_database import AlphaDatabase
 from research_lab.config import ResearchLabConfig
 from research_lab.critic import CriticAgent
+from research_lab.database import ResultStore
 from research_lab.runners import ExperimentRunner
-from research_lab.schemas import AlphaIdea, LiteratureReference
+from research_lab.schemas import AlphaIdea, ExperimentResult, FactorKnowledge, LiteratureReference
 from research_lab.validation import WalkForwardValidationEngine
 
 
@@ -125,6 +127,60 @@ class AlphaDatabaseTest(unittest.TestCase):
                 database.query_failure_patterns(category="future_data")[0].pattern_id,
                 f"{review.review_id}-future_data",
             )
+            factor_patterns = database.query_failure_patterns(
+                category="future_data", factor_name="close_return",
+            )
+            self.assertEqual([pattern.pattern_id for pattern in factor_patterns], [f"{review.review_id}-future_data"])
+            knowledge = database.get_factor_knowledge("close_return")
+            self.assertIn(f"{review.review_id}-future_data", knowledge.failure_pattern_ids)
+
+    def test_sync_projects_existing_result_and_critic_history_without_rerunning(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "output"
+            validation = WalkForwardValidationEngine.local(root).run_yaml(
+                self._write(Path(directory), "validation.yaml", VALIDATION_YAML)
+            )
+            agent = CriticAgent.local(root)
+            review = agent.review(validation)
+            shutil.rmtree(root / "alpha_database")
+
+            database = AlphaDatabase(ResearchLabConfig(root), result_store=agent.store)
+            first_counts = database.sync_from_result_store(agent.store)
+            second_counts = database.sync_from_result_store(agent.store)
+
+            self.assertEqual(first_counts, second_counts)
+            self.assertTrue(database.query_experiments())
+            self.assertEqual(
+                database.query_failure_patterns(source_id=review.review_id, factor_name="close_return")[0].source_id,
+                review.review_id,
+            )
+            self.assertEqual(len(list((database.root / "failure_patterns").glob("*.json"))), len({
+                pattern.pattern_id for pattern in database.query_failure_patterns()
+            }))
+
+    def test_sync_projects_preexisting_result_store_records_idempotently(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = ResearchLabConfig(Path(directory) / "output")
+            store = ResultStore(config)
+            store.save(ExperimentResult(
+                experiment_id="history-result-001", status="completed", strategy_name="flat",
+                factor_name="historical-factor",
+            ))
+
+            database = AlphaDatabase(config, result_store=store)
+            self.assertEqual(database.sync_from_result_store(store), (1, 0))
+            self.assertEqual([record.experiment_id for record in database.query_experiments()], ["history-result-001"])
+            self.assertEqual(database.get_factor_knowledge("historical-factor").experiment_ids, ["history-result-001"])
+
+    def test_factor_asset_filenames_do_not_collide_for_legal_factor_names(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = AlphaDatabase(ResearchLabConfig(Path(directory) / "output"))
+            first = database.save_factor_knowledge(FactorKnowledge(factor_name="mean/reversion"))
+            second = database.save_factor_knowledge(FactorKnowledge(factor_name="mean?reversion"))
+
+            self.assertEqual(database.get_factor_knowledge(first.factor_name), first)
+            self.assertEqual(database.get_factor_knowledge(second.factor_name), second)
+            self.assertEqual(len(list((database.root / "factors").glob("*.json"))), 2)
 
     def test_ideas_literature_and_factor_history_are_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

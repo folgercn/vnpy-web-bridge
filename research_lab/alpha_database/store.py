@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
+from urllib.parse import quote
 
 from research_lab.config import ResearchLabConfig
 from research_lab.schemas import (
     AlphaIdea, CriticReview, ExperimentRecord, ExperimentResult, FactorKnowledge,
-    FailurePattern, LiteratureReference,
+    FailurePattern, LiteratureReference, ValidationResult,
 )
 
+if TYPE_CHECKING:
+    from research_lab.database import ResultStore
 
 Asset = TypeVar("Asset", AlphaIdea, ExperimentRecord, FailurePattern, FactorKnowledge, LiteratureReference)
 _ASSET_PATH = {
@@ -24,7 +26,8 @@ _ASSET_PATH = {
 
 
 def _asset_filename(value: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]", "_", value)
+    """Encode every legal identity without lossy filename normalization."""
+    return quote(value, safe="._-")
 
 
 class AlphaDatabase:
@@ -35,11 +38,28 @@ class AlphaDatabase:
     or trade candidates.
     """
 
-    def __init__(self, config: ResearchLabConfig) -> None:
+    def __init__(self, config: ResearchLabConfig, *, result_store: ResultStore | None = None) -> None:
         self.config = config
         self.root = config.root / "alpha_database"
         for directory in _ASSET_PATH.values():
             (self.root / directory).mkdir(parents=True, exist_ok=True)
+        if result_store is not None:
+            self.sync_from_result_store(result_store)
+
+    def sync_from_result_store(self, store: ResultStore) -> tuple[int, int]:
+        """Idempotently project persisted experiment and Critic history.
+
+        The SQLite ResultStore remains the execution index; this writes only
+        reviewable JSON/Markdown projections and therefore never requires a
+        historical experiment to be run again.
+        """
+        experiments = store.query()
+        for result in experiments:
+            self.archive_experiment(result)
+        reviews = store.query_critic_reviews()
+        for review in reviews:
+            self.archive_critic_review(review, validation=store.get_validation(review.validation_id))
+        return len(experiments), len(reviews)
 
     def archive_experiment(self, result: ExperimentResult) -> ExperimentRecord:
         record = ExperimentRecord(
@@ -70,7 +90,10 @@ class AlphaDatabase:
             ))
         return record
 
-    def archive_critic_review(self, review: CriticReview) -> list[FailurePattern]:
+    def archive_critic_review(
+        self, review: CriticReview, *, validation: ValidationResult | None = None,
+    ) -> list[FailurePattern]:
+        strategy_name, factor_name = self._validation_lineage(validation)
         patterns: list[FailurePattern] = []
         for finding in review.findings:
             if finding.assessment == "pass":
@@ -79,6 +102,8 @@ class AlphaDatabase:
                 pattern_id=f"{review.review_id}-{finding.category}",
                 source_kind="critic_review",
                 source_id=review.review_id,
+                strategy_name=strategy_name,
+                factor_name=factor_name,
                 category=finding.category,
                 severity="critical" if finding.severity == "critical" else "warning",
                 summary=finding.summary,
@@ -165,11 +190,21 @@ class AlphaDatabase:
         path = self.root / _ASSET_PATH[model] / f"{_asset_filename(identity)}.json"
         if not path.is_file():
             return None
-        return model.model_validate_json(path.read_text(encoding="utf-8"))
+        asset = model.model_validate_json(path.read_text(encoding="utf-8"))
+        if _identity_for(asset) != identity:
+            raise ValueError(f"asset identity mismatch for {identity}")
+        return asset
 
     def _all(self, model: type[Asset]) -> list[Asset]:
         directory = self.root / _ASSET_PATH[model]
         return [model.model_validate_json(path.read_text(encoding="utf-8")) for path in sorted(directory.glob("*.json"))]
+
+    @staticmethod
+    def _validation_lineage(validation: ValidationResult | None) -> tuple[str | None, str | None]:
+        if validation is None or not validation.folds:
+            return None, None
+        result = validation.folds[0].in_sample
+        return result.strategy_name, result.factor_name
 
     @staticmethod
     def _markdown(asset: Asset) -> str:
@@ -198,3 +233,15 @@ class AlphaDatabase:
 
 def _append_unique(items: list[str], value: str | None) -> list[str]:
     return items if value is None or value in items else [*items, value]
+
+
+def _identity_for(asset: Asset) -> str:
+    if isinstance(asset, AlphaIdea):
+        return asset.idea_id
+    if isinstance(asset, ExperimentRecord):
+        return asset.experiment_id
+    if isinstance(asset, FailurePattern):
+        return asset.pattern_id
+    if isinstance(asset, FactorKnowledge):
+        return asset.factor_name
+    return asset.reference_id

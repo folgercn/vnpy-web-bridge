@@ -63,7 +63,7 @@ class CriticAgent:
 
         report_path = write_critic_report(self.store.config.artifacts_dir, stored)
         stored = self.store.save_critic_review(stored.model_copy(update={"report_location": str(report_path)}))
-        AlphaDatabase(self.store.config).archive_critic_review(stored)
+        AlphaDatabase(self.store.config, result_store=self.store).archive_critic_review(stored, validation=result)
         return stored
 
     @staticmethod

@@ -18,7 +18,7 @@ class ExperimentRunner:
         self.store = store
         self.adapter = adapter or DeterministicBacktestAdapter()
         self.feature_store = FeatureStore(self.store.config)
-        self.alpha_database = AlphaDatabase(self.store.config)
+        self.alpha_database = AlphaDatabase(self.store.config, result_store=self.store)
 
     @classmethod
     def local(cls, root: Path | str, adapter: BacktestAdapter | None = None) -> "ExperimentRunner":
