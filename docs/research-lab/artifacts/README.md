@@ -221,6 +221,10 @@ Manifest 条目显式标注用途分类（`classification`，正式条目仅允�
 
 ## 7. 冻结责任与 implementation_ref 待办
 
+机器化进展：已有 [离线契约校验](../../../research_lab/contracts/README.md) 与
+[Manifest Schema](../../schemas/research-artifact-manifest-v2.schema.json)。固定定义目录及本例载荷、引用拒绝已有测试；
+未登记的其他内容定义、完整科学准入仍是下表的未完成项，不因部分机器化自动冻结或开放执行。
+
 依据 #541 Review，以下不能只停留在“文档说拒绝”：
 
 | 责任 | 正式冻结/开放执行前必须提供的证据 |

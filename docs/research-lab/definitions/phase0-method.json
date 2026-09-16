@@ -1,0 +1,21 @@
+{
+  "id": "candidate.phase0.source_order.rev1",
+  "metric": {
+    "calculation_definition": "Compare adjacent selected dates within each exact_contract in original source order. Count current <= previous when strict=true, otherwise current < previous. Report comparisons as denominator, duplicate excess keys and reversals separately. Zero comparisons is a defined zero count, not proof of coverage.",
+    "calculation_definition_version": "phase0.source_order.rev1",
+    "metric_name": "timestamp_monotonicity_violations",
+    "precision_rule": "exact_integer",
+    "sample_scope": "selected rows, adjacent within exact_contract, original CSV order",
+    "undefined_policy": "null_with_reason_not_zero",
+    "unit": "integer_count"
+  },
+  "parameter_definition": {
+    "strict": {
+      "default": true,
+      "type": "boolean",
+      "unit": "dimensionless"
+    }
+  },
+  "revision": "rev.1",
+  "source_sha256": "6d2a1299c656f8d97d1530cba9c7d3da806554a779df2586806081b6857ed67d"
+}

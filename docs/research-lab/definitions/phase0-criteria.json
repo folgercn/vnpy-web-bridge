@@ -1,0 +1,8 @@
+{
+  "id": "phase0-date-order-criteria",
+  "maximum": 0,
+  "metric": "timestamp_monotonicity_violations",
+  "minimum_comparisons": 1,
+  "revision": "rev.1",
+  "scope": "date order only; not calendar completeness, PIT or protocol freeze"
+}

@@ -1,0 +1,255 @@
+{
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "research_lab.artifact_manifest.v2"
+    },
+    "hash_profile": {
+      "const": "research-json-v1"
+    },
+    "manifest_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "revision": {
+      "type": "string",
+      "pattern": "^rev\\.[1-9][0-9]*$"
+    },
+    "manifest_content_hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_content_hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "experiment_type": {
+      "enum": [
+        "data_quality",
+        "statistical_factor",
+        "trading_backtest"
+      ]
+    },
+    "artifact_profile": {
+      "const": "research_lab.artifact_roles.v2.candidate1"
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "properties": {
+          "artifact_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "role": {
+            "enum": [
+              "backtest_summary",
+              "chart",
+              "daily_ic_series",
+              "dataset_metadata",
+              "environment_lock",
+              "equity_curve",
+              "execution_log",
+              "failure_diagnostics",
+              "method_definition",
+              "presentation_report",
+              "quality_anomalies",
+              "quality_summary",
+              "replay_instructions",
+              "sample_feature_target",
+              "statistical_summary",
+              "trade_blotter"
+            ]
+          },
+          "classification": {
+            "enum": [
+              "required",
+              "supporting"
+            ]
+          },
+          "content_schema_ref": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "revision": {
+                "type": "string",
+                "pattern": "^rev\\.[1-9][0-9]*$"
+              },
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "locator": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "name",
+              "revision",
+              "content_hash",
+              "locator"
+            ],
+            "additionalProperties": false
+          },
+          "availability": {
+            "enum": [
+              "present",
+              "unavailable"
+            ]
+          },
+          "coverage": {
+            "enum": [
+              "complete",
+              "partial",
+              "none"
+            ]
+          },
+          "relative_path": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)*$"
+          },
+          "media_type": {
+            "type": "string",
+            "minLength": 1
+          },
+          "byte_length": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "content_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "producer": {
+            "type": "object",
+            "properties": {
+              "component": {
+                "type": "string",
+                "minLength": 1
+              },
+              "version": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "component",
+              "version"
+            ],
+            "additionalProperties": false
+          },
+          "unavailable_reason": {
+            "enum": [
+              "not_produced",
+              "source_unavailable",
+              "execution_interrupted"
+            ]
+          }
+        },
+        "required": [
+          "artifact_id",
+          "role",
+          "classification",
+          "content_schema_ref",
+          "availability",
+          "coverage"
+        ],
+        "additionalProperties": false,
+        "oneOf": [
+          {
+            "properties": {
+              "availability": {
+                "const": "present"
+              },
+              "coverage": {
+                "enum": [
+                  "complete",
+                  "partial"
+                ]
+              }
+            },
+            "required": [
+              "relative_path",
+              "media_type",
+              "byte_length",
+              "content_sha256",
+              "producer"
+            ],
+            "not": {
+              "required": [
+                "unavailable_reason"
+              ]
+            }
+          },
+          {
+            "properties": {
+              "availability": {
+                "const": "unavailable"
+              },
+              "coverage": {
+                "const": "none"
+              }
+            },
+            "required": [
+              "unavailable_reason"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "relative_path"
+                  ]
+                },
+                {
+                  "required": [
+                    "media_type"
+                  ]
+                },
+                {
+                  "required": [
+                    "byte_length"
+                  ]
+                },
+                {
+                  "required": [
+                    "content_sha256"
+                  ]
+                },
+                {
+                  "required": [
+                    "producer"
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "hash_profile",
+    "manifest_id",
+    "revision",
+    "manifest_content_hash",
+    "run_id",
+    "run_content_hash",
+    "experiment_type",
+    "artifact_profile",
+    "entries"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}
