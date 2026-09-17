@@ -851,7 +851,7 @@ def test_trend20_return_decimal_precision_through_manifest(tmp_path, role, field
     task, spec, run, manifest = trend20_bundle(tmp_path)
     entry = next(item for item in manifest["entries"] if item["role"] == role)
     path = tmp_path / entry["relative_path"]
-    for value, accepted in [("12.123456789012", True), ("12.1234567890123", False)]:
+    for value, accepted in [("2.123456789012", True), ("-2.123456789012", True), ("2.1234567890123", False), ("-2.1234567890123", False)]:
         content = v2.parse(path.read_bytes())
         target = content
         for key in field_path[:-1]:
