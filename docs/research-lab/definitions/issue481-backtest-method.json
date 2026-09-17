@@ -1,0 +1,7 @@
+{
+  "id": "phase0.issue481_minimal_causal_replay.rev1",
+  "revision": "rev.1",
+  "source_sha256": "3798178e2b265f6001dc607fe89add68f1f0f583ae85ddf62ddead38e677577c",
+  "corrected_events": 603,
+  "stop_reason": "STOP_ECONOMIC_GATE"
+}

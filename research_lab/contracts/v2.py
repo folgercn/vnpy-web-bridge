@@ -397,7 +397,7 @@ def validate_statistical_payloads(entries, contents):
 def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=None):
     definitions = definitions or Definitions()
     schema_check(manifest, parse(safe_read(ROOT, 'docs/schemas/research-artifact-manifest-v2.schema.json')))
-    run_schema = ('trend20-control.schema.json' if manifest['experiment_type'] == 'statistical_factor' else 'phase0-control.schema.json')
+    run_schema = {'statistical_factor': 'trend20-control.schema.json', 'trading_backtest': 'issue481-backtest-control.schema.json'}.get(manifest['experiment_type'], 'phase0-control.schema.json')
     run_definition = 'experiment_run'
     schema_check(run, parse(safe_read(DEFINITIONS, run_schema))['$defs'][run_definition])
     check_record(manifest, 'artifact_manifest')
@@ -416,7 +416,7 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
     for e in entries:
         entry, definition = definitions.resolve('payload', e['content_schema_ref'])
         require(entry['role'] == e['role'], 'schema role mismatch')
-        expected_name = ('phase0.trend20.' if manifest['experiment_type'] == 'statistical_factor' else 'phase0.') + e['role']
+        expected_name = {'statistical_factor': 'phase0.trend20.', 'trading_backtest': 'phase0.issue481.'}.get(manifest['experiment_type'], 'phase0.') + e['role']
         require(entry['name'] == expected_name, 'profile payload definition mismatch')
         # Registered rev.1 definitions specify one complete file, no implicit shards.
         require(e['role'] not in roles, 'unsupported/duplicate shard')
@@ -439,6 +439,15 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
         metadata = next(contents[e['artifact_id']] for e in entries if e['role'] == 'dataset_metadata')
         require(metadata['snapshot_sha256'] == spec['dataset_requirements']['snapshot_sha256'], 'Trend20 payload snapshot')
         validate_statistical_payloads(entries, contents)
+    if manifest['experiment_type'] == 'trading_backtest':
+        require(spec is not None and task is not None and spec['experiment_type'] == 'trading_backtest', 'backtest manifest requires Task and Spec')
+        require((run['spec_id'], run['spec_revision'], run['spec_content_hash']) == (spec['spec_id'], spec['revision'], spec['spec_content_hash']), 'Issue481 Run Spec reference')
+        require(run['scientific_fingerprint'] == digest(run['resolved_computation_manifest']), 'Issue481 scientific fingerprint')
+        summary = next(contents[e['artifact_id']] for e in entries if e['role'] == 'backtest_summary')
+        blotter = next(contents[e['artifact_id']] for e in entries if e['role'] == 'trade_blotter')
+        require(summary['accounts'] == summary['products'] == ['ag', 'au', 'cu', 'rb', 'ru', 'sc'], 'account products')
+        sequences = [item['fill_sequence'] for item in blotter['fills']]
+        require(sequences == sorted(sequences) and len(sequences) == len(set(sequences)), 'fill order')
     return contents
 
 

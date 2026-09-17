@@ -225,6 +225,107 @@
         "trend20_target"
       ],
       "source_path": "research_lab/contracts/trend20_definition.py"
+    },
+    {
+      "kind": "payload",
+      "name": "phase0.issue481.dataset_metadata",
+      "revision": "rev.1",
+      "content_hash": "0887eb2f4c2bd3a2a0b4a0c49d32f46cdb84ee1bca0939fbc7af81bf9cb39a81",
+      "locator": "issue481-backtest-payload.schema.json#/$defs/dataset_metadata",
+      "file": "issue481-backtest-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "dataset_metadata"
+      ],
+      "role": "dataset_metadata"
+    },
+    {
+      "kind": "payload",
+      "name": "phase0.issue481.method_definition",
+      "revision": "rev.1",
+      "content_hash": "fdb058ce2741777124b9c10a6be7859abd4c941386f0125c353b49e506585d4e",
+      "locator": "issue481-backtest-payload.schema.json#/$defs/method_definition",
+      "file": "issue481-backtest-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "method_definition"
+      ],
+      "role": "method_definition"
+    },
+    {
+      "kind": "payload",
+      "name": "phase0.issue481.environment_lock",
+      "revision": "rev.1",
+      "content_hash": "e215d6add43a23878aa2dce8f1240f30fb57fec7ef4c703dcd5d1776dfa38371",
+      "locator": "issue481-backtest-payload.schema.json#/$defs/environment_lock",
+      "file": "issue481-backtest-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "environment_lock"
+      ],
+      "role": "environment_lock"
+    },
+    {
+      "kind": "payload",
+      "name": "phase0.issue481.replay_instructions",
+      "revision": "rev.1",
+      "content_hash": "6b7262fa63942d142ef3b8d19c1415e0bacaef355ca54ccdbd3a9e162c8dc7b6",
+      "locator": "issue481-backtest-payload.schema.json#/$defs/replay_instructions",
+      "file": "issue481-backtest-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "replay_instructions"
+      ],
+      "role": "replay_instructions"
+    },
+    {
+      "kind": "payload",
+      "name": "phase0.issue481.backtest_summary",
+      "revision": "rev.1",
+      "content_hash": "b70face71b89e21d81066cbb1a42852e388a2f181744a1f836339e3adbf30fd6",
+      "locator": "issue481-backtest-payload.schema.json#/$defs/backtest_summary",
+      "file": "issue481-backtest-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "backtest_summary"
+      ],
+      "role": "backtest_summary"
+    },
+    {
+      "kind": "payload",
+      "name": "phase0.issue481.trade_blotter",
+      "revision": "rev.1",
+      "content_hash": "fbd7c3a94da04ae04e0a92c144cd26f36a8e25776da119814a25ee2a9f12f753",
+      "locator": "issue481-backtest-payload.schema.json#/$defs/trade_blotter",
+      "file": "issue481-backtest-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "trade_blotter"
+      ],
+      "role": "trade_blotter"
+    },
+    {
+      "kind": "payload",
+      "name": "phase0.issue481.equity_curve",
+      "revision": "rev.1",
+      "content_hash": "94e3aaa1879ba27c627b1a9439f35fbe1e60b0e2f588a087a0f26878f0c93d96",
+      "locator": "issue481-backtest-payload.schema.json#/$defs/equity_curve",
+      "file": "issue481-backtest-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "equity_curve"
+      ],
+      "role": "equity_curve"
+    },
+    {
+      "kind": "method",
+      "name": "phase0.issue481_minimal_causal_replay.rev1",
+      "revision": "rev.1",
+      "content_hash": "c7099e93e4a3f261815d5a4033bc7e92c93e3171927160d7975ce8930899a8ba",
+      "locator": "issue481-backtest-method.json",
+      "file": "issue481-backtest-method.json",
+      "pointer": [],
+      "source_path": "scripts/issue481_minimal_causal_replay.py"
     }
   ]
 }
