@@ -319,6 +319,8 @@ def validate_spec(spec, task, definitions=None):
     """Machine checks for bound methods. No execution, PIT or confirmation approval."""
     definitions = definitions or Definitions()
     schema_check(spec, parse(safe_read(ROOT, 'docs/schemas/research-experiment-spec-v2.schema.json')))
+    task_schema = 'trend20-control.schema.json' if spec['experiment_type'] == 'statistical_factor' else 'phase0-control.schema.json'
+    schema_check(task, parse(safe_read(DEFINITIONS, task_schema))['$defs']['research_task'])
     check_record(spec, 'experiment_spec')
     check_record(task, 'research_task')
     require((spec['task_id'], spec['task_revision'], spec['task_content_hash']) ==
@@ -329,6 +331,8 @@ def validate_spec(spec, task, definitions=None):
     require(time_value(req['time_range']['start']) < time_value(req['time_range']['end']), 'reversed range')
     require(req['snapshot_selection_mode'] == 'fixed_snapshot' and re.fullmatch(r'[a-f0-9]{64}', req.get('snapshot_sha256') or ''), 'unbound snapshot')
     require(len(set(req['universe'])) == len(req['universe']), 'duplicate universe')
+    if spec['experiment_type'] == 'statistical_factor':
+        return validate_trend20_spec(spec, definitions)
     require(spec['experiment_type'] == 'data_quality', 'unsupported method profile: no registered implementation')
     resolved = {}
     metrics = []
@@ -352,10 +356,50 @@ def validate_spec(spec, task, definitions=None):
     return resolved
 
 
-def validate_manifest(root, manifest, run, definitions=None):
+
+def validate_trend20_spec(spec, definitions):
+    """Fail-closed admission for the one retrospective Trend20 profile."""
+    require(spec['research_stage'] == 'exploration', 'unsupported statistical stage')
+    feature, target = spec['feature_specification'], spec['target_specification']
+    require(feature['implementation_ref'] == 'phase0.trend20_same_exact_contract.feature.rev1', 'unknown feature method')
+    require(target['implementation_ref'] == 'phase0.trend20_same_exact_contract.forward5_log_return.rev1', 'unknown target method')
+    require(feature.get('parameters') == [{'name': 'lookback_official_days', 'value_type': 'integer', 'value': 20, 'unit': 'official_day'}], 'feature parameters')
+    require(target['horizon_trading_days'] == 6 and target['return_interval'] == 't+1_to_t+6_same_exact_contract' and target['target_type'] == 'forward_log_return', 'target definition')
+    require(spec['split_and_leakage_control'] == {'method': 'retrospective_exploration_no_split', 'train_window_days': 1, 'test_window_days': 1, 'step_size_days': 1, 'leakage_mitigation': {'purging_rule': 'overlapping_labels_retained_and_disclosed', 'embargo_days': 0}}, 'statistical split definition')
+    req = spec['dataset_requirements']
+    require(req['universe'] == ['ag', 'au', 'cu', 'rb', 'ru', 'sc'] and req['snapshot_sha256'] == 'f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351', 'Trend20 dataset binding')
+    require(req['time_range'] == {'start': '2023-01-03T00:00:00.000000Z', 'end': '2024-12-31T00:00:00.000000Z'}, 'Trend20 time range')
+    feature_method, target_method = definitions.method(feature['implementation_ref']), definitions.method(target['implementation_ref'])
+    require(feature_method['parameters'] == {'lookback_official_days': 20} and target_method['parameters'] == {'start_offset_official_days': 1, 'end_offset_official_days': 6}, 'registered Trend20 parameters')
+    expected_metrics = {
+        'ic_pearson_cross_sectional': {'calculation_definition_version': 'phase0.trend20.daily_pearson_ic.rev1', 'unit': 'correlation', 'sample_scope': 'daily cross sections with at least four samples', 'precision_rule': 'Round published decimal to 12 places, ROUND_HALF_EVEN; do not round daily inputs.', 'calculation_definition': 'Pearson correlation of same-day Trend20 feature and t+1..t+6 same-contract forward log return, then mean unrounded daily values.', 'undefined_policy': 'null_with_reason_not_zero'},
+        'top_bottom_spread': {'calculation_definition_version': 'phase0.trend20.top2_bottom2.rev1', 'unit': 'log_return', 'sample_scope': 'daily cross sections with at least four samples', 'precision_rule': 'Round published decimal to 12 places, ROUND_HALF_EVEN; do not round daily inputs.', 'calculation_definition': 'Mean unrounded daily top2 minus bottom2 same-contract forward log-return spread.', 'undefined_policy': 'null_with_reason_not_zero'},
+    }
+    metrics = spec['metric_specifications']
+    require(len(metrics) == 2 and {m['metric_name'] for m in metrics} == set(expected_metrics), 'Trend20 metrics')
+    for metric in metrics:
+        require({k: v for k, v in metric.items() if k != 'metric_name'} == expected_metrics[metric['metric_name']], 'Trend20 metric definition')
+    return {'feature': feature_method, 'target': target_method}
+
+
+def validate_statistical_payloads(entries, contents):
+    by_role = {entry['role']: contents[entry['artifact_id']] for entry in entries if entry['artifact_id'] in contents}
+    summary = by_role['statistical_summary']
+    require(summary['method_id'] == 'phase0.trend20_same_exact_contract.rev1', 'summary method')
+    require(summary['precision'] == 'half_even_12_decimal_places_from_unrounded_daily_values', 'summary precision')
+    require(summary['label_overlap'] and summary['significance_test'] == 'not_performed', 'summary limitations')
+    daily = by_role['daily_ic_series']
+    require(daily['metric'] == 'daily_cross_sectional_pearson_ic' and daily['precision'] == summary['precision'], 'daily IC definition')
+    samples = by_role['sample_feature_target']
+    require(samples['fields'] == ['official_day', 'product', 'exact_contract', 'feature_log_return', 'forward_log_return', 'split'], 'sample fields')
+    require(samples['units'] == {'feature_log_return': 'log_return', 'forward_log_return': 'log_return'}, 'sample units')
+
+def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=None):
     definitions = definitions or Definitions()
     schema_check(manifest, parse(safe_read(ROOT, 'docs/schemas/research-artifact-manifest-v2.schema.json')))
-    schema_check(run, parse(safe_read(DEFINITIONS, 'phase0-control.schema.json'))['$defs']['experiment_run'])
+    run_schema = ('trend20-control.schema.json' if manifest['experiment_type'] == 'statistical_factor' else 'phase0-control.schema.json')
+    run_definition = 'experiment_run'
+    schema_check(run, parse(safe_read(DEFINITIONS, run_schema))['$defs'][run_definition])
     check_record(manifest, 'artifact_manifest')
     check_record(run, 'experiment_run')
     require(run['run_status'] in ('COMPLETED', 'FAILED'), 'nonterminal run')
@@ -372,6 +416,8 @@ def validate_manifest(root, manifest, run, definitions=None):
     for e in entries:
         entry, definition = definitions.resolve('payload', e['content_schema_ref'])
         require(entry['role'] == e['role'], 'schema role mismatch')
+        expected_name = ('phase0.trend20.' if manifest['experiment_type'] == 'statistical_factor' else 'phase0.') + e['role']
+        require(entry['name'] == expected_name, 'profile payload definition mismatch')
         # Registered rev.1 definitions specify one complete file, no implicit shards.
         require(e['role'] not in roles, 'unsupported/duplicate shard')
         roles.add(e['role'])
@@ -385,6 +431,14 @@ def validate_manifest(root, manifest, run, definitions=None):
         content = parse(raw)
         schema_check(content, definition)
         contents[e['artifact_id']] = content
+    if manifest['experiment_type'] == 'statistical_factor':
+        require(spec is not None and task is not None and spec['experiment_type'] == 'statistical_factor', 'statistical manifest requires Task and Spec')
+        validate_spec(spec, task, definitions)
+        require((run['spec_id'], run['spec_revision'], run['spec_content_hash']) == (spec['spec_id'], spec['revision'], spec['spec_content_hash']), 'Trend20 Run Spec reference')
+        require(run['scientific_fingerprint'] == digest(run['resolved_computation_manifest']), 'Trend20 scientific fingerprint')
+        metadata = next(contents[e['artifact_id']] for e in entries if e['role'] == 'dataset_metadata')
+        require(metadata['snapshot_sha256'] == spec['dataset_requirements']['snapshot_sha256'], 'Trend20 payload snapshot')
+        validate_statistical_payloads(entries, contents)
     return contents
 
 

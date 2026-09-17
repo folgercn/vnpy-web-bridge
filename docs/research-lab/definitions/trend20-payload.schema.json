@@ -1,0 +1,310 @@
+{
+  "$defs": {
+    "dataset_metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "case_kind",
+        "snapshot_sha256",
+        "source_manifest",
+        "source_member",
+        "source_bytes",
+        "receipt_evidence",
+        "limitations"
+      ],
+      "properties": {
+        "case_kind": {
+          "const": "retrospective_trend20_structural_fixture"
+        },
+        "snapshot_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "source_manifest": {
+          "const": "docs/research-lab/phase0-validation/input-manifest.json"
+        },
+        "source_member": {
+          "const": "curve_contract_daily.csv"
+        },
+        "source_bytes": {
+          "const": 14187500
+        },
+        "receipt_evidence": {
+          "type": "null"
+        },
+        "limitations": {
+          "const": "Historical derived table; no collector receipt evidence; structural fixture is not a native v2 execution."
+        }
+      }
+    },
+    "method_definition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method_id",
+        "feature",
+        "target",
+        "selection",
+        "precision",
+        "limitations"
+      ],
+      "properties": {
+        "method_id": {
+          "const": "phase0.trend20_same_exact_contract.rev1"
+        },
+        "feature": {
+          "const": "log(settlement(t)/settlement(t-20 official days)) for same exact contract"
+        },
+        "target": {
+          "const": "log(settlement(t+6)/settlement(t+1)) for same exact contract"
+        },
+        "selection": {
+          "const": "eligible_curve_contract=True; maximum t open_interest per product; ties exact_contract ascending"
+        },
+        "precision": {
+          "const": "float64; published decimals rounded half-even to 12 decimal places; means use unrounded daily values"
+        },
+        "limitations": {
+          "const": "exploration; overlapping labels; no significance test; no Alpha or confirmation claim"
+        }
+      }
+    },
+    "environment_lock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "case_kind",
+        "runtime_lock",
+        "calculation_script_sha256",
+        "limitations"
+      ],
+      "properties": {
+        "case_kind": {
+          "const": "retrospective_trend20_structural_fixture"
+        },
+        "runtime_lock": {
+          "const": "docs/research-lab/phase0-validation/runtime-lock.json"
+        },
+        "calculation_script_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "limitations": {
+          "const": "Synthetic structural payload only; historical full detail remains external and unavailable."
+        }
+      }
+    },
+    "replay_instructions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "case_kind",
+        "input_manifest",
+        "steps",
+        "comparison",
+        "limitations"
+      ],
+      "properties": {
+        "case_kind": {
+          "const": "retrospective_trend20_structural_fixture"
+        },
+        "input_manifest": {
+          "const": "docs/research-lab/phase0-validation/input-manifest.json"
+        },
+        "steps": {
+          "const": "Verify fixed input hashes; calculate same-contract Trend20 and t+1..t+6 forward labels; compute daily Pearson IC; round published values half-even to 12 decimals."
+        },
+        "comparison": {
+          "const": "Compare structural fields only; unavailable historical full sample and daily payloads prevent complete replay."
+        },
+        "limitations": {
+          "const": "Not a prospective registration or native v2 execution."
+        }
+      }
+    },
+    "statistical_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method_id",
+        "research_stage",
+        "sample_count",
+        "date_count",
+        "mean_daily_pearson_ic",
+        "mean_top2_minus_bottom2_forward_log_return",
+        "precision",
+        "significance_test",
+        "label_overlap"
+      ],
+      "properties": {
+        "method_id": {
+          "const": "phase0.trend20_same_exact_contract.rev1"
+        },
+        "research_stage": {
+          "const": "exploration"
+        },
+        "sample_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "date_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "mean_daily_pearson_ic": {
+          "type": "string",
+          "pattern": "^(?:0|-?(?:1|0\\.[0-9]{0,11}[1-9]))$"
+        },
+        "mean_top2_minus_bottom2_forward_log_return": {
+          "type": "string",
+          "pattern": "^(?:0|-?(?:0\\.[0-9]{0,11}[1-9]|[1-9][0-9]*(?:\\.[0-9]{0,11}[1-9])?))$"
+        },
+        "precision": {
+          "const": "half_even_12_decimal_places_from_unrounded_daily_values"
+        },
+        "significance_test": {
+          "const": "not_performed"
+        },
+        "label_overlap": {
+          "const": true
+        }
+      }
+    },
+    "sample_feature_target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "case_kind",
+        "rows",
+        "fields",
+        "units",
+        "limitations"
+      ],
+      "properties": {
+        "case_kind": {
+          "const": "synthetic_structural_fixture_not_historical_full_detail"
+        },
+        "rows": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "official_day",
+              "product",
+              "exact_contract",
+              "feature_log_return",
+              "forward_log_return",
+              "split"
+            ],
+            "properties": {
+              "official_day": {
+                "type": "string",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+              },
+              "product": {
+                "type": "string"
+              },
+              "exact_contract": {
+                "type": "string"
+              },
+              "feature_log_return": {
+                "type": "string",
+                "pattern": "^(?:0|-?(?:0\\.[0-9]{0,11}[1-9]|[1-9][0-9]*(?:\\.[0-9]{0,11}[1-9])?))$"
+              },
+              "forward_log_return": {
+                "type": "string",
+                "pattern": "^(?:0|-?(?:0\\.[0-9]{0,11}[1-9]|[1-9][0-9]*(?:\\.[0-9]{0,11}[1-9])?))$"
+              },
+              "split": {
+                "const": "exploration_all"
+              }
+            }
+          }
+        },
+        "fields": {
+          "const": [
+            "official_day",
+            "product",
+            "exact_contract",
+            "feature_log_return",
+            "forward_log_return",
+            "split"
+          ]
+        },
+        "units": {
+          "const": {
+            "feature_log_return": "log_return",
+            "forward_log_return": "log_return"
+          }
+        },
+        "limitations": {
+          "const": "Synthetic rows exercise structure only; #540 full sample payload is externally referenced and unavailable."
+        }
+      }
+    },
+    "daily_ic_series": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "case_kind",
+        "metric",
+        "precision",
+        "rows",
+        "limitations"
+      ],
+      "properties": {
+        "case_kind": {
+          "const": "synthetic_structural_fixture_not_historical_full_detail"
+        },
+        "metric": {
+          "const": "daily_cross_sectional_pearson_ic"
+        },
+        "precision": {
+          "const": "half_even_12_decimal_places_from_unrounded_daily_values"
+        },
+        "rows": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "official_day",
+              "pearson_ic",
+              "sample_count",
+              "undefined_reason"
+            ],
+            "properties": {
+              "official_day": {
+                "type": "string",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+              },
+              "pearson_ic": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^(?:0|-?(?:1|0\\.[0-9]{0,11}[1-9]))$"
+              },
+              "sample_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "undefined_reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        "limitations": {
+          "const": "Synthetic rows exercise structure only; #540 full daily IC payload is externally referenced and unavailable."
+        }
+      }
+    }
+  }
+}

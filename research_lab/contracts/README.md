@@ -48,3 +48,11 @@
 不重跑研究或改变历史归档。安全读取只支持具备 `dir_fd/O_NOFOLLOW` 的本机 POSIX 环境；不据此承诺 Windows 消费入口。
 
 控制记录结构使用 `definitions/phase0-control.schema.json`：Task/Run/Evidence/Review 的本例封闭字段、类型、摘要、时间与枚举；Spec/Manifest 使用公共 Schema。当前跨对象入口只支持 data_quality/validation。删除 Review 必填字段后重新计算摘要也会被拒绝；不能用自洽 hash 代替评审记录完整性。此受限控制 profile 不代表其他研究类型已有完整公共对象 Schema。
+
+## Trend20 statistical_factor 受限 profile
+
+本轮仅登记 `phase0.trend20_same_exact_contract.*.rev1`：同合约 `t/t-20` 日结算价对数特征、同合约 `t+1..t+6` 前向对数标签、每日截面 Pearson IC 和 top2-minus-bottom2 对数收益；发布数值为 12 位 half-even，聚合保留未舍入日值。它固定为 `exploration`，显式保留标签重叠和未做显著性检验，拒绝 carry、20 日标签、HAC 或未知方法/版本/profile。
+
+#540 的 `factor-summary.json` 与输入摘要在仓内；其完整 `factor-samples.csv`、`factor-daily.csv` 仍为外置引用，当前不可读。因此测试中的 `sample_feature_target`、`daily_ic_series` 是合成结构 fixture，明确不是事前锁定的 v2 执行或 #540 完整证据包。统计 Manifest 必须传入已通过 `validate_spec` 的 Trend20 Spec：`validate_manifest(root, manifest, run, task=task, spec=spec)`。这只验证离线结构、引用与字段语义，完整历史明细缺失前不宣称可重放或完成 #524 的完整真实包验收。
+
+Trend20 structural fixture 的 Run 使用独立、封闭的 `trend20-control.schema.json`：只允许该 profile 的 exploration/non-holdout 标识、Spec 精确引用、方法与 feature/target 参数、产品池、时间窗与固定 snapshot，并要求科学指纹等于该计算清单摘要。它不能通过改名复用 data_quality Run。

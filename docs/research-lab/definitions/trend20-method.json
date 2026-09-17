@@ -1,0 +1,23 @@
+{
+  "trend20_feature": {
+    "id": "phase0.trend20_same_exact_contract.feature.rev1",
+    "revision": "rev.1",
+    "source_sha256": "8b08ceaa5e4d1b6b1f8b141834a83cb807d09be6cf7ff89a345e66ebec73fb50",
+    "kind": "feature",
+    "parameters": {
+      "lookback_official_days": 20
+    },
+    "definition": "log(settlement(t)/settlement(t-20 official days)) for same exact contract"
+  },
+  "trend20_target": {
+    "id": "phase0.trend20_same_exact_contract.forward5_log_return.rev1",
+    "revision": "rev.1",
+    "source_sha256": "8b08ceaa5e4d1b6b1f8b141834a83cb807d09be6cf7ff89a345e66ebec73fb50",
+    "kind": "target",
+    "parameters": {
+      "start_offset_official_days": 1,
+      "end_offset_official_days": 6
+    },
+    "definition": "log(settlement(t+6)/settlement(t+1)) for same exact contract"
+  }
+}

@@ -110,6 +110,121 @@
       "locator": "phase0-criteria.json",
       "file": "phase0-criteria.json",
       "pointer": []
+    },
+    {
+      "kind": "payload",
+      "name": "phase0.trend20.dataset_metadata",
+      "revision": "rev.1",
+      "content_hash": "14e44b67437c85478e3de234dac5c68adead3e091aa6fa79675b3d01ef9ce9b8",
+      "locator": "trend20-payload.schema.json#/$defs/dataset_metadata",
+      "file": "trend20-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "dataset_metadata"
+      ],
+      "role": "dataset_metadata"
+    },
+    {
+      "kind": "payload",
+      "name": "phase0.trend20.method_definition",
+      "revision": "rev.1",
+      "content_hash": "85b5c11be3c8cd9f34191321880875ea225d06da3c31b8f10cdd140135f10c7f",
+      "locator": "trend20-payload.schema.json#/$defs/method_definition",
+      "file": "trend20-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "method_definition"
+      ],
+      "role": "method_definition"
+    },
+    {
+      "kind": "payload",
+      "name": "phase0.trend20.environment_lock",
+      "revision": "rev.1",
+      "content_hash": "c04c629f8144f86814cc8e11216fd40547ea5e8fb7ede06a96e3fbe5dcf65203",
+      "locator": "trend20-payload.schema.json#/$defs/environment_lock",
+      "file": "trend20-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "environment_lock"
+      ],
+      "role": "environment_lock"
+    },
+    {
+      "kind": "payload",
+      "name": "phase0.trend20.replay_instructions",
+      "revision": "rev.1",
+      "content_hash": "3fe900f7b13bfa43856a309c10c086098b55ce0b02b24be2edf6f29bc9653a82",
+      "locator": "trend20-payload.schema.json#/$defs/replay_instructions",
+      "file": "trend20-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "replay_instructions"
+      ],
+      "role": "replay_instructions"
+    },
+    {
+      "kind": "payload",
+      "name": "phase0.trend20.statistical_summary",
+      "revision": "rev.1",
+      "content_hash": "998523991d05f59ae7b889df4b5c81263f6dd44af02ca8e4fb0d6ee634b4c75d",
+      "locator": "trend20-payload.schema.json#/$defs/statistical_summary",
+      "file": "trend20-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "statistical_summary"
+      ],
+      "role": "statistical_summary"
+    },
+    {
+      "kind": "payload",
+      "name": "phase0.trend20.sample_feature_target",
+      "revision": "rev.1",
+      "content_hash": "a1f1471f18cea498d4a42111d9dc418e15c1ad64d0a38ed42d2f51809390e80d",
+      "locator": "trend20-payload.schema.json#/$defs/sample_feature_target",
+      "file": "trend20-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "sample_feature_target"
+      ],
+      "role": "sample_feature_target"
+    },
+    {
+      "kind": "payload",
+      "name": "phase0.trend20.daily_ic_series",
+      "revision": "rev.1",
+      "content_hash": "7518b984a306b4732a558899a1ccf0ba349c095fab9308597f449ec69ab1e715",
+      "locator": "trend20-payload.schema.json#/$defs/daily_ic_series",
+      "file": "trend20-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "daily_ic_series"
+      ],
+      "role": "daily_ic_series"
+    },
+    {
+      "kind": "method",
+      "name": "phase0.trend20_same_exact_contract.feature.rev1",
+      "revision": "rev.1",
+      "content_hash": "8874f46b11ed25da11fe43b34d52370e301df2e40b844b82937bc42f053c8816",
+      "locator": "trend20-method.json#/trend20_feature",
+      "file": "trend20-method.json",
+      "pointer": [
+        "trend20_feature"
+      ],
+      "source_path": "research_lab/contracts/trend20_definition.py"
+    },
+    {
+      "kind": "method",
+      "name": "phase0.trend20_same_exact_contract.forward5_log_return.rev1",
+      "revision": "rev.1",
+      "content_hash": "0e715b6c522fe655c43d1842038e3898f7d9daee7d2f343946bfcf4ff8f1c885",
+      "locator": "trend20-method.json#/trend20_target",
+      "file": "trend20-method.json",
+      "pointer": [
+        "trend20_target"
+      ],
+      "source_path": "research_lab/contracts/trend20_definition.py"
     }
   ]
 }
