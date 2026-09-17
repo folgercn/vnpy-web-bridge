@@ -1,13 +1,226 @@
 {
   "$defs": {
     "experiment_run": {
-      "type": "object", "additionalProperties": false,
-      "required": ["schema_version","hash_profile","run_id","run_status","spec_id","spec_revision","spec_content_hash","trial_context","resolved_computation_manifest","scientific_fingerprint","timing","process_exit_code","run_content_hash"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "hash_profile",
+        "run_id",
+        "run_status",
+        "spec_id",
+        "spec_revision",
+        "spec_content_hash",
+        "trial_context",
+        "resolved_computation_manifest",
+        "scientific_fingerprint",
+        "timing",
+        "process_exit_code",
+        "run_content_hash"
+      ],
       "properties": {
-        "schema_version":{"const":"research_lab.run.v2"}, "hash_profile":{"const":"research-json-v1"}, "run_id":{"type":"string","minLength":1}, "run_status":{"const":"COMPLETED"}, "spec_id":{"type":"string","minLength":1}, "spec_revision":{"const":"rev.1"}, "spec_content_hash":{"type":"string","pattern":"^[a-f0-9]{64}$"}, "process_exit_code":{"const":0}, "run_content_hash":{"type":"string","pattern":"^[a-f0-9]{64}$"}, "scientific_fingerprint":{"type":"string","pattern":"^[a-f0-9]{64}$"},
-        "trial_context":{"type":"object","additionalProperties":false,"required":["research_stage","trial_kind","retry_of_run_id","holdout_usage_state"],"properties":{"research_stage":{"const":"exploration"},"trial_kind":{"type":"null"},"retry_of_run_id":{"type":"null"},"holdout_usage_state":{"const":"not_used_retrospective"}}},
-        "timing":{"type":"object","additionalProperties":false,"required":["started_at","completed_at","recorded_at"],"properties":{"started_at":{"type":"null"},"completed_at":{"type":"null"},"recorded_at":{"type":"string","format":"date-time"}}},
-        "resolved_computation_manifest":{"type":"object","additionalProperties":false,"required":["method_id","feature_parameters","target_parameters","universe","scientific_time","snapshot_sha256","status"],"properties":{"method_id":{"const":"phase0.trend20_same_exact_contract.rev1"},"feature_parameters":{"const":{"lookback_official_days":20}},"target_parameters":{"const":{"start_offset_official_days":1,"end_offset_official_days":6}},"universe":{"const":["ag","au","cu","rb","ru","sc"]},"scientific_time":{"const":{"start":"2023-01-03T00:00:00.000000Z","end":"2024-12-31T00:00:00.000000Z","warmup_from":"2022-09-01T00:00:00.000000Z"}},"snapshot_sha256":{"const":"f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351"},"status":{"const":"synthetic_structural_fixture_not_historical_execution"}}}
+        "schema_version": {
+          "const": "research_lab.run.v2"
+        },
+        "hash_profile": {
+          "const": "research-json-v1"
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "run_status": {
+          "const": "COMPLETED"
+        },
+        "spec_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "spec_revision": {
+          "const": "rev.1"
+        },
+        "spec_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "process_exit_code": {
+          "const": 0
+        },
+        "run_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "scientific_fingerprint": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "trial_context": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "research_stage",
+            "trial_kind",
+            "retry_of_run_id",
+            "holdout_usage_state"
+          ],
+          "properties": {
+            "research_stage": {
+              "const": "exploration"
+            },
+            "trial_kind": {
+              "type": "null"
+            },
+            "retry_of_run_id": {
+              "type": "null"
+            },
+            "holdout_usage_state": {
+              "const": "not_used_retrospective"
+            }
+          }
+        },
+        "timing": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "started_at",
+            "completed_at",
+            "recorded_at"
+          ],
+          "properties": {
+            "started_at": {
+              "type": "null"
+            },
+            "completed_at": {
+              "type": "null"
+            },
+            "recorded_at": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        },
+        "resolved_computation_manifest": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "method_id",
+            "feature_parameters",
+            "target_parameters",
+            "universe",
+            "scientific_time",
+            "snapshot_sha256",
+            "status"
+          ],
+          "properties": {
+            "method_id": {
+              "const": "phase0.trend20_same_exact_contract.rev1"
+            },
+            "feature_parameters": {
+              "const": {
+                "lookback_official_days": 20
+              }
+            },
+            "target_parameters": {
+              "const": {
+                "start_offset_official_days": 1,
+                "end_offset_official_days": 6
+              }
+            },
+            "universe": {
+              "const": [
+                "ag",
+                "au",
+                "cu",
+                "rb",
+                "ru",
+                "sc"
+              ]
+            },
+            "scientific_time": {
+              "const": {
+                "start": "2023-01-03T00:00:00.000000Z",
+                "end": "2024-12-31T00:00:00.000000Z",
+                "warmup_from": "2022-09-01T00:00:00.000000Z"
+              }
+            },
+            "snapshot_sha256": {
+              "const": "f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351"
+            },
+            "status": {
+              "const": "synthetic_structural_fixture_not_historical_execution"
+            }
+          }
+        }
+      }
+    },
+    "research_task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "hash_profile",
+        "task_id",
+        "revision",
+        "research_type",
+        "objective",
+        "data_requirements",
+        "task_content_hash"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "research_lab.task.v2"
+        },
+        "hash_profile": {
+          "const": "research-json-v1"
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "const": "rev.1"
+        },
+        "research_type": {
+          "const": "statistical_factor"
+        },
+        "objective": {
+          "type": "string",
+          "minLength": 1
+        },
+        "task_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "data_requirements": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "products",
+            "dev_dates",
+            "warmup_from"
+          ],
+          "properties": {
+            "products": {
+              "const": [
+                "ag",
+                "au",
+                "cu",
+                "rb",
+                "ru",
+                "sc"
+              ]
+            },
+            "dev_dates": {
+              "const": [
+                "2023-01-03",
+                "2024-12-31"
+              ]
+            },
+            "warmup_from": {
+              "const": "2022-09-01"
+            }
+          }
+        }
       }
     }
   }

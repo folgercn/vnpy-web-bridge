@@ -319,7 +319,8 @@ def validate_spec(spec, task, definitions=None):
     """Machine checks for bound methods. No execution, PIT or confirmation approval."""
     definitions = definitions or Definitions()
     schema_check(spec, parse(safe_read(ROOT, 'docs/schemas/research-experiment-spec-v2.schema.json')))
-    schema_check(task, parse(safe_read(DEFINITIONS, 'phase0-control.schema.json'))['$defs']['research_task'])
+    task_schema = 'trend20-control.schema.json' if spec['experiment_type'] == 'statistical_factor' else 'phase0-control.schema.json'
+    schema_check(task, parse(safe_read(DEFINITIONS, task_schema))['$defs']['research_task'])
     check_record(spec, 'experiment_spec')
     check_record(task, 'research_task')
     require((spec['task_id'], spec['task_revision'], spec['task_content_hash']) ==

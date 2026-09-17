@@ -424,7 +424,7 @@ def trend20_spec_task():
         "revision": "rev.1",
         "research_type": "statistical_factor",
         "objective": "Retrospective Trend20 structural contract only.",
-        "data_requirements": {"date_start": "2023-01-03", "date_end_exclusive": "2024-12-31", "fields": ["settlement", "open_interest", "exact_contract"], "products": ["ag", "au", "cu", "rb", "ru", "sc"]},
+        "data_requirements": {"products": ["ag", "au", "cu", "rb", "ru", "sc"], "dev_dates": ["2023-01-03", "2024-12-31"], "warmup_from": "2022-09-01"},
     }
     reseal(task, "task")
     spec = {
