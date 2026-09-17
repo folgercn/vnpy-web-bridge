@@ -7,6 +7,7 @@ import json
 import os
 import re
 import stat
+import weakref
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -398,6 +399,37 @@ def validate_statistical_payloads(entries, contents):
     require(samples['fields'] == ['official_day', 'product', 'exact_contract', 'feature_log_return', 'forward_log_return', 'split'], 'sample fields')
     require(samples['units'] == {'feature_log_return': 'log_return', 'forward_log_return': 'log_return'}, 'sample units')
 
+class _VerifiedPayloads(dict):
+    """Payload mapping returned by ``validate_manifest`` for one manifest."""
+
+    def __init__(self, contents, manifest, entries):
+        super().__init__(contents)
+        self._manifest_ref = (
+            manifest['manifest_id'], manifest['revision'], manifest['manifest_content_hash'],
+        )
+        self._entry_refs = {
+            entry['artifact_id']: (entry['content_sha256'], entry['byte_length'])
+            for entry in entries if entry['availability'] == 'present'
+        }
+        self._content_digests = {
+            artifact_id: digest(content) for artifact_id, content in contents.items()
+        }
+
+
+_VERIFIED_PAYLOAD_REFS = []
+
+
+def _remember_verified_payloads(payloads):
+    _VERIFIED_PAYLOAD_REFS[:] = [ref for ref in _VERIFIED_PAYLOAD_REFS if ref() is not None]
+    _VERIFIED_PAYLOAD_REFS.append(weakref.ref(payloads))
+    return payloads
+
+
+def _is_verified_payloads(payloads):
+    _VERIFIED_PAYLOAD_REFS[:] = [ref for ref in _VERIFIED_PAYLOAD_REFS if ref() is not None]
+    return any(ref() is payloads for ref in _VERIFIED_PAYLOAD_REFS)
+
+
 def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=None):
     definitions = definitions or Definitions()
     schema_check(manifest, parse(safe_read(ROOT, 'docs/schemas/research-artifact-manifest-v2.schema.json')))
@@ -491,10 +523,10 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
             require(item['exact_contract'].startswith(item['product']) and len(item['exact_contract']) > len(item['product']), 'exact contract product')
             by_account.setdefault(item['account_id'], []).append(item['fill_sequence'])
         require(all(values == sorted(values) and len(values) == len(set(values)) for values in by_account.values()), 'fill order')
-    return contents
+    return _remember_verified_payloads(_VerifiedPayloads(contents, manifest, entries))
 
 
-def validate_handoff(request, objects, response=None):
+def validate_handoff(request, objects, response=None, *, payloads=None, root=None):
     """Fail-closed offline review consumption for three registered profiles only."""
     schema = parse(safe_read(ROOT, 'docs/research-lab/agent-contract/agent-handoff.schema.json'))
     schema_check(request, schema)
@@ -568,24 +600,91 @@ def validate_handoff(request, objects, response=None):
     require(present_roles == (required_roles if run['run_status'] == 'COMPLETED' else {e['role'] for e in manifest['entries'] if e['availability'] == 'present'}), 'handoff exact role references')
     scope = 'research_assessment' if run['run_status'] == 'COMPLETED' else 'failure_diagnosis'
     require(request['review_scope'] == scope and request['expected_outputs'] == [{'object_type': 'review', 'schema_version': 'research_lab.review.v2'}], 'review scope/output')
+
+    def resolve_payload(role):
+        entry = next((e for e in manifest['entries'] if e['role'] == role), None)
+        require(entry is not None and entry['availability'] == 'present', 'missing required payload: ' + role)
+        _, definition = definitions.resolve('payload', entry['content_schema_ref'])
+        if payloads is not None:
+            require(isinstance(payloads, _VerifiedPayloads) and _is_verified_payloads(payloads),
+                    'verified payloads required')
+            require(payloads._manifest_ref == (
+                manifest['manifest_id'], manifest['revision'], manifest['manifest_content_hash'],
+            ), 'verified payload manifest mismatch')
+            artifact_id = entry['artifact_id']
+            require(payloads._entry_refs.get(artifact_id) == (
+                entry['content_sha256'], entry['byte_length'],
+            ), 'verified payload reference mismatch: ' + role)
+            require(artifact_id in payloads and artifact_id in payloads._content_digests,
+                    'missing verified payload content for ' + role)
+            content = payloads[artifact_id]
+            require(payloads._content_digests[artifact_id] == digest(content),
+                    'verified payload content mutated: ' + role)
+            schema_check(content, definition)
+            return content
+        if root is not None:
+            require('relative_path' in entry, 'missing relative_path for ' + role)
+            raw = safe_read(root, entry['relative_path'])
+            require(len(raw) == entry['byte_length'] and sha(raw) == entry['content_sha256'], 'payload bytes mismatch: ' + role)
+            content = parse(raw)
+            schema_check(content, definition)
+            return content
+        raise ValueError('verified payloads or root required for ' + role)
+
     if profile[0] == 'statistical_factor':
+        summary = resolve_payload('statistical_summary')
         metrics = evidence['typed_metrics']
         require(metrics['daily_ic']['unit'] == 'correlation' and metrics['top_bottom_spread']['unit'] == 'log_return', 'Trend20 evidence units')
+        require(metrics['daily_ic']['value'] == summary['mean_daily_pearson_ic'], 'Trend20 daily IC value mismatch')
+        require(metrics['daily_ic']['precision'] == summary['precision'], 'Trend20 daily IC precision mismatch')
+        require(metrics['top_bottom_spread']['value'] == summary['mean_top2_minus_bottom2_forward_log_return'], 'Trend20 top-bottom spread value mismatch')
+        require(metrics['top_bottom_spread']['precision'] == summary['precision'], 'Trend20 top-bottom spread precision mismatch')
+        require(metrics['metrics_precision'] == summary['precision'], 'Trend20 metrics precision mismatch')
     elif profile[0] == 'trading_backtest':
+        summary = resolve_payload('backtest_summary')
         rows = evidence['typed_metrics']['account_metrics']
         expected = {f'{p}:{s}:{x}' for p in ('CANDIDATE', 'PAIRED') for s in ('PRIMARY_2S', 'STRESS_5S') for x in ('ag', 'au', 'cu', 'rb', 'ru', 'sc')}
         require(len(rows) == 24 and {r['account_id'] for r in rows} == expected and all(r['account_id'] == ':'.join((r['path'], r['scenario'], r['product'])) for r in rows), 'Issue481 evidence account metrics')
+        summary_rows = summary.get('account_metrics', [])
+        summary_by_id = {r['account_id']: r for r in summary_rows}
+        require(len(summary_by_id) == 24 and set(summary_by_id) == expected, 'Issue481 summary account metrics')
+        for r in rows:
+            acc_id = r['account_id']
+            s_row = summary_by_id[acc_id]
+            for field in ('net_pnl_cny', 'fees_cny', 'trade_count', 'path', 'scenario', 'product'):
+                require(r[field] == s_row[field], f'Issue481 {field} mismatch: {acc_id}')
+
     if response is not None:
         schema_check(response, schema)
         require(response['message_kind'] == 'response' and response['in_reply_to'] == request['handoff_id'], 'response correlation')
         require(response['context_refs'] == request['context_refs'] and response['operation'] == request['operation'], 'response context')
         require((response['sender_role'], response['recipient_role']) == (request['recipient_role'], request['sender_role']), 'response direction')
-        require(response['status'] == 'completed' and response['review_scope'] == request['review_scope'], 'response status/scope')
-        require(len(response['output_refs']) == 1 and response['output_refs'][0]['object_type'] == 'review', 'review output')
-        review = objects.get('review')
-        require(review is not None and response['output_refs'][0] == check_record(review, 'review'), 'output reference')
-        require(review['criteria_ref'] == request['criteria_ref'], 'Review criteria mismatch')
-        require((review['evidence_id'], review['evidence_content_hash']) == (evidence['evidence_id'], evidence['evidence_content_hash']), 'Review Evidence reference')
-        if profile[0] == 'data_quality':
-            require(time_value(review['reviewed_at']) >= time_value(run['timing']['completed_at']), 'Review time order')
+        require(response['review_scope'] == request['review_scope'], 'response review scope')
+        if response['status'] == 'completed':
+            require(len(response.get('output_refs', [])) == 1 and response['output_refs'][0]['object_type'] == 'review', 'review output')
+            review = objects.get('review')
+            require(review is not None and response['output_refs'][0] == check_record(review, 'review'), 'output reference')
+            require(review['criteria_ref'] == request['criteria_ref'], 'Review criteria mismatch')
+            require((review['evidence_id'], review['evidence_content_hash']) == (evidence['evidence_id'], evidence['evidence_content_hash']), 'Review Evidence reference')
+            if profile[0] == 'data_quality':
+                require(time_value(review['reviewed_at']) >= time_value(run['timing']['completed_at']), 'Review time order')
+        else:
+            require(response['status'] in ('blocked', 'rejected', 'incomplete', 'unsupported'), 'response status')
+            require('output_refs' not in response, 'noncompleted output reference')
+            problem = response.get('problem')
+            require(isinstance(problem, dict), 'problem definition')
+            expected_codes = {
+                'blocked': {'dependency_unavailable', 'execution_outcome_unknown'},
+                'rejected': {'invalid_input'},
+                'incomplete': {'missing_delivery'},
+                'unsupported': {'capability_unsupported'},
+            }
+            require(problem.get('code') in expected_codes[response['status']], 'problem status/code')
+            require(bool(problem.get('reason')), 'problem reason')
+            require(isinstance(problem.get('affected_items'), list) and len(problem['affected_items']) >= 1, 'problem affected items')
+            require(bool(problem.get('resume_condition')), 'problem resume condition')
+            require(problem.get('execution_outcome') in ('not_started', 'known', 'unknown'), 'problem execution outcome')
+            require((problem['execution_outcome'] == 'unknown') == (
+                response['status'] == 'blocked' and problem['code'] == 'execution_outcome_unknown'
+            ), 'problem unknown outcome/status')
     return True

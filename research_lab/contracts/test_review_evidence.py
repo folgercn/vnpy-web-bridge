@@ -153,14 +153,15 @@ def objects_for(tmp_path, profile):
 @pytest.mark.parametrize("profile", ["trend20", "issue481"])
 def test_registered_review_evidence_chain(tmp_path, profile):
     request, records, response = objects_for(tmp_path, profile)
-    v2.validate_manifest(
+    payloads = v2.validate_manifest(
         tmp_path,
         records["artifact_manifest"],
         records["experiment_run"],
         task=records["research_task"],
         spec=records["experiment_spec"],
     )
-    assert v2.validate_handoff(request, records, response)
+    assert v2.validate_handoff(request, records, response, payloads=payloads)
+    assert v2.validate_handoff(request, records, response, root=tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -221,7 +222,7 @@ def test_registered_review_evidence_rejects_rehashed_mutations(tmp_path, mutatio
     else:
         response["status"] = "incomplete"
     with pytest.raises((ValueError, ValidationError)):
-        v2.validate_handoff(request, records, response)
+        v2.validate_handoff(request, records, response, root=tmp_path)
 
 
 def test_issue481_account_metrics_are_not_combined(tmp_path):
@@ -234,7 +235,8 @@ def test_issue481_account_metrics_are_not_combined(tmp_path):
     )
     reseal_review_response(records, response)
     with pytest.raises((ValueError, ValidationError), match="account"):
-        v2.validate_handoff(request, records, response)
+        v2.validate_handoff(request, records, response, root=tmp_path)
+
 
 @pytest.mark.parametrize("value", ["2", "-1.1", "0.1234567890123"])
 def test_trend20_ic_range_and_precision_rehashed_rejected(tmp_path, value):
@@ -247,4 +249,244 @@ def test_trend20_ic_range_and_precision_rehashed_rejected(tmp_path, value):
     )
     reseal_review_response(records, response)
     with pytest.raises((ValueError, ValidationError)):
+        v2.validate_handoff(request, records, response, root=tmp_path)
+
+
+def test_trend20_evidence_metrics_summary_mismatch_rehashed_rejected(tmp_path):
+    request, records, response = objects_for(tmp_path, "trend20")
+    payloads = v2.validate_manifest(
+        tmp_path,
+        records["artifact_manifest"],
+        records["experiment_run"],
+        task=records["research_task"],
+        spec=records["experiment_spec"],
+    )
+    evidence = records["result_evidence"]
+    evidence["typed_metrics"]["daily_ic"]["value"] = "0.9"
+    seal(evidence, "evidence")
+    request["context_refs"]["result_evidence"] = v2.check_record(evidence, "result_evidence")
+    reseal_review_response(records, response)
+    with pytest.raises(ValueError, match="Trend20 daily IC value mismatch"):
+        v2.validate_handoff(request, records, response, payloads=payloads)
+    with pytest.raises(ValueError, match="Trend20 daily IC value mismatch"):
+        v2.validate_handoff(request, records, response, root=tmp_path)
+
+    # Now restore daily_ic but mutate top_bottom_spread
+    request, records, response = objects_for(tmp_path, "trend20")
+    evidence = records["result_evidence"]
+    evidence["typed_metrics"]["top_bottom_spread"]["value"] = "100"
+    seal(evidence, "evidence")
+    request["context_refs"]["result_evidence"] = v2.check_record(evidence, "result_evidence")
+    reseal_review_response(records, response)
+    with pytest.raises(ValueError, match="Trend20 top-bottom spread value mismatch"):
+        v2.validate_handoff(request, records, response, payloads=payloads)
+    with pytest.raises(ValueError, match="Trend20 top-bottom spread value mismatch"):
+        v2.validate_handoff(request, records, response, root=tmp_path)
+
+
+@pytest.mark.parametrize("field,value", [("net_pnl_cny", "999999999"), ("fees_cny", "12345"), ("trade_count", 123456)])
+def test_issue481_evidence_metrics_summary_mismatch_rehashed_rejected(tmp_path, field, value):
+    request, records, response = objects_for(tmp_path, "issue481")
+    payloads = v2.validate_manifest(
+        tmp_path,
+        records["artifact_manifest"],
+        records["experiment_run"],
+        task=records["research_task"],
+        spec=records["experiment_spec"],
+    )
+    evidence = records["result_evidence"]
+    evidence["typed_metrics"]["account_metrics"][0][field] = value
+    seal(evidence, "evidence")
+    request["context_refs"]["result_evidence"] = v2.check_record(evidence, "result_evidence")
+    reseal_review_response(records, response)
+    with pytest.raises(ValueError, match=f"Issue481 {field} mismatch"):
+        v2.validate_handoff(request, records, response, payloads=payloads)
+    with pytest.raises(ValueError, match=f"Issue481 {field} mismatch"):
+        v2.validate_handoff(request, records, response, root=tmp_path)
+
+
+@pytest.mark.parametrize("profile", ["trend20", "issue481"])
+def test_registered_review_evidence_requires_payloads_or_root(tmp_path, profile):
+    request, records, response = objects_for(tmp_path, profile)
+    with pytest.raises(ValueError, match="verified payloads or root required"):
         v2.validate_handoff(request, records, response)
+
+
+@pytest.mark.parametrize("profile", ["trend20", "issue481"])
+@pytest.mark.parametrize(
+    "status,code,outcome",
+    [
+        ("blocked", "dependency_unavailable", "known"),
+        ("rejected", "invalid_input", "not_started"),
+        ("incomplete", "missing_delivery", "known"),
+        ("unsupported", "capability_unsupported", "not_started"),
+        ("blocked", "execution_outcome_unknown", "unknown"),
+    ],
+)
+def test_noncompleted_review_handoff_response(tmp_path, profile, status, code, outcome):
+    request, records, _ = objects_for(tmp_path, profile)
+    response = {
+        "schema_version": "research_lab.agent_handoff.v2",
+        "handoff_id": profile + "-synthetic-noncompleted-response",
+        "message_kind": "response",
+        "operation": "review_evidence",
+        "sender_role": "critic",
+        "recipient_role": "execution",
+        "context_refs": request["context_refs"],
+        "in_reply_to": request["handoff_id"],
+        "status": status,
+        "review_scope": request["review_scope"],
+        "problem": {
+            "code": code,
+            "reason": f"Synthetic test {status} condition.",
+            "affected_items": ["dataset_metadata"],
+            "resume_condition": "Provide required dependency or valid specification.",
+            "execution_outcome": outcome,
+        },
+    }
+    records_without_review = {k: v for k, v in records.items() if k != "review"}
+    assert v2.validate_handoff(request, records_without_review, response, root=tmp_path)
+
+
+def test_noncompleted_review_handoff_rejects_output_refs(tmp_path):
+    request, records, _ = objects_for(tmp_path, "trend20")
+    response = {
+        "schema_version": "research_lab.agent_handoff.v2",
+        "handoff_id": "trend20-synthetic-illegal-output-response",
+        "message_kind": "response",
+        "operation": "review_evidence",
+        "sender_role": "critic",
+        "recipient_role": "execution",
+        "context_refs": request["context_refs"],
+        "in_reply_to": request["handoff_id"],
+        "status": "blocked",
+        "review_scope": request["review_scope"],
+        "output_refs": [v2.check_record(records["review"], "review")],
+        "problem": {
+            "code": "dependency_unavailable",
+            "reason": "Synthetic blocked reason.",
+            "affected_items": ["dataset_metadata"],
+            "resume_condition": "Condition.",
+            "execution_outcome": "known",
+        },
+    }
+    with pytest.raises((ValueError, ValidationError)):
+        v2.validate_handoff(request, records, response, root=tmp_path)
+
+
+def test_noncompleted_review_handoff_rejects_scope_mismatch(tmp_path):
+    request, records, _ = objects_for(tmp_path, "trend20")
+    response = {
+        "schema_version": "research_lab.agent_handoff.v2",
+        "handoff_id": "trend20-synthetic-scope-mismatch-response",
+        "message_kind": "response",
+        "operation": "review_evidence",
+        "sender_role": "critic",
+        "recipient_role": "execution",
+        "context_refs": request["context_refs"],
+        "in_reply_to": request["handoff_id"],
+        "status": "blocked",
+        "review_scope": "failure_diagnosis",  # request has research_assessment
+        "problem": {
+            "code": "dependency_unavailable",
+            "reason": "Synthetic blocked reason.",
+            "affected_items": ["dataset_metadata"],
+            "resume_condition": "Condition.",
+            "execution_outcome": "known",
+        },
+    }
+    records_without_review = {k: v for k, v in records.items() if k != "review"}
+    with pytest.raises((ValueError, ValidationError), match="review scope"):
+        v2.validate_handoff(request, records_without_review, response, root=tmp_path)
+
+
+def test_arbitrary_unverified_payload_mapping_rejected(tmp_path):
+    request, records, response = objects_for(tmp_path, "trend20")
+    # A plain mapping cannot claim provenance from validate_manifest.
+    fake_payloads = {
+        "statistical_summary": {
+            "method_id": "phase0.trend20_same_exact_contract.rev1",
+            "research_stage": "exploration",
+            "sample_count": 9999,
+            "date_count": 999,
+            "mean_daily_pearson_ic": "-0.012667903046",
+            "mean_top2_minus_bottom2_forward_log_return": "-0.001355555878",
+            "precision": "half_even_12_decimal_places_from_unrounded_daily_values",
+            "significance_test": "not_performed",
+            "label_overlap": True,
+        }
+    }
+    with pytest.raises(ValueError, match="verified payloads required"):
+        v2.validate_handoff(request, records, response, payloads=fake_payloads)
+
+
+def test_verified_payloads_mutation_rejected(tmp_path):
+    request, records, response = objects_for(tmp_path, "trend20")
+    payloads = v2.validate_manifest(
+        tmp_path,
+        records["artifact_manifest"],
+        records["experiment_run"],
+        task=records["research_task"],
+        spec=records["experiment_spec"],
+    )
+    summary_id = next(
+        entry["artifact_id"]
+        for entry in records["artifact_manifest"]["entries"]
+        if entry["role"] == "statistical_summary"
+    )
+    payloads[summary_id]["mean_daily_pearson_ic"] = "0.9"
+    with pytest.raises(ValueError, match="verified payload content mutated"):
+        v2.validate_handoff(request, records, response, payloads=payloads)
+
+
+def test_constructed_verified_payloads_rejected(tmp_path):
+    request, records, response = objects_for(tmp_path, "trend20")
+    verified = v2.validate_manifest(
+        tmp_path,
+        records["artifact_manifest"],
+        records["experiment_run"],
+        task=records["research_task"],
+        spec=records["experiment_spec"],
+    )
+    forged = v2._VerifiedPayloads(
+        dict(verified), records["artifact_manifest"], records["artifact_manifest"]["entries"]
+    )
+    with pytest.raises(ValueError, match="verified payloads required"):
+        v2.validate_handoff(request, records, response, payloads=forged)
+
+
+@pytest.mark.parametrize(
+    "status,code,outcome",
+    [
+        ("rejected", "dependency_unavailable", "known"),
+        ("unsupported", "missing_delivery", "not_started"),
+        ("incomplete", "execution_outcome_unknown", "unknown"),
+        ("blocked", "execution_outcome_unknown", "known"),
+    ],
+)
+def test_noncompleted_review_handoff_rejects_status_problem_mismatch(
+    tmp_path, status, code, outcome
+):
+    request, records, _ = objects_for(tmp_path, "trend20")
+    response = {
+        "schema_version": "research_lab.agent_handoff.v2",
+        "handoff_id": "trend20-synthetic-status-problem-mismatch-response",
+        "message_kind": "response",
+        "operation": "review_evidence",
+        "sender_role": "critic",
+        "recipient_role": "execution",
+        "context_refs": request["context_refs"],
+        "in_reply_to": request["handoff_id"],
+        "status": status,
+        "review_scope": request["review_scope"],
+        "problem": {
+            "code": code,
+            "reason": "Synthetic invalid status/problem pairing.",
+            "affected_items": ["dataset_metadata"],
+            "resume_condition": "Provide a valid response status and problem code.",
+            "execution_outcome": outcome,
+        },
+    }
+    records_without_review = {key: value for key, value in records.items() if key != "review"}
+    with pytest.raises((ValueError, ValidationError)):
+        v2.validate_handoff(request, records_without_review, response, root=tmp_path)

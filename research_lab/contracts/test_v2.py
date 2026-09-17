@@ -962,3 +962,35 @@ def test_failed_dq_review_diagnostics_cannot_bypass_exact_refs(bundle, mutation)
     response["output_refs"] = [v2.check_record(review, "review")]
     with pytest.raises((ValueError, ValidationError)):
         v2.validate_handoff(request, obj, response)
+
+
+def test_data_quality_archived_noncompleted_response(bundle):
+    obj = records(bundle)
+    request = load(bundle, "review-request")
+    response = {
+        "schema_version": "research_lab.agent_handoff.v2",
+        "handoff_id": "handoff-response-blocked",
+        "message_kind": "response",
+        "in_reply_to": request["handoff_id"],
+        "operation": request["operation"],
+        "sender_role": request["recipient_role"],
+        "recipient_role": request["sender_role"],
+        "context_refs": request["context_refs"],
+        "review_scope": request["review_scope"],
+        "status": "blocked",
+        "problem": {
+            "code": "dependency_unavailable",
+            "reason": "external review criteria dependency unavailable",
+            "affected_items": ["dataset_metadata"],
+            "resume_condition": "restore criteria artifact",
+            "execution_outcome": "known",
+        },
+    }
+    obj_without_review = {k: v for k, v in obj.items() if k != "review"}
+    assert v2.validate_handoff(request, obj_without_review, response)
+
+    # Illegal output_refs on noncompleted response must be rejected
+    invalid_response = copy.deepcopy(response)
+    invalid_response["output_refs"] = [v2.check_record(obj["review"], "review")]
+    with pytest.raises((ValueError, ValidationError)):
+        v2.validate_handoff(request, obj_without_review, invalid_response)
