@@ -387,3 +387,22 @@ def test_issue481_rehashed_exact_contract_rejected(tmp_path, contract, accepted)
     else:
         with pytest.raises((ValueError, ValidationError)):
             v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)
+
+
+@pytest.mark.parametrize("mutation", ["rb２４０１", "2024-99-99", "2023-02-29"])
+def test_issue481_rehashed_ascii_contract_and_calendar_rejected(tmp_path, mutation):
+    task, spec, run, manifest = fixture(tmp_path)
+    role = "trade_blotter" if mutation.startswith("rb") else "equity_curve"
+    entry = next(e for e in manifest["entries"] if e["role"] == role)
+    path = tmp_path / entry["relative_path"]
+    content = v2.parse(path.read_bytes())
+    if role == "trade_blotter":
+        content["fills"][0]["exact_contract"] = mutation
+    else:
+        content["points"][0]["official_day"] = mutation
+    raw = v2.canonical(content).encode()
+    path.write_bytes(raw)
+    entry.update(byte_length=len(raw), content_sha256=v2.sha(raw))
+    seal(manifest, "manifest")
+    with pytest.raises((ValueError, ValidationError)):
+        v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)

@@ -295,7 +295,7 @@
       "kind": "payload",
       "name": "phase0.issue481.trade_blotter",
       "revision": "rev.1",
-      "content_hash": "7137e977378ca2cd0796ec1dab60938b5ea74ee429ec618bcf97f520bb82a7b1",
+      "content_hash": "11b3f2254bcd2d96bcc862711c12f8eedbec9b8f9d89aaef4bf069f8cbb1f922",
       "locator": "issue481-backtest-payload.schema.json#/$defs/trade_blotter",
       "file": "issue481-backtest-payload.schema.json",
       "pointer": [

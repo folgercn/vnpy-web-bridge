@@ -228,7 +228,7 @@
               },
               "exact_contract": {
                 "type": "string",
-                "pattern": "^(ag|au|cu|rb|ru|sc)\\d{4}$"
+                "pattern": "^(ag|au|cu|rb|ru|sc)[0-9]{4}$"
               },
               "fill_sequence": {
                 "type": "integer",

@@ -467,6 +467,7 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
         point_times = {}
         for point in curve['points']:
             require(point['account'] == point['product'] and point['account_id'] == ':'.join((point['path'], point['scenario'], point['product'])), 'equity account identity')
+            time_value(point['official_day'] + 'T00:00:00.000000Z')
             point_times.setdefault(point['account_id'], []).append(point['official_day'])
         require(all(times == sorted(times) and len(times) == len(set(times)) for times in point_times.values()), 'equity point order')
         by_account = {}
