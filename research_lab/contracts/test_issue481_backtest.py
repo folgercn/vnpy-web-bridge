@@ -327,3 +327,63 @@ def test_issue481_missing_equity_account_rejected(tmp_path):
     seal(manifest, "manifest")
     with pytest.raises(ValueError, match="missing equity account"):
         v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)
+
+
+@pytest.mark.parametrize(
+    "field, value", [("path", "PAIRED"), ("scenario", "STRESS_5S"), ("product", "rb")]
+)
+def test_issue481_rehashed_equity_identity_rejected(tmp_path, field, value):
+    task, spec, run, manifest = fixture(tmp_path)
+    entry = next(e for e in manifest["entries"] if e["role"] == "equity_curve")
+    path = tmp_path / entry["relative_path"]
+    content = v2.parse(path.read_bytes())
+    content["points"][0][field] = value
+    raw = v2.canonical(content).encode()
+    path.write_bytes(raw)
+    entry.update(byte_length=len(raw), content_sha256=v2.sha(raw))
+    seal(manifest, "manifest")
+    with pytest.raises(ValueError, match="equity account identity"):
+        v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)
+
+
+def test_issue481_rehashed_duplicate_equity_point_rejected(tmp_path):
+    task, spec, run, manifest = fixture(tmp_path)
+    entry = next(e for e in manifest["entries"] if e["role"] == "equity_curve")
+    path = tmp_path / entry["relative_path"]
+    content = v2.parse(path.read_bytes())
+    content["points"].append(content["points"][0])
+    raw = v2.canonical(content).encode()
+    path.write_bytes(raw)
+    entry.update(byte_length=len(raw), content_sha256=v2.sha(raw))
+    seal(manifest, "manifest")
+    with pytest.raises(ValueError, match="equity point order"):
+        v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)
+
+
+@pytest.mark.parametrize(
+    "contract, accepted",
+    [("rb2401", True), ("ag2501", True), ("rbarbitrary", False), ("ag2401", False)],
+)
+def test_issue481_rehashed_exact_contract_rejected(tmp_path, contract, accepted):
+    task, spec, run, manifest = fixture(tmp_path)
+    entry = next(e for e in manifest["entries"] if e["role"] == "trade_blotter")
+    path = tmp_path / entry["relative_path"]
+    content = v2.parse(path.read_bytes())
+    content["fills"][0]["exact_contract"] = contract
+    raw = v2.canonical(content).encode()
+    path.write_bytes(raw)
+    entry.update(byte_length=len(raw), content_sha256=v2.sha(raw))
+    seal(manifest, "manifest")
+    if accepted:
+        if contract.startswith("ag"):
+            content["fills"][0].update(
+                account="ag", product="ag", account_id="CANDIDATE:PRIMARY_2S:ag"
+            )
+            raw = v2.canonical(content).encode()
+            path.write_bytes(raw)
+            entry.update(byte_length=len(raw), content_sha256=v2.sha(raw))
+            seal(manifest, "manifest")
+        v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)
+    else:
+        with pytest.raises((ValueError, ValidationError)):
+            v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)
