@@ -150,10 +150,12 @@ also binds response correlation, reversed direction, context, review scope, and
 Review criteria/evidence references. For Trend20 and Issue481, `validate_handoff`
 consumes the unmodified verified mapping returned by `validate_manifest`, or
 re-reads exact bytes through a read-only `root`, to cross-check Evidence metrics against `statistical_summary` and
-`backtest_summary` by exact metric mappings and account IDs. For non-completed
+`backtest_summary` by exact metric mappings and account IDs. A request without
+a response and a `completed` response require those summary bytes. For non-completed
 responses (`blocked`, `rejected`, `incomplete`, `unsupported`), it validates
-problem code/fields, correlation, and review scope without treating them as
-completed Review deliveries. Unknown profile, stage, criteria, Run status, method
+problem code/fields, correlation, and review scope before any success-only
+summary read, so it can report that a summary is currently unreadable without
+treating that report as a completed Review delivery. Unknown profile, stage, criteria, Run status, method
 shape, missing role, or cross-profile reference remains rejected. This is an
 offline contract check only and remains **DRAFT_UNFROZEN**.
 

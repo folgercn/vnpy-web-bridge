@@ -348,6 +348,63 @@ def test_noncompleted_review_handoff_response(tmp_path, profile, status, code, o
     assert v2.validate_handoff(request, records_without_review, response, root=tmp_path)
 
 
+@pytest.mark.parametrize(
+    "profile,status,code,role",
+    [
+        ("trend20", "blocked", "dependency_unavailable", "statistical_summary"),
+        ("trend20", "incomplete", "missing_delivery", "statistical_summary"),
+        ("issue481", "blocked", "dependency_unavailable", "backtest_summary"),
+        ("issue481", "incomplete", "missing_delivery", "backtest_summary"),
+    ],
+)
+def test_noncompleted_response_can_report_unreadable_summary(
+    tmp_path, profile, status, code, role
+):
+    request, records, _ = objects_for(tmp_path, profile)
+    entry = next(
+        item for item in records["artifact_manifest"]["entries"] if item["role"] == role
+    )
+    (tmp_path / entry["relative_path"]).unlink()
+    response = {
+        "schema_version": "research_lab.agent_handoff.v2",
+        "handoff_id": profile + "-synthetic-unreadable-summary-response",
+        "message_kind": "response",
+        "operation": "review_evidence",
+        "sender_role": "critic",
+        "recipient_role": "execution",
+        "context_refs": request["context_refs"],
+        "in_reply_to": request["handoff_id"],
+        "status": status,
+        "review_scope": request["review_scope"],
+        "problem": {
+            "code": code,
+            "reason": f"Synthetic {role} bytes are unavailable to the receiving consumer.",
+            "affected_items": [role],
+            "resume_condition": "Provide readable summary payload bytes.",
+            "execution_outcome": "known",
+        },
+    }
+    records_without_review = {key: value for key, value in records.items() if key != "review"}
+    assert v2.validate_handoff(request, records_without_review, response, root=tmp_path)
+
+
+@pytest.mark.parametrize(
+    "profile,role",
+    [
+        ("trend20", "statistical_summary"),
+        ("issue481", "backtest_summary"),
+    ],
+)
+def test_completed_response_requires_readable_summary(tmp_path, profile, role):
+    request, records, response = objects_for(tmp_path, profile)
+    entry = next(
+        item for item in records["artifact_manifest"]["entries"] if item["role"] == role
+    )
+    (tmp_path / entry["relative_path"]).unlink()
+    with pytest.raises(FileNotFoundError):
+        v2.validate_handoff(request, records, response, root=tmp_path)
+
+
 def test_noncompleted_review_handoff_rejects_output_refs(tmp_path):
     request, records, _ = objects_for(tmp_path, "trend20")
     response = {

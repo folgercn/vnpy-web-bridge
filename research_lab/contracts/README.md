@@ -8,7 +8,7 @@
 - `Definitions().method(implementation_ref)`：核对登记的不可变方法定义及当前源码原始 SHA；不动态 import 或执行引用字符串。
 - `validate_spec(spec, task)`：公共 Spec Schema、记录摘要、Task 引用、固定快照绑定、日期范围、唯一参数/类型/单位、默认值与精确指标定义。返回生效参数，不授予执行资格。
 - `validate_manifest(bundle_root, manifest, run)`：公共 Manifest Schema、Run 绑定、角色完整性、唯一条目/路径、内容定义、原始字节长度/摘要、载荷 Schema。返回已检查的受控载荷映射，不证明科学结论正确。
-- `validate_handoff(request, objects, response=None, *, payloads=None, root=None)`：当前支持 `review_evidence` 的实际上下文、Run/Spec/Manifest/Evidence 引用、完整产物引用和实际 Review 与请求判据对应。统计/回测 profile 必须传入未经复制或修改的 `validate_manifest` 返回值作为 `payloads`，或传入 `root` 重新核对所需载荷原始字节；普通映射明确拒绝。其他操作明确拒绝，不能把结构合格等同跨对象验证完成。
+- `validate_handoff(request, objects, response=None, *, payloads=None, root=None)`：当前支持 `review_evidence` 的实际上下文、Run/Spec/Manifest/Evidence 引用、完整产物引用和实际 Review 与请求判据对应。统计/回测的请求或 `completed` 响应必须传入未经复制或修改的 `validate_manifest` 返回值作为 `payloads`，或传入 `root` 重新核对所需摘要载荷原始字节；普通映射明确拒绝。合法非完成响应只校验控制记录、引用和问题字段，允许报告该摘要当前不可读，不能冒充 Review 交付。其他操作明确拒绝，不能把结构合格等同跨对象验证完成。
 
 调用方必须分别完成适用检查。单独调用 Handoff 检查不替代文件内容核验，单独验证 Manifest 不替代实际输入、方法与科学指纹复算。
 

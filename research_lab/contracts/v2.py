@@ -601,6 +601,33 @@ def validate_handoff(request, objects, response=None, *, payloads=None, root=Non
     scope = 'research_assessment' if run['run_status'] == 'COMPLETED' else 'failure_diagnosis'
     require(request['review_scope'] == scope and request['expected_outputs'] == [{'object_type': 'review', 'schema_version': 'research_lab.review.v2'}], 'review scope/output')
 
+    if response is not None:
+        schema_check(response, schema)
+        require(response['message_kind'] == 'response' and response['in_reply_to'] == request['handoff_id'], 'response correlation')
+        require(response['context_refs'] == request['context_refs'] and response['operation'] == request['operation'], 'response context')
+        require((response['sender_role'], response['recipient_role']) == (request['recipient_role'], request['sender_role']), 'response direction')
+        require(response['review_scope'] == request['review_scope'], 'response review scope')
+        if response['status'] != 'completed':
+            require(response['status'] in ('blocked', 'rejected', 'incomplete', 'unsupported'), 'response status')
+            require('output_refs' not in response, 'noncompleted output reference')
+            problem = response.get('problem')
+            require(isinstance(problem, dict), 'problem definition')
+            expected_codes = {
+                'blocked': {'dependency_unavailable', 'execution_outcome_unknown'},
+                'rejected': {'invalid_input'},
+                'incomplete': {'missing_delivery'},
+                'unsupported': {'capability_unsupported'},
+            }
+            require(problem.get('code') in expected_codes[response['status']], 'problem status/code')
+            require(bool(problem.get('reason')), 'problem reason')
+            require(isinstance(problem.get('affected_items'), list) and len(problem['affected_items']) >= 1, 'problem affected items')
+            require(bool(problem.get('resume_condition')), 'problem resume condition')
+            require(problem.get('execution_outcome') in ('not_started', 'known', 'unknown'), 'problem execution outcome')
+            require((problem['execution_outcome'] == 'unknown') == (
+                response['status'] == 'blocked' and problem['code'] == 'execution_outcome_unknown'
+            ), 'problem unknown outcome/status')
+            return True
+
     def resolve_payload(role):
         entry = next((e for e in manifest['entries'] if e['role'] == role), None)
         require(entry is not None and entry['availability'] == 'present', 'missing required payload: ' + role)
@@ -655,36 +682,11 @@ def validate_handoff(request, objects, response=None, *, payloads=None, root=Non
                 require(r[field] == s_row[field], f'Issue481 {field} mismatch: {acc_id}')
 
     if response is not None:
-        schema_check(response, schema)
-        require(response['message_kind'] == 'response' and response['in_reply_to'] == request['handoff_id'], 'response correlation')
-        require(response['context_refs'] == request['context_refs'] and response['operation'] == request['operation'], 'response context')
-        require((response['sender_role'], response['recipient_role']) == (request['recipient_role'], request['sender_role']), 'response direction')
-        require(response['review_scope'] == request['review_scope'], 'response review scope')
-        if response['status'] == 'completed':
-            require(len(response.get('output_refs', [])) == 1 and response['output_refs'][0]['object_type'] == 'review', 'review output')
-            review = objects.get('review')
-            require(review is not None and response['output_refs'][0] == check_record(review, 'review'), 'output reference')
-            require(review['criteria_ref'] == request['criteria_ref'], 'Review criteria mismatch')
-            require((review['evidence_id'], review['evidence_content_hash']) == (evidence['evidence_id'], evidence['evidence_content_hash']), 'Review Evidence reference')
-            if profile[0] == 'data_quality':
-                require(time_value(review['reviewed_at']) >= time_value(run['timing']['completed_at']), 'Review time order')
-        else:
-            require(response['status'] in ('blocked', 'rejected', 'incomplete', 'unsupported'), 'response status')
-            require('output_refs' not in response, 'noncompleted output reference')
-            problem = response.get('problem')
-            require(isinstance(problem, dict), 'problem definition')
-            expected_codes = {
-                'blocked': {'dependency_unavailable', 'execution_outcome_unknown'},
-                'rejected': {'invalid_input'},
-                'incomplete': {'missing_delivery'},
-                'unsupported': {'capability_unsupported'},
-            }
-            require(problem.get('code') in expected_codes[response['status']], 'problem status/code')
-            require(bool(problem.get('reason')), 'problem reason')
-            require(isinstance(problem.get('affected_items'), list) and len(problem['affected_items']) >= 1, 'problem affected items')
-            require(bool(problem.get('resume_condition')), 'problem resume condition')
-            require(problem.get('execution_outcome') in ('not_started', 'known', 'unknown'), 'problem execution outcome')
-            require((problem['execution_outcome'] == 'unknown') == (
-                response['status'] == 'blocked' and problem['code'] == 'execution_outcome_unknown'
-            ), 'problem unknown outcome/status')
+        require(len(response.get('output_refs', [])) == 1 and response['output_refs'][0]['object_type'] == 'review', 'review output')
+        review = objects.get('review')
+        require(review is not None and response['output_refs'][0] == check_record(review, 'review'), 'output reference')
+        require(review['criteria_ref'] == request['criteria_ref'], 'Review criteria mismatch')
+        require((review['evidence_id'], review['evidence_content_hash']) == (evidence['evidence_id'], evidence['evidence_content_hash']), 'Review Evidence reference')
+        if profile[0] == 'data_quality':
+            require(time_value(review['reviewed_at']) >= time_value(run['timing']['completed_at']), 'Review time order')
     return True
