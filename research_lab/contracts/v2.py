@@ -319,6 +319,7 @@ def validate_spec(spec, task, definitions=None):
     """Machine checks for bound methods. No execution, PIT or confirmation approval."""
     definitions = definitions or Definitions()
     schema_check(spec, parse(safe_read(ROOT, 'docs/schemas/research-experiment-spec-v2.schema.json')))
+    schema_check(task, parse(safe_read(DEFINITIONS, 'phase0-control.schema.json'))['$defs']['research_task'])
     check_record(spec, 'experiment_spec')
     check_record(task, 'research_task')
     require((spec['task_id'], spec['task_revision'], spec['task_content_hash']) ==
@@ -392,7 +393,9 @@ def validate_statistical_payloads(entries, contents):
 def validate_manifest(root, manifest, run, definitions=None, *, spec=None):
     definitions = definitions or Definitions()
     schema_check(manifest, parse(safe_read(ROOT, 'docs/schemas/research-artifact-manifest-v2.schema.json')))
-    schema_check(run, parse(safe_read(DEFINITIONS, 'phase0-control.schema.json'))['$defs']['experiment_run'])
+    run_schema = ('trend20-control.schema.json' if manifest['experiment_type'] == 'statistical_factor' else 'phase0-control.schema.json')
+    run_definition = 'experiment_run'
+    schema_check(run, parse(safe_read(DEFINITIONS, run_schema))['$defs'][run_definition])
     check_record(manifest, 'artifact_manifest')
     check_record(run, 'experiment_run')
     require(run['run_status'] in ('COMPLETED', 'FAILED'), 'nonterminal run')
@@ -424,6 +427,8 @@ def validate_manifest(root, manifest, run, definitions=None, *, spec=None):
         contents[e['artifact_id']] = content
     if manifest['experiment_type'] == 'statistical_factor':
         require(spec is not None and spec['experiment_type'] == 'statistical_factor', 'statistical manifest requires Spec')
+        require((run['spec_id'], run['spec_revision'], run['spec_content_hash']) == (spec['spec_id'], spec['revision'], spec['spec_content_hash']), 'Trend20 Run Spec reference')
+        require(run['scientific_fingerprint'] == digest(run['resolved_computation_manifest']), 'Trend20 scientific fingerprint')
         validate_statistical_payloads(entries, contents)
     return contents
 
