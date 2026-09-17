@@ -391,7 +391,7 @@ def validate_statistical_payloads(entries, contents):
     require(samples['fields'] == ['official_day', 'product', 'exact_contract', 'feature_log_return', 'forward_log_return', 'split'], 'sample fields')
     require(samples['units'] == {'feature_log_return': 'log_return', 'forward_log_return': 'log_return'}, 'sample units')
 
-def validate_manifest(root, manifest, run, definitions=None, *, spec=None):
+def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=None):
     definitions = definitions or Definitions()
     schema_check(manifest, parse(safe_read(ROOT, 'docs/schemas/research-artifact-manifest-v2.schema.json')))
     run_schema = ('trend20-control.schema.json' if manifest['experiment_type'] == 'statistical_factor' else 'phase0-control.schema.json')
@@ -427,7 +427,8 @@ def validate_manifest(root, manifest, run, definitions=None, *, spec=None):
         schema_check(content, definition)
         contents[e['artifact_id']] = content
     if manifest['experiment_type'] == 'statistical_factor':
-        require(spec is not None and spec['experiment_type'] == 'statistical_factor', 'statistical manifest requires Spec')
+        require(spec is not None and task is not None and spec['experiment_type'] == 'statistical_factor', 'statistical manifest requires Task and Spec')
+        validate_spec(spec, task, definitions)
         require((run['spec_id'], run['spec_revision'], run['spec_content_hash']) == (spec['spec_id'], spec['revision'], spec['spec_content_hash']), 'Trend20 Run Spec reference')
         require(run['scientific_fingerprint'] == digest(run['resolved_computation_manifest']), 'Trend20 scientific fingerprint')
         validate_statistical_payloads(entries, contents)

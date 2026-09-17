@@ -501,7 +501,7 @@ def trend20_spec_task():
 
 
 def trend20_bundle(tmp_path):
-    _, spec = trend20_spec_task()
+    task, spec = trend20_spec_task()
     computation = {"method_id": "phase0.trend20_same_exact_contract.rev1", "feature_parameters": {"lookback_official_days": 20}, "target_parameters": {"start_offset_official_days": 1, "end_offset_official_days": 6}, "universe": ["ag", "au", "cu", "rb", "ru", "sc"], "scientific_time": {"start": "2023-01-03T00:00:00.000000Z", "end": "2024-12-31T00:00:00.000000Z", "warmup_from": "2022-09-01T00:00:00.000000Z"}, "snapshot_sha256": "f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351", "status": "synthetic_structural_fixture_not_historical_execution"}
     run = {"schema_version": "research_lab.run.v2", "hash_profile": "research-json-v1", "run_id": "run-phase0-trend20-structural", "run_status": "COMPLETED", "spec_id": spec["spec_id"], "spec_revision": spec["revision"], "spec_content_hash": spec["spec_content_hash"], "trial_context": {"research_stage": "exploration", "trial_kind": None, "retry_of_run_id": None, "holdout_usage_state": "not_used_retrospective"}, "resolved_computation_manifest": computation, "scientific_fingerprint": v2.digest(computation), "timing": {"started_at": None, "completed_at": None, "recorded_at": "2026-09-17T00:00:00.000000Z"}, "process_exit_code": 0}
     reseal(run, "run")
@@ -633,14 +633,14 @@ def trend20_bundle(tmp_path):
             }
         )
     reseal(manifest, "manifest")
-    return spec, run, manifest
+    return task, spec, run, manifest
 
 
 def test_trend20_structural_statistical_delivery(tmp_path):
     task, spec = trend20_spec_task()
     assert v2.validate_spec(spec, task)["feature"]["id"].endswith("feature.rev1")
-    spec, run, manifest = trend20_bundle(tmp_path)
-    assert set(v2.validate_manifest(tmp_path, manifest, run, spec=spec)) == {
+    task, spec, run, manifest = trend20_bundle(tmp_path)
+    assert set(v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)) == {
         e["artifact_id"] for e in manifest["entries"]
     }
 
@@ -651,7 +651,7 @@ def test_trend20_structural_statistical_delivery(tmp_path):
 )
 def test_trend20_statistical_rejects(tmp_path, mutation):
     task, spec = trend20_spec_task()
-    spec, run, manifest = trend20_bundle(tmp_path)
+    task, spec, run, manifest = trend20_bundle(tmp_path)
     if mutation == "metric":
         spec["metric_specifications"][0]["calculation_definition"] = "wrong"
         reseal(spec, "spec")
@@ -690,12 +690,12 @@ def test_trend20_statistical_rejects(tmp_path, mutation):
         entry.update(byte_length=len(raw), content_sha256=v2.sha(raw))
     reseal(manifest, "manifest")
     with pytest.raises((ValueError, ValidationError, OSError)):
-        v2.validate_manifest(tmp_path, manifest, run, spec=spec)
+        v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)
 
 
 @pytest.mark.parametrize("field", ["research_stage", "method_id", "feature_parameters", "target_parameters", "universe", "scientific_time", "snapshot_sha256"])
 def test_trend20_rehashed_run_binding_rejected(tmp_path, field):
-    spec, run, manifest = trend20_bundle(tmp_path)
+    task, spec, run, manifest = trend20_bundle(tmp_path)
     if field == "research_stage":
         run["trial_context"][field] = "validation"
     elif field == "method_id":
@@ -715,11 +715,11 @@ def test_trend20_rehashed_run_binding_rejected(tmp_path, field):
     manifest["run_content_hash"] = run["run_content_hash"]
     reseal(manifest, "manifest")
     with pytest.raises((ValueError, ValidationError)):
-        v2.validate_manifest(tmp_path, manifest, run, spec=spec)
+        v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)
 
 
 def test_trend20_rehashed_dq_run_rejected(tmp_path):
-    spec, run, manifest = trend20_bundle(tmp_path)
+    task, spec, run, manifest = trend20_bundle(tmp_path)
     run["resolved_computation_manifest"]["status"] = "synthetic_structural_fixture_not_historical_execution"
     run["trial_context"]["holdout_usage_state"] = "not_used_retrospective"
     run["resolved_computation_manifest"]["method_id"] = "candidate.phase0.source_order.rev1"
@@ -728,7 +728,7 @@ def test_trend20_rehashed_dq_run_rejected(tmp_path):
     manifest["run_content_hash"] = run["run_content_hash"]
     reseal(manifest, "manifest")
     with pytest.raises((ValueError, ValidationError)):
-        v2.validate_manifest(tmp_path, manifest, run, spec=spec)
+        v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)
 
 
 def test_trend20_malformed_task_rejected():
@@ -737,3 +737,21 @@ def test_trend20_malformed_task_rejected():
     reseal(task, "task")
     with pytest.raises(ValidationError):
         v2.validate_spec(spec, task)
+
+
+@pytest.mark.parametrize("mutation", ["carry", "parameter", "metric"])
+def test_trend20_forged_spec_run_manifest_rejected(tmp_path, mutation):
+    task, spec, run, manifest = trend20_bundle(tmp_path)
+    if mutation == "carry":
+        spec["feature_specification"]["implementation_ref"] = "candidate.carry.rev1"
+    elif mutation == "parameter":
+        spec["feature_specification"]["parameters"][0]["value"] = 19
+    else:
+        spec["metric_specifications"][0]["calculation_definition"] = "forged definition"
+    reseal(spec, "spec")
+    run["spec_content_hash"] = spec["spec_content_hash"]
+    reseal(run, "run")
+    manifest["run_content_hash"] = run["run_content_hash"]
+    reseal(manifest, "manifest")
+    with pytest.raises(ValueError):
+        v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)
