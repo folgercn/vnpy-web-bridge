@@ -167,7 +167,7 @@
       "kind": "payload",
       "name": "phase0.trend20.statistical_summary",
       "revision": "rev.1",
-      "content_hash": "516f6d8a565f737073904a231cd277a8ffdefc2fba560a9c46cd85e20789a501",
+      "content_hash": "95300f95ca4f873d4e7c8e36b378a61ae66d417a574ca9e21c7df3cf3eca6e5f",
       "locator": "trend20-payload.schema.json#/$defs/statistical_summary",
       "file": "trend20-payload.schema.json",
       "pointer": [
@@ -180,7 +180,7 @@
       "kind": "payload",
       "name": "phase0.trend20.sample_feature_target",
       "revision": "rev.1",
-      "content_hash": "ec959bb7061d915c823bbc7feff1b3866ae463f3be9e117346378b34bbf68884",
+      "content_hash": "d070a5896c7a3b34f80fbebae2448e7343df99a673d763896bf88ec31baa0133",
       "locator": "trend20-payload.schema.json#/$defs/sample_feature_target",
       "file": "trend20-payload.schema.json",
       "pointer": [
@@ -193,7 +193,7 @@
       "kind": "payload",
       "name": "phase0.trend20.daily_ic_series",
       "revision": "rev.1",
-      "content_hash": "f3fa62493d816c013bbdc03defe87d82ce9dca63803794574f9e456c5e266f35",
+      "content_hash": "7518b984a306b4732a558899a1ccf0ba349c095fab9308597f449ec69ab1e715",
       "locator": "trend20-payload.schema.json#/$defs/daily_ic_series",
       "file": "trend20-payload.schema.json",
       "pointer": [

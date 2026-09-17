@@ -755,3 +755,86 @@ def test_trend20_forged_spec_run_manifest_rejected(tmp_path, mutation):
     reseal(manifest, "manifest")
     with pytest.raises(ValueError):
         v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)
+
+@pytest.mark.parametrize("mutation", ["universe", "snapshot", "time_range"])
+def test_trend20_rehashed_spec_dataset_binding_rejected(tmp_path, mutation):
+    task, spec, run, manifest = trend20_bundle(tmp_path)
+    requirements = spec["dataset_requirements"]
+    if mutation == "universe":
+        requirements["universe"] = ["rb"]
+    elif mutation == "snapshot":
+        requirements["snapshot_sha256"] = "0" * 64
+    else:
+        requirements["time_range"]["end"] = "2024-12-30T00:00:00.000000Z"
+    reseal(spec, "spec")
+    run["spec_content_hash"] = spec["spec_content_hash"]
+    reseal(run, "run")
+    manifest["run_content_hash"] = run["run_content_hash"]
+    reseal(manifest, "manifest")
+    with pytest.raises(ValueError):
+        v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)
+
+
+def test_trend20_rehashed_payload_snapshot_rejected(tmp_path):
+    task, spec, run, manifest = trend20_bundle(tmp_path)
+    entry = next(e for e in manifest["entries"] if e["role"] == "dataset_metadata")
+    path = tmp_path / entry["relative_path"]
+    content = v2.parse(path.read_bytes())
+    content["snapshot_sha256"] = "0" * 64
+    raw = v2.canonical(content).encode()
+    path.write_bytes(raw)
+    entry.update(byte_length=len(raw), content_sha256=v2.sha(raw))
+    reseal(manifest, "manifest")
+    with pytest.raises(ValueError):
+        v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)
+
+
+@pytest.mark.parametrize("value, accepted", [
+    ("0", True), ("1", True), ("-1", True), ("0.1", True), ("-0.1", True),
+    ("0.123456789012", True), ("-0", False), ("0.10", False),
+    ("0.1234567890123", False), ("1.000000000000", False), ("1.1", False),
+])
+def test_trend20_ic_decimal_contract(value, accepted):
+    definition = v2.Definitions().resolve('payload', {
+        'name': 'phase0.trend20.daily_ic_series', 'revision': 'rev.1',
+        'content_hash': next(e['content_hash'] for e in v2.Definitions().entries if e['name'] == 'phase0.trend20.daily_ic_series'),
+        'locator': 'trend20-payload.schema.json#/$defs/daily_ic_series'})[1]
+    content = {"case_kind": "synthetic_structural_fixture_not_historical_full_detail", "metric": "daily_cross_sectional_pearson_ic", "precision": "half_even_12_decimal_places_from_unrounded_daily_values", "rows": [{"official_day": "2023-01-03", "pearson_ic": value, "sample_count": 6, "undefined_reason": None}], "limitations": "Synthetic rows exercise structure only; #540 full daily IC payload is externally referenced and unavailable."}
+    if accepted:
+        v2.schema_check(content, definition)
+    else:
+        with pytest.raises(ValidationError):
+            v2.schema_check(content, definition)
+
+
+def test_trend20_sample_return_is_not_ic_bounded():
+    definition = v2.Definitions().resolve('payload', {
+        'name': 'phase0.trend20.sample_feature_target', 'revision': 'rev.1',
+        'content_hash': next(e['content_hash'] for e in v2.Definitions().entries if e['name'] == 'phase0.trend20.sample_feature_target'),
+        'locator': 'trend20-payload.schema.json#/$defs/sample_feature_target'})[1]
+    content = {"case_kind": "synthetic_structural_fixture_not_historical_full_detail", "rows": [{"official_day": "2023-01-03", "product": "rb", "exact_contract": "rb2305", "feature_log_return": "2", "forward_log_return": "-2", "split": "exploration_all"}], "fields": ["official_day", "product", "exact_contract", "feature_log_return", "forward_log_return", "split"], "units": {"feature_log_return": "log_return", "forward_log_return": "log_return"}, "limitations": "Synthetic rows exercise structure only; #540 full sample payload is externally referenced and unavailable."}
+    v2.schema_check(content, definition)
+
+
+def payload_ref(name):
+    entry = next(e for e in v2.Definitions().entries if e["kind"] == "payload" and e["name"] == name)
+    return {key: entry[key] for key in ("name", "revision", "content_hash", "locator")}
+
+
+def test_trend20_rehashed_dq_common_definition_rejected(tmp_path):
+    task, spec, run, manifest = trend20_bundle(tmp_path)
+    entry = next(e for e in manifest["entries"] if e["role"] == "method_definition")
+    entry["content_schema_ref"] = payload_ref("phase0.method_definition")
+    reseal(manifest, "manifest")
+    with pytest.raises(ValueError, match="profile payload definition mismatch"):
+        v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)
+
+
+def test_data_quality_rehashed_trend20_common_definition_rejected(bundle):
+    obj = records(bundle)
+    manifest = obj["artifact_manifest"]
+    entry = next(e for e in manifest["entries"] if e["role"] == "method_definition")
+    entry["content_schema_ref"] = payload_ref("phase0.trend20.method_definition")
+    reseal(manifest, "manifest")
+    with pytest.raises(ValueError, match="profile payload definition mismatch"):
+        v2.validate_manifest(bundle, manifest, obj["experiment_run"])

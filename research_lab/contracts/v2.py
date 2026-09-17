@@ -366,6 +366,9 @@ def validate_trend20_spec(spec, definitions):
     require(feature.get('parameters') == [{'name': 'lookback_official_days', 'value_type': 'integer', 'value': 20, 'unit': 'official_day'}], 'feature parameters')
     require(target['horizon_trading_days'] == 6 and target['return_interval'] == 't+1_to_t+6_same_exact_contract' and target['target_type'] == 'forward_log_return', 'target definition')
     require(spec['split_and_leakage_control'] == {'method': 'retrospective_exploration_no_split', 'train_window_days': 1, 'test_window_days': 1, 'step_size_days': 1, 'leakage_mitigation': {'purging_rule': 'overlapping_labels_retained_and_disclosed', 'embargo_days': 0}}, 'statistical split definition')
+    req = spec['dataset_requirements']
+    require(req['universe'] == ['ag', 'au', 'cu', 'rb', 'ru', 'sc'] and req['snapshot_sha256'] == 'f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351', 'Trend20 dataset binding')
+    require(req['time_range'] == {'start': '2023-01-03T00:00:00.000000Z', 'end': '2024-12-31T00:00:00.000000Z'}, 'Trend20 time range')
     feature_method, target_method = definitions.method(feature['implementation_ref']), definitions.method(target['implementation_ref'])
     require(feature_method['parameters'] == {'lookback_official_days': 20} and target_method['parameters'] == {'start_offset_official_days': 1, 'end_offset_official_days': 6}, 'registered Trend20 parameters')
     expected_metrics = {
@@ -413,6 +416,8 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
     for e in entries:
         entry, definition = definitions.resolve('payload', e['content_schema_ref'])
         require(entry['role'] == e['role'], 'schema role mismatch')
+        expected_name = ('phase0.trend20.' if manifest['experiment_type'] == 'statistical_factor' else 'phase0.') + e['role']
+        require(entry['name'] == expected_name, 'profile payload definition mismatch')
         # Registered rev.1 definitions specify one complete file, no implicit shards.
         require(e['role'] not in roles, 'unsupported/duplicate shard')
         roles.add(e['role'])
@@ -431,6 +436,8 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
         validate_spec(spec, task, definitions)
         require((run['spec_id'], run['spec_revision'], run['spec_content_hash']) == (spec['spec_id'], spec['revision'], spec['spec_content_hash']), 'Trend20 Run Spec reference')
         require(run['scientific_fingerprint'] == digest(run['resolved_computation_manifest']), 'Trend20 scientific fingerprint')
+        metadata = next(contents[e['artifact_id']] for e in entries if e['role'] == 'dataset_metadata')
+        require(metadata['snapshot_sha256'] == spec['dataset_requirements']['snapshot_sha256'], 'Trend20 payload snapshot')
         validate_statistical_payloads(entries, contents)
     return contents
 
