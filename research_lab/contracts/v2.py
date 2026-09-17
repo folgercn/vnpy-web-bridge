@@ -559,6 +559,9 @@ def validate_handoff(request, objects, response=None):
     required_roles = COMMON | TYPED[manifest['experiment_type']]
     if run['run_status'] == 'FAILED':
         required_roles |= {'failure_diagnostics'}
+    if profile[0] == 'data_quality' and run['run_status'] == 'FAILED':
+        diagnostics = [entry for entry in manifest['entries'] if entry['role'] == 'failure_diagnostics']
+        require(len(diagnostics) == 1 and diagnostics[0]['availability'] == 'present', 'failure diagnostics delivery')
     requested_roles = set(request['artifact_requirements']['required_roles'])
     present_roles = {ref['role'] for ref in present}
     require(requested_roles == required_roles and required_roles <= {e['role'] for e in manifest['entries']}, 'handoff required roles')

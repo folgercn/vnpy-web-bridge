@@ -150,3 +150,7 @@ also binds response correlation, reversed direction, context, review scope, and
 Review criteria/evidence references. Unknown profile, stage, criteria, Run
 status, method shape, missing role, or cross-profile reference remains rejected.
 This is an offline contract check only and remains **DRAFT_UNFROZEN**.
+
+`validate_handoff` validates only the cross-object consumption graph. Call
+`validate_manifest` first to verify manifest bytes and payload schemas; a valid
+handoff never substitutes for that payload admission.

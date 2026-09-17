@@ -31,6 +31,15 @@ def present(manifest):
     ]
 
 
+def reseal_review_response(records, response):
+    review = records["review"]
+    evidence = records["result_evidence"]
+    review["evidence_id"] = evidence["evidence_id"]
+    review["evidence_content_hash"] = evidence["evidence_content_hash"]
+    seal(review, "review")
+    response["output_refs"] = [v2.check_record(review, "review")]
+
+
 def objects_for(tmp_path, profile):
     if profile == "trend20":
         task, spec, run, manifest = trend20_bundle(tmp_path)
@@ -144,6 +153,13 @@ def objects_for(tmp_path, profile):
 @pytest.mark.parametrize("profile", ["trend20", "issue481"])
 def test_registered_review_evidence_chain(tmp_path, profile):
     request, records, response = objects_for(tmp_path, profile)
+    v2.validate_manifest(
+        tmp_path,
+        records["artifact_manifest"],
+        records["experiment_run"],
+        task=records["research_task"],
+        spec=records["experiment_spec"],
+    )
     assert v2.validate_handoff(request, records, response)
 
 
@@ -162,10 +178,12 @@ def test_registered_review_evidence_rejects_rehashed_mutations(tmp_path, mutatio
         records["result_evidence"]["typed_metrics"]["daily_ic"]["unit"] = "log_return"
         seal(records["result_evidence"], "evidence")
         request["context_refs"]["result_evidence"] = v2.check_record(records["result_evidence"], "result_evidence")
+        reseal_review_response(records, response)
     elif mutation == "profile":
         records["result_evidence"]["typed_metrics"]["profile"] = "other"
         seal(records["result_evidence"], "evidence")
         request["context_refs"]["result_evidence"] = v2.check_record(records["result_evidence"], "result_evidence")
+        reseal_review_response(records, response)
     elif mutation == "artifact":
         request["artifact_requirements"]["exact_refs"].pop()
     elif mutation == "roles":
@@ -193,6 +211,7 @@ def test_registered_review_evidence_rejects_rehashed_mutations(tmp_path, mutatio
             evidence, "result_evidence"
         )
         request["artifact_requirements"]["exact_refs"] = evidence["supporting_artifacts"]
+        reseal_review_response(records, response)
     elif mutation == "run":
         records["experiment_run"]["run_id"] = "wrong"
         seal(records["experiment_run"], "run")
@@ -213,6 +232,7 @@ def test_issue481_account_metrics_are_not_combined(tmp_path):
     request["context_refs"]["result_evidence"] = v2.check_record(
         records["result_evidence"], "result_evidence"
     )
+    reseal_review_response(records, response)
     with pytest.raises((ValueError, ValidationError), match="account"):
         v2.validate_handoff(request, records, response)
 
@@ -225,9 +245,6 @@ def test_trend20_ic_range_and_precision_rehashed_rejected(tmp_path, value):
     request["context_refs"]["result_evidence"] = v2.check_record(
         evidence, "result_evidence"
     )
-    review = records["review"]
-    review["evidence_content_hash"] = evidence["evidence_content_hash"]
-    seal(review, "review")
-    response["output_refs"] = [v2.check_record(review, "review")]
+    reseal_review_response(records, response)
     with pytest.raises((ValueError, ValidationError)):
         v2.validate_handoff(request, records, response)

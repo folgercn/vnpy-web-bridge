@@ -866,3 +866,99 @@ def test_trend20_return_decimal_precision_through_manifest(tmp_path, role, field
         else:
             with pytest.raises(ValidationError):
                 v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)
+
+
+def failed_dq_review_chain(bundle):
+    obj = records(bundle)
+    run, manifest = obj["experiment_run"], obj["artifact_manifest"]
+    run["run_status"] = "FAILED"
+    run["process_exit_code"] = 1
+    reseal(run, "run")
+    manifest["run_content_hash"] = run["run_content_hash"]
+    template = copy.deepcopy(manifest["entries"][0])
+    for entry in manifest["entries"]:
+        if entry["role"] in ("quality_summary", "quality_anomalies"):
+            for name in ("relative_path", "media_type", "byte_length", "content_sha256", "producer"):
+                entry.pop(name)
+            entry.update(availability="unavailable", coverage="none", unavailable_reason="execution_interrupted")
+    definition = next(entry for entry in v2.Definitions().entries if entry.get("role") == "failure_diagnostics")
+    raw = v2.canonical({"error_type": "ValueError", "message": "synthetic failure", "stage": "quality_scan"}).encode()
+    (bundle / "failure.json").write_bytes(raw)
+    template.update(
+        artifact_id="failure",
+        role="failure_diagnostics",
+        relative_path="failure.json",
+        content_schema_ref={key: definition[key] for key in ("name", "revision", "content_hash", "locator")},
+        content_sha256=v2.sha(raw),
+        byte_length=len(raw),
+    )
+    manifest["entries"].append(template)
+    reseal(manifest, "manifest")
+    evidence = obj["result_evidence"]
+    evidence.update(
+        run_content_hash=run["run_content_hash"],
+        run_status_snapshot="FAILED",
+        execution_status="FAILED",
+        manifest_content_hash=manifest["manifest_content_hash"],
+    )
+    evidence["supporting_artifacts"] = [
+        {
+            "manifest_id": manifest["manifest_id"],
+            "manifest_revision": manifest["revision"],
+            "manifest_content_hash": manifest["manifest_content_hash"],
+            "artifact_id": entry["artifact_id"],
+            "role": entry["role"],
+            "content_sha256": entry["content_sha256"],
+        }
+        for entry in manifest["entries"]
+        if entry["availability"] == "present"
+    ]
+    reseal(evidence, "evidence")
+    request = load(bundle, "review-request")
+    request["context_refs"] = {
+        kind: v2.check_record(value, kind)
+        for kind, value in obj.items()
+        if kind != "review"
+    }
+    request["artifact_requirements"]["required_roles"] = sorted(v2.COMMON | v2.TYPED["data_quality"] | {"failure_diagnostics"})
+    request["artifact_requirements"]["exact_refs"] = evidence["supporting_artifacts"]
+    request["review_scope"] = "failure_diagnosis"
+    review = obj["review"]
+    review["evidence_id"] = evidence["evidence_id"]
+    review["evidence_content_hash"] = evidence["evidence_content_hash"]
+    reseal(review, "review")
+    response = load(bundle, "review-response")
+    response.update(context_refs=request["context_refs"], review_scope="failure_diagnosis", status="completed", output_refs=[v2.check_record(review, "review")])
+    return obj, request, response
+
+
+def test_failed_dq_review_requires_present_diagnostics(bundle):
+    obj, request, response = failed_dq_review_chain(bundle)
+    assert v2.validate_handoff(request, obj, response)
+
+
+@pytest.mark.parametrize("mutation", ["unavailable", "missing_ref"])
+def test_failed_dq_review_diagnostics_cannot_bypass_exact_refs(bundle, mutation):
+    obj, request, response = failed_dq_review_chain(bundle)
+    manifest, evidence = obj["artifact_manifest"], obj["result_evidence"]
+    if mutation == "unavailable":
+        diagnostic = next(entry for entry in manifest["entries"] if entry["role"] == "failure_diagnostics")
+        for field in ("relative_path", "media_type", "byte_length", "content_sha256", "producer"):
+            diagnostic.pop(field)
+        diagnostic.update(availability="unavailable", coverage="none", unavailable_reason="execution_interrupted")
+        reseal(manifest, "manifest")
+        evidence["manifest_content_hash"] = manifest["manifest_content_hash"]
+        for ref in evidence["supporting_artifacts"]:
+            ref["manifest_content_hash"] = manifest["manifest_content_hash"]
+    else:
+        evidence["supporting_artifacts"] = [ref for ref in evidence["supporting_artifacts"] if ref["role"] != "failure_diagnostics"]
+    reseal(evidence, "evidence")
+    request["context_refs"]["artifact_manifest"] = v2.check_record(manifest, "artifact_manifest")
+    request["context_refs"]["result_evidence"] = v2.check_record(evidence, "result_evidence")
+    request["artifact_requirements"]["exact_refs"] = evidence["supporting_artifacts"]
+    review = obj["review"]
+    review["evidence_content_hash"] = evidence["evidence_content_hash"]
+    reseal(review, "review")
+    response["output_refs"] = [v2.check_record(review, "review")]
+    with pytest.raises((ValueError, ValidationError)):
+        v2.validate_handoff(request, obj, response)
