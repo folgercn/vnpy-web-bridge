@@ -1,0 +1,245 @@
+{
+  "$defs": {
+    "experiment_run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "hash_profile",
+        "run_id",
+        "run_status",
+        "spec_id",
+        "spec_revision",
+        "spec_content_hash",
+        "trial_context",
+        "resolved_computation_manifest",
+        "scientific_fingerprint",
+        "timing",
+        "process_exit_code",
+        "run_content_hash"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "research_lab.run.v2"
+        },
+        "hash_profile": {
+          "const": "research-json-v1"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "run_status": {
+          "const": "COMPLETED"
+        },
+        "spec_id": {
+          "type": "string"
+        },
+        "spec_revision": {
+          "const": "rev.1"
+        },
+        "spec_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "trial_context": {
+          "const": {
+            "research_stage": "validation",
+            "trial_kind": null,
+            "retry_of_run_id": null,
+            "holdout_usage_state": "unknown"
+          }
+        },
+        "resolved_computation_manifest": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "method_id",
+            "products",
+            "corrected_events",
+            "stop_reason",
+            "snapshot_sha256",
+            "accounts",
+            "dev_dates",
+            "warmup_from",
+            "cost_scenarios",
+            "input_snapshots"
+          ],
+          "properties": {
+            "method_id": {
+              "const": "phase0.issue481_minimal_causal_replay.rev1"
+            },
+            "products": {
+              "const": [
+                "ag",
+                "au",
+                "cu",
+                "rb",
+                "ru",
+                "sc"
+              ]
+            },
+            "corrected_events": {
+              "const": 603
+            },
+            "stop_reason": {
+              "const": "STOP_ECONOMIC_GATE"
+            },
+            "snapshot_sha256": {
+              "const": "f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351"
+            },
+            "accounts": {
+              "const": [
+                "ag",
+                "au",
+                "cu",
+                "rb",
+                "ru",
+                "sc"
+              ]
+            },
+            "dev_dates": {
+              "const": [
+                "2023-01-03",
+                "2025-01-01"
+              ]
+            },
+            "warmup_from": {
+              "const": "2022-09-01"
+            },
+            "cost_scenarios": {
+              "const": {
+                "primary_bbo_ticks": 1,
+                "primary_window_seconds": 2,
+                "stress_bbo_ticks": 3,
+                "stress_window_seconds": 5,
+                "stress_fee_multiplier": "1.25",
+                "fee_model": "official_pit_mapping_with_modeled_close_today_fee"
+              }
+            },
+            "input_snapshots": {
+              "const": {
+                "bbo_event_path_assumed_fill.csv": "dfe1a9dc6d8b5b2060b796eded73e74b9d280b9c810564522ae297a637aa96c4",
+                "event_bbo_first_qualified.csv": "c9e4cb0c1a15277999786d4823b692415ee198d925beb4fd017a60ea71a14b90",
+                "contract_specs.csv": "5df7eb0d695ea44dbe6ed116e01c00d1ef6f46df31f1764e6068e208259b0587",
+                "curve_contract_daily.csv": "f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351",
+                "official_fee_margin_history_6products_with_modeled_close_today.csv": "3d155cbcc9f491eeeda49248a3271784cf79979fe17d3a33908aeb14e05604c8",
+                "official_pit_mapping_with_modeled_close_today_fee.csv": "dfc3b986fc496fe4ec19b6bbf6d531a08e8fdb1093bf172dc1217abf66af336c"
+              }
+            }
+          }
+        },
+        "scientific_fingerprint": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "timing": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "started_at",
+            "completed_at",
+            "recorded_at"
+          ],
+          "properties": {
+            "started_at": {
+              "type": "null"
+            },
+            "completed_at": {
+              "type": "null"
+            },
+            "recorded_at": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        },
+        "process_exit_code": {
+          "const": 3
+        },
+        "run_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "research_task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "hash_profile",
+        "task_id",
+        "revision",
+        "research_type",
+        "objective",
+        "data_requirements",
+        "task_content_hash"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "research_lab.task.v2"
+        },
+        "hash_profile": {
+          "const": "research-json-v1"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "revision": {
+          "const": "rev.1"
+        },
+        "research_type": {
+          "const": "trading_backtest"
+        },
+        "objective": {
+          "type": "string"
+        },
+        "task_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "data_requirements": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "products",
+            "dev_dates",
+            "warmup_from",
+            "input_snapshots"
+          ],
+          "properties": {
+            "products": {
+              "const": [
+                "ag",
+                "au",
+                "cu",
+                "rb",
+                "ru",
+                "sc"
+              ]
+            },
+            "dev_dates": {
+              "const": [
+                "2023-01-03",
+                "2025-01-01"
+              ]
+            },
+            "warmup_from": {
+              "const": "2022-09-01"
+            },
+            "input_snapshots": {
+              "const": {
+                "bbo_event_path_assumed_fill.csv": "dfe1a9dc6d8b5b2060b796eded73e74b9d280b9c810564522ae297a637aa96c4",
+                "event_bbo_first_qualified.csv": "c9e4cb0c1a15277999786d4823b692415ee198d925beb4fd017a60ea71a14b90",
+                "contract_specs.csv": "5df7eb0d695ea44dbe6ed116e01c00d1ef6f46df31f1764e6068e208259b0587",
+                "curve_contract_daily.csv": "f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351",
+                "official_fee_margin_history_6products_with_modeled_close_today.csv": "3d155cbcc9f491eeeda49248a3271784cf79979fe17d3a33908aeb14e05604c8",
+                "official_pit_mapping_with_modeled_close_today_fee.csv": "dfc3b986fc496fe4ec19b6bbf6d531a08e8fdb1093bf172dc1217abf66af336c"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

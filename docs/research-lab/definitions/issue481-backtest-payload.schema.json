@@ -1,0 +1,520 @@
+{
+  "$defs": {
+    "dataset_metadata": {
+      "type": "object",
+      "required": [
+        "profile",
+        "products",
+        "snapshot_sha256",
+        "limitations",
+        "input_snapshots"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "const": "issue481_corrected603_structural"
+        },
+        "products": {
+          "const": [
+            "ag",
+            "au",
+            "cu",
+            "rb",
+            "ru",
+            "sc"
+          ]
+        },
+        "snapshot_sha256": {
+          "const": "f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351"
+        },
+        "limitations": {
+          "const": "Synthetic structural fixture; historical blotter and equity curve are external and unavailable."
+        },
+        "input_snapshots": {
+          "const": {
+            "bbo_event_path_assumed_fill.csv": "dfe1a9dc6d8b5b2060b796eded73e74b9d280b9c810564522ae297a637aa96c4",
+            "event_bbo_first_qualified.csv": "c9e4cb0c1a15277999786d4823b692415ee198d925beb4fd017a60ea71a14b90",
+            "contract_specs.csv": "5df7eb0d695ea44dbe6ed116e01c00d1ef6f46df31f1764e6068e208259b0587",
+            "curve_contract_daily.csv": "f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351",
+            "official_fee_margin_history_6products_with_modeled_close_today.csv": "3d155cbcc9f491eeeda49248a3271784cf79979fe17d3a33908aeb14e05604c8",
+            "official_pit_mapping_with_modeled_close_today_fee.csv": "dfc3b986fc496fe4ec19b6bbf6d531a08e8fdb1093bf172dc1217abf66af336c"
+          }
+        }
+      }
+    },
+    "method_definition": {
+      "type": "object",
+      "required": [
+        "method",
+        "corrected_events",
+        "stop_reason",
+        "limitations"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "const": "scripts/issue481_minimal_causal_replay.py"
+        },
+        "corrected_events": {
+          "const": 603
+        },
+        "stop_reason": {
+          "const": "STOP_ECONOMIC_GATE"
+        },
+        "limitations": {
+          "const": "Historical modeled BBO and fee assumptions; not real execution."
+        }
+      }
+    },
+    "environment_lock": {
+      "type": "object",
+      "required": [
+        "profile",
+        "source_sha256",
+        "limitations"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "const": "issue481_corrected603_structural"
+        },
+        "source_sha256": {
+          "const": "3798178e2b265f6001dc607fe89add68f1f0f583ae85ddf62ddead38e677577c"
+        },
+        "limitations": {
+          "const": "Synthetic structural fixture; historical blotter and equity curve are external and unavailable."
+        }
+      }
+    },
+    "replay_instructions": {
+      "type": "object",
+      "required": [
+        "profile",
+        "events",
+        "limitations"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "const": "issue481_corrected603_structural"
+        },
+        "events": {
+          "const": 603
+        },
+        "limitations": {
+          "const": "Structural validation only; no historical replay is performed."
+        }
+      }
+    },
+    "backtest_summary": {
+      "type": "object",
+      "required": [
+        "products",
+        "accounts",
+        "corrected_events",
+        "stop_reason",
+        "account_identities",
+        "account_metrics"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "products": {
+          "const": [
+            "ag",
+            "au",
+            "cu",
+            "rb",
+            "ru",
+            "sc"
+          ]
+        },
+        "accounts": {
+          "const": [
+            "ag",
+            "au",
+            "cu",
+            "rb",
+            "ru",
+            "sc"
+          ]
+        },
+        "corrected_events": {
+          "const": 603
+        },
+        "stop_reason": {
+          "const": "STOP_ECONOMIC_GATE"
+        },
+        "account_identities": {
+          "type": "array",
+          "minItems": 24,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "account_id",
+              "path",
+              "scenario",
+              "product"
+            ],
+            "properties": {
+              "account_id": {
+                "type": "string"
+              },
+              "path": {
+                "enum": [
+                  "CANDIDATE",
+                  "PAIRED"
+                ]
+              },
+              "scenario": {
+                "enum": [
+                  "PRIMARY_2S",
+                  "STRESS_5S"
+                ]
+              },
+              "product": {
+                "enum": [
+                  "ag",
+                  "au",
+                  "cu",
+                  "rb",
+                  "ru",
+                  "sc"
+                ]
+              }
+            }
+          }
+        },
+        "account_metrics": {
+          "type": "array",
+          "minItems": 24,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "account_id",
+              "path",
+              "scenario",
+              "product",
+              "net_pnl_cny",
+              "fees_cny",
+              "trade_count"
+            ],
+            "properties": {
+              "account_id": {
+                "type": "string"
+              },
+              "path": {
+                "enum": [
+                  "CANDIDATE",
+                  "PAIRED"
+                ]
+              },
+              "scenario": {
+                "enum": [
+                  "PRIMARY_2S",
+                  "STRESS_5S"
+                ]
+              },
+              "product": {
+                "enum": [
+                  "ag",
+                  "au",
+                  "cu",
+                  "rb",
+                  "ru",
+                  "sc"
+                ]
+              },
+              "net_pnl_cny": {
+                "type": "string",
+                "pattern": "^(?:0|-?(?:0\\.[0-9]{0,9}[1-9]|[1-9][0-9]*(?:\\.[0-9]{0,9}[1-9])?))$"
+              },
+              "fees_cny": {
+                "type": "string",
+                "pattern": "^(?:0|(?:0\\.[0-9]{0,9}[1-9]|[1-9][0-9]*(?:\\.[0-9]{0,9}[1-9])?))$"
+              },
+              "trade_count": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      }
+    },
+    "trade_blotter": {
+      "type": "object",
+      "required": [
+        "fixture",
+        "fills",
+        "limitations",
+        "accounts",
+        "account_identities"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "fixture": {
+          "const": "synthetic_structural_fixture"
+        },
+        "fills": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "account",
+              "exact_contract",
+              "fill_sequence",
+              "fee_provenance",
+              "account_id",
+              "path",
+              "scenario",
+              "product"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "account": {
+                "enum": [
+                  "ag",
+                  "au",
+                  "cu",
+                  "rb",
+                  "ru",
+                  "sc"
+                ]
+              },
+              "exact_contract": {
+                "type": "string",
+                "pattern": "^(ag|au|cu|rb|ru|sc)[0-9]{4}$"
+              },
+              "fill_sequence": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "fee_provenance": {
+                "const": "modeled_close_today_or_official_pit_fee"
+              },
+              "account_id": {
+                "type": "string"
+              },
+              "path": {
+                "enum": [
+                  "CANDIDATE",
+                  "PAIRED"
+                ]
+              },
+              "scenario": {
+                "enum": [
+                  "PRIMARY_2S",
+                  "STRESS_5S"
+                ]
+              },
+              "product": {
+                "enum": [
+                  "ag",
+                  "au",
+                  "cu",
+                  "rb",
+                  "ru",
+                  "sc"
+                ]
+              }
+            }
+          }
+        },
+        "limitations": {
+          "const": "Synthetic fills only; target-changes is not a complete blotter."
+        },
+        "accounts": {
+          "const": [
+            "ag",
+            "au",
+            "cu",
+            "rb",
+            "ru",
+            "sc"
+          ]
+        },
+        "account_identities": {
+          "type": "array",
+          "minItems": 24,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "account_id",
+              "path",
+              "scenario",
+              "product"
+            ],
+            "properties": {
+              "account_id": {
+                "type": "string"
+              },
+              "path": {
+                "enum": [
+                  "CANDIDATE",
+                  "PAIRED"
+                ]
+              },
+              "scenario": {
+                "enum": [
+                  "PRIMARY_2S",
+                  "STRESS_5S"
+                ]
+              },
+              "product": {
+                "enum": [
+                  "ag",
+                  "au",
+                  "cu",
+                  "rb",
+                  "ru",
+                  "sc"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "equity_curve": {
+      "type": "object",
+      "required": [
+        "fixture",
+        "points",
+        "limitations",
+        "accounts",
+        "account_identities"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "fixture": {
+          "const": "synthetic_structural_fixture"
+        },
+        "points": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "account",
+              "sequence",
+              "equity_cny",
+              "account_id",
+              "path",
+              "scenario",
+              "product",
+              "official_day"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "account": {
+                "enum": [
+                  "ag",
+                  "au",
+                  "cu",
+                  "rb",
+                  "ru",
+                  "sc"
+                ]
+              },
+              "sequence": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "equity_cny": {
+                "type": "string",
+                "pattern": "^(?:0|-?(?:0\\.[0-9]{0,9}[1-9]|[1-9][0-9]*(?:\\.[0-9]{0,9}[1-9])?))$"
+              },
+              "account_id": {
+                "type": "string"
+              },
+              "path": {
+                "enum": [
+                  "CANDIDATE",
+                  "PAIRED"
+                ]
+              },
+              "scenario": {
+                "enum": [
+                  "PRIMARY_2S",
+                  "STRESS_5S"
+                ]
+              },
+              "product": {
+                "enum": [
+                  "ag",
+                  "au",
+                  "cu",
+                  "rb",
+                  "ru",
+                  "sc"
+                ]
+              },
+              "official_day": {
+                "type": "string",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+              }
+            }
+          }
+        },
+        "limitations": {
+          "const": "Synthetic points only; historical equity curve is external and unavailable."
+        },
+        "accounts": {
+          "const": [
+            "ag",
+            "au",
+            "cu",
+            "rb",
+            "ru",
+            "sc"
+          ]
+        },
+        "account_identities": {
+          "type": "array",
+          "minItems": 24,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "account_id",
+              "path",
+              "scenario",
+              "product"
+            ],
+            "properties": {
+              "account_id": {
+                "type": "string"
+              },
+              "path": {
+                "enum": [
+                  "CANDIDATE",
+                  "PAIRED"
+                ]
+              },
+              "scenario": {
+                "enum": [
+                  "PRIMARY_2S",
+                  "STRESS_5S"
+                ]
+              },
+              "product": {
+                "enum": [
+                  "ag",
+                  "au",
+                  "cu",
+                  "rb",
+                  "ru",
+                  "sc"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

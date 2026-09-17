@@ -319,7 +319,7 @@ def validate_spec(spec, task, definitions=None):
     """Machine checks for bound methods. No execution, PIT or confirmation approval."""
     definitions = definitions or Definitions()
     schema_check(spec, parse(safe_read(ROOT, 'docs/schemas/research-experiment-spec-v2.schema.json')))
-    task_schema = 'trend20-control.schema.json' if spec['experiment_type'] == 'statistical_factor' else 'phase0-control.schema.json'
+    task_schema = {'statistical_factor': 'trend20-control.schema.json', 'trading_backtest': 'issue481-backtest-control.schema.json'}.get(spec['experiment_type'], 'phase0-control.schema.json')
     schema_check(task, parse(safe_read(DEFINITIONS, task_schema))['$defs']['research_task'])
     check_record(spec, 'experiment_spec')
     check_record(task, 'research_task')
@@ -327,6 +327,10 @@ def validate_spec(spec, task, definitions=None):
             (task['task_id'], task['revision'], task['task_content_hash']), 'Task reference')
     require(task['research_type'] == spec['experiment_type'], 'Task type')
     require(spec['research_stage'] != 'confirmation', 'unsupported confirmation admission: exposure evidence not verified')
+    if spec['experiment_type'] == 'trading_backtest':
+        method = definitions.method(spec['method_id'])
+        require(method['corrected_events'] == spec['corrected_events'] == 603, 'Issue481 corrected events')
+        return {'method': method}
     req = spec['dataset_requirements']
     require(time_value(req['time_range']['start']) < time_value(req['time_range']['end']), 'reversed range')
     require(req['snapshot_selection_mode'] == 'fixed_snapshot' and re.fullmatch(r'[a-f0-9]{64}', req.get('snapshot_sha256') or ''), 'unbound snapshot')
@@ -397,7 +401,7 @@ def validate_statistical_payloads(entries, contents):
 def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=None):
     definitions = definitions or Definitions()
     schema_check(manifest, parse(safe_read(ROOT, 'docs/schemas/research-artifact-manifest-v2.schema.json')))
-    run_schema = ('trend20-control.schema.json' if manifest['experiment_type'] == 'statistical_factor' else 'phase0-control.schema.json')
+    run_schema = {'statistical_factor': 'trend20-control.schema.json', 'trading_backtest': 'issue481-backtest-control.schema.json'}.get(manifest['experiment_type'], 'phase0-control.schema.json')
     run_definition = 'experiment_run'
     schema_check(run, parse(safe_read(DEFINITIONS, run_schema))['$defs'][run_definition])
     check_record(manifest, 'artifact_manifest')
@@ -416,7 +420,7 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
     for e in entries:
         entry, definition = definitions.resolve('payload', e['content_schema_ref'])
         require(entry['role'] == e['role'], 'schema role mismatch')
-        expected_name = ('phase0.trend20.' if manifest['experiment_type'] == 'statistical_factor' else 'phase0.') + e['role']
+        expected_name = {'statistical_factor': 'phase0.trend20.', 'trading_backtest': 'phase0.issue481.'}.get(manifest['experiment_type'], 'phase0.') + e['role']
         require(entry['name'] == expected_name, 'profile payload definition mismatch')
         # Registered rev.1 definitions specify one complete file, no implicit shards.
         require(e['role'] not in roles, 'unsupported/duplicate shard')
@@ -439,6 +443,54 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
         metadata = next(contents[e['artifact_id']] for e in entries if e['role'] == 'dataset_metadata')
         require(metadata['snapshot_sha256'] == spec['dataset_requirements']['snapshot_sha256'], 'Trend20 payload snapshot')
         validate_statistical_payloads(entries, contents)
+    if manifest['experiment_type'] == 'trading_backtest':
+        require(spec is not None and task is not None and spec['experiment_type'] == 'trading_backtest', 'backtest manifest requires Task and Spec')
+        validate_spec(spec, task, definitions)
+        require((run['spec_id'], run['spec_revision'], run['spec_content_hash']) == (spec['spec_id'], spec['revision'], spec['spec_content_hash']), 'Issue481 Run Spec reference')
+        require(run['scientific_fingerprint'] == digest(run['resolved_computation_manifest']), 'Issue481 scientific fingerprint')
+        requirements = spec['dataset_requirements']
+        computation = run['resolved_computation_manifest']
+        task_data = task['data_requirements']
+        summary = next(contents[e['artifact_id']] for e in entries if e['role'] == 'backtest_summary')
+        blotter = next(contents[e['artifact_id']] for e in entries if e['role'] == 'trade_blotter')
+        metadata = next(contents[e['artifact_id']] for e in entries if e['role'] == 'dataset_metadata')
+        require(task_data['products'] == requirements['products'] == computation['products'] == metadata['products'], 'Issue481 product binding')
+        require(task_data['input_snapshots'] == requirements['input_snapshots'] == computation['input_snapshots'] == metadata['input_snapshots'], 'Issue481 input snapshot binding')
+        require(requirements['snapshot_sha256'] == computation['snapshot_sha256'] == metadata['snapshot_sha256'], 'Issue481 curve snapshot binding')
+        require(task_data['dev_dates'] == computation['dev_dates'] == [requirements['time_range']['start'][:10], requirements['time_range']['end'][:10]], 'Issue481 DEV date binding')
+        require(task_data['warmup_from'] == requirements['warmup_from'] == computation['warmup_from'], 'Issue481 warmup binding')
+        require(spec['cost_model'] == computation['cost_scenarios']['fee_model'], 'Issue481 cost binding')
+        require(summary['accounts'] == summary['products'] == blotter['accounts'] == ['ag', 'au', 'cu', 'rb', 'ru', 'sc'], 'account products')
+        curve = next(contents[e['artifact_id']] for e in entries if e['role'] == 'equity_curve')
+        require(curve['accounts'] == summary['accounts'], 'equity account coverage')
+        expected = {(path, scenario, product) for path in ('CANDIDATE', 'PAIRED') for scenario in ('PRIMARY_2S', 'STRESS_5S') for product in summary['accounts']}
+        def identities(value):
+            rows = value['account_identities']
+            actual = {(row['path'], row['scenario'], row['product']) for row in rows}
+            require(len(rows) == len(actual) == 24 and actual == expected, 'account identity coverage')
+            require(all(row['account_id'] == ':'.join((row['path'], row['scenario'], row['product'])) for row in rows), 'account identity format')
+        identities(summary)
+        identities(blotter)
+        identities(curve)
+        metrics = summary['account_metrics']
+        metric_ids = {row['account_id'] for row in metrics}
+        require(len(metrics) == len(metric_ids) == 24 and metric_ids == {':'.join(row) for row in expected}, 'account metric coverage')
+        require(all(row['account_id'] == ':'.join((row['path'], row['scenario'], row['product'])) for row in metrics), 'account metric identity')
+        point_ids = {point['account_id'] for point in curve['points']}
+        require(point_ids == {':'.join(row) for row in expected}, 'missing equity account')
+        point_times = {}
+        for point in curve['points']:
+            require(point['account'] == point['product'] and point['account_id'] == ':'.join((point['path'], point['scenario'], point['product'])), 'equity account identity')
+            time_value(point['official_day'] + 'T00:00:00.000000Z')
+            require('2023-01-03' <= point['official_day'] < '2025-01-01', 'equity DEV range')
+            point_times.setdefault(point['account_id'], []).append(point['official_day'])
+        require(all(times == sorted(times) and len(times) == len(set(times)) for times in point_times.values()), 'equity point order')
+        by_account = {}
+        for item in blotter['fills']:
+            require(item['account'] == item['product'] and item['account_id'] == ':'.join((item['path'], item['scenario'], item['product'])), 'fill account identity')
+            require(item['exact_contract'].startswith(item['product']) and len(item['exact_contract']) > len(item['product']), 'exact contract product')
+            by_account.setdefault(item['account_id'], []).append(item['fill_sequence'])
+        require(all(values == sorted(values) and len(values) == len(set(values)) for values in by_account.values()), 'fill order')
     return contents
 
 
