@@ -6,6 +6,17 @@ from research_lab.contracts import v2
 
 P = ["ag", "au", "cu", "rb", "ru", "sc"]
 SNAP = "f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351"
+IDENTITIES = [
+    {
+        "path": path,
+        "scenario": scenario,
+        "product": product,
+        "account_id": f"{path}:{scenario}:{product}",
+    }
+    for path in ("CANDIDATE", "PAIRED")
+    for scenario in ("PRIMARY_2S", "STRESS_5S")
+    for product in P
+]
 
 
 def seal(x, p):
@@ -132,13 +143,19 @@ def fixture(tmp):
             "stop_reason": "STOP_ECONOMIC_GATE",
             "net_pnl_cny": "-1",
             "fees_cny": "0",
+            "account_identities": IDENTITIES,
         },
         "trade_blotter": {
             "fixture": "synthetic_structural_fixture",
             "accounts": P,
+            "account_identities": IDENTITIES,
             "fills": [
                 {
                     "account": "rb",
+                    "product": "rb",
+                    "path": "CANDIDATE",
+                    "scenario": "PRIMARY_2S",
+                    "account_id": "CANDIDATE:PRIMARY_2S:rb",
                     "exact_contract": "rb2401",
                     "fill_sequence": 1,
                     "fee_provenance": "modeled_close_today_or_official_pit_fee",
@@ -149,8 +166,18 @@ def fixture(tmp):
         "equity_curve": {
             "fixture": "synthetic_structural_fixture",
             "accounts": P,
+            "account_identities": IDENTITIES,
             "points": [
-                {"account": account, "sequence": 1, "equity_cny": "0"} for account in P
+                {
+                    "account": row["product"],
+                    "product": row["product"],
+                    "path": row["path"],
+                    "scenario": row["scenario"],
+                    "account_id": row["account_id"],
+                    "sequence": 1,
+                    "equity_cny": "0",
+                }
+                for row in IDENTITIES
             ],
             "limitations": "Synthetic points only; historical equity curve is external and unavailable.",
         },
@@ -274,6 +301,8 @@ def test_issue481_cny_precision_rehashed(tmp_path, role, field):
             content["points"][0][field] = value
         else:
             content[field] = value
+        if field == "fees_cny" and value.startswith("-"):
+            accepted = False
         raw = v2.canonical(content).encode()
         path.write_bytes(raw)
         entry.update(byte_length=len(raw), content_sha256=v2.sha(raw))

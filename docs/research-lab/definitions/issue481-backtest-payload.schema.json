@@ -103,7 +103,8 @@
         "corrected_events",
         "stop_reason",
         "net_pnl_cny",
-        "fees_cny"
+        "fees_cny",
+        "account_identities"
       ],
       "additionalProperties": false,
       "properties": {
@@ -139,7 +140,48 @@
         },
         "fees_cny": {
           "type": "string",
-          "pattern": "^(?:0|-?(?:0\\.[0-9]{0,9}[1-9]|[1-9][0-9]*(?:\\.[0-9]{0,9}[1-9])?))$"
+          "pattern": "^(?:0|(?:0\\.[0-9]{0,9}[1-9]|[1-9][0-9]*(?:\\.[0-9]{0,9}[1-9])?))$"
+        },
+        "account_identities": {
+          "type": "array",
+          "minItems": 24,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "account_id",
+              "path",
+              "scenario",
+              "product"
+            ],
+            "properties": {
+              "account_id": {
+                "type": "string"
+              },
+              "path": {
+                "enum": [
+                  "CANDIDATE",
+                  "PAIRED"
+                ]
+              },
+              "scenario": {
+                "enum": [
+                  "PRIMARY_2S",
+                  "STRESS_5S"
+                ]
+              },
+              "product": {
+                "enum": [
+                  "ag",
+                  "au",
+                  "cu",
+                  "rb",
+                  "ru",
+                  "sc"
+                ]
+              }
+            }
+          }
         }
       }
     },
@@ -149,7 +191,8 @@
         "fixture",
         "fills",
         "limitations",
-        "accounts"
+        "accounts",
+        "account_identities"
       ],
       "additionalProperties": false,
       "properties": {
@@ -165,7 +208,11 @@
               "account",
               "exact_contract",
               "fill_sequence",
-              "fee_provenance"
+              "fee_provenance",
+              "account_id",
+              "path",
+              "scenario",
+              "product"
             ],
             "additionalProperties": false,
             "properties": {
@@ -189,6 +236,31 @@
               },
               "fee_provenance": {
                 "const": "modeled_close_today_or_official_pit_fee"
+              },
+              "account_id": {
+                "type": "string"
+              },
+              "path": {
+                "enum": [
+                  "CANDIDATE",
+                  "PAIRED"
+                ]
+              },
+              "scenario": {
+                "enum": [
+                  "PRIMARY_2S",
+                  "STRESS_5S"
+                ]
+              },
+              "product": {
+                "enum": [
+                  "ag",
+                  "au",
+                  "cu",
+                  "rb",
+                  "ru",
+                  "sc"
+                ]
               }
             }
           }
@@ -205,6 +277,47 @@
             "ru",
             "sc"
           ]
+        },
+        "account_identities": {
+          "type": "array",
+          "minItems": 24,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "account_id",
+              "path",
+              "scenario",
+              "product"
+            ],
+            "properties": {
+              "account_id": {
+                "type": "string"
+              },
+              "path": {
+                "enum": [
+                  "CANDIDATE",
+                  "PAIRED"
+                ]
+              },
+              "scenario": {
+                "enum": [
+                  "PRIMARY_2S",
+                  "STRESS_5S"
+                ]
+              },
+              "product": {
+                "enum": [
+                  "ag",
+                  "au",
+                  "cu",
+                  "rb",
+                  "ru",
+                  "sc"
+                ]
+              }
+            }
+          }
         }
       }
     },
@@ -214,7 +327,8 @@
         "fixture",
         "points",
         "limitations",
-        "accounts"
+        "accounts",
+        "account_identities"
       ],
       "additionalProperties": false,
       "properties": {
@@ -229,7 +343,11 @@
             "required": [
               "account",
               "sequence",
-              "equity_cny"
+              "equity_cny",
+              "account_id",
+              "path",
+              "scenario",
+              "product"
             ],
             "additionalProperties": false,
             "properties": {
@@ -250,6 +368,31 @@
               "equity_cny": {
                 "type": "string",
                 "pattern": "^(?:0|-?(?:0\\.[0-9]{0,9}[1-9]|[1-9][0-9]*(?:\\.[0-9]{0,9}[1-9])?))$"
+              },
+              "account_id": {
+                "type": "string"
+              },
+              "path": {
+                "enum": [
+                  "CANDIDATE",
+                  "PAIRED"
+                ]
+              },
+              "scenario": {
+                "enum": [
+                  "PRIMARY_2S",
+                  "STRESS_5S"
+                ]
+              },
+              "product": {
+                "enum": [
+                  "ag",
+                  "au",
+                  "cu",
+                  "rb",
+                  "ru",
+                  "sc"
+                ]
               }
             }
           }
@@ -266,6 +409,47 @@
             "ru",
             "sc"
           ]
+        },
+        "account_identities": {
+          "type": "array",
+          "minItems": 24,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "account_id",
+              "path",
+              "scenario",
+              "product"
+            ],
+            "properties": {
+              "account_id": {
+                "type": "string"
+              },
+              "path": {
+                "enum": [
+                  "CANDIDATE",
+                  "PAIRED"
+                ]
+              },
+              "scenario": {
+                "enum": [
+                  "PRIMARY_2S",
+                  "STRESS_5S"
+                ]
+              },
+              "product": {
+                "enum": [
+                  "ag",
+                  "au",
+                  "cu",
+                  "rb",
+                  "ru",
+                  "sc"
+                ]
+              }
+            }
+          }
         }
       }
     }

@@ -453,9 +453,23 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
         require(summary['accounts'] == summary['products'] == blotter['accounts'] == ['ag', 'au', 'cu', 'rb', 'ru', 'sc'], 'account products')
         curve = next(contents[e['artifact_id']] for e in entries if e['role'] == 'equity_curve')
         require(curve['accounts'] == summary['accounts'], 'equity account coverage')
-        require(set(point['account'] for point in curve['points']) == set(summary['accounts']), 'missing equity account')
-        sequences = [item['fill_sequence'] for item in blotter['fills']]
-        require(sequences == sorted(sequences) and len(sequences) == len(set(sequences)), 'fill order')
+        expected = {(path, scenario, product) for path in ('CANDIDATE', 'PAIRED') for scenario in ('PRIMARY_2S', 'STRESS_5S') for product in summary['accounts']}
+        def identities(value):
+            rows = value['account_identities']
+            actual = {(row['path'], row['scenario'], row['product']) for row in rows}
+            require(len(rows) == len(actual) == 24 and actual == expected, 'account identity coverage')
+            require(all(row['account_id'] == ':'.join((row['path'], row['scenario'], row['product'])) for row in rows), 'account identity format')
+        identities(summary)
+        identities(blotter)
+        identities(curve)
+        point_ids = {point['account_id'] for point in curve['points']}
+        require(point_ids == {':'.join(row) for row in expected}, 'missing equity account')
+        by_account = {}
+        for item in blotter['fills']:
+            require(item['account'] == item['product'] and item['account_id'] == ':'.join((item['path'], item['scenario'], item['product'])), 'fill account identity')
+            require(item['exact_contract'].startswith(item['product']) and len(item['exact_contract']) > len(item['product']), 'exact contract product')
+            by_account.setdefault(item['account_id'], []).append(item['fill_sequence'])
+        require(all(values == sorted(values) and len(values) == len(set(values)) for values in by_account.values()), 'fill order')
     return contents
 
 

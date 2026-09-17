@@ -282,7 +282,7 @@
       "kind": "payload",
       "name": "phase0.issue481.backtest_summary",
       "revision": "rev.1",
-      "content_hash": "7b327111983985143a82eff3b829647d8775d2684a432eac4527fae225e872f4",
+      "content_hash": "56babf6034be26772e943ac88c569c82b38d57e6b1f7b4b1dcb3c2bf0efca7e0",
       "locator": "issue481-backtest-payload.schema.json#/$defs/backtest_summary",
       "file": "issue481-backtest-payload.schema.json",
       "pointer": [
@@ -295,7 +295,7 @@
       "kind": "payload",
       "name": "phase0.issue481.trade_blotter",
       "revision": "rev.1",
-      "content_hash": "7d1245d0c10815428ea0ba2be7add31f12c4b6f27f188cabdaf72ec5f6693351",
+      "content_hash": "fad4b52bfa0ad3d0fe2f17470a83dfa9b2bdbbe8b06c0724d58eef2f67de32ff",
       "locator": "issue481-backtest-payload.schema.json#/$defs/trade_blotter",
       "file": "issue481-backtest-payload.schema.json",
       "pointer": [
@@ -308,7 +308,7 @@
       "kind": "payload",
       "name": "phase0.issue481.equity_curve",
       "revision": "rev.1",
-      "content_hash": "77dc70d1635220e2c95e78240a5333f4eeb8fb70de63a12cac57ae701b0bf7b6",
+      "content_hash": "d902baec4ecdecbc2e41b678252f3efe773826cefe6bf7ee76630fb3a5db489c",
       "locator": "issue481-backtest-payload.schema.json#/$defs/equity_curve",
       "file": "issue481-backtest-payload.schema.json",
       "pointer": [
