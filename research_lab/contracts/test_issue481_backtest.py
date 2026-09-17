@@ -6,6 +6,14 @@ from research_lab.contracts import v2
 
 P = ["ag", "au", "cu", "rb", "ru", "sc"]
 SNAP = "f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351"
+INPUTS = {
+    "bbo_event_path_assumed_fill.csv": "dfe1a9dc6d8b5b2060b796eded73e74b9d280b9c810564522ae297a637aa96c4",
+    "event_bbo_first_qualified.csv": "c9e4cb0c1a15277999786d4823b692415ee198d925beb4fd017a60ea71a14b90",
+    "contract_specs.csv": "5df7eb0d695ea44dbe6ed116e01c00d1ef6f46df31f1764e6068e208259b0587",
+    "curve_contract_daily.csv": "f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351",
+    "official_fee_margin_history_6products_with_modeled_close_today.csv": "3d155cbcc9f491eeeda49248a3271784cf79979fe17d3a33908aeb14e05604c8",
+    "official_pit_mapping_with_modeled_close_today_fee.csv": "dfc3b986fc496fe4ec19b6bbf6d531a08e8fdb1093bf172dc1217abf66af336c",
+}
 IDENTITIES = [
     {
         "path": path,
@@ -40,7 +48,7 @@ def fixture(tmp):
         "objective": "synthetic only",
         "data_requirements": {
             "products": P,
-            "dev_dates": ["2023-01-03", "2024-12-31"],
+            "dev_dates": ["2023-01-03", "2025-01-01"],
             "warmup_from": "2022-09-01",
         },
     }
@@ -60,10 +68,11 @@ def fixture(tmp):
             "accounts": P,
             "time_range": {
                 "start": "2023-01-03T00:00:00.000000Z",
-                "end": "2024-12-31T00:00:00.000000Z",
+                "end": "2025-01-01T00:00:00.000000Z",
             },
             "warmup_from": "2022-09-01",
             "snapshot_sha256": SNAP,
+            "input_snapshots": INPUTS,
         },
         "method_id": "phase0.issue481_minimal_causal_replay.rev1",
         "corrected_events": 603,
@@ -77,8 +86,9 @@ def fixture(tmp):
         "corrected_events": 603,
         "stop_reason": "STOP_ECONOMIC_GATE",
         "snapshot_sha256": SNAP,
+        "input_snapshots": INPUTS,
         "accounts": P,
-        "dev_dates": ["2023-01-03", "2024-12-31"],
+        "dev_dates": ["2023-01-03", "2025-01-01"],
         "warmup_from": "2022-09-01",
         "cost_scenarios": {
             "primary_bbo_ticks": 1,
@@ -118,6 +128,7 @@ def fixture(tmp):
             "profile": "issue481_corrected603_structural",
             "products": P,
             "snapshot_sha256": SNAP,
+            "input_snapshots": INPUTS,
             "limitations": "Synthetic structural fixture; historical blotter and equity curve are external and unavailable.",
         },
         "method_definition": {
@@ -144,6 +155,10 @@ def fixture(tmp):
             "net_pnl_cny": "-1",
             "fees_cny": "0",
             "account_identities": IDENTITIES,
+            "account_metrics": [
+                {**row, "net_pnl_cny": "0", "fees_cny": "0", "trade_count": 0}
+                for row in IDENTITIES
+            ],
         },
         "trade_blotter": {
             "fixture": "synthetic_structural_fixture",

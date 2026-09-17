@@ -6,7 +6,8 @@
         "profile",
         "products",
         "snapshot_sha256",
-        "limitations"
+        "limitations",
+        "input_snapshots"
       ],
       "additionalProperties": false,
       "properties": {
@@ -28,6 +29,16 @@
         },
         "limitations": {
           "const": "Synthetic structural fixture; historical blotter and equity curve are external and unavailable."
+        },
+        "input_snapshots": {
+          "const": {
+            "bbo_event_path_assumed_fill.csv": "dfe1a9dc6d8b5b2060b796eded73e74b9d280b9c810564522ae297a637aa96c4",
+            "event_bbo_first_qualified.csv": "c9e4cb0c1a15277999786d4823b692415ee198d925beb4fd017a60ea71a14b90",
+            "contract_specs.csv": "5df7eb0d695ea44dbe6ed116e01c00d1ef6f46df31f1764e6068e208259b0587",
+            "curve_contract_daily.csv": "f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351",
+            "official_fee_margin_history_6products_with_modeled_close_today.csv": "3d155cbcc9f491eeeda49248a3271784cf79979fe17d3a33908aeb14e05604c8",
+            "official_pit_mapping_with_modeled_close_today_fee.csv": "dfc3b986fc496fe4ec19b6bbf6d531a08e8fdb1093bf172dc1217abf66af336c"
+          }
         }
       }
     },
@@ -104,7 +115,8 @@
         "stop_reason",
         "net_pnl_cny",
         "fees_cny",
-        "account_identities"
+        "account_identities",
+        "account_metrics"
       ],
       "additionalProperties": false,
       "properties": {
@@ -179,6 +191,62 @@
                   "ru",
                   "sc"
                 ]
+              }
+            }
+          }
+        },
+        "account_metrics": {
+          "type": "array",
+          "minItems": 24,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "account_id",
+              "path",
+              "scenario",
+              "product",
+              "net_pnl_cny",
+              "fees_cny",
+              "trade_count"
+            ],
+            "properties": {
+              "account_id": {
+                "type": "string"
+              },
+              "path": {
+                "enum": [
+                  "CANDIDATE",
+                  "PAIRED"
+                ]
+              },
+              "scenario": {
+                "enum": [
+                  "PRIMARY_2S",
+                  "STRESS_5S"
+                ]
+              },
+              "product": {
+                "enum": [
+                  "ag",
+                  "au",
+                  "cu",
+                  "rb",
+                  "ru",
+                  "sc"
+                ]
+              },
+              "net_pnl_cny": {
+                "type": "string",
+                "pattern": "^(?:0|-?(?:0\\.[0-9]{0,9}[1-9]|[1-9][0-9]*(?:\\.[0-9]{0,9}[1-9])?))$"
+              },
+              "fees_cny": {
+                "type": "string",
+                "pattern": "^(?:0|(?:0\\.[0-9]{0,9}[1-9]|[1-9][0-9]*(?:\\.[0-9]{0,9}[1-9])?))$"
+              },
+              "trade_count": {
+                "type": "integer",
+                "minimum": 0
               }
             }
           }

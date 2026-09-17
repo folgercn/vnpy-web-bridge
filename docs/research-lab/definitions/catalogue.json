@@ -230,7 +230,7 @@
       "kind": "payload",
       "name": "phase0.issue481.dataset_metadata",
       "revision": "rev.1",
-      "content_hash": "0887eb2f4c2bd3a2a0b4a0c49d32f46cdb84ee1bca0939fbc7af81bf9cb39a81",
+      "content_hash": "cf8f56cd541eabeed3739875c4dbf2e317c31648123438e56d4a64b5129ca739",
       "locator": "issue481-backtest-payload.schema.json#/$defs/dataset_metadata",
       "file": "issue481-backtest-payload.schema.json",
       "pointer": [
@@ -282,7 +282,7 @@
       "kind": "payload",
       "name": "phase0.issue481.backtest_summary",
       "revision": "rev.1",
-      "content_hash": "56babf6034be26772e943ac88c569c82b38d57e6b1f7b4b1dcb3c2bf0efca7e0",
+      "content_hash": "a47e799ef9dfe5002a14667894fbe120b535abba804b2ae1abb4e196d6cf560d",
       "locator": "issue481-backtest-payload.schema.json#/$defs/backtest_summary",
       "file": "issue481-backtest-payload.schema.json",
       "pointer": [
