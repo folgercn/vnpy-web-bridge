@@ -462,6 +462,10 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
         identities(summary)
         identities(blotter)
         identities(curve)
+        metrics = summary['account_metrics']
+        metric_ids = {row['account_id'] for row in metrics}
+        require(len(metrics) == len(metric_ids) == 24 and metric_ids == {':'.join(row) for row in expected}, 'account metric coverage')
+        require(all(row['account_id'] == ':'.join((row['path'], row['scenario'], row['product'])) for row in metrics), 'account metric identity')
         point_ids = {point['account_id'] for point in curve['points']}
         require(point_ids == {':'.join(row) for row in expected}, 'missing equity account')
         point_times = {}
