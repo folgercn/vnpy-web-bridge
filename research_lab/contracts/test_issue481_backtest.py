@@ -175,6 +175,7 @@ def fixture(tmp):
                     "scenario": row["scenario"],
                     "account_id": row["account_id"],
                     "sequence": 1,
+                    "official_day": "2023-01-03",
                     "equity_cny": "0",
                 }
                 for row in IDENTITIES

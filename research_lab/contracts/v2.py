@@ -464,6 +464,11 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
         identities(curve)
         point_ids = {point['account_id'] for point in curve['points']}
         require(point_ids == {':'.join(row) for row in expected}, 'missing equity account')
+        point_times = {}
+        for point in curve['points']:
+            require(point['account'] == point['product'] and point['account_id'] == ':'.join((point['path'], point['scenario'], point['product'])), 'equity account identity')
+            point_times.setdefault(point['account_id'], []).append(point['official_day'])
+        require(all(times == sorted(times) and len(times) == len(set(times)) for times in point_times.values()), 'equity point order')
         by_account = {}
         for item in blotter['fills']:
             require(item['account'] == item['product'] and item['account_id'] == ':'.join((item['path'], item['scenario'], item['product'])), 'fill account identity')

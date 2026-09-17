@@ -228,7 +228,7 @@
               },
               "exact_contract": {
                 "type": "string",
-                "minLength": 1
+                "pattern": "^(ag|au|cu|rb|ru|sc)\\d{4}$"
               },
               "fill_sequence": {
                 "type": "integer",
@@ -347,7 +347,8 @@
               "account_id",
               "path",
               "scenario",
-              "product"
+              "product",
+              "official_day"
             ],
             "additionalProperties": false,
             "properties": {
@@ -393,6 +394,10 @@
                   "ru",
                   "sc"
                 ]
+              },
+              "official_day": {
+                "type": "string",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
               }
             }
           }
