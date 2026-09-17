@@ -1,0 +1,275 @@
+{
+  "$defs": {
+    "trend20_result_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "hash_profile",
+        "evidence_id",
+        "run_id",
+        "run_status_snapshot",
+        "run_content_hash",
+        "execution_status",
+        "manifest_id",
+        "manifest_revision",
+        "manifest_content_hash",
+        "typed_metrics",
+        "supporting_artifacts",
+        "missing_reason",
+        "evidence_content_hash"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "research_lab.evidence.v2"
+        },
+        "hash_profile": {
+          "const": "research-json-v1"
+        },
+        "evidence_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "run_status_snapshot": {
+          "const": "COMPLETED"
+        },
+        "run_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "execution_status": {
+          "const": "COMPLETED"
+        },
+        "manifest_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "manifest_revision": {
+          "const": "rev.1"
+        },
+        "manifest_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "missing_reason": {
+          "const": null
+        },
+        "supporting_artifacts": {
+          "type": "array",
+          "minItems": 7
+        },
+        "evidence_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "typed_metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "profile",
+            "metrics_precision",
+            "daily_ic",
+            "top_bottom_spread"
+          ],
+          "properties": {
+            "profile": {
+              "const": "trend20_same_exact_contract_structural"
+            },
+            "metrics_precision": {
+              "const": "half_even_12_decimal_places_from_unrounded_daily_values"
+            },
+            "daily_ic": {
+              "$ref": "#/$defs/ic_metric"
+            },
+            "top_bottom_spread": {
+              "$ref": "#/$defs/return_metric"
+            }
+          }
+        }
+      }
+    },
+    "issue481_result_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "hash_profile",
+        "evidence_id",
+        "run_id",
+        "run_status_snapshot",
+        "run_content_hash",
+        "execution_status",
+        "manifest_id",
+        "manifest_revision",
+        "manifest_content_hash",
+        "typed_metrics",
+        "supporting_artifacts",
+        "missing_reason",
+        "evidence_content_hash"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "research_lab.evidence.v2"
+        },
+        "hash_profile": {
+          "const": "research-json-v1"
+        },
+        "evidence_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "run_status_snapshot": {
+          "const": "COMPLETED"
+        },
+        "run_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "execution_status": {
+          "const": "COMPLETED"
+        },
+        "manifest_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "manifest_revision": {
+          "const": "rev.1"
+        },
+        "manifest_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "missing_reason": {
+          "const": null
+        },
+        "supporting_artifacts": {
+          "type": "array",
+          "minItems": 7
+        },
+        "evidence_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "typed_metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "profile",
+            "account_metrics"
+          ],
+          "properties": {
+            "profile": {
+              "const": "issue481_corrected603_structural"
+            },
+            "account_metrics": {
+              "type": "array",
+              "minItems": 24,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "account_id",
+                  "path",
+                  "scenario",
+                  "product",
+                  "net_pnl_cny",
+                  "fees_cny",
+                  "trade_count"
+                ],
+                "properties": {
+                  "account_id": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "enum": [
+                      "CANDIDATE",
+                      "PAIRED"
+                    ]
+                  },
+                  "scenario": {
+                    "enum": [
+                      "PRIMARY_2S",
+                      "STRESS_5S"
+                    ]
+                  },
+                  "product": {
+                    "enum": [
+                      "ag",
+                      "au",
+                      "cu",
+                      "rb",
+                      "ru",
+                      "sc"
+                    ]
+                  },
+                  "net_pnl_cny": {
+                    "type": "string",
+                    "pattern": "^(?:0|-?(?:0\\.[0-9]{0,9}[1-9]|[1-9][0-9]*(?:\\.[0-9]{0,9}[1-9])?))$"
+                  },
+                  "fees_cny": {
+                    "type": "string",
+                    "pattern": "^(?:0|(?:0\\.[0-9]{0,9}[1-9]|[1-9][0-9]*(?:\\.[0-9]{0,9}[1-9])?))$"
+                  },
+                  "trade_count": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "ic_metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "unit",
+        "precision"
+      ],
+      "properties": {
+        "value": {
+          "type": "string",
+          "pattern": "^(?:0|-?1|-?0\\.[0-9]{0,11}[1-9])$"
+        },
+        "unit": {
+          "const": "correlation"
+        },
+        "precision": {
+          "const": "half_even_12_decimal_places_from_unrounded_daily_values"
+        }
+      }
+    },
+    "return_metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "unit",
+        "precision"
+      ],
+      "properties": {
+        "value": {
+          "type": "string",
+          "pattern": "^(?:0|-?(?:0\\.[0-9]{0,11}[1-9]|[1-9][0-9]*(?:\\.[0-9]{0,11}[1-9])?))$"
+        },
+        "unit": {
+          "const": "log_return"
+        },
+        "precision": {
+          "const": "half_even_12_decimal_places_from_unrounded_daily_values"
+        }
+      }
+    }
+  }
+}

@@ -495,15 +495,28 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
 
 
 def validate_handoff(request, objects, response=None):
-    """Bind real objects, exact payload references, and actual Review criteria."""
+    """Fail-closed offline review consumption for three registered profiles only."""
     schema = parse(safe_read(ROOT, 'docs/research-lab/agent-contract/agent-handoff.schema.json'))
     schema_check(request, schema)
-    require(request['message_kind'] == 'request', 'expected request')
-    require(request['operation'] == 'review_evidence', 'unsupported cross-object operation')
-    control = parse(safe_read(DEFINITIONS, 'phase0-control.schema.json'))['$defs']
+    require(request['message_kind'] == 'request' and request['operation'] == 'review_evidence', 'unsupported cross-object operation')
+    required_objects = {'research_task', 'experiment_spec', 'experiment_run', 'artifact_manifest', 'result_evidence'}
+    require(required_objects <= set(objects), 'missing review context')
+    spec, task = objects['experiment_spec'], objects['research_task']
+    profile = (spec.get('experiment_type'), spec.get('research_stage'))
+    supported = {('data_quality', 'validation'), ('statistical_factor', 'exploration'), ('trading_backtest', 'validation')}
+    require(profile in supported, 'unsupported cross-object profile')
+    controls = parse(safe_read(DEFINITIONS, {'statistical_factor': 'trend20-control.schema.json', 'trading_backtest': 'issue481-backtest-control.schema.json'}.get(profile[0], 'phase0-control.schema.json')))['$defs']
+    profile_schema = None
+    if profile[0] != 'data_quality':
+        profile_schema = parse(safe_read(DEFINITIONS, 'review-evidence.schema.json'))['$defs']
     for kind, obj in objects.items():
-        if kind in control:
-            schema_check(obj, control[kind])
+        if kind in ('research_task', 'experiment_run'):
+            schema_check(obj, controls[kind])
+        elif kind == 'result_evidence' and profile_schema is not None:
+            name = {'statistical_factor': 'trend20_result_evidence', 'trading_backtest': 'issue481_result_evidence'}[profile[0]]
+            schema_check(obj, {'$defs': profile_schema, '$ref': '#/$defs/' + name})
+        elif kind in parse(safe_read(DEFINITIONS, 'phase0-control.schema.json'))['$defs']:
+            schema_check(obj, parse(safe_read(DEFINITIONS, 'phase0-control.schema.json'))['$defs'][kind])
         elif kind == 'experiment_spec':
             schema_check(obj, parse(safe_read(ROOT, 'docs/schemas/research-experiment-spec-v2.schema.json')))
         elif kind == 'artifact_manifest':
@@ -512,63 +525,64 @@ def validate_handoff(request, objects, response=None):
             raise ValueError('unsupported control object')
     definitions = Definitions()
     criteria = request['criteria_ref']
-    candidates = [e for e in definitions.entries if e['kind'] == 'criteria' and
-                  (e['name'], e['revision']) == (criteria['id'], criteria['revision'])]
+    candidates = [e for e in definitions.entries if e['kind'] == 'criteria' and (e['name'], e['revision']) == (criteria['id'], criteria['revision'])]
     require(len(candidates) == 1, 'unknown criteria definition')
-    definitions.resolve('criteria', {'name': criteria['id'], 'revision': criteria['revision'],
-                        'content_hash': criteria['content_hash'], 'locator': candidates[0]['locator']})
+    _, criterion = definitions.resolve('criteria', {'name': criteria['id'], 'revision': criteria['revision'], 'content_hash': criteria['content_hash'], 'locator': candidates[0]['locator']})
+    expected_criteria = {('data_quality', 'validation'): 'phase0-date-order-criteria', ('statistical_factor', 'exploration'): 'phase0.trend20.review_evidence.criteria', ('trading_backtest', 'validation'): 'phase0.issue481.review_evidence.criteria'}[profile]
+    require(criterion['id'] == expected_criteria, 'criteria profile')
     for kind, ref in request['context_refs'].items():
         require(kind in objects and ref == check_record(objects[kind], kind), 'context reference: ' + kind)
-    spec, run = objects.get('experiment_spec'), objects.get('experiment_run')
-    manifest, evidence = objects.get('artifact_manifest'), objects.get('result_evidence')
-    task = objects.get('research_task')
-    require(spec and spec['experiment_type'] == 'data_quality' and spec['research_stage'] == 'validation',
-            'unsupported cross-object profile')
-    if spec and task:
-        require((spec['task_id'], spec['task_revision'], spec['task_content_hash']) ==
-                (task['task_id'], task['revision'], task['task_content_hash']), 'Spec Task reference')
-        require(spec['experiment_type'] == task['research_type'], 'Spec Task type')
-    if run:
+    require(set(request['context_refs']) == required_objects, 'review context set')
+    validate_spec(spec, task, definitions)
+    run, manifest, evidence = objects['experiment_run'], objects['artifact_manifest'], objects['result_evidence']
+    require((run['spec_id'], run['spec_revision'], run['spec_content_hash']) == (spec['spec_id'], spec['revision'], spec['spec_content_hash']), 'Run Spec reference')
+    require(run['scientific_fingerprint'] == digest(run['resolved_computation_manifest']), 'scientific fingerprint')
+    if profile[0] == 'data_quality':
         require(time_value(run['timing']['started_at']) <= time_value(run['timing']['completed_at']), 'Run time order')
-        require(run['scientific_fingerprint'] == digest(run['resolved_computation_manifest']), 'scientific fingerprint')
         require(run['process_exit_code'] == (0 if run['run_status'] == 'COMPLETED' else 1), 'Run exit status')
-    if spec and run:
-        require((run['spec_id'], run['spec_revision'], run['spec_content_hash']) ==
-                (spec['spec_id'], spec['revision'], spec['spec_content_hash']), 'Run Spec reference')
-    if manifest and run:
-        require((manifest['run_id'], manifest['run_content_hash']) == (run['run_id'], run['run_content_hash']), 'Manifest Run reference')
-    if manifest and spec:
-        require(manifest['experiment_type'] == spec['experiment_type'], 'Manifest Spec type')
-    if evidence and manifest and run:
-        require((evidence['run_id'], evidence['run_content_hash']) == (run['run_id'], run['run_content_hash']), 'Evidence Run reference')
-        require((evidence['manifest_id'], evidence['manifest_revision'], evidence['manifest_content_hash']) ==
-                (manifest['manifest_id'], manifest['revision'], manifest['manifest_content_hash']), 'Evidence Manifest reference')
-        require(evidence['run_status_snapshot'] == evidence['execution_status'] == run['run_status'], 'Evidence status')
-        present = [{**{k: manifest[v] for k, v in [('manifest_id', 'manifest_id'), ('manifest_revision', 'revision'),
-                    ('manifest_content_hash', 'manifest_content_hash')]},
-                    **{k: e[k] for k in ('artifact_id', 'role', 'content_sha256')}}
-                   for e in manifest['entries'] if e['availability'] == 'present']
-        require(evidence['supporting_artifacts'] == present, 'Evidence artifact references')
-        require(request['artifact_requirements']['exact_refs'] == present, 'handoff artifact references')
-        require(request['artifact_requirements']['role_profile_ref'] == manifest['artifact_profile'], 'role profile')
-        required = COMMON | TYPED[manifest['experiment_type']]
-        if run['run_status'] == 'FAILED':
-            required |= {'failure_diagnostics'}
-        require(required <= set(request['artifact_requirements']['required_roles']), 'handoff required roles')
-        require(request['review_scope'] == ('research_assessment' if run['run_status'] == 'COMPLETED' else 'failure_diagnosis'), 'review scope')
+    elif profile[0] == 'trading_backtest':
+        require(run['run_status'] == 'COMPLETED' and run['process_exit_code'] == 3 and run['resolved_computation_manifest']['stop_reason'] == 'STOP_ECONOMIC_GATE', 'Issue481 stop status')
+    else:
+        require(run['run_status'] == 'COMPLETED' and run['process_exit_code'] == 0, 'Trend20 run status')
+    require((manifest['run_id'], manifest['run_content_hash']) == (run['run_id'], run['run_content_hash']), 'Manifest Run reference')
+    require(manifest['experiment_type'] == spec['experiment_type'], 'Manifest Spec type')
+    prefix = {'data_quality': 'phase0.', 'statistical_factor': 'phase0.trend20.', 'trading_backtest': 'phase0.issue481.'}[profile[0]]
+    for entry in manifest['entries']:
+        definition, _ = definitions.resolve('payload', entry['content_schema_ref'])
+        require(definition['role'] == entry['role'] and definition['name'] == prefix + entry['role'], 'profile payload definition')
+    require((evidence['run_id'], evidence['run_content_hash']) == (run['run_id'], run['run_content_hash']), 'Evidence Run reference')
+    require((evidence['manifest_id'], evidence['manifest_revision'], evidence['manifest_content_hash']) == (manifest['manifest_id'], manifest['revision'], manifest['manifest_content_hash']), 'Evidence Manifest reference')
+    require(evidence['run_status_snapshot'] == evidence['execution_status'] == run['run_status'], 'Evidence status')
+    present = [{**{k: manifest[v] for k, v in [('manifest_id', 'manifest_id'), ('manifest_revision', 'revision'), ('manifest_content_hash', 'manifest_content_hash')]}, **{k: e[k] for k in ('artifact_id', 'role', 'content_sha256')}} for e in manifest['entries'] if e['availability'] == 'present']
+    require(evidence['supporting_artifacts'] == present and request['artifact_requirements']['exact_refs'] == present, 'Evidence artifact references')
+    require(request['artifact_requirements']['role_profile_ref'] == manifest['artifact_profile'], 'role profile')
+    required_roles = COMMON | TYPED[manifest['experiment_type']]
+    if run['run_status'] == 'FAILED':
+        required_roles |= {'failure_diagnostics'}
+    requested_roles = set(request['artifact_requirements']['required_roles'])
+    present_roles = {ref['role'] for ref in present}
+    require(requested_roles == required_roles and required_roles <= {e['role'] for e in manifest['entries']}, 'handoff required roles')
+    require(present_roles == (required_roles if run['run_status'] == 'COMPLETED' else {e['role'] for e in manifest['entries'] if e['availability'] == 'present'}), 'handoff exact role references')
+    scope = 'research_assessment' if run['run_status'] == 'COMPLETED' else 'failure_diagnosis'
+    require(request['review_scope'] == scope and request['expected_outputs'] == [{'object_type': 'review', 'schema_version': 'research_lab.review.v2'}], 'review scope/output')
+    if profile[0] == 'statistical_factor':
+        metrics = evidence['typed_metrics']
+        require(metrics['daily_ic']['unit'] == 'correlation' and metrics['top_bottom_spread']['unit'] == 'log_return', 'Trend20 evidence units')
+    elif profile[0] == 'trading_backtest':
+        rows = evidence['typed_metrics']['account_metrics']
+        expected = {f'{p}:{s}:{x}' for p in ('CANDIDATE', 'PAIRED') for s in ('PRIMARY_2S', 'STRESS_5S') for x in ('ag', 'au', 'cu', 'rb', 'ru', 'sc')}
+        require(len(rows) == 24 and {r['account_id'] for r in rows} == expected and all(r['account_id'] == ':'.join((r['path'], r['scenario'], r['product'])) for r in rows), 'Issue481 evidence account metrics')
     if response is not None:
         schema_check(response, schema)
         require(response['message_kind'] == 'response' and response['in_reply_to'] == request['handoff_id'], 'response correlation')
         require(response['context_refs'] == request['context_refs'] and response['operation'] == request['operation'], 'response context')
         require((response['sender_role'], response['recipient_role']) == (request['recipient_role'], request['sender_role']), 'response direction')
-        for ref in response.get('output_refs', []):
-            kind = ref['object_type']
-            require(kind in objects and ref == check_record(objects[kind], kind), 'output reference')
-            if kind == 'review':
-                review = objects[kind]
-                require(review['criteria_ref'] == request['criteria_ref'], 'Review criteria mismatch')
-                require((review['evidence_id'], review['evidence_content_hash']) ==
-                        (evidence['evidence_id'], evidence['evidence_content_hash']), 'Review Evidence reference')
-                require(response['review_scope'] == request['review_scope'], 'response review scope')
-                require(time_value(review['reviewed_at']) >= time_value(run['timing']['completed_at']), 'Review time order')
+        require(response['status'] == 'completed' and response['review_scope'] == request['review_scope'], 'response status/scope')
+        require(len(response['output_refs']) == 1 and response['output_refs'][0]['object_type'] == 'review', 'review output')
+        review = objects.get('review')
+        require(review is not None and response['output_refs'][0] == check_record(review, 'review'), 'output reference')
+        require(review['criteria_ref'] == request['criteria_ref'], 'Review criteria mismatch')
+        require((review['evidence_id'], review['evidence_content_hash']) == (evidence['evidence_id'], evidence['evidence_content_hash']), 'Review Evidence reference')
+        if profile[0] == 'data_quality':
+            require(time_value(review['reviewed_at']) >= time_value(run['timing']['completed_at']), 'Review time order')
     return True

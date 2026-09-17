@@ -126,3 +126,27 @@ Critic 必须先校验 Evidence、Manifest 与 Run 的精确引用、内容摘�
 这是离线审计脚本文本，不是接入生产的 validator。判据用例额外覆盖缺 id/revision/hash、非法版本/摘要、非评审请求携带判据和同 Evidence 改用 rev.2；输出 Review 选错版本/摘要必须由上述跨对象语义核对拒绝，不列作已通过的结构校验。反例覆盖缺 Task/Spec、缺 revision/hash、错误引用类型、错误角色/输出、错误响应状态、无原因、未绑定摘要、越权添加执行字段。未做真实 bundle、消息投递或 v2 输入驱动计算。
 
 下一步是极小的正向 v2 案例：从真实绑定 Task/Spec 开始，验证准入、实际 Run、Artifact、Evidence 和独立 Review；不能复用 #540 回溯映射冒充正向执行。#498 决定冻结，再逐项判断 #538 退出。本次不提前增加 Runtime。
+
+## 7. #523 restricted offline review-evidence admission
+
+`research_lab.contracts.v2.validate_handoff` now consumes only three registered
+Task → Spec → Run → Manifest → Evidence → Review chains: the archived #544
+`data_quality/validation` chain (including its FAILED diagnostic shape), the
+Trend20 `statistical_factor/exploration` profile, and the Issue481
+`trading_backtest/validation` profile. The latter two are synthetic structural
+fixtures. They do not turn the #540 retrospective examples into native v2
+bundles, consume external blotter/equity files, perform replay, or implement S7.
+
+Trend20 criteria preserve daily cross-sectional Pearson IC, log-return spread,
+negative values, the published half-even 12-decimal rule, overlap disclosure,
+and no significance test. Issue481 criteria preserve 24 independent
+path/scenario/product accounts, CNY precision, negative PnL, nonnegative fees,
+and explicit zero-trade accounts. Neither profile gains a profitability or
+significance threshold.
+
+Admission resolves one immutable registered criteria definition and requires
+all Manifest present-role exact references in both Evidence and the request. It
+also binds response correlation, reversed direction, context, review scope, and
+Review criteria/evidence references. Unknown profile, stage, criteria, Run
+status, method shape, missing role, or cross-profile reference remains rejected.
+This is an offline contract check only and remains **DRAFT_UNFROZEN**.
