@@ -62,6 +62,16 @@ def digest(value):
 
 DECIMAL = re.compile(r'(?:0|-?0\.[0-9]*[1-9]|-?[1-9][0-9]*(?:\.[0-9]*[1-9])?)')
 FIELD_TYPES = {'decimal', 'timestamp'}
+POSITIVE_HASH_VECTOR_NAMES = frozenset({
+    'basic', 'reordered', 'null', 'missing', 'array', 'array_reordered',
+    'unicode_control', 'unicode_composed', 'unicode_decomposed', 'decimal', 'utc',
+    'integer_bounds', 'self_hash', 'upstream_change',
+})
+NEGATIVE_HASH_VECTOR_NAMES = frozenset({
+    'float', 'exponent', 'negative_zero', 'nonfinite', 'out_of_range', 'duplicate',
+    'surrogate', 'non_ascii_key', 'decimal_trailing_zero', 'decimal_negative_zero',
+    'timestamp_offset', 'timestamp_invalid_date', 'timestamp_precision',
+})
 
 
 def validate_field_types(value, field_types):
@@ -130,6 +140,9 @@ def validate_hash_vectors(vectors):
         actual, actual_hash = hash_json(raw, vector['field_types'], vector['self_hash_field'])
         require(actual == expected and actual_hash == vector['sha256'],
                 'positive hash vector mismatch')
+    require(len(vectors['positive']) == len(POSITIVE_HASH_VECTOR_NAMES) and
+            {item['name'] for item in vectors['positive']} == POSITIVE_HASH_VECTOR_NAMES,
+            'positive hash vector set')
     for vector in vectors['negative']:
         require(isinstance(vector, dict) and set(vector) == negative_fields,
                 'negative hash vector fields')
@@ -147,6 +160,9 @@ def validate_hash_vectors(vectors):
         except ValueError:
             continue
         raise ValueError('negative hash vector accepted')
+    require(len(vectors['negative']) == len(NEGATIVE_HASH_VECTOR_NAMES) and
+            {item['name'] for item in vectors['negative']} == NEGATIVE_HASH_VECTOR_NAMES,
+            'negative hash vector set')
     return True
 
 

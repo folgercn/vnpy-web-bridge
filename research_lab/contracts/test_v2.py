@@ -327,6 +327,30 @@ def test_hash_vector_metadata_tampering_rejected(section, index, field, value):
         v2.validate_hash_vectors(vectors)
 
 
+
+@pytest.mark.parametrize(
+    "section,mutation",
+    [
+        ("positive", "delete"),
+        ("negative", "delete"),
+        ("positive", "rename"),
+        ("negative", "rename"),
+        ("positive", "clear"),
+        ("negative", "clear"),
+    ],
+)
+def test_hash_vector_collection_tampering_rejected(section, mutation):
+    vectors = hash_vectors()
+    if mutation == "delete":
+        vectors[section].pop()
+    elif mutation == "rename":
+        vectors[section][0]["name"] = "renamed"
+    else:
+        vectors[section].clear()
+    with pytest.raises(ValueError):
+        v2.validate_hash_vectors(vectors)
+
+
 def test_self_hash_excludes_only_declared_root_field():
     raw = b'{"spec_content_hash":"self","nested":{"spec_content_hash":"kept"}}'
     canonical, _ = v2.hash_json(raw, {}, "spec_content_hash")
