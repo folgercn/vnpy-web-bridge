@@ -56,3 +56,7 @@
 #540 的 `factor-summary.json` 与输入摘要在仓内；其完整 `factor-samples.csv`、`factor-daily.csv` 仍为外置引用，当前不可读。因此测试中的 `sample_feature_target`、`daily_ic_series` 是合成结构 fixture，明确不是事前锁定的 v2 执行或 #540 完整证据包。统计 Manifest 必须传入已通过 `validate_spec` 的 Trend20 Spec：`validate_manifest(root, manifest, run, task=task, spec=spec)`。这只验证离线结构、引用与字段语义，完整历史明细缺失前不宣称可重放或完成 #524 的完整真实包验收。
 
 Trend20 structural fixture 的 Run 使用独立、封闭的 `trend20-control.schema.json`：只允许该 profile 的 exploration/non-holdout 标识、Spec 精确引用、方法与 feature/target 参数、产品池、时间窗与固定 snapshot，并要求科学指纹等于该计算清单摘要。它不能通过改名复用 data_quality Run。
+
+## Issue481 trading_backtest profile
+
+`phase0.issue481.*.rev1` 仅表达 #540 的 Issue481 回溯映射：六个独立产品账户、603 个 corrected events 与 `STOP_ECONOMIC_GATE`。`process_exit_code=3` 在该受限 completed structural case 中是经济门槛停止，不能泛化为其他非零退出码成功。仓内可读 `backtest-facts.json` 和控制映射；完整历史 blotter/equity curve 是外置材料，`target-changes.jsonl` 不是其替代。因此此 profile 当前只能接收明确标注的 synthetic structural payload，未实现 S7 交易语义或完整历史 evidence 验收。
