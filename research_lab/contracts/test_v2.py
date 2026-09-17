@@ -351,6 +351,23 @@ def test_hash_vector_collection_tampering_rejected(section, mutation):
         v2.validate_hash_vectors(vectors)
 
 
+
+def test_negative_hash_vector_field_types_tampering_rejected():
+    vectors = hash_vectors()
+    vectors["negative"][8]["field_types"] = []
+    with pytest.raises(ValueError, match="field types"):
+        v2.validate_hash_vectors(vectors)
+
+
+def test_legal_negative_hash_vector_input_with_bad_field_types_rejected():
+    vectors = hash_vectors()
+    vectors["negative"][8].update(
+        raw_json='{"a":1}', field_types={"a": "decimal"}
+    )
+    with pytest.raises(ValueError, match="typed field must be a string"):
+        v2.validate_hash_vectors(vectors)
+
+
 def test_self_hash_excludes_only_declared_root_field():
     raw = b'{"spec_content_hash":"self","nested":{"spec_content_hash":"kept"}}'
     canonical, _ = v2.hash_json(raw, {}, "spec_content_hash")

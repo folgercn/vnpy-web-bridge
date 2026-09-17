@@ -74,15 +74,27 @@ NEGATIVE_HASH_VECTOR_NAMES = frozenset({
 })
 
 
-def validate_field_types(value, field_types):
-    """Validate explicitly declared root fields without inferring ordinary strings."""
-    require(isinstance(value, dict), 'typed hash value must be an object')
+def validate_field_type_declarations(field_types):
     require(isinstance(field_types, dict), 'field types')
     for field, kind in field_types.items():
-        require(isinstance(field, str) and field in value, 'unknown typed field')
+        require(isinstance(field, str), 'typed field name')
         require(kind in FIELD_TYPES, 'unknown field type')
+
+
+def validate_field_type_metadata(value, field_types):
+    """Check declarations against parsed values before testing negative inputs."""
+    require(isinstance(value, dict), 'typed hash value must be an object')
+    validate_field_type_declarations(field_types)
+    for field in field_types:
+        require(field in value, 'unknown typed field')
+        require(isinstance(value[field], str), 'typed field must be a string')
+
+
+def validate_field_types(value, field_types):
+    """Validate explicitly declared root fields without inferring ordinary strings."""
+    validate_field_type_metadata(value, field_types)
+    for field, kind in field_types.items():
         item = value[field]
-        require(isinstance(item, str), 'typed field must be a string')
         if kind == 'decimal':
             require(DECIMAL.fullmatch(item) is not None, 'decimal')
         else:
@@ -155,6 +167,12 @@ def validate_hash_vectors(vectors):
             raw = vector['raw_json'].encode('utf-8')
         except UnicodeEncodeError as error:
             raise ValueError('invalid vector UTF-8') from error
+        validate_field_type_declarations(vector['field_types'])
+        try:
+            parsed = parse(raw)
+        except ValueError:
+            continue
+        validate_field_type_metadata(parsed, vector['field_types'])
         try:
             hash_json(raw, vector['field_types'])
         except ValueError:
