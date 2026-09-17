@@ -838,3 +838,31 @@ def test_data_quality_rehashed_trend20_common_definition_rejected(bundle):
     reseal(manifest, "manifest")
     with pytest.raises(ValueError, match="profile payload definition mismatch"):
         v2.validate_manifest(bundle, manifest, obj["experiment_run"])
+
+@pytest.mark.parametrize(
+    "role, field_path",
+    [
+        ("statistical_summary", ("mean_top2_minus_bottom2_forward_log_return",)),
+        ("sample_feature_target", ("rows", 0, "feature_log_return")),
+        ("sample_feature_target", ("rows", 0, "forward_log_return")),
+    ],
+)
+def test_trend20_return_decimal_precision_through_manifest(tmp_path, role, field_path):
+    task, spec, run, manifest = trend20_bundle(tmp_path)
+    entry = next(item for item in manifest["entries"] if item["role"] == role)
+    path = tmp_path / entry["relative_path"]
+    for value, accepted in [("12.123456789012", True), ("12.1234567890123", False)]:
+        content = v2.parse(path.read_bytes())
+        target = content
+        for key in field_path[:-1]:
+            target = target[key]
+        target[field_path[-1]] = value
+        raw = v2.canonical(content).encode()
+        path.write_bytes(raw)
+        entry.update(byte_length=len(raw), content_sha256=v2.sha(raw))
+        reseal(manifest, "manifest")
+        if accepted:
+            v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)
+        else:
+            with pytest.raises(ValidationError):
+                v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)
