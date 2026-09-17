@@ -60,6 +60,148 @@ def digest(value):
     return sha(canonical(value).encode('utf-8'))
 
 
+DECIMAL = re.compile(r'(?:0|-?0\.[0-9]*[1-9]|-?[1-9][0-9]*(?:\.[0-9]*[1-9])?)')
+FIELD_TYPES = {'decimal', 'timestamp'}
+POSITIVE_HASH_VECTOR_NAMES = frozenset({
+    'basic', 'reordered', 'null', 'missing', 'array', 'array_reordered',
+    'unicode_control', 'unicode_composed', 'unicode_decomposed', 'decimal', 'utc',
+    'integer_bounds', 'self_hash', 'upstream_change',
+})
+NEGATIVE_HASH_VECTOR_NAMES = frozenset({
+    'float', 'exponent', 'negative_zero', 'nonfinite', 'out_of_range', 'duplicate',
+    'surrogate', 'non_ascii_key', 'decimal_trailing_zero', 'decimal_negative_zero',
+    'timestamp_offset', 'timestamp_invalid_date', 'timestamp_precision',
+})
+NEGATIVE_HASH_VECTOR_FIELD_TYPES = {
+    'float': {},
+    'exponent': {},
+    'negative_zero': {},
+    'nonfinite': {},
+    'out_of_range': {},
+    'duplicate': {},
+    'surrogate': {},
+    'non_ascii_key': {},
+    'decimal_trailing_zero': {'a': 'decimal'},
+    'decimal_negative_zero': {'a': 'decimal'},
+    'timestamp_offset': {'a': 'timestamp'},
+    'timestamp_invalid_date': {'a': 'timestamp'},
+    'timestamp_precision': {'a': 'timestamp'},
+}
+
+
+def validate_field_type_declarations(field_types):
+    require(isinstance(field_types, dict), 'field types')
+    for field, kind in field_types.items():
+        require(isinstance(field, str), 'typed field name')
+        require(kind in FIELD_TYPES, 'unknown field type')
+
+
+def validate_field_type_metadata(value, field_types):
+    """Check declarations against parsed values before testing negative inputs."""
+    require(isinstance(value, dict), 'typed hash value must be an object')
+    validate_field_type_declarations(field_types)
+    for field in field_types:
+        require(field in value, 'unknown typed field')
+        require(isinstance(value[field], str), 'typed field must be a string')
+
+
+def validate_field_types(value, field_types):
+    """Validate explicitly declared root fields without inferring ordinary strings."""
+    validate_field_type_metadata(value, field_types)
+    for field, kind in field_types.items():
+        item = value[field]
+        if kind == 'decimal':
+            require(DECIMAL.fullmatch(item) is not None, 'decimal')
+        else:
+            time_value(item)
+
+
+def hash_json(raw, field_types=None, self_hash_field=None):
+    """Return canonical UTF-8 and SHA-256 for one research-json-v1 value.
+
+    ``field_types`` applies only to declared root fields.  ``self_hash_field``
+    removes exactly that root field after validation; nested names remain hashed.
+    """
+    require(isinstance(raw, bytes), 'raw JSON bytes')
+    try:
+        value = parse(raw)
+    except UnicodeDecodeError as error:
+        raise ValueError('invalid UTF-8') from error
+    field_types = {} if field_types is None else field_types
+    validate_field_types(value, field_types)
+    if self_hash_field is not None:
+        require(isinstance(self_hash_field, str) and self_hash_field in value,
+                'self hash field')
+        value = {key: item for key, item in value.items() if key != self_hash_field}
+    output = canonical(value)
+    return output.encode('utf-8'), sha(output.encode('utf-8'))
+
+
+def validate_hash_vectors(vectors):
+    """Verify the repository-pinned research-json-v1 interoperability vectors."""
+    require(isinstance(vectors, dict) and set(vectors) ==
+            {'profile', 'status', 'positive', 'negative'}, 'hash vector envelope')
+    require(vectors['profile'] == PROFILE and vectors['status'] == 'DRAFT_UNFROZEN',
+            'hash vector profile/status')
+    positive_fields = {'name', 'raw_json', 'field_types', 'self_hash_field',
+                       'canonical_utf8', 'sha256'}
+    negative_fields = {'name', 'raw_json', 'field_types', 'expected'}
+    require(isinstance(vectors['positive'], list) and isinstance(vectors['negative'], list),
+            'hash vector collections')
+    names = set()
+    for vector in vectors['positive']:
+        require(isinstance(vector, dict) and set(vector) == positive_fields,
+                'positive hash vector fields')
+        require(isinstance(vector['name'], str) and vector['name'] not in names,
+                'duplicate hash vector name')
+        names.add(vector['name'])
+        require(isinstance(vector['raw_json'], str) and
+                isinstance(vector['canonical_utf8'], str) and
+                re.fullmatch(r'[a-f0-9]{64}', vector['sha256']) is not None,
+                'positive hash vector values')
+        try:
+            raw = vector['raw_json'].encode('utf-8')
+            expected = vector['canonical_utf8'].encode('utf-8')
+        except UnicodeEncodeError as error:
+            raise ValueError('invalid vector UTF-8') from error
+        actual, actual_hash = hash_json(raw, vector['field_types'], vector['self_hash_field'])
+        require(actual == expected and actual_hash == vector['sha256'],
+                'positive hash vector mismatch')
+    require(len(vectors['positive']) == len(POSITIVE_HASH_VECTOR_NAMES) and
+            {item['name'] for item in vectors['positive']} == POSITIVE_HASH_VECTOR_NAMES,
+            'positive hash vector set')
+    for vector in vectors['negative']:
+        require(isinstance(vector, dict) and set(vector) == negative_fields,
+                'negative hash vector fields')
+        require(isinstance(vector['name'], str) and vector['name'] not in names,
+                'duplicate hash vector name')
+        names.add(vector['name'])
+        require(isinstance(vector['raw_json'], str) and
+                vector['expected'] == 'reject_before_hash', 'negative hash vector values')
+        require(vector['name'] in NEGATIVE_HASH_VECTOR_FIELD_TYPES and
+                vector['field_types'] == NEGATIVE_HASH_VECTOR_FIELD_TYPES[vector['name']],
+                'negative hash vector field types')
+        try:
+            raw = vector['raw_json'].encode('utf-8')
+        except UnicodeEncodeError as error:
+            raise ValueError('invalid vector UTF-8') from error
+        validate_field_type_declarations(vector['field_types'])
+        try:
+            parsed = parse(raw)
+        except ValueError:
+            continue
+        validate_field_type_metadata(parsed, vector['field_types'])
+        try:
+            hash_json(raw, vector['field_types'])
+        except ValueError:
+            continue
+        raise ValueError('negative hash vector accepted')
+    require(len(vectors['negative']) == len(NEGATIVE_HASH_VECTOR_NAMES) and
+            {item['name'] for item in vectors['negative']} == NEGATIVE_HASH_VECTOR_NAMES,
+            'negative hash vector set')
+    return True
+
+
 def parse(raw):
     def pairs(items):
         result = {}

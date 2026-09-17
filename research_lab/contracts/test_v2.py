@@ -298,3 +298,97 @@ def test_incomplete_control_rejected(bundle, kind, field, prefix):
     request["context_refs"][kind] = v2.check_record(obj[kind], kind)
     with pytest.raises(ValidationError):
         v2.validate_handoff(request, obj)
+
+
+def hash_vectors():
+    return v2.parse(
+        v2.safe_read(v2.ROOT, "docs/research-lab/protocol-v2-hash-vectors.json")
+    )
+
+
+def test_research_json_v1_hash_vectors():
+    assert v2.validate_hash_vectors(hash_vectors())
+
+
+@pytest.mark.parametrize(
+    "section,index,field,value",
+    [
+        ("positive", 0, "canonical_utf8", "{}"),
+        ("positive", 0, "sha256", "0" * 64),
+        ("positive", 9, "field_types", {"rate": "timestamp"}),
+        ("positive", 12, "self_hash_field", "task_content_hash"),
+        ("negative", 0, "expected", "accept"),
+    ],
+)
+def test_hash_vector_metadata_tampering_rejected(section, index, field, value):
+    vectors = hash_vectors()
+    vectors[section][index][field] = value
+    with pytest.raises(ValueError):
+        v2.validate_hash_vectors(vectors)
+
+
+
+@pytest.mark.parametrize(
+    "section,mutation",
+    [
+        ("positive", "delete"),
+        ("negative", "delete"),
+        ("positive", "rename"),
+        ("negative", "rename"),
+        ("positive", "clear"),
+        ("negative", "clear"),
+    ],
+)
+def test_hash_vector_collection_tampering_rejected(section, mutation):
+    vectors = hash_vectors()
+    if mutation == "delete":
+        vectors[section].pop()
+    elif mutation == "rename":
+        vectors[section][0]["name"] = "renamed"
+    else:
+        vectors[section].clear()
+    with pytest.raises(ValueError):
+        v2.validate_hash_vectors(vectors)
+
+
+
+def test_negative_hash_vector_field_types_tampering_rejected():
+    vectors = hash_vectors()
+    vectors["negative"][8]["field_types"] = []
+    with pytest.raises(ValueError, match="field types"):
+        v2.validate_hash_vectors(vectors)
+
+
+def test_legal_negative_hash_vector_input_with_bad_field_types_rejected():
+    vectors = hash_vectors()
+    vectors["negative"][8].update(
+        raw_json='{"a":1}', field_types={"a": "decimal"}
+    )
+    with pytest.raises(ValueError, match="typed field must be a string"):
+        v2.validate_hash_vectors(vectors)
+
+
+def test_invalid_negative_raw_still_rejects_wrong_field_types_metadata():
+    vectors = hash_vectors()
+    vectors["negative"][0]["field_types"] = {"bogus": "decimal"}
+    with pytest.raises(ValueError, match="negative hash vector field types"):
+        v2.validate_hash_vectors(vectors)
+
+
+def test_self_hash_excludes_only_declared_root_field():
+    raw = b'{"spec_content_hash":"self","nested":{"spec_content_hash":"kept"}}'
+    canonical, _ = v2.hash_json(raw, {}, "spec_content_hash")
+    assert canonical == b'{"nested":{"spec_content_hash":"kept"}}'
+    with pytest.raises(ValueError):
+        v2.hash_json(raw, {}, "missing_content_hash")
+
+
+def test_hash_json_never_guesses_string_field_types():
+    raw = b'{"plain":"2024-01-01T08:00:00+08:00"}'
+    canonical, content_hash = v2.hash_json(raw)
+    assert canonical == raw
+    assert content_hash == v2.sha(raw)
+    with pytest.raises(ValueError, match="UTC timestamp"):
+        v2.hash_json(raw, {"plain": "timestamp"})
+    with pytest.raises(ValueError, match="invalid UTF-8"):
+        v2.hash_json(b'{"plain":"\xff"}')
