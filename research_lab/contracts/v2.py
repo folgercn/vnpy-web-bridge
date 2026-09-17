@@ -333,6 +333,10 @@ def validate_spec(spec, task, definitions=None):
     require(len(set(req['universe'])) == len(req['universe']), 'duplicate universe')
     if spec['experiment_type'] == 'statistical_factor':
         return validate_trend20_spec(spec, definitions)
+    if spec['experiment_type'] == 'trading_backtest':
+        method = definitions.method(spec['method_id'])
+        require(method['corrected_events'] == spec['corrected_events'] == 603, 'Issue481 corrected events')
+        return {'method': method}
     require(spec['experiment_type'] == 'data_quality', 'unsupported method profile: no registered implementation')
     resolved = {}
     metrics = []
@@ -441,6 +445,7 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
         validate_statistical_payloads(entries, contents)
     if manifest['experiment_type'] == 'trading_backtest':
         require(spec is not None and task is not None and spec['experiment_type'] == 'trading_backtest', 'backtest manifest requires Task and Spec')
+        validate_spec(spec, task, definitions)
         require((run['spec_id'], run['spec_revision'], run['spec_content_hash']) == (spec['spec_id'], spec['revision'], spec['spec_content_hash']), 'Issue481 Run Spec reference')
         require(run['scientific_fingerprint'] == digest(run['resolved_computation_manifest']), 'Issue481 scientific fingerprint')
         summary = next(contents[e['artifact_id']] for e in entries if e['role'] == 'backtest_summary')
