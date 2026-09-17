@@ -327,16 +327,16 @@ def validate_spec(spec, task, definitions=None):
             (task['task_id'], task['revision'], task['task_content_hash']), 'Task reference')
     require(task['research_type'] == spec['experiment_type'], 'Task type')
     require(spec['research_stage'] != 'confirmation', 'unsupported confirmation admission: exposure evidence not verified')
+    if spec['experiment_type'] == 'trading_backtest':
+        method = definitions.method(spec['method_id'])
+        require(method['corrected_events'] == spec['corrected_events'] == 603, 'Issue481 corrected events')
+        return {'method': method}
     req = spec['dataset_requirements']
     require(time_value(req['time_range']['start']) < time_value(req['time_range']['end']), 'reversed range')
     require(req['snapshot_selection_mode'] == 'fixed_snapshot' and re.fullmatch(r'[a-f0-9]{64}', req.get('snapshot_sha256') or ''), 'unbound snapshot')
     require(len(set(req['universe'])) == len(req['universe']), 'duplicate universe')
     if spec['experiment_type'] == 'statistical_factor':
         return validate_trend20_spec(spec, definitions)
-    if spec['experiment_type'] == 'trading_backtest':
-        method = definitions.method(spec['method_id'])
-        require(method['corrected_events'] == spec['corrected_events'] == 603, 'Issue481 corrected events')
-        return {'method': method}
     require(spec['experiment_type'] == 'data_quality', 'unsupported method profile: no registered implementation')
     resolved = {}
     metrics = []
