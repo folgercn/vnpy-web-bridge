@@ -72,6 +72,21 @@ NEGATIVE_HASH_VECTOR_NAMES = frozenset({
     'surrogate', 'non_ascii_key', 'decimal_trailing_zero', 'decimal_negative_zero',
     'timestamp_offset', 'timestamp_invalid_date', 'timestamp_precision',
 })
+NEGATIVE_HASH_VECTOR_FIELD_TYPES = {
+    'float': {},
+    'exponent': {},
+    'negative_zero': {},
+    'nonfinite': {},
+    'out_of_range': {},
+    'duplicate': {},
+    'surrogate': {},
+    'non_ascii_key': {},
+    'decimal_trailing_zero': {'a': 'decimal'},
+    'decimal_negative_zero': {'a': 'decimal'},
+    'timestamp_offset': {'a': 'timestamp'},
+    'timestamp_invalid_date': {'a': 'timestamp'},
+    'timestamp_precision': {'a': 'timestamp'},
+}
 
 
 def validate_field_type_declarations(field_types):
@@ -163,6 +178,9 @@ def validate_hash_vectors(vectors):
         names.add(vector['name'])
         require(isinstance(vector['raw_json'], str) and
                 vector['expected'] == 'reject_before_hash', 'negative hash vector values')
+        require(vector['name'] in NEGATIVE_HASH_VECTOR_FIELD_TYPES and
+                vector['field_types'] == NEGATIVE_HASH_VECTOR_FIELD_TYPES[vector['name']],
+                'negative hash vector field types')
         try:
             raw = vector['raw_json'].encode('utf-8')
         except UnicodeEncodeError as error:

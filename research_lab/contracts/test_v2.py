@@ -368,6 +368,13 @@ def test_legal_negative_hash_vector_input_with_bad_field_types_rejected():
         v2.validate_hash_vectors(vectors)
 
 
+def test_invalid_negative_raw_still_rejects_wrong_field_types_metadata():
+    vectors = hash_vectors()
+    vectors["negative"][0]["field_types"] = {"bogus": "decimal"}
+    with pytest.raises(ValueError, match="negative hash vector field types"):
+        v2.validate_hash_vectors(vectors)
+
+
 def test_self_hash_excludes_only_declared_root_field():
     raw = b'{"spec_content_hash":"self","nested":{"spec_content_hash":"kept"}}'
     canonical, _ = v2.hash_json(raw, {}, "spec_content_hash")
