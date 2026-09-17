@@ -448,8 +448,18 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
         validate_spec(spec, task, definitions)
         require((run['spec_id'], run['spec_revision'], run['spec_content_hash']) == (spec['spec_id'], spec['revision'], spec['spec_content_hash']), 'Issue481 Run Spec reference')
         require(run['scientific_fingerprint'] == digest(run['resolved_computation_manifest']), 'Issue481 scientific fingerprint')
+        requirements = spec['dataset_requirements']
+        computation = run['resolved_computation_manifest']
+        task_data = task['data_requirements']
         summary = next(contents[e['artifact_id']] for e in entries if e['role'] == 'backtest_summary')
         blotter = next(contents[e['artifact_id']] for e in entries if e['role'] == 'trade_blotter')
+        metadata = next(contents[e['artifact_id']] for e in entries if e['role'] == 'dataset_metadata')
+        require(task_data['products'] == requirements['products'] == computation['products'] == metadata['products'], 'Issue481 product binding')
+        require(task_data['input_snapshots'] == requirements['input_snapshots'] == computation['input_snapshots'] == metadata['input_snapshots'], 'Issue481 input snapshot binding')
+        require(requirements['snapshot_sha256'] == computation['snapshot_sha256'] == metadata['snapshot_sha256'], 'Issue481 curve snapshot binding')
+        require(task_data['dev_dates'] == computation['dev_dates'] == [requirements['time_range']['start'][:10], requirements['time_range']['end'][:10]], 'Issue481 DEV date binding')
+        require(task_data['warmup_from'] == requirements['warmup_from'] == computation['warmup_from'], 'Issue481 warmup binding')
+        require(spec['cost_model'] == computation['cost_scenarios']['fee_model'], 'Issue481 cost binding')
         require(summary['accounts'] == summary['products'] == blotter['accounts'] == ['ag', 'au', 'cu', 'rb', 'ru', 'sc'], 'account products')
         curve = next(contents[e['artifact_id']] for e in entries if e['role'] == 'equity_curve')
         require(curve['accounts'] == summary['accounts'], 'equity account coverage')
@@ -472,6 +482,7 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
         for point in curve['points']:
             require(point['account'] == point['product'] and point['account_id'] == ':'.join((point['path'], point['scenario'], point['product'])), 'equity account identity')
             time_value(point['official_day'] + 'T00:00:00.000000Z')
+            require('2023-01-03' <= point['official_day'] < '2025-01-01', 'equity DEV range')
             point_times.setdefault(point['account_id'], []).append(point['official_day'])
         require(all(times == sorted(times) and len(times) == len(set(times)) for times in point_times.values()), 'equity point order')
         by_account = {}

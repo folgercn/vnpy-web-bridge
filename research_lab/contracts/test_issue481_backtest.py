@@ -50,6 +50,7 @@ def fixture(tmp):
             "products": P,
             "dev_dates": ["2023-01-03", "2025-01-01"],
             "warmup_from": "2022-09-01",
+            "input_snapshots": dict(INPUTS),
         },
     }
     seal(t, "task")
@@ -72,7 +73,7 @@ def fixture(tmp):
             },
             "warmup_from": "2022-09-01",
             "snapshot_sha256": SNAP,
-            "input_snapshots": INPUTS,
+            "input_snapshots": dict(INPUTS),
         },
         "method_id": "phase0.issue481_minimal_causal_replay.rev1",
         "corrected_events": 603,
@@ -86,7 +87,7 @@ def fixture(tmp):
         "corrected_events": 603,
         "stop_reason": "STOP_ECONOMIC_GATE",
         "snapshot_sha256": SNAP,
-        "input_snapshots": INPUTS,
+        "input_snapshots": dict(INPUTS),
         "accounts": P,
         "dev_dates": ["2023-01-03", "2025-01-01"],
         "warmup_from": "2022-09-01",
@@ -128,7 +129,7 @@ def fixture(tmp):
             "profile": "issue481_corrected603_structural",
             "products": P,
             "snapshot_sha256": SNAP,
-            "input_snapshots": INPUTS,
+            "input_snapshots": dict(INPUTS),
             "limitations": "Synthetic structural fixture; historical blotter and equity curve are external and unavailable.",
         },
         "method_definition": {
@@ -152,8 +153,6 @@ def fixture(tmp):
             "accounts": P,
             "corrected_events": 603,
             "stop_reason": "STOP_ECONOMIC_GATE",
-            "net_pnl_cny": "-1",
-            "fees_cny": "0",
             "account_identities": IDENTITIES,
             "account_metrics": [
                 {**row, "net_pnl_cny": "0", "fees_cny": "0", "trade_count": 0}
@@ -316,7 +315,7 @@ def test_issue481_cny_precision_rehashed(tmp_path, role, field):
         if role == "equity_curve":
             content["points"][0][field] = value
         else:
-            content[field] = value
+            content["account_metrics"][0][field] = value
         if field == "fees_cny" and value.startswith("-"):
             accepted = False
         raw = v2.canonical(content).encode()
@@ -421,3 +420,132 @@ def test_issue481_rehashed_ascii_contract_and_calendar_rejected(tmp_path, mutati
     seal(manifest, "manifest")
     with pytest.raises((ValueError, ValidationError)):
         v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)
+
+
+@pytest.mark.parametrize("key", list(INPUTS))
+def test_issue481_rehashed_missing_input_rejected(tmp_path, key):
+    task, spec, run, manifest = fixture(tmp_path)
+    for value in (
+        task["data_requirements"],
+        spec["dataset_requirements"],
+        run["resolved_computation_manifest"],
+    ):
+        value["input_snapshots"].pop(key)
+    entry = next(e for e in manifest["entries"] if e["role"] == "dataset_metadata")
+    path = tmp_path / entry["relative_path"]
+    content = v2.parse(path.read_bytes())
+    content["input_snapshots"].pop(key)
+    raw = v2.canonical(content).encode()
+    path.write_bytes(raw)
+    entry.update(byte_length=len(raw), content_sha256=v2.sha(raw))
+    seal(task, "task")
+    spec["task_content_hash"] = task["task_content_hash"]
+    seal(spec, "spec")
+    run["spec_content_hash"] = spec["spec_content_hash"]
+    run["scientific_fingerprint"] = v2.digest(run["resolved_computation_manifest"])
+    seal(run, "run")
+    manifest["run_content_hash"] = run["run_content_hash"]
+    seal(manifest, "manifest")
+    with pytest.raises((ValueError, ValidationError)):
+        v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)
+
+
+def test_issue481_rehashed_replaced_input_rejected(tmp_path):
+    task, spec, run, manifest = fixture(tmp_path)
+    for value in (
+        task["data_requirements"],
+        spec["dataset_requirements"],
+        run["resolved_computation_manifest"],
+    ):
+        value["input_snapshots"]["contract_specs.csv"] = "0" * 64
+    entry = next(e for e in manifest["entries"] if e["role"] == "dataset_metadata")
+    path = tmp_path / entry["relative_path"]
+    content = v2.parse(path.read_bytes())
+    content["input_snapshots"]["contract_specs.csv"] = "0" * 64
+    raw = v2.canonical(content).encode()
+    path.write_bytes(raw)
+    entry.update(byte_length=len(raw), content_sha256=v2.sha(raw))
+    seal(task, "task")
+    spec["task_content_hash"] = task["task_content_hash"]
+    seal(spec, "spec")
+    run["spec_content_hash"] = spec["spec_content_hash"]
+    run["scientific_fingerprint"] = v2.digest(run["resolved_computation_manifest"])
+    seal(run, "run")
+    manifest["run_content_hash"] = run["run_content_hash"]
+    seal(manifest, "manifest")
+    with pytest.raises((ValueError, ValidationError)):
+        v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)
+
+
+def test_issue481_half_open_controls_align(tmp_path):
+    task, spec, run, manifest = fixture(tmp_path)
+    assert task["data_requirements"]["dev_dates"] == ["2023-01-03", "2025-01-01"]
+    assert spec["dataset_requirements"]["time_range"] == {
+        "start": "2023-01-03T00:00:00.000000Z",
+        "end": "2025-01-01T00:00:00.000000Z",
+    }
+    assert run["resolved_computation_manifest"]["dev_dates"] == [
+        "2023-01-03",
+        "2025-01-01",
+    ]
+    v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)
+
+
+@pytest.mark.parametrize(
+    "day, accepted",
+    [
+        ("2023-01-03", True),
+        ("2024-12-31", True),
+        ("2025-01-01", False),
+        ("1900-01-01", False),
+    ],
+)
+def test_issue481_rehashed_equity_dev_range(tmp_path, day, accepted):
+    task, spec, run, manifest = fixture(tmp_path)
+    entry = next(e for e in manifest["entries"] if e["role"] == "equity_curve")
+    path = tmp_path / entry["relative_path"]
+    content = v2.parse(path.read_bytes())
+    content["points"][0]["official_day"] = day
+    raw = v2.canonical(content).encode()
+    path.write_bytes(raw)
+    entry.update(byte_length=len(raw), content_sha256=v2.sha(raw))
+    seal(manifest, "manifest")
+    if accepted:
+        v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)
+    else:
+        with pytest.raises(ValueError, match="equity DEV range"):
+            v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)
+
+
+@pytest.mark.parametrize("mutation", ["missing", "duplicate", "identity"])
+def test_issue481_rehashed_account_metrics_rejected(tmp_path, mutation):
+    task, spec, run, manifest = fixture(tmp_path)
+    entry = next(e for e in manifest["entries"] if e["role"] == "backtest_summary")
+    path = tmp_path / entry["relative_path"]
+    content = v2.parse(path.read_bytes())
+    if mutation == "missing":
+        content["account_metrics"].pop()
+    elif mutation == "duplicate":
+        content["account_metrics"][-1] = content["account_metrics"][0]
+    else:
+        content["account_metrics"][0]["product"] = "rb"
+    raw = v2.canonical(content).encode()
+    path.write_bytes(raw)
+    entry.update(byte_length=len(raw), content_sha256=v2.sha(raw))
+    seal(manifest, "manifest")
+    with pytest.raises((ValueError, ValidationError)):
+        v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)
+
+
+def test_issue481_au_zero_trade_is_explicit(tmp_path):
+    task, spec, run, manifest = fixture(tmp_path)
+    metrics = next(
+        e
+        for e in v2.validate_manifest(
+            tmp_path, manifest, run, task=task, spec=spec
+        ).values()
+        if e.get("account_metrics")
+    )["account_metrics"]
+    au = [row for row in metrics if row["product"] == "au"]
+    assert len(au) == 4
+    assert all(row["trade_count"] == 0 and row["net_pnl_cny"] == "0" for row in au)

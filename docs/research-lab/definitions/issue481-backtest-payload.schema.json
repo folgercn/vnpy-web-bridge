@@ -113,8 +113,6 @@
         "accounts",
         "corrected_events",
         "stop_reason",
-        "net_pnl_cny",
-        "fees_cny",
         "account_identities",
         "account_metrics"
       ],
@@ -145,14 +143,6 @@
         },
         "stop_reason": {
           "const": "STOP_ECONOMIC_GATE"
-        },
-        "net_pnl_cny": {
-          "type": "string",
-          "pattern": "^(?:0|-?(?:0\\.[0-9]{0,9}[1-9]|[1-9][0-9]*(?:\\.[0-9]{0,9}[1-9])?))$"
-        },
-        "fees_cny": {
-          "type": "string",
-          "pattern": "^(?:0|(?:0\\.[0-9]{0,9}[1-9]|[1-9][0-9]*(?:\\.[0-9]{0,9}[1-9])?))$"
         },
         "account_identities": {
           "type": "array",

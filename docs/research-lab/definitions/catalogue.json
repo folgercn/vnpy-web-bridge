@@ -282,7 +282,7 @@
       "kind": "payload",
       "name": "phase0.issue481.backtest_summary",
       "revision": "rev.1",
-      "content_hash": "a47e799ef9dfe5002a14667894fbe120b535abba804b2ae1abb4e196d6cf560d",
+      "content_hash": "ab8f00175366a764cfa9c18a3cdcbc95c8439e5b662dd09752270ba7d7680178",
       "locator": "issue481-backtest-payload.schema.json#/$defs/backtest_summary",
       "file": "issue481-backtest-payload.schema.json",
       "pointer": [
