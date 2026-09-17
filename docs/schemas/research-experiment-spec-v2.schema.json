@@ -902,7 +902,8 @@
               "enum": [
                 "purged_time_series_split",
                 "combinatorial_purged_cross_validation",
-                "walk_forward_split"
+                "walk_forward_split",
+                "retrospective_exploration_no_split"
               ]
             },
             "train_window_days": {
@@ -938,7 +939,41 @@
                 }
               }
             }
-          }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "method": {
+                    "const": "retrospective_exploration_no_split"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "train_window_days": {
+                    "const": 1
+                  },
+                  "test_window_days": {
+                    "const": 1
+                  },
+                  "step_size_days": {
+                    "const": 1
+                  },
+                  "leakage_mitigation": {
+                    "properties": {
+                      "purging_rule": {
+                        "const": "overlapping_labels_retained_and_disclosed"
+                      },
+                      "embargo_days": {
+                        "const": 0
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
         },
         "candidate_decision_criteria": {
           "type": "object",
@@ -973,9 +1008,10 @@
                 "properties": {
                   "metric_name": {
                     "enum": [
+                      "ic_pearson_cross_sectional",
+                      "top_bottom_spread",
                       "rank_ic_spearman_cross_sectional",
-                      "t_statistic_hac_adjusted",
-                      "top_bottom_spread"
+                      "t_statistic_hac_adjusted"
                     ]
                   }
                 }

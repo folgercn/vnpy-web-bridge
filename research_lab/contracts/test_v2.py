@@ -1,6 +1,7 @@
 """Real archived objects and adversarial copies; no new research execution."""
 
 import copy
+import json
 import tarfile
 from pathlib import Path
 
@@ -392,3 +393,308 @@ def test_hash_json_never_guesses_string_field_types():
         v2.hash_json(raw, {"plain": "timestamp"})
     with pytest.raises(ValueError, match="invalid UTF-8"):
         v2.hash_json(b'{"plain":"\xff"}')
+
+
+TREND20_METRICS = [
+    {
+        "metric_name": "ic_pearson_cross_sectional",
+        "calculation_definition_version": "phase0.trend20.daily_pearson_ic.rev1",
+        "unit": "correlation",
+        "sample_scope": "daily cross sections with at least four samples",
+        "precision_rule": "Round published decimal to 12 places, ROUND_HALF_EVEN; do not round daily inputs.",
+        "calculation_definition": "Pearson correlation of same-day Trend20 feature and t+1..t+6 same-contract forward log return, then mean unrounded daily values.",
+        "undefined_policy": "null_with_reason_not_zero",
+    },
+    {
+        "metric_name": "top_bottom_spread",
+        "calculation_definition_version": "phase0.trend20.top2_bottom2.rev1",
+        "unit": "log_return",
+        "sample_scope": "daily cross sections with at least four samples",
+        "precision_rule": "Round published decimal to 12 places, ROUND_HALF_EVEN; do not round daily inputs.",
+        "calculation_definition": "Mean unrounded daily top2 minus bottom2 same-contract forward log-return spread.",
+        "undefined_policy": "null_with_reason_not_zero",
+    },
+]
+
+
+def trend20_spec_task():
+    task = {
+        "schema_version": "research_lab.task.v2",
+        "hash_profile": "research-json-v1",
+        "task_id": "task-phase0-trend20",
+        "revision": "rev.1",
+        "research_type": "statistical_factor",
+        "objective": "Retrospective Trend20 structural contract only.",
+    }
+    reseal(task, "task")
+    spec = {
+        "schema_version": "research_lab.experiment.v2",
+        "hash_profile": "research-json-v1",
+        "spec_id": "spec-phase0-trend20",
+        "revision": "rev.1",
+        "task_id": task["task_id"],
+        "task_revision": "rev.1",
+        "task_content_hash": task["task_content_hash"],
+        "experiment_type": "statistical_factor",
+        "research_stage": "exploration",
+        "dataset_requirements": {
+            "provider_kind": "historical_derived",
+            "dataset_reference_uri": "candidate://phase0/trend20",
+            "snapshot_selection_mode": "fixed_snapshot",
+            "snapshot_sha256": "f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351",
+            "universe": ["ag", "au", "cu", "rb", "ru", "sc"],
+            "frequencies": ["1d"],
+            "time_range": {
+                "start": "2023-01-03T00:00:00.000000Z",
+                "end": "2024-12-31T00:00:00.000000Z",
+            },
+            "required_fields": ["settlement", "open_interest", "exact_contract"],
+            "pit_constraints": "No historical collector receipt proof.",
+        },
+        "feature_specification": {
+            "feature_name": "Trend20 same exact contract",
+            "implementation_ref": "phase0.trend20_same_exact_contract.feature.rev1",
+            "parameters": [
+                {
+                    "name": "lookback_official_days",
+                    "value_type": "integer",
+                    "value": 20,
+                    "unit": "official_day",
+                }
+            ],
+            "pit_alignment": {
+                "required_receipt": "unavailable historically",
+                "signal_decision_point": "retrospective exploration",
+            },
+        },
+        "target_specification": {
+            "target_name": "forward5 log return",
+            "implementation_ref": "phase0.trend20_same_exact_contract.forward5_log_return.rev1",
+            "horizon_trading_days": 6,
+            "return_interval": "t+1_to_t+6_same_exact_contract",
+            "target_type": "forward_log_return",
+        },
+        "split_and_leakage_control": {
+            "method": "retrospective_exploration_no_split",
+            "train_window_days": 1,
+            "test_window_days": 1,
+            "step_size_days": 1,
+            "leakage_mitigation": {
+                "purging_rule": "overlapping_labels_retained_and_disclosed",
+                "embargo_days": 0,
+            },
+        },
+        "candidate_decision_criteria": {},
+        "metric_specifications": copy.deepcopy(TREND20_METRICS),
+        "rejection_policy": {
+            "forbid_unknown_fields": True,
+            "reject_unregistered_implementation": True,
+            "reject_backtest_metrics_in_pure_statistical_spec": True,
+        },
+        "holdout_policy": {
+            "mode": "not_used",
+            "reason": "retrospective exploration, not a holdout.",
+        },
+    }
+    reseal(spec, "spec")
+    return task, spec
+
+
+def trend20_bundle(tmp_path):
+    _, spec = trend20_spec_task()
+    base = v2.ROOT / "research/phase0_data_quality/bundles/validation-rev1-ci.tar.gz"
+    with tarfile.open(base) as source:
+        run = json.loads(source.extractfile("run.json").read())
+        manifest = json.loads(source.extractfile("manifest.json").read())
+    run["run_id"] = "run-phase0-trend20-structural"
+    run["spec_id"], run["spec_revision"], run["spec_content_hash"] = (
+        spec["spec_id"],
+        spec["revision"],
+        spec["spec_content_hash"],
+    )
+    reseal(run, "run")
+    payloads = {
+        "dataset_metadata": {
+            "case_kind": "retrospective_trend20_structural_fixture",
+            "snapshot_sha256": "f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351",
+            "source_manifest": "docs/research-lab/phase0-validation/input-manifest.json",
+            "source_member": "curve_contract_daily.csv",
+            "source_bytes": 14187500,
+            "receipt_evidence": None,
+            "limitations": "Historical derived table; no collector receipt evidence; structural fixture is not a native v2 execution.",
+        },
+        "method_definition": {
+            "method_id": "phase0.trend20_same_exact_contract.rev1",
+            "feature": "log(settlement(t)/settlement(t-20 official days)) for same exact contract",
+            "target": "log(settlement(t+6)/settlement(t+1)) for same exact contract",
+            "selection": "eligible_curve_contract=True; maximum t open_interest per product; ties exact_contract ascending",
+            "precision": "float64; published decimals rounded half-even to 12 decimal places; means use unrounded daily values",
+            "limitations": "exploration; overlapping labels; no significance test; no Alpha or confirmation claim",
+        },
+        "environment_lock": {
+            "case_kind": "retrospective_trend20_structural_fixture",
+            "runtime_lock": "docs/research-lab/phase0-validation/runtime-lock.json",
+            "calculation_script_sha256": "bce98d04365d8bda5200a14bcfffcb63fac6eb7ce0fae872bada6e077d940e75",
+            "limitations": "Synthetic structural payload only; historical full detail remains external and unavailable.",
+        },
+        "replay_instructions": {
+            "case_kind": "retrospective_trend20_structural_fixture",
+            "input_manifest": "docs/research-lab/phase0-validation/input-manifest.json",
+            "steps": "Verify fixed input hashes; calculate same-contract Trend20 and t+1..t+6 forward labels; compute daily Pearson IC; round published values half-even to 12 decimals.",
+            "comparison": "Compare structural fields only; unavailable historical full sample and daily payloads prevent complete replay.",
+            "limitations": "Not a prospective registration or native v2 execution.",
+        },
+        "statistical_summary": {
+            "method_id": "phase0.trend20_same_exact_contract.rev1",
+            "research_stage": "exploration",
+            "sample_count": 2868,
+            "date_count": 478,
+            "mean_daily_pearson_ic": "-0.012667903046",
+            "mean_top2_minus_bottom2_forward_log_return": "-0.001355555878",
+            "precision": "half_even_12_decimal_places_from_unrounded_daily_values",
+            "significance_test": "not_performed",
+            "label_overlap": True,
+        },
+        "sample_feature_target": {
+            "case_kind": "synthetic_structural_fixture_not_historical_full_detail",
+            "rows": [
+                {
+                    "official_day": "2023-01-03",
+                    "product": "rb",
+                    "exact_contract": "rb2305",
+                    "feature_log_return": "0.01",
+                    "forward_log_return": "-0.02",
+                    "split": "exploration_all",
+                }
+            ],
+            "fields": [
+                "official_day",
+                "product",
+                "exact_contract",
+                "feature_log_return",
+                "forward_log_return",
+                "split",
+            ],
+            "units": {
+                "feature_log_return": "log_return",
+                "forward_log_return": "log_return",
+            },
+            "limitations": "Synthetic rows exercise structure only; #540 full sample payload is externally referenced and unavailable.",
+        },
+        "daily_ic_series": {
+            "case_kind": "synthetic_structural_fixture_not_historical_full_detail",
+            "metric": "daily_cross_sectional_pearson_ic",
+            "precision": "half_even_12_decimal_places_from_unrounded_daily_values",
+            "rows": [
+                {
+                    "official_day": "2023-01-03",
+                    "pearson_ic": "-0.012667903046",
+                    "sample_count": 6,
+                    "undefined_reason": None,
+                }
+            ],
+            "limitations": "Synthetic rows exercise structure only; #540 full daily IC payload is externally referenced and unavailable.",
+        },
+    }
+    manifest["experiment_type"], manifest["run_id"], manifest["run_content_hash"] = (
+        "statistical_factor",
+        run["run_id"],
+        run["run_content_hash"],
+    )
+    manifest["entries"] = []
+    for role, content in payloads.items():
+        raw = v2.canonical(content).encode()
+        path = f"payload/{role}.json"
+        target = tmp_path / path
+        target.parent.mkdir(exist_ok=True)
+        target.write_bytes(raw)
+        entry = next(
+            e
+            for e in v2.Definitions().entries
+            if e["kind"] == "payload" and e["name"] == f"phase0.trend20.{role}"
+        )
+        manifest["entries"].append(
+            {
+                "artifact_id": role,
+                "availability": "present",
+                "byte_length": len(raw),
+                "classification": "required"
+                if role
+                in {
+                    "dataset_metadata",
+                    "method_definition",
+                    "environment_lock",
+                    "replay_instructions",
+                    "statistical_summary",
+                }
+                else "supporting",
+                "content_schema_ref": {
+                    k: entry[k] for k in ("name", "revision", "content_hash", "locator")
+                },
+                "content_sha256": v2.sha(raw),
+                "coverage": "complete",
+                "media_type": "application/json",
+                "producer": {"component": "structural_fixture", "version": "0" * 64},
+                "relative_path": path,
+                "role": role,
+            }
+        )
+    reseal(manifest, "manifest")
+    return spec, run, manifest
+
+
+def test_trend20_structural_statistical_delivery(tmp_path):
+    task, spec = trend20_spec_task()
+    assert v2.validate_spec(spec, task)["feature"]["id"].endswith("feature.rev1")
+    spec, run, manifest = trend20_bundle(tmp_path)
+    assert set(v2.validate_manifest(tmp_path, manifest, run, spec=spec)) == {
+        e["artifact_id"] for e in manifest["entries"]
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["missing", "wrong_definition", "corrupt", "reference", "type", "metric"],
+)
+def test_trend20_statistical_rejects(tmp_path, mutation):
+    task, spec = trend20_spec_task()
+    spec, run, manifest = trend20_bundle(tmp_path)
+    if mutation == "metric":
+        spec["metric_specifications"][0]["calculation_definition"] = "wrong"
+        reseal(spec, "spec")
+        with pytest.raises(ValueError):
+            v2.validate_spec(spec, task)
+        return
+    entry = next(
+        e
+        for e in manifest["entries"]
+        if e["role"]
+        == (
+            "statistical_summary"
+            if mutation in ("wrong_definition", "type")
+            else "sample_feature_target"
+            if mutation == "missing"
+            else "daily_ic_series"
+        )
+    )
+    if mutation == "missing":
+        (tmp_path / entry["relative_path"]).unlink()
+    elif mutation == "corrupt":
+        (tmp_path / entry["relative_path"]).write_bytes(b"{}")
+    elif mutation == "reference":
+        entry["content_schema_ref"]["revision"] = "rev.2"
+    elif mutation == "type":
+        data = v2.parse((tmp_path / entry["relative_path"]).read_bytes())
+        data["sample_count"] = "2868"
+        raw = v2.canonical(data).encode()
+        (tmp_path / entry["relative_path"]).write_bytes(raw)
+        entry.update(byte_length=len(raw), content_sha256=v2.sha(raw))
+    else:
+        data = v2.parse((tmp_path / entry["relative_path"]).read_bytes())
+        data["precision"] = "wrong"
+        raw = v2.canonical(data).encode()
+        (tmp_path / entry["relative_path"]).write_bytes(raw)
+        entry.update(byte_length=len(raw), content_sha256=v2.sha(raw))
+    reseal(manifest, "manifest")
+    with pytest.raises((ValueError, ValidationError, OSError)):
+        v2.validate_manifest(tmp_path, manifest, run, spec=spec)
