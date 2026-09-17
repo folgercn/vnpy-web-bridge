@@ -450,7 +450,10 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
         require(run['scientific_fingerprint'] == digest(run['resolved_computation_manifest']), 'Issue481 scientific fingerprint')
         summary = next(contents[e['artifact_id']] for e in entries if e['role'] == 'backtest_summary')
         blotter = next(contents[e['artifact_id']] for e in entries if e['role'] == 'trade_blotter')
-        require(summary['accounts'] == summary['products'] == ['ag', 'au', 'cu', 'rb', 'ru', 'sc'], 'account products')
+        require(summary['accounts'] == summary['products'] == blotter['accounts'] == ['ag', 'au', 'cu', 'rb', 'ru', 'sc'], 'account products')
+        curve = next(contents[e['artifact_id']] for e in entries if e['role'] == 'equity_curve')
+        require(curve['accounts'] == summary['accounts'], 'equity account coverage')
+        require(set(point['account'] for point in curve['points']) == set(summary['accounts']), 'missing equity account')
         sequences = [item['fill_sequence'] for item in blotter['fills']]
         require(sequences == sorted(sequences) and len(sequences) == len(set(sequences)), 'fill order')
     return contents

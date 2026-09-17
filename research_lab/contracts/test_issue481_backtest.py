@@ -66,6 +66,17 @@ def fixture(tmp):
         "corrected_events": 603,
         "stop_reason": "STOP_ECONOMIC_GATE",
         "snapshot_sha256": SNAP,
+        "accounts": P,
+        "dev_dates": ["2023-01-03", "2024-12-31"],
+        "warmup_from": "2022-09-01",
+        "cost_scenarios": {
+            "primary_bbo_ticks": 1,
+            "primary_window_seconds": 2,
+            "stress_bbo_ticks": 3,
+            "stress_window_seconds": 5,
+            "stress_fee_multiplier": "1.25",
+            "fee_model": "official_pit_mapping_with_modeled_close_today_fee",
+        },
     }
     r = {
         "schema_version": "research_lab.run.v2",
@@ -124,6 +135,7 @@ def fixture(tmp):
         },
         "trade_blotter": {
             "fixture": "synthetic_structural_fixture",
+            "accounts": P,
             "fills": [
                 {
                     "account": "rb",
@@ -136,7 +148,10 @@ def fixture(tmp):
         },
         "equity_curve": {
             "fixture": "synthetic_structural_fixture",
-            "points": [{"account": "rb", "sequence": 1, "equity_cny": "0"}],
+            "accounts": P,
+            "points": [
+                {"account": account, "sequence": 1, "equity_cny": "0"} for account in P
+            ],
             "limitations": "Synthetic points only; historical equity curve is external and unavailable.",
         },
     }
@@ -239,3 +254,46 @@ def test_issue481_rejects(tmp_path, kind):
     seal(m, "manifest")
     with pytest.raises((ValueError, ValidationError)):
         v2.validate_manifest(tmp_path, m, r, task=t, spec=s)
+
+
+@pytest.mark.parametrize(
+    "role, field",
+    [
+        ("backtest_summary", "net_pnl_cny"),
+        ("backtest_summary", "fees_cny"),
+        ("equity_curve", "equity_cny"),
+    ],
+)
+def test_issue481_cny_precision_rehashed(tmp_path, role, field):
+    task, spec, run, manifest = fixture(tmp_path)
+    entry = next(e for e in manifest["entries"] if e["role"] == role)
+    path = tmp_path / entry["relative_path"]
+    for value, accepted in [("-2.1234567891", True), ("-2.12345678901", False)]:
+        content = v2.parse(path.read_bytes())
+        if role == "equity_curve":
+            content["points"][0][field] = value
+        else:
+            content[field] = value
+        raw = v2.canonical(content).encode()
+        path.write_bytes(raw)
+        entry.update(byte_length=len(raw), content_sha256=v2.sha(raw))
+        seal(manifest, "manifest")
+        if accepted:
+            v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)
+        else:
+            with pytest.raises(ValidationError):
+                v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)
+
+
+def test_issue481_missing_equity_account_rejected(tmp_path):
+    task, spec, run, manifest = fixture(tmp_path)
+    entry = next(e for e in manifest["entries"] if e["role"] == "equity_curve")
+    path = tmp_path / entry["relative_path"]
+    content = v2.parse(path.read_bytes())
+    content["points"].pop()
+    raw = v2.canonical(content).encode()
+    path.write_bytes(raw)
+    entry.update(byte_length=len(raw), content_sha256=v2.sha(raw))
+    seal(manifest, "manifest")
+    with pytest.raises(ValueError, match="missing equity account"):
+        v2.validate_manifest(tmp_path, manifest, run, task=task, spec=spec)

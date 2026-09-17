@@ -256,7 +256,7 @@
       "kind": "payload",
       "name": "phase0.issue481.environment_lock",
       "revision": "rev.1",
-      "content_hash": "e215d6add43a23878aa2dce8f1240f30fb57fec7ef4c703dcd5d1776dfa38371",
+      "content_hash": "cacb233814fab7a79777eee260f2a145cfa9da752c79255687eb546af91421cd",
       "locator": "issue481-backtest-payload.schema.json#/$defs/environment_lock",
       "file": "issue481-backtest-payload.schema.json",
       "pointer": [
@@ -282,7 +282,7 @@
       "kind": "payload",
       "name": "phase0.issue481.backtest_summary",
       "revision": "rev.1",
-      "content_hash": "b70face71b89e21d81066cbb1a42852e388a2f181744a1f836339e3adbf30fd6",
+      "content_hash": "7b327111983985143a82eff3b829647d8775d2684a432eac4527fae225e872f4",
       "locator": "issue481-backtest-payload.schema.json#/$defs/backtest_summary",
       "file": "issue481-backtest-payload.schema.json",
       "pointer": [
@@ -295,7 +295,7 @@
       "kind": "payload",
       "name": "phase0.issue481.trade_blotter",
       "revision": "rev.1",
-      "content_hash": "fbd7c3a94da04ae04e0a92c144cd26f36a8e25776da119814a25ee2a9f12f753",
+      "content_hash": "7d1245d0c10815428ea0ba2be7add31f12c4b6f27f188cabdaf72ec5f6693351",
       "locator": "issue481-backtest-payload.schema.json#/$defs/trade_blotter",
       "file": "issue481-backtest-payload.schema.json",
       "pointer": [
@@ -308,7 +308,7 @@
       "kind": "payload",
       "name": "phase0.issue481.equity_curve",
       "revision": "rev.1",
-      "content_hash": "94e3aaa1879ba27c627b1a9439f35fbe1e60b0e2f588a087a0f26878f0c93d96",
+      "content_hash": "77dc70d1635220e2c95e78240a5333f4eeb8fb70de63a12cac57ae701b0bf7b6",
       "locator": "issue481-backtest-payload.schema.json#/$defs/equity_curve",
       "file": "issue481-backtest-payload.schema.json",
       "pointer": [
