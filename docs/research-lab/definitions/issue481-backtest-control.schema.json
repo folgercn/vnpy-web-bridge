@@ -1,1 +1,190 @@
-{"$defs":{"experiment_run":{"type":"object","additionalProperties":false,"required":["schema_version","hash_profile","run_id","run_status","spec_id","spec_revision","spec_content_hash","trial_context","resolved_computation_manifest","scientific_fingerprint","timing","process_exit_code","run_content_hash"],"properties":{"schema_version":{"const":"research_lab.run.v2"},"hash_profile":{"const":"research-json-v1"},"run_id":{"type":"string"},"run_status":{"const":"COMPLETED"},"spec_id":{"type":"string"},"spec_revision":{"const":"rev.1"},"spec_content_hash":{"type":"string","pattern":"^[a-f0-9]{64}$"},"trial_context":{"const":{"research_stage":"validation","trial_kind":null,"retry_of_run_id":null,"holdout_usage_state":"unknown"}},"resolved_computation_manifest":{"type":"object","additionalProperties":false,"required":["method_id","products","corrected_events","stop_reason","snapshot_sha256"],"properties":{"method_id":{"const":"phase0.issue481_minimal_causal_replay.rev1"},"products":{"const":["ag","au","cu","rb","ru","sc"]},"corrected_events":{"const":603},"stop_reason":{"const":"STOP_ECONOMIC_GATE"},"snapshot_sha256":{"const":"f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351"}}},"scientific_fingerprint":{"type":"string","pattern":"^[a-f0-9]{64}$"},"timing":{"type":"object","additionalProperties":false,"required":["started_at","completed_at","recorded_at"],"properties":{"started_at":{"type":"null"},"completed_at":{"type":"null"},"recorded_at":{"type":"string","format":"date-time"}}},"process_exit_code":{"const":3},"run_content_hash":{"type":"string","pattern":"^[a-f0-9]{64}$"}}}}}
+{
+  "$defs": {
+    "experiment_run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "hash_profile",
+        "run_id",
+        "run_status",
+        "spec_id",
+        "spec_revision",
+        "spec_content_hash",
+        "trial_context",
+        "resolved_computation_manifest",
+        "scientific_fingerprint",
+        "timing",
+        "process_exit_code",
+        "run_content_hash"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "research_lab.run.v2"
+        },
+        "hash_profile": {
+          "const": "research-json-v1"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "run_status": {
+          "const": "COMPLETED"
+        },
+        "spec_id": {
+          "type": "string"
+        },
+        "spec_revision": {
+          "const": "rev.1"
+        },
+        "spec_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "trial_context": {
+          "const": {
+            "research_stage": "validation",
+            "trial_kind": null,
+            "retry_of_run_id": null,
+            "holdout_usage_state": "unknown"
+          }
+        },
+        "resolved_computation_manifest": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "method_id",
+            "products",
+            "corrected_events",
+            "stop_reason",
+            "snapshot_sha256"
+          ],
+          "properties": {
+            "method_id": {
+              "const": "phase0.issue481_minimal_causal_replay.rev1"
+            },
+            "products": {
+              "const": [
+                "ag",
+                "au",
+                "cu",
+                "rb",
+                "ru",
+                "sc"
+              ]
+            },
+            "corrected_events": {
+              "const": 603
+            },
+            "stop_reason": {
+              "const": "STOP_ECONOMIC_GATE"
+            },
+            "snapshot_sha256": {
+              "const": "f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351"
+            }
+          }
+        },
+        "scientific_fingerprint": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "timing": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "started_at",
+            "completed_at",
+            "recorded_at"
+          ],
+          "properties": {
+            "started_at": {
+              "type": "null"
+            },
+            "completed_at": {
+              "type": "null"
+            },
+            "recorded_at": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        },
+        "process_exit_code": {
+          "const": 3
+        },
+        "run_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "research_task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "hash_profile",
+        "task_id",
+        "revision",
+        "research_type",
+        "objective",
+        "data_requirements",
+        "task_content_hash"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "research_lab.task.v2"
+        },
+        "hash_profile": {
+          "const": "research-json-v1"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "revision": {
+          "const": "rev.1"
+        },
+        "research_type": {
+          "const": "trading_backtest"
+        },
+        "objective": {
+          "type": "string"
+        },
+        "task_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "data_requirements": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "products",
+            "dev_dates",
+            "warmup_from"
+          ],
+          "properties": {
+            "products": {
+              "const": [
+                "ag",
+                "au",
+                "cu",
+                "rb",
+                "ru",
+                "sc"
+              ]
+            },
+            "dev_dates": {
+              "const": [
+                "2023-01-03",
+                "2024-12-31"
+              ]
+            },
+            "warmup_from": {
+              "const": "2022-09-01"
+            }
+          }
+        }
+      }
+    }
+  }
+}

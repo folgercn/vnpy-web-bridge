@@ -13,6 +13,9 @@
     },
     {
       "$ref": "#/$defs/trading_backtest_spec"
+    },
+    {
+      "$ref": "#/$defs/issue481_backtest_spec"
     }
   ],
   "allOf": [
@@ -1694,6 +1697,120 @@
           }
         }
       ]
+    },
+    "issue481_backtest_spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "hash_profile",
+        "spec_id",
+        "revision",
+        "task_id",
+        "task_revision",
+        "task_content_hash",
+        "spec_content_hash",
+        "experiment_type",
+        "research_stage",
+        "dataset_requirements",
+        "method_id",
+        "corrected_events",
+        "cost_model",
+        "holdout_policy"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "research_lab.experiment.v2"
+        },
+        "hash_profile": {
+          "const": "research-json-v1"
+        },
+        "spec_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "const": "rev.1"
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "task_revision": {
+          "const": "rev.1"
+        },
+        "task_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "spec_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "experiment_type": {
+          "const": "trading_backtest"
+        },
+        "research_stage": {
+          "const": "validation"
+        },
+        "dataset_requirements": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "products",
+            "accounts",
+            "time_range",
+            "warmup_from",
+            "snapshot_sha256"
+          ],
+          "properties": {
+            "products": {
+              "const": [
+                "ag",
+                "au",
+                "cu",
+                "rb",
+                "ru",
+                "sc"
+              ]
+            },
+            "accounts": {
+              "const": [
+                "ag",
+                "au",
+                "cu",
+                "rb",
+                "ru",
+                "sc"
+              ]
+            },
+            "time_range": {
+              "const": {
+                "start": "2023-01-03T00:00:00.000000Z",
+                "end": "2024-12-31T00:00:00.000000Z"
+              }
+            },
+            "warmup_from": {
+              "const": "2022-09-01"
+            },
+            "snapshot_sha256": {
+              "const": "f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351"
+            }
+          }
+        },
+        "method_id": {
+          "const": "phase0.issue481_minimal_causal_replay.rev1"
+        },
+        "corrected_events": {
+          "const": 603
+        },
+        "cost_model": {
+          "const": "official_pit_mapping_with_modeled_close_today_fee"
+        },
+        "holdout_policy": {
+          "const": "unknown"
+        }
+      }
     }
   }
 }
