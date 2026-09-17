@@ -326,6 +326,24 @@
       "file": "issue481-backtest-method.json",
       "pointer": [],
       "source_path": "scripts/issue481_minimal_causal_replay.py"
+    },
+    {
+      "kind": "criteria",
+      "name": "phase0.trend20.review_evidence.criteria",
+      "revision": "rev.1",
+      "content_hash": "e3606c0b976832a9ddf96b049fb90400737909356be53a0fd11e320e37761f5f",
+      "locator": "trend20-review-criteria.json",
+      "file": "trend20-review-criteria.json",
+      "pointer": []
+    },
+    {
+      "kind": "criteria",
+      "name": "phase0.issue481.review_evidence.criteria",
+      "revision": "rev.1",
+      "content_hash": "e5d8018cd7c0279ded9021dec3946032ab18b7919c7feee7afd932909de7dc18",
+      "locator": "issue481-review-criteria.json",
+      "file": "issue481-review-criteria.json",
+      "pointer": []
     }
   ]
 }
