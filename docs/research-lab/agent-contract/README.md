@@ -127,9 +127,30 @@ Critic 必须先校验 Evidence、Manifest 与 Run 的精确引用、内容摘�
 
 下一步是极小的正向 v2 案例：从真实绑定 Task/Spec 开始，验证准入、实际 Run、Artifact、Evidence 和独立 Review；不能复用 #540 回溯映射冒充正向执行。#498 决定冻结，再逐项判断 #538 退出。本次不提前增加 Runtime。
 
-## 7. #523 restricted offline review-evidence admission
+## 7. #523 restricted offline `execute_spec` and review-evidence admission
 
-`research_lab.contracts.v2.validate_handoff` now consumes only three registered
+`research_lab.contracts.v2.validate_handoff` accepts an `execute_spec` request
+only for the registered `data_quality/validation` profile. The request binds
+exact Task and Spec records, the fixed candidate role profile and all six
+required roles, declares Run/Manifest/Evidence outputs, and keeps `exact_refs`
+empty because no future file hash may be invented. A valid request-only fixture
+means only that this offline contract shape and its existing inputs are valid;
+it is neither execution approval nor a claim that outputs exist.
+
+For a `completed` execute response, the same entry consumes the archived #544
+Task → Spec → Run → Manifest → Evidence chain and requires reverse direction,
+`in_reply_to`, all three real output references, terminal Run, complete role
+delivery, raw payload bytes/hashes and schemas, and the data-quality Evidence
+metric facts from `quality_summary`. Recomputing every affected record hash
+does not bypass these graph and payload checks. A FAILED Run may still have a
+completed handoff response only when its Manifest and Evidence deliver a real
+`failure_diagnostics` payload; this reports delivery completion, not successful
+execution. `blocked`, `rejected`, `incomplete`, and `unsupported` responses can
+report a valid problem without speculative future Run/Manifest/Evidence reads;
+unknown outcome remains only `blocked` with `execution_outcome_unknown` and
+does not authorize retry.
+
+`validate_handoff` also consumes three registered
 Task → Spec → Run → Manifest → Evidence → Review chains: the archived #544
 `data_quality/validation` chain (including its FAILED diagnostic shape), the
 Trend20 `statistical_factor/exploration` profile, and the Issue481
@@ -144,7 +165,7 @@ path/scenario/product accounts, CNY precision, negative PnL, nonnegative fees,
 and explicit zero-trade accounts. Neither profile gains a profitability or
 significance threshold.
 
-Admission resolves one immutable registered criteria definition and requires
+Review admission resolves one immutable registered criteria definition and requires
 all Manifest present-role exact references in both Evidence and the request. It
 also binds response correlation, reversed direction, context, review scope, and
 Review criteria/evidence references. For Trend20 and Issue481, `validate_handoff`
@@ -159,6 +180,9 @@ treating that report as a completed Review delivery. Unknown profile, stage, cri
 shape, missing role, or cross-profile reference remains rejected. This is an
 offline contract check only and remains **DRAFT_UNFROZEN**.
 
-`validate_handoff` validates only the cross-object consumption graph. Call
-`validate_manifest` first to verify manifest bytes and payload schemas; a valid
-handoff never substitutes for that payload admission.
+`validate_handoff` is an offline, fail-closed graph check. Completed
+`execute_spec` and review responses require either `root` for raw-byte
+verification or the unmodified verified mapping returned by `validate_manifest`;
+ordinary payload mappings are rejected. No other operation/profile gains a
+cross-object validator, and this work does not add a Runtime, dispatch, retry,
+authorization, or execution implementation.
