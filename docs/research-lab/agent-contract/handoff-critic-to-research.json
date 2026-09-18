@@ -46,8 +46,64 @@
     },
     "artifact_requirements": {
       "role_profile_ref": "research_lab.artifact_roles.v2.candidate1",
-      "required_roles": [],
-      "exact_refs": []
+      "required_roles": [
+        "dataset_metadata",
+        "method_definition",
+        "environment_lock",
+        "replay_instructions",
+        "quality_summary",
+        "quality_anomalies"
+      ],
+      "exact_refs": [
+        {
+          "manifest_id": "fixture-artifact-manifest",
+          "manifest_revision": "rev.1",
+          "manifest_content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "artifact_id": "fixture-dataset_metadata",
+          "role": "dataset_metadata",
+          "content_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "manifest_id": "fixture-artifact-manifest",
+          "manifest_revision": "rev.1",
+          "manifest_content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "artifact_id": "fixture-method_definition",
+          "role": "method_definition",
+          "content_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "manifest_id": "fixture-artifact-manifest",
+          "manifest_revision": "rev.1",
+          "manifest_content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "artifact_id": "fixture-environment_lock",
+          "role": "environment_lock",
+          "content_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "manifest_id": "fixture-artifact-manifest",
+          "manifest_revision": "rev.1",
+          "manifest_content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "artifact_id": "fixture-replay_instructions",
+          "role": "replay_instructions",
+          "content_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "manifest_id": "fixture-artifact-manifest",
+          "manifest_revision": "rev.1",
+          "manifest_content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "artifact_id": "fixture-quality_summary",
+          "role": "quality_summary",
+          "content_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "manifest_id": "fixture-artifact-manifest",
+          "manifest_revision": "rev.1",
+          "manifest_content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "artifact_id": "fixture-quality_anomalies",
+          "role": "quality_anomalies",
+          "content_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
     },
     "expected_outputs": [
       {

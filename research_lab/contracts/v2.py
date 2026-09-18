@@ -27,6 +27,42 @@ OBJECTS = {'research_task': ('task', 'research_lab.task.v2', True),
            'artifact_manifest': ('manifest', 'research_lab.artifact_manifest.v2', True),
            'result_evidence': ('evidence', 'research_lab.evidence.v2', False),
            'review': ('review', 'research_lab.review.v2', True)}
+REVISE_SPEC_544_SOURCE_ANCHOR = {
+    'research_task': {
+        'object_type': 'research_task',
+        'object_id': 'task-phase0-rb-date-order',
+        'revision': 'rev.1',
+        'content_hash': '006fd80ec74c4ecc713271a6980e3df838aca2f02c51361a5c1a5702d5097443',
+    },
+    'experiment_spec': {
+        'object_type': 'experiment_spec',
+        'object_id': 'spec-phase0-rb-date-order',
+        'revision': 'rev.1',
+        'content_hash': 'bd4cba75ee4688305344b3665fba29d712029a6b465c81ce6ef937ea3a1acde5',
+    },
+    'experiment_run': {
+        'object_type': 'experiment_run',
+        'object_id': 'run-3bc9fae4eaed4ff291af0c732c0f7871',
+        'content_hash': '7f3139ed2a9035afa6d9cbe671e0a5d89545635f9103340172dfd77b365326ce',
+    },
+    'artifact_manifest': {
+        'object_type': 'artifact_manifest',
+        'object_id': 'manifest-run-3bc9fae4eaed4ff291af0c732c0f7871',
+        'revision': 'rev.1',
+        'content_hash': '41ac809f40c4d4e4f40bfffa88c6b0dcaf3362d207453cfdfad8dcedaf038e6f',
+    },
+    'result_evidence': {
+        'object_type': 'result_evidence',
+        'object_id': 'evidence-run-3bc9fae4eaed4ff291af0c732c0f7871',
+        'content_hash': '279e63699a7758814e204dcaaf1be570b147174b12619d66f3346945620d4acf',
+    },
+    'review': {
+        'object_type': 'review',
+        'object_id': 'review-independent-run-3bc9fae4eaed4ff291af0c732c0f7871',
+        'revision': 'rev.1',
+        'content_hash': 'a7dce82c45f9d02603c37f83a2850243f32223b0f2381f133583fde7960e39bf',
+    },
+}
 
 
 def require(ok, reason):
@@ -592,17 +628,27 @@ def _resolve_manifest_payload(manifest, definitions, role, *, payloads, root):
     raise ValueError('verified payloads or root required for ' + role)
 
 
-def _validate_execute_problem_context(request, objects, response):
+def _parse_revision_number(rev_str):
+    require(isinstance(rev_str, str) and rev_str.startswith('rev.') and
+            rev_str[4:].isdigit() and int(rev_str[4:]) >= 1, 'invalid revision')
+    return int(rev_str[4:])
+
+
+def _validate_problem_context(request, objects, response, operation):
     """Allow a problem report to retain only request references it can verify."""
     response_refs = response['context_refs']
     if not response_refs:
         return
     request_refs = request.get('context_refs')
-    require(isinstance(request_refs, dict), 'execute_spec problem context')
-    require(set(response_refs) <= set(request_refs), 'execute_spec problem response context')
+    require(isinstance(request_refs, dict), f'{operation} problem context')
+    require(set(response_refs) <= set(request_refs), f'{operation} problem response context')
     for kind, reference in response_refs.items():
         require(kind in objects and reference == request_refs[kind] == check_record(objects[kind], kind),
-                'execute_spec problem context reference: ' + kind)
+                f'{operation} problem context reference: ' + kind)
+
+
+def _validate_execute_problem_context(request, objects, response):
+    return _validate_problem_context(request, objects, response, 'execute_spec')
 
 
 def _validate_execute_spec_handoff(request, objects, response, schema, *, payloads, root):
@@ -769,12 +815,349 @@ def _validate_execute_spec_handoff(request, objects, response, schema, *, payloa
     return True
 
 
+def _dq_registered_fields(definitions):
+    """Derive authoritative registered field list for phase0 data_quality from catalogue."""
+    entry = next(e for e in definitions.entries if e['kind'] == 'payload' and e['name'] == 'phase0.dataset_metadata')
+    ref = {k: entry[k] for k in ('name', 'revision', 'content_hash', 'locator')}
+    _, schema = definitions.resolve('payload', ref)
+    return schema['properties']['fields']['const']
+
+
+def _validate_dq_spec_dataset_requirements(requirements_spec, task, definitions):
+    """Validate data_quality dataset_requirements against task and registered DQ method."""
+    task_data = task['data_requirements']
+    req_fields = requirements_spec.get('required_fields')
+    require(isinstance(req_fields, list) and 'source_official_day' in req_fields,
+            'data-quality spec missing source_official_day')
+    registered_fields = _dq_registered_fields(definitions)
+    require(isinstance(req_fields, list) and
+            all(f in req_fields for f in registered_fields) and
+            req_fields == registered_fields,
+            'data-quality spec registered method field contract')
+    require(req_fields == task_data.get('fields'),
+            'Task data-quality required fields binding')
+    task_start = task_data.get('date_start')
+    task_end = task_data.get('date_end_exclusive')
+    time_range = requirements_spec.get('time_range') or {}
+    start = time_range.get('start')
+    end = time_range.get('end')
+    require(requirements_spec.get('universe') == task_data.get('products') and
+            isinstance(task_start, str) and isinstance(task_end, str) and
+            task_start < task_end and
+            isinstance(start, str) and isinstance(end, str) and
+            start[:10] < end[:10] and
+            start == f"{task_start}T00:00:00.000000Z" and
+            end == f"{task_end}T00:00:00.000000Z",
+            'Task data-quality range binding')
+
+
+def _validate_prepare_spec_handoff(request, objects, response, schema):
+    """Offline delivery check for prepare_spec in data_quality/validation."""
+    if response is not None and isinstance(response, dict) and response.get('status') != 'completed':
+        schema_check(response, schema)
+        require(isinstance(request, dict) and request.get('schema_version') == 'research_lab.agent_handoff.v2' and
+                request.get('message_kind') == 'request' and
+                request.get('operation') == 'prepare_spec' and
+                (request.get('sender_role'), request.get('recipient_role')) == ('research', 'research'),
+                'prepare_spec problem request')
+        require(isinstance(request.get('handoff_id'), str) and request['handoff_id'],
+                'prepare_spec problem correlation')
+        require(response['message_kind'] == 'response' and response['in_reply_to'] == request['handoff_id'] and
+                response['operation'] == 'prepare_spec' and
+                (response['sender_role'], response['recipient_role']) == ('research', 'research'),
+                'prepare_spec problem response')
+        require(response.get('handoff_id') != request['handoff_id'],
+                'response handoff_id must differ from request')
+        _validate_problem_response(response)
+        if (response['status'], response['problem']['code']) == ('rejected', 'invalid_input'):
+            _validate_problem_context(request, objects, response, 'prepare_spec')
+            return True
+        schema_check(request, schema)
+        if (response['status'], response['problem']['code']) == ('unsupported', 'capability_unsupported'):
+            _validate_problem_context(request, objects, response, 'prepare_spec')
+            return True
+
+    schema_check(request, schema)
+    require(request['message_kind'] == 'request', 'prepare_spec request')
+    require((request['sender_role'], request['recipient_role']) == ('research', 'research'),
+            'prepare_spec request direction')
+    require(set(request['context_refs']) == {'research_task'}, 'unsupported prepare_spec context')
+    require('research_task' in objects, 'missing research_task')
+    task = objects['research_task']
+    controls = parse(safe_read(DEFINITIONS, 'phase0-control.schema.json'))['$defs']
+    schema_check(task, controls['research_task'])
+    require(task.get('research_type') == 'data_quality', 'unsupported prepare_spec task research_type')
+    require(request['context_refs']['research_task'] == check_record(task, 'research_task'),
+            'context reference: research_task')
+    requirements = request['artifact_requirements']
+    require(requirements['role_profile_ref'] == ROLE_PROFILE, 'prepare_spec role profile')
+    require(requirements['required_roles'] == [], 'prepare_spec required roles must be empty')
+    require(requirements['exact_refs'] == [], 'prepare_spec exact refs must be empty')
+    require(request['expected_outputs'] == [
+        {'object_type': 'experiment_spec', 'schema_version': 'research_lab.experiment.v2'}
+    ], 'prepare_spec expected outputs')
+    if response is None:
+        return True
+
+    schema_check(response, schema)
+    require(response['message_kind'] == 'response' and response['in_reply_to'] == request['handoff_id'],
+            'response correlation')
+    require(response.get('handoff_id') != request['handoff_id'],
+            'response handoff_id must differ from request')
+    require(response['operation'] == 'prepare_spec' and
+            (response['sender_role'], response['recipient_role']) == ('research', 'research'),
+            'prepare_spec response direction')
+    require(response['context_refs'] == request['context_refs'], 'prepare_spec response context')
+    if response['status'] != 'completed':
+        _validate_problem_response(response)
+        return True
+
+    require(len(response.get('output_refs', [])) == 1 and
+            response['output_refs'][0]['object_type'] == 'experiment_spec',
+            'prepare_spec output reference')
+    require('experiment_spec' in objects, 'missing experiment_spec delivery')
+    spec = objects['experiment_spec']
+    require((spec.get('experiment_type'), spec.get('research_stage')) == ('data_quality', 'validation'),
+            'unsupported prepare_spec profile')
+    schema_check(spec, parse(safe_read(ROOT, 'docs/schemas/research-experiment-spec-v2.schema.json')))
+    require(response['output_refs'][0] == check_record(spec, 'experiment_spec'), 'output reference mismatch')
+    definitions = Definitions()
+    validate_spec(spec, task, definitions)
+    _validate_dq_spec_dataset_requirements(spec['dataset_requirements'], task, definitions)
+    return True
+
+
+def _validate_revise_spec_handoff(request, objects, response, schema, *, payloads, root):
+    """Offline delivery check for revise_spec in data_quality/validation."""
+    if response is not None and isinstance(response, dict) and response.get('status') != 'completed':
+        schema_check(response, schema)
+        require(isinstance(request, dict) and request.get('schema_version') == 'research_lab.agent_handoff.v2' and
+                request.get('message_kind') == 'request' and
+                request.get('operation') == 'revise_spec' and
+                (request.get('sender_role'), request.get('recipient_role')) == ('critic', 'research'),
+                'revise_spec problem request')
+        require(isinstance(request.get('handoff_id'), str) and request['handoff_id'],
+                'revise_spec problem correlation')
+        require(response['message_kind'] == 'response' and response['in_reply_to'] == request['handoff_id'] and
+                response['operation'] == 'revise_spec' and
+                (response['sender_role'], response['recipient_role']) == ('research', 'critic'),
+                'revise_spec problem response')
+        require(response.get('handoff_id') != request['handoff_id'],
+                'response handoff_id must differ from request')
+        _validate_problem_response(response)
+        if (response['status'], response['problem']['code']) == ('rejected', 'invalid_input'):
+            _validate_problem_context(request, objects, response, 'revise_spec')
+            return True
+        schema_check(request, schema)
+        if (response['status'], response['problem']['code']) == ('unsupported', 'capability_unsupported'):
+            _validate_problem_context(request, objects, response, 'revise_spec')
+            return True
+
+    schema_check(request, schema)
+    require(request['message_kind'] == 'request', 'revise_spec request')
+    require((request['sender_role'], request['recipient_role']) == ('critic', 'research'),
+            'revise_spec request direction')
+    required_request_objects = {'research_task', 'experiment_spec', 'experiment_run',
+                                'artifact_manifest', 'result_evidence', 'review'}
+    require(set(request['context_refs']) == required_request_objects, 'revise_spec request context set')
+    require(required_request_objects <= set(objects), 'missing revise_spec request context')
+    task = objects['research_task']
+    old_spec = objects['experiment_spec']
+    run = objects['experiment_run']
+    manifest = objects['artifact_manifest']
+    evidence = objects['result_evidence']
+    review = objects['review']
+
+    controls = parse(safe_read(DEFINITIONS, 'phase0-control.schema.json'))['$defs']
+    schema_check(task, controls['research_task'])
+    schema_check(run, controls['experiment_run'])
+    schema_check(evidence, controls['result_evidence'])
+    schema_check(review, controls['review'])
+    schema_check(old_spec, parse(safe_read(ROOT, 'docs/schemas/research-experiment-spec-v2.schema.json')))
+    schema_check(manifest, parse(safe_read(ROOT, 'docs/schemas/research-artifact-manifest-v2.schema.json')))
+
+    for kind in required_request_objects:
+        require(request['context_refs'][kind] == check_record(objects[kind], kind),
+                'context reference: ' + kind)
+
+    require(task.get('research_type') == 'data_quality', 'unsupported revise_spec task research_type')
+    require((old_spec.get('experiment_type'), old_spec.get('research_stage')) == ('data_quality', 'validation'),
+            'unsupported revise_spec profile')
+    require(run['run_status'] == 'COMPLETED' and run['process_exit_code'] == 0,
+            'revise_spec requires COMPLETED run')
+    require(request['expected_outputs'] == [
+        {'object_type': 'experiment_spec', 'schema_version': 'research_lab.experiment.v2'}
+    ], 'revise_spec expected outputs')
+
+    definitions = Definitions()
+    resolved_old = validate_spec(old_spec, task, definitions)
+    requirements_spec = old_spec['dataset_requirements']
+    require(requirements_spec['universe'] == task['data_requirements']['products'] and
+            requirements_spec['time_range']['start'][:10] == task['data_requirements']['date_start'] and
+            requirements_spec['time_range']['end'][:10] == task['data_requirements']['date_end_exclusive'],
+            'Task data-quality range binding')
+
+    require((run['spec_id'], run['spec_revision'], run['spec_content_hash']) ==
+            (old_spec['spec_id'], old_spec['revision'], old_spec['spec_content_hash']),
+            'Run Spec reference')
+    require(run['scientific_fingerprint'] == digest(run['resolved_computation_manifest']),
+            'scientific fingerprint')
+    require(time_value(run['timing']['started_at']) <= time_value(run['timing']['completed_at']),
+            'Run time order')
+    computation = run['resolved_computation_manifest']
+    require(computation['raw_bytes_sha256'] == requirements_spec['snapshot_sha256'] and
+            computation['resolved_parameters'] == resolved_old['source_order'] and
+            computation['scientific_time'] == requirements_spec['time_range'] and
+            computation['universe'] == requirements_spec['universe'] and
+            computation['normalization_rule_version'] == requirements_spec['normalization_rule_version'],
+            'Run data-quality Spec binding')
+    require(computation['holdout_usage_state'] == 'not_applicable' and
+            run['trial_context'] == {'research_stage': 'validation', 'trial_kind': None,
+                                     'retry_of_run_id': None, 'holdout_usage_state': 'not_applicable'},
+            'Run data-quality metadata')
+
+    verified = validate_manifest(root, manifest, run, definitions, task=task, spec=old_spec) if root is not None else payloads
+    require(isinstance(verified, _VerifiedPayloads) and _is_verified_payloads(verified),
+            'verified payloads or root required')
+    require(verified._manifest_ref == (manifest['manifest_id'], manifest['revision'],
+                                       manifest['manifest_content_hash']),
+            'verified payload manifest mismatch')
+
+    require((manifest['run_id'], manifest['run_content_hash']) == (run['run_id'], run['run_content_hash']),
+            'Manifest Run reference')
+    require(manifest['experiment_type'] == old_spec['experiment_type'] and
+            manifest['artifact_profile'] == ROLE_PROFILE,
+            'Manifest data-quality delivery metadata')
+
+    require((evidence['run_id'], evidence['run_content_hash']) == (run['run_id'], run['run_content_hash']),
+            'Evidence Run reference')
+    require((evidence['manifest_id'], evidence['manifest_revision'], evidence['manifest_content_hash']) ==
+            (manifest['manifest_id'], manifest['revision'], manifest['manifest_content_hash']),
+            'Evidence Manifest reference')
+    require(evidence['run_status_snapshot'] == evidence['execution_status'] == run['run_status'],
+            'Evidence status')
+
+    present = _present_artifact_refs(manifest)
+    require(evidence['supporting_artifacts'] == present, 'Evidence artifact references')
+    actual_roles = {item['role'] for item in present}
+    required_roles = COMMON | TYPED['data_quality']
+    require(actual_roles == required_roles, 'unexpected completed delivery role')
+
+    requirements = request['artifact_requirements']
+    require(requirements['role_profile_ref'] == manifest['artifact_profile'], 'revise_spec role profile')
+    requested_roles = set(requirements['required_roles'])
+    require(requested_roles == required_roles and len(requirements['required_roles']) == len(required_roles),
+            'revise_spec required roles')
+    require(requirements['exact_refs'] == present, 'revise_spec exact artifact references')
+
+    contents = {
+        entry['role']: _resolve_manifest_payload(manifest, definitions, entry['role'],
+                                                 payloads=verified, root=None)
+        for entry in manifest['entries'] if entry['availability'] == 'present'
+    }
+    metadata, method_definition = contents['dataset_metadata'], contents['method_definition']
+    method_entry = next(entry for entry in manifest['entries'] if entry['role'] == 'method_definition')
+    method = definitions.method(old_spec['quality_checks'][0]['implementation_ref'])
+    require(method_definition == method and
+            computation['method_definition_sha256'] == method_entry['content_sha256'],
+            'data-quality method binding')
+    require(metadata['snapshot_sha256'] == computation['raw_bytes_sha256'] == requirements_spec['snapshot_sha256'] and
+            metadata['time_range'] == computation['scientific_time'] == requirements_spec['time_range'] and
+            metadata['fields'] == requirements_spec['required_fields'] and
+            metadata['source']['projection'].split(';', 1)[0].strip() == ','.join(computation['universe']),
+            'data-quality dataset metadata binding')
+    summary, anomalies = contents['quality_summary'], contents['quality_anomalies']
+    require(summary is not None and anomalies is not None, 'missing data quality payload')
+    metrics = evidence['typed_metrics']
+    require(isinstance(metrics, list) and len(metrics) == 1 and
+            metrics[0]['metric'] == old_spec['metric_specifications'][0] and
+            metrics[0]['sample_count'] == summary['comparison_count'] and
+            metrics[0]['value'] == summary['timestamp_monotonicity_violations'],
+            'Evidence data quality facts')
+
+    require((review['evidence_id'], review['evidence_content_hash']) ==
+            (evidence['evidence_id'], evidence['evidence_content_hash']),
+            'Review Evidence reference')
+    criteria = review['criteria_ref']
+    candidates = [e for e in definitions.entries if e['kind'] == 'criteria' and
+                  (e['name'], e['revision']) == (criteria['id'], criteria['revision'])]
+    require(len(candidates) == 1, 'unknown criteria definition')
+    _, criterion = definitions.resolve('criteria', {
+        'name': criteria['id'], 'revision': criteria['revision'],
+        'content_hash': criteria['content_hash'], 'locator': candidates[0]['locator'],
+    })
+    require(criterion['id'] == 'phase0-date-order-criteria', 'criteria profile')
+    require(time_value(review['reviewed_at']) >= time_value(run['timing']['completed_at']),
+            'Review time order')
+
+    for kind, expected_ref in REVISE_SPEC_544_SOURCE_ANCHOR.items():
+        require(request['context_refs'][kind] == expected_ref,
+                f'#544 source identity anchor mismatch: {kind}')
+
+    if response is None:
+        return True
+
+    schema_check(response, schema)
+    require(response['message_kind'] == 'response' and response['in_reply_to'] == request['handoff_id'],
+            'response correlation')
+    require(response.get('handoff_id') != request['handoff_id'],
+            'response handoff_id must differ from request')
+    require(response['operation'] == 'revise_spec' and
+            (response['sender_role'], response['recipient_role']) == ('research', 'critic'),
+            'revise_spec response direction')
+    require(response['context_refs'] == request['context_refs'], 'revise_spec response context')
+    if response['status'] != 'completed':
+        _validate_problem_response(response)
+        return True
+
+    require(len(response.get('output_refs', [])) == 1 and
+            response['output_refs'][0]['object_type'] == 'experiment_spec',
+            'revise_spec output reference')
+    new_spec = objects.get('revised_experiment_spec')
+    require(new_spec is not None, 'missing revised_experiment_spec')
+    require(new_spec is not old_spec, 'revised spec cannot be identical object to old spec')
+    require(new_spec != old_spec, 'revised spec cannot be identical content to old spec')
+
+    require(new_spec['spec_id'] == old_spec['spec_id'], 'revised spec must have same spec_id')
+    old_rev = _parse_revision_number(old_spec['revision'])
+    new_rev = _parse_revision_number(new_spec['revision'])
+    require(new_rev > old_rev, 'revised spec revision must strictly increase')
+
+    require((new_spec.get('experiment_type'), new_spec.get('research_stage')) == ('data_quality', 'validation'),
+            'unsupported revised spec profile')
+    require(new_spec['experiment_type'] == old_spec['experiment_type'] and
+            new_spec['research_stage'] == old_spec['research_stage'],
+            'revised spec cannot change type or stage')
+
+    schema_check(new_spec, parse(safe_read(ROOT, 'docs/schemas/research-experiment-spec-v2.schema.json')))
+
+    require(new_spec['task_id'] == task['task_id'] == old_spec['task_id'],
+            'revised spec task_id mismatch')
+    require(new_spec['task_revision'] == task['revision'] == old_spec['task_revision'],
+            'revised spec task_revision mismatch')
+    require(new_spec['task_content_hash'] == task['task_content_hash'] == old_spec['task_content_hash'],
+            'revised spec task_content_hash mismatch')
+
+    require(response['output_refs'][0] == check_record(new_spec, 'experiment_spec'),
+            'output reference mismatch')
+    validate_spec(new_spec, task, definitions)
+    _validate_dq_spec_dataset_requirements(new_spec['dataset_requirements'], task, definitions)
+    return True
+
+
 def validate_handoff(request, objects, response=None, *, payloads=None, root=None):
-    """Fail-closed offline admission for registered review and execute profiles."""
+    """Fail-closed offline admission for registered review, execute, prepare, and revise profiles."""
     schema = parse(safe_read(ROOT, 'docs/research-lab/agent-contract/agent-handoff.schema.json'))
-    if isinstance(request, dict) and request.get('operation') == 'execute_spec':
-        return _validate_execute_spec_handoff(request, objects, response, schema,
-                                              payloads=payloads, root=root)
+    if isinstance(request, dict):
+        op = request.get('operation')
+        if op == 'execute_spec':
+            return _validate_execute_spec_handoff(request, objects, response, schema,
+                                                  payloads=payloads, root=root)
+        if op == 'prepare_spec':
+            return _validate_prepare_spec_handoff(request, objects, response, schema)
+        if op == 'revise_spec':
+            return _validate_revise_spec_handoff(request, objects, response, schema,
+                                                 payloads=payloads, root=root)
     schema_check(request, schema)
     return _validate_review_handoff(request, objects, response, payloads=payloads, root=root)
 
