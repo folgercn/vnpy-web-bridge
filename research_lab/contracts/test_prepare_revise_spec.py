@@ -785,3 +785,150 @@ def test_noncompleted_response_rejects_same_handoff_id(bundle, operation, status
     }
     with pytest.raises(ValueError, match="response handoff_id must differ from request"):
         v2.validate_handoff(request, objects, response, root=root)
+
+
+# ==============================================================================
+# P2 review corrections: required_fields and midnight date-label boundaries
+# ==============================================================================
+
+def test_prepare_spec_rejects_resealed_missing_source_official_day(bundle):
+    """prepare_spec must reject resealed spec delivery omitting source_official_day."""
+    obj = records(bundle)
+    request = prepare_request(obj)
+    bad_spec = copy.deepcopy(obj["experiment_spec"])
+    bad_spec["dataset_requirements"]["required_fields"] = ["product", "exact_contract"]
+    reseal(bad_spec, "spec")
+    response = prepare_completed_response(request, {"experiment_spec": bad_spec})
+    with pytest.raises(ValueError, match="source_official_day"):
+        v2.validate_handoff(request, {
+            "research_task": obj["research_task"],
+            "experiment_spec": bad_spec,
+        }, response)
+
+
+@pytest.mark.parametrize("field,bad_time", [
+    ("start", "2023-01-03T01:00:00.000000Z"),
+    ("end", "2023-02-01T23:59:59.000000Z"),
+])
+def test_prepare_spec_rejects_resealed_non_midnight_boundary(bundle, field, bad_time):
+    """prepare_spec must reject resealed spec with non-midnight start or end."""
+    obj = records(bundle)
+    request = prepare_request(obj)
+    bad_spec = copy.deepcopy(obj["experiment_spec"])
+    bad_spec["dataset_requirements"]["time_range"][field] = bad_time
+    reseal(bad_spec, "spec")
+    response = prepare_completed_response(request, {"experiment_spec": bad_spec})
+    with pytest.raises(ValueError, match="range binding"):
+        v2.validate_handoff(request, {
+            "research_task": obj["research_task"],
+            "experiment_spec": bad_spec,
+        }, response)
+
+
+def test_prepare_spec_rejects_resealed_same_day_boundary(bundle):
+    """prepare_spec must reject same-day start/end even if internally rehashed."""
+    obj = records(bundle)
+    bad_task = copy.deepcopy(obj["research_task"])
+    bad_task["data_requirements"]["date_end_exclusive"] = bad_task["data_requirements"]["date_start"]
+    reseal(bad_task, "task")
+
+    bad_spec = copy.deepcopy(obj["experiment_spec"])
+    bad_spec["task_content_hash"] = bad_task["task_content_hash"]
+    # Provide schema-valid time range where start < end within same day
+    bad_spec["dataset_requirements"]["time_range"]["start"] = "2023-01-03T00:00:00.000000Z"
+    bad_spec["dataset_requirements"]["time_range"]["end"] = "2023-01-03T12:00:00.000000Z"
+    reseal(bad_spec, "spec")
+
+    request = prepare_request({"research_task": bad_task})
+    response = prepare_completed_response(request, {"experiment_spec": bad_spec})
+    with pytest.raises(ValueError, match="range binding"):
+        v2.validate_handoff(request, {
+            "research_task": bad_task,
+            "experiment_spec": bad_spec,
+        }, response)
+
+
+def test_revise_spec_rejects_resealed_missing_source_official_day(bundle):
+    """revise_spec must reject revised spec omitting source_official_day."""
+    obj = records(bundle)
+    request = revise_request(obj)
+    bad_revised = make_revised_spec(obj["experiment_spec"], strict=False, revision="rev.2")
+    bad_revised["dataset_requirements"]["required_fields"] = ["product", "exact_contract"]
+    reseal(bad_revised, "spec")
+    response = revise_completed_response(request, bad_revised)
+    objects = dict(obj, revised_experiment_spec=bad_revised)
+    with pytest.raises(ValueError, match="source_official_day"):
+        v2.validate_handoff(request, objects, response, root=bundle)
+
+
+@pytest.mark.parametrize("field,bad_time", [
+    ("start", "2023-01-03T01:00:00.000000Z"),
+    ("end", "2023-02-01T23:59:59.000000Z"),
+])
+def test_revise_spec_rejects_resealed_non_midnight_boundary(bundle, field, bad_time):
+    """revise_spec must reject revised spec with non-midnight start or end."""
+    obj = records(bundle)
+    request = revise_request(obj)
+    bad_revised = make_revised_spec(obj["experiment_spec"], strict=False, revision="rev.2")
+    bad_revised["dataset_requirements"]["time_range"][field] = bad_time
+    reseal(bad_revised, "spec")
+    response = revise_completed_response(request, bad_revised)
+    objects = dict(obj, revised_experiment_spec=bad_revised)
+    with pytest.raises(ValueError, match="range binding"):
+        v2.validate_handoff(request, objects, response, root=bundle)
+
+
+def test_revise_spec_rejects_resealed_same_day_boundary(bundle):
+    """revise_spec must reject revised spec with same-day time range."""
+    obj = records(bundle)
+    request = revise_request(obj)
+    bad_revised = make_revised_spec(obj["experiment_spec"], strict=False, revision="rev.2")
+    bad_revised["dataset_requirements"]["time_range"]["start"] = "2023-01-03T00:00:00.000000Z"
+    bad_revised["dataset_requirements"]["time_range"]["end"] = "2023-01-03T12:00:00.000000Z"
+    reseal(bad_revised, "spec")
+    response = revise_completed_response(request, bad_revised)
+    objects = dict(obj, revised_experiment_spec=bad_revised)
+    with pytest.raises(ValueError, match="range binding"):
+        v2.validate_handoff(request, objects, response, root=bundle)
+
+
+def test_prepare_spec_rejects_resealed_jointly_dropped_exact_contract(bundle):
+    """prepare_spec must reject when Task and Spec jointly drop exact_contract even if rehashed."""
+    obj = records(bundle)
+    bad_task = copy.deepcopy(obj["research_task"])
+    bad_task["data_requirements"]["fields"] = ["source_official_day", "product"]
+    reseal(bad_task, "task")
+
+    bad_spec = copy.deepcopy(obj["experiment_spec"])
+    bad_spec["task_content_hash"] = bad_task["task_content_hash"]
+    bad_spec["dataset_requirements"]["required_fields"] = ["source_official_day", "product"]
+    reseal(bad_spec, "spec")
+
+    request = prepare_request({"research_task": bad_task})
+    response = prepare_completed_response(request, {"experiment_spec": bad_spec})
+
+    with pytest.raises(ValueError, match="registered method field contract"):
+        v2.validate_handoff(request, {
+            "research_task": bad_task,
+            "experiment_spec": bad_spec,
+        }, response)
+
+
+def test_revise_spec_rejects_resealed_dropped_exact_contract(bundle):
+    """revise_spec must reject revised spec omitting exact_contract even if rehashed.
+
+    Note: In revise_spec, the source chain Task is anchored to the verified #544
+    delivery (REVISE_SPEC_544_SOURCE_ANCHOR); mutating the source Task would
+    trip the #544 source anchor rather than validating the new revised Spec's
+    method contract. Therefore, the source Task remains anchored and unmutated,
+    while the candidate revised Spec delivery drops exact_contract and is resealed.
+    """
+    obj = records(bundle)
+    request = revise_request(obj)
+    bad_revised = make_revised_spec(obj["experiment_spec"], strict=False, revision="rev.2")
+    bad_revised["dataset_requirements"]["required_fields"] = ["source_official_day", "product"]
+    reseal(bad_revised, "spec")
+    response = revise_completed_response(request, bad_revised)
+    objects = dict(obj, revised_experiment_spec=bad_revised)
+    with pytest.raises(ValueError, match="registered method field contract"):
+        v2.validate_handoff(request, objects, response, root=bundle)

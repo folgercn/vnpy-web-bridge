@@ -815,6 +815,42 @@ def _validate_execute_spec_handoff(request, objects, response, schema, *, payloa
     return True
 
 
+def _dq_registered_fields(definitions):
+    """Derive authoritative registered field list for phase0 data_quality from catalogue."""
+    entry = next(e for e in definitions.entries if e['kind'] == 'payload' and e['name'] == 'phase0.dataset_metadata')
+    ref = {k: entry[k] for k in ('name', 'revision', 'content_hash', 'locator')}
+    _, schema = definitions.resolve('payload', ref)
+    return schema['properties']['fields']['const']
+
+
+def _validate_dq_spec_dataset_requirements(requirements_spec, task, definitions):
+    """Validate data_quality dataset_requirements against task and registered DQ method."""
+    task_data = task['data_requirements']
+    req_fields = requirements_spec.get('required_fields')
+    require(isinstance(req_fields, list) and 'source_official_day' in req_fields,
+            'data-quality spec missing source_official_day')
+    registered_fields = _dq_registered_fields(definitions)
+    require(isinstance(req_fields, list) and
+            all(f in req_fields for f in registered_fields) and
+            req_fields == registered_fields,
+            'data-quality spec registered method field contract')
+    require(req_fields == task_data.get('fields'),
+            'Task data-quality required fields binding')
+    task_start = task_data.get('date_start')
+    task_end = task_data.get('date_end_exclusive')
+    time_range = requirements_spec.get('time_range') or {}
+    start = time_range.get('start')
+    end = time_range.get('end')
+    require(requirements_spec.get('universe') == task_data.get('products') and
+            isinstance(task_start, str) and isinstance(task_end, str) and
+            task_start < task_end and
+            isinstance(start, str) and isinstance(end, str) and
+            start[:10] < end[:10] and
+            start == f"{task_start}T00:00:00.000000Z" and
+            end == f"{task_end}T00:00:00.000000Z",
+            'Task data-quality range binding')
+
+
 def _validate_prepare_spec_handoff(request, objects, response, schema):
     """Offline delivery check for prepare_spec in data_quality/validation."""
     if response is not None and isinstance(response, dict) and response.get('status') != 'completed':
@@ -887,11 +923,7 @@ def _validate_prepare_spec_handoff(request, objects, response, schema):
     require(response['output_refs'][0] == check_record(spec, 'experiment_spec'), 'output reference mismatch')
     definitions = Definitions()
     validate_spec(spec, task, definitions)
-    requirements_spec = spec['dataset_requirements']
-    require(requirements_spec['universe'] == task['data_requirements']['products'] and
-            requirements_spec['time_range']['start'][:10] == task['data_requirements']['date_start'] and
-            requirements_spec['time_range']['end'][:10] == task['data_requirements']['date_end_exclusive'],
-            'Task data-quality range binding')
+    _validate_dq_spec_dataset_requirements(spec['dataset_requirements'], task, definitions)
     return True
 
 
@@ -1109,11 +1141,7 @@ def _validate_revise_spec_handoff(request, objects, response, schema, *, payload
     require(response['output_refs'][0] == check_record(new_spec, 'experiment_spec'),
             'output reference mismatch')
     validate_spec(new_spec, task, definitions)
-    new_requirements = new_spec['dataset_requirements']
-    require(new_requirements['universe'] == task['data_requirements']['products'] and
-            new_requirements['time_range']['start'][:10] == task['data_requirements']['date_start'] and
-            new_requirements['time_range']['end'][:10] == task['data_requirements']['date_end_exclusive'],
-            'Task data-quality range binding')
+    _validate_dq_spec_dataset_requirements(new_spec['dataset_requirements'], task, definitions)
     return True
 
 
