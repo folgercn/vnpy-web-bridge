@@ -8,7 +8,7 @@
 - `Definitions().method(implementation_ref)`：核对登记的不可变方法定义及当前源码原始 SHA；不动态 import 或执行引用字符串。
 - `validate_spec(spec, task)`：公共 Spec Schema、记录摘要、Task 引用、固定快照绑定、日期范围、唯一参数/类型/单位、默认值与精确指标定义。返回生效参数，不授予执行资格。
 - `validate_manifest(bundle_root, manifest, run)`：公共 Manifest Schema、Run 绑定、角色完整性、唯一条目/路径、内容定义、原始字节长度/摘要、载荷 Schema。返回已检查的受控载荷映射，不证明科学结论正确。
-- `validate_handoff(request, objects, response=None, *, payloads=None, root=None)`：支持 `review_evidence`，以及仅限 `data_quality/validation` 的 `execute_spec`。后者 request-only 只绑定真实 Task/Spec、唯一的固定角色集合和预期输出，`exact_refs` 必须为空，不能伪造未来交付；`completed` 响应将 Run 的已展开参数、快照、时间窗、产品范围和交付元数据回绑到 Task/Spec，并必须以 `root` 重读原始载荷，或传入未经复制或修改的 `validate_manifest` 返回值作为 `payloads`。FAILED 交付只能携带完整诊断、`typed_metrics=null` 与 `missing_reason=execution_failed`。非完成响应不预读未来 Run/Manifest/Evidence；无法解析的 Task/Spec 可用空或部分已核验 `context_refs` 报告 `rejected/invalid_input` 或 `unsupported/capability_unsupported`，但不表示原请求有效；`blocked`（包括 unknown outcome）和 `incomplete` 仍必须先通过完整请求准入。其他 execute profile 和 operation 明确拒绝，不能把结构合格等同跨对象验证完成。
+- `validate_handoff(request, objects, response=None, *, payloads=None, root=None)`：支持 `review_evidence`，以及仅限 `data_quality/validation` 的 `execute_spec`、`prepare_spec` 与 `revise_spec`。`prepare_spec` 请求仅绑定真实 Task（纯请求校验时立即拒绝非 data_quality 任务），产物要求为空，完成响应交付真实绑定的 Spec（参数、范围、指标校验通过并绑定 validation 阶段）；`execute_spec` 请求绑定 Task+Spec，输出 Run/Manifest/Evidence，完成响应回绑参数与原始载荷，FAILED 仅限诊断包；`review_evidence` 消费 Task/Spec/Run/Manifest/Evidence，完成响应交付绑定的 Review；`revise_spec` 严格锚定已归档的 #544 确切来源身份（Task/Spec/Run/Manifest/Evidence/Review 的确切 ID、版本与内容哈希），而非任意自洽的通用数据质量完成链，并消费真实底层载荷（不支持 FAILED 来源，且不虚构历史 Review handoff 消息），请求必须绑定 Manifest 的真实来源角色与 exact_refs 并与 Evidence 交叉核验；完成响应以唯一显式键 `revised_experiment_spec` 交付同一 Task、同一 spec_id 且 revision 严格升高的新 Spec 提案（新旧 Spec 独立对象同时读取，移除回退别名，严禁同一对象），拒绝同 revision 篡改、版本回退、跨 Task 或改变 type/stage。非完成错误信封（含 rejected/unsupported/blocked/incomplete）均强制要求响应 handoff_id 与请求不同，并不预读未来产物；无法解析的请求可用空或部分已核验 `context_refs` 报告 `rejected/invalid_input` 或 `unsupported/capability_unsupported`，但不表示原请求有效；`blocked`（包括 unknown outcome）和 `incomplete` 仍必须先通过完整请求准入。其他 profile 和 operation 明确拒绝，不能把结构合格等同跨对象验证完成。
 
 调用方必须分别完成适用检查。单独调用 Handoff 检查不替代文件内容核验，单独验证 Manifest 不替代实际输入、方法与科学指纹复算。
 
@@ -34,7 +34,7 @@
 | #524 结构、present/unavailable、完整性 | Manifest Schema；必需角色不受 supporting 分类豁免；长度/摘要、重复/缺件、路径和内容 Schema 拒绝测试 | 不发布或修改任何包；未登记内容定义仍是冻结缺口，不能视为延期批准 |
 | #524 定义定位与身份 | 固定 catalogue、版本与定义摘要、方法实际源码、未知引用拒绝 | 不为缺失 candidate 猜算法；其他 profile 定义尚未提供 |
 | #511 机器可检查部分 | Spec/Task 绑定、方法/参数/默认值、快照摘要、时间与指标定义检查 | 不认证实际数据可得性、完整时间切分、S7 交易语义；confirmation 显式拒绝，未实现暴露核验 |
-| #523 消费交接 | 原真实评审链正例；重算记录 hash 后仍拒绝错上下文、错 Evidence/criteria、错响应 | prepare/execute/revise 操作暂无公共跨对象核验；现有 Schema 保持可表达 |
+| #523 消费交接 | 原真实评审链正例；重算记录 hash 后仍拒绝错上下文、错 Evidence/criteria、错响应；受限支持 data_quality/validation 的 execute/prepare/revise 校验 | prepare/revise 仅限 data_quality/validation 且 revise 严格固定到 #544 确切来源身份与载荷（不支持通用自洽链替换、虚构历史 handoff 或 FAILED 来源）；其他 profile 暂无 prepare/revise 跨对象校验；无执行授权 |
 
 不宣称 #511/#524/#523 或 #498/#538 全部完成，不解锁运行平台。这里的剩余项是具体未实现条款，不是新增架构要求。
 

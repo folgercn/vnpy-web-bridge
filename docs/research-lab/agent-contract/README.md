@@ -127,68 +127,72 @@ Critic 必须先校验 Evidence、Manifest 与 Run 的精确引用、内容摘�
 
 下一步是极小的正向 v2 案例：从真实绑定 Task/Spec 开始，验证准入、实际 Run、Artifact、Evidence 和独立 Review；不能复用 #540 回溯映射冒充正向执行。#498 决定冻结，再逐项判断 #538 退出。本次不提前增加 Runtime。
 
-## 7. #523 restricted offline `execute_spec` and review-evidence admission
+## 7. #523 restricted offline handoff admission
 
-`research_lab.contracts.v2.validate_handoff` accepts an `execute_spec` request
-only for the registered `data_quality/validation` profile. The request binds
-exact Task and Spec records, the fixed candidate role profile and all six
-required roles, declares Run/Manifest/Evidence outputs, and keeps `exact_refs`
-empty because no future file hash may be invented. A valid request-only fixture
-means only that this offline contract shape and its existing inputs are valid;
-it is neither execution approval nor a claim that outputs exist.
+`research_lab.contracts.v2.validate_handoff` provides fail-closed offline
+admission for four operations under registered profiles: `review_evidence`,
+`execute_spec`, `prepare_spec`, and `revise_spec`.
 
-For a `completed` execute response, the same entry consumes the archived #544
-Task → Spec → Run → Manifest → Evidence chain and requires reverse direction,
-`in_reply_to`, all three real output references, terminal Run, complete role
-delivery, raw payload bytes/hashes and schemas, and the data-quality Evidence
-metric facts from `quality_summary`. Recomputing every affected record hash
-does not bypass these graph and payload checks. A FAILED Run may still have a
-completed handoff response only when its Manifest and Evidence deliver a real
-`failure_diagnostics` payload; this reports delivery completion, not successful
-execution. Its resolved parameters, fixed snapshot, scientific time, universe,
-normalization and trial metadata must bind back to the Task/Spec; FAILED Evidence
-must be `typed_metrics=null` with `missing_reason=execution_failed`. `blocked`, `rejected`, `incomplete`, and `unsupported` responses can
-report a valid problem without speculative future Run/Manifest/Evidence reads;
-unknown outcome remains only `blocked` with `execution_outcome_unknown` and
-does not authorize retry. An unresolvable Task/Spec can be reported as
-`rejected/invalid_input` or `unsupported/capability_unsupported` with empty or
-partially verified context references, but that problem response never validates
-the original request. `blocked` (including an unknown outcome) and `incomplete`
-still require a fully admitted Task/Spec request.
+For `prepare_spec`, validation is restricted strictly to the
+`data_quality/validation` profile. The Research → Research request requires only
+a genuine, verified `research_task`. Request-only validation immediately rejects
+any Task whose `research_type` is not `data_quality`. It requires no Spec, Run,
+or artifacts, keeps `required_roles` and `exact_refs` strictly empty, and
+explicitly rejects any unsupported optional context (such as attaching evidence
+or reviews). A `completed` response must use a distinct `handoff_id`, reversed
+direction, and correct `in_reply_to`, delivering a genuine `experiment_spec`
+that binds the `validation` research stage. That Spec must strictly bind to the
+requested Task (`task_id`, `task_revision`, `task_content_hash`), align
+scientific time and universe with Task data requirements, and pass all existing
+method, parameter, snapshot, and metric specification checks.
 
-`validate_handoff` also consumes three registered
-Task → Spec → Run → Manifest → Evidence → Review chains: the archived #544
-`data_quality/validation` chain (including its FAILED diagnostic shape), the
-Trend20 `statistical_factor/exploration` profile, and the Issue481
-`trading_backtest/validation` profile. The latter two are synthetic structural
-fixtures. They do not turn the #540 retrospective examples into native v2
-bundles, consume external blotter/equity files, perform replay, or implement S7.
+For `execute_spec`, `validate_handoff` accepts requests and completed deliveries
+only for `data_quality/validation`. The request binds exact Task and Spec
+records, the fixed candidate role profile, all six required roles, and declares
+Run/Manifest/Evidence outputs with empty `exact_refs`. A `completed` response
+consumes the archived #544 chain, requiring reverse direction, `in_reply_to`,
+terminal Run, all three real output references, complete role delivery, and raw
+payload verification. A FAILED Run is only admitted when accompanied by a real
+`failure_diagnostics` payload and `typed_metrics=null`.
 
-Trend20 criteria preserve daily cross-sectional Pearson IC, log-return spread,
-negative values, the published half-even 12-decimal rule, overlap disclosure,
-and no significance test. Issue481 criteria preserve 24 independent
-path/scenario/product accounts, CNY precision, negative PnL, nonnegative fees,
-and explicit zero-trade accounts. Neither profile gains a profitability or
-significance threshold.
+For `revise_spec`, `validate_handoff` is pinned to the exact archived #544
+source identity (exact Task, old Spec, Run, Manifest, Evidence, and Review
+records), not any generic self-consistent completed data_quality chain. It
+consumes Task, old Spec, Run, Manifest, Evidence, Review, and the required raw
+underlying payloads (via `root` safe_read or unmodified `_VerifiedPayloads` from
+`validate_manifest`). Any alternate or mutated source chain (even if internally
+resealed with valid hashes and payloads) is rejected by the explicit immutable
+#544 source identity anchor. The Critic → Research request must bind the verified
+#544 source delivery: it requires the actual completed source roles and exact
+artifact refs from the Manifest, cross-checked against Evidence and Manifest.
+FAILED Run provenance chains are explicitly unsupported (`run_status` must be
+`COMPLETED` and `process_exit_code` must be 0). It rejects cross-Run linkage,
+mismatched Evidence/criteria references, missing roles, and unverified payloads.
+A `completed` response outputs a new `experiment_spec` proposal under the single
+explicit key `revised_experiment_spec`. The old Spec and new Spec must be read
+simultaneously as two distinct actual objects; in-place replacement of the old
+Spec and fallback aliases are forbidden. The revised Spec must bind to the same
+Task, maintain the same `spec_id`, preserve `data_quality/validation` type and
+stage, and have a strictly increasing revision number (e.g. `rev.1` to `rev.2`),
+demonstrating registered parameter revisions such as `source_order.strict`.
+Content tampering under the same revision, revision downgrades, cross-Task
+rebinding, and forged review handoff fields (`review_scope`, `criteria_ref`)
+are rejected.
 
-Review admission resolves one immutable registered criteria definition and requires
-all Manifest present-role exact references in both Evidence and the request. It
-also binds response correlation, reversed direction, context, review scope, and
-Review criteria/evidence references. For Trend20 and Issue481, `validate_handoff`
-consumes the unmodified verified mapping returned by `validate_manifest`, or
-re-reads exact bytes through a read-only `root`, to cross-check Evidence metrics against `statistical_summary` and
-`backtest_summary` by exact metric mappings and account IDs. A request without
-a response and a `completed` response require those summary bytes. For non-completed
-responses (`blocked`, `rejected`, `incomplete`, `unsupported`), it validates
-problem code/fields, correlation, and review scope before any success-only
-summary read, so it can report that a summary is currently unreadable without
-treating that report as a completed Review delivery. Unknown profile, stage, criteria, Run status, method
-shape, missing role, or cross-profile reference remains rejected. This is an
-offline contract check only and remains **DRAFT_UNFROZEN**.
+Non-completed error envelopes (`blocked`, `rejected`, `incomplete`, `unsupported`)
+for `prepare_spec`, `execute_spec`, and `revise_spec` follow the reliable error
+reporting boundary: `rejected/invalid_input` and `unsupported/capability_unsupported`
+can report valid problem envelopes without reading missing future delivery
+objects, allowing empty or partially verified `context_refs` without validating
+the original request. `blocked` (including unknown execution outcomes) and
+`incomplete` strictly require fully admitted input requests. In all non-completed
+error envelopes, the response `handoff_id` is required to differ from the
+request `handoff_id`.
 
-`validate_handoff` is an offline, fail-closed graph check. Completed
-`execute_spec` and review responses require either `root` for raw-byte
-verification or the unmodified verified mapping returned by `validate_manifest`;
-ordinary payload mappings are rejected. No other operation/profile gains a
-cross-object validator, and this work does not add a Runtime, dispatch, retry,
-authorization, or execution implementation.
+`validate_handoff` also consumes three registered Review chains: the archived
+#544 `data_quality/validation` chain, the Trend20 `statistical_factor/exploration`
+profile, and the Issue481 `trading_backtest/validation` profile. Neither Trend20
+nor Issue481 supports `prepare_spec` or `revise_spec` cross-object validation.
+
+This offline contract check remains strictly **DRAFT_UNFROZEN**. It provides no
+execution authorization, runtime implementation, scheduling, or retry mechanism.

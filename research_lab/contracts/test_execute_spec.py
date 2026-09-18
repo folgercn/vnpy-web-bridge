@@ -111,8 +111,11 @@ def test_execute_spec_rejects_other_profile_before_delivery(bundle):
         v2.validate_handoff(request, obj)
 
 
-@pytest.mark.parametrize("operation", ["prepare_spec", "revise_spec"])
-def test_non_execute_operations_remain_unsupported(bundle, operation):
+@pytest.mark.parametrize("operation, err", [
+    ("prepare_spec", "prepare_spec required roles must be empty"),
+    ("revise_spec", "verified payloads or root required"),
+])
+def test_non_execute_operations_reject_execute_shape(bundle, operation, err):
     obj = records(bundle)
     request = execute_request(obj)
     request.update(
@@ -129,7 +132,7 @@ def test_non_execute_operations_remain_unsupported(bundle, operation):
         request["context_refs"] = {
             kind: v2.check_record(value, kind) for kind, value in obj.items()
         }
-    with pytest.raises(ValueError, match="unsupported cross-object operation"):
+    with pytest.raises(ValueError, match=err):
         v2.validate_handoff(request, obj)
 
 
