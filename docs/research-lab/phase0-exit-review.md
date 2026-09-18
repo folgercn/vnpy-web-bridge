@@ -1,8 +1,10 @@
 # Phase 0 Exit Review & Protocol v2 Freeze Record
 
-状态：**PROTOCOL_V2_PHASE0_FROZEN**  
-基线 Commit：`df1019df267b7424bc960dff8b68e01146592665`（PR #552 合并提交）  
-关联上位门禁：[#538 [Research Lab] Roadmap Gate & Development Order Phase 0 Protocol Foundation](https://github.com/folgercn/vnpy-web-bridge/issues/538)  
+状态：**PROTOCOL_V2_PHASE0_FROZEN**
+
+基线 Commit：`df1019df267b7424bc960dff8b68e01146592665`（PR #552 合并提交）
+
+关联上位门禁：[#538 [Research Lab] Roadmap Gate & Development Order Phase 0 Protocol Foundation](https://github.com/folgercn/vnpy-web-bridge/issues/538)
 核心 Issue 集合：
 - [#498 Research Task Protocol](https://github.com/folgercn/vnpy-web-bridge/issues/498)
 - [#511 Experiment Schema](https://github.com/folgercn/vnpy-web-bridge/issues/511)

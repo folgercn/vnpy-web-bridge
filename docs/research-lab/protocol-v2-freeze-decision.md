@@ -1,6 +1,7 @@
 # Protocol v2：#498 冻结签收决策
 
-状态：**PROTOCOL_V2_PHASE0_FROZEN**。基线为 `df1019df267b7424bc960dff8b68e01146592665`（包含 #539～#552）。  
+状态：**PROTOCOL_V2_PHASE0_FROZEN**。基线为 `df1019df267b7424bc960dff8b68e01146592665`（包含 #539～#552）。
+
 关联 [#498](https://github.com/folgercn/vnpy-web-bridge/issues/498)、[#538](https://github.com/folgercn/vnpy-web-bridge/issues/538)。完整退出评审见 [Phase 0 Exit Review](phase0-exit-review.md)。
 
 ## 1. 结论
