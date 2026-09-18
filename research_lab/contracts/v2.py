@@ -594,7 +594,10 @@ def _resolve_manifest_payload(manifest, definitions, role, *, payloads, root):
 
 def _validate_execute_problem_context(request, objects, response):
     """Allow a problem report to retain only request references it can verify."""
-    request_refs, response_refs = request.get('context_refs', {}), response['context_refs']
+    response_refs = response['context_refs']
+    if not response_refs:
+        return
+    request_refs = request.get('context_refs')
     require(isinstance(request_refs, dict), 'execute_spec problem context')
     require(set(response_refs) <= set(request_refs), 'execute_spec problem response context')
     for kind, reference in response_refs.items():
@@ -615,7 +618,6 @@ def _validate_execute_spec_handoff(request, objects, response, schema, *, payloa
                 'execute_spec problem request')
         require(isinstance(request.get('handoff_id'), str) and request['handoff_id'],
                 'execute_spec problem correlation')
-        require(isinstance(request.get('context_refs'), dict), 'execute_spec problem context')
         require(response['message_kind'] == 'response' and response['in_reply_to'] == request['handoff_id'] and
                 response['operation'] == 'execute_spec' and
                 (response['sender_role'], response['recipient_role']) == ('execution', 'research'),

@@ -421,6 +421,53 @@ def test_execute_spec_rejected_response_reports_structurally_invalid_request(bun
     assert v2.validate_handoff(request, obj, response)
 
 
+@pytest.mark.parametrize("bad_context", ["missing", None, []])
+def test_execute_spec_rejected_response_allows_unparseable_empty_request_context(bundle, bad_context):
+    obj = records(bundle)
+    request = execute_request(obj)
+    if bad_context == "missing":
+        request.pop("context_refs")
+    else:
+        request["context_refs"] = bad_context
+    response = {
+        "schema_version": "research_lab.agent_handoff.v2",
+        "handoff_id": "unparseable-context-response",
+        "message_kind": "response",
+        "operation": "execute_spec",
+        "sender_role": "execution",
+        "recipient_role": "research",
+        "context_refs": {},
+        "in_reply_to": request["handoff_id"],
+        "status": "rejected",
+        "problem": {"code": "invalid_input", "reason": "request context is not parseable",
+                    "affected_items": ["context_refs"], "resume_condition": "supply object references",
+                    "execution_outcome": "not_started"},
+    }
+    assert v2.validate_handoff(request, obj, response)
+
+
+def test_execute_spec_rejected_response_requires_parseable_request_context_for_retained_ref(bundle):
+    obj = records(bundle)
+    request = execute_request(obj)
+    request["context_refs"] = None
+    response = {
+        "schema_version": "research_lab.agent_handoff.v2",
+        "handoff_id": "unparseable-context-response",
+        "message_kind": "response",
+        "operation": "execute_spec",
+        "sender_role": "execution",
+        "recipient_role": "research",
+        "context_refs": {"research_task": v2.check_record(obj["research_task"], "research_task")},
+        "in_reply_to": request["handoff_id"],
+        "status": "rejected",
+        "problem": {"code": "invalid_input", "reason": "request context is not parseable",
+                    "affected_items": ["context_refs"], "resume_condition": "supply object references",
+                    "execution_outcome": "not_started"},
+    }
+    with pytest.raises(ValueError, match="execute_spec problem context"):
+        v2.validate_handoff(request, obj, response)
+
+
 @pytest.mark.parametrize("implementation", [
     "candidate.phase0.unknown.rev1", "candidate.phase0.source_order.rev99",
 ])
