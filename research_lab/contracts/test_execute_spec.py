@@ -69,6 +69,19 @@ def completed_response(request, obj):
     }
 
 
+def reseal_delivery(obj):
+    reseal(obj["experiment_run"], "run")
+    manifest = obj["artifact_manifest"]
+    manifest["run_content_hash"] = obj["experiment_run"]["run_content_hash"]
+    reseal(manifest, "manifest")
+    evidence = obj["result_evidence"]
+    evidence.update(run_content_hash=obj["experiment_run"]["run_content_hash"],
+                    manifest_content_hash=manifest["manifest_content_hash"])
+    for ref in evidence["supporting_artifacts"]:
+        ref["manifest_content_hash"] = manifest["manifest_content_hash"]
+    reseal(evidence, "evidence")
+
+
 def test_execute_spec_request_only_is_valid_offline_contract_fixture(bundle):
     obj = records(bundle)
     request = execute_request(obj)
@@ -120,6 +133,37 @@ def test_execute_spec_archived_success_delivery_accepts_verified_payloads(bundle
     assert v2.validate_handoff(request, obj, completed_response(request, obj), payloads=payloads)
 
 
+@pytest.mark.parametrize("field, value", [
+    ("resolved_parameters", {"strict": False}),
+    ("scientific_time", {"start": "2023-01-03T00:00:00.000000Z", "end": "2023-01-10T00:00:00.000000Z"}),
+    ("raw_bytes_sha256", "0" * 64),
+])
+@pytest.mark.parametrize("mode", ["root", "payloads"])
+def test_execute_spec_binds_resolved_data_quality_inputs(bundle, field, value, mode):
+    obj = records(bundle)
+    obj["experiment_run"]["resolved_computation_manifest"][field] = value
+    obj["experiment_run"]["scientific_fingerprint"] = v2.digest(
+        obj["experiment_run"]["resolved_computation_manifest"]
+    )
+    reseal_delivery(obj)
+    request = execute_request(obj)
+    response = completed_response(request, obj)
+    kwargs = {"root": bundle} if mode == "root" else {
+        "payloads": v2.validate_manifest(bundle, obj["artifact_manifest"], obj["experiment_run"])
+    }
+    with pytest.raises(ValueError, match="Run data-quality Spec binding"):
+        v2.validate_handoff(request, obj, response, **kwargs)
+
+
+def test_execute_spec_reversed_request_roles_are_set_semantic(bundle):
+    obj = records(bundle)
+    request = execute_request(obj)
+    request["artifact_requirements"]["required_roles"].reverse()
+    minimal = {key: obj[key] for key in ("research_task", "experiment_spec")}
+    assert v2.validate_handoff(request, minimal)
+    assert v2.validate_handoff(request, obj, completed_response(request, obj), root=bundle)
+
+
 def test_execute_spec_rejects_mutated_verified_quality_summary(bundle):
     obj = records(bundle)
     request = execute_request(obj)
@@ -140,6 +184,20 @@ def test_execute_spec_archived_failed_delivery(bundle):
     obj, _, _ = failed_dq_review_chain(bundle)
     request = execute_request(obj)
     assert v2.validate_handoff(request, obj, completed_response(request, obj), root=bundle)
+
+
+@pytest.mark.parametrize("mode", ["root", "payloads"])
+@pytest.mark.parametrize("field, value", [("typed_metrics", []), ("missing_reason", None)])
+def test_execute_spec_failed_delivery_rejects_fabricated_metrics(bundle, mode, field, value):
+    obj, _, _ = failed_dq_review_chain(bundle)
+    obj["result_evidence"][field] = value
+    reseal(obj["result_evidence"], "evidence")
+    request = execute_request(obj)
+    kwargs = {"root": bundle} if mode == "root" else {
+        "payloads": v2.validate_manifest(bundle, obj["artifact_manifest"], obj["experiment_run"])
+    }
+    with pytest.raises(ValueError, match="FAILED evidence delivery"):
+        v2.validate_handoff(request, obj, completed_response(request, obj), **kwargs)
 
 
 @pytest.mark.parametrize("mutation", ["role", "file"])
@@ -182,7 +240,7 @@ def test_execute_spec_failed_delivery_requires_failure_diagnostics(bundle):
         v2.validate_handoff(request, obj, completed_response(request, obj), root=bundle)
 
 
-@pytest.mark.parametrize("mutation", ["spec", "run", "reply", "roles", "bytes", "facts", "missing"])
+@pytest.mark.parametrize("mutation", ["spec", "run", "reply", "roles", "duplicate_roles", "bytes", "facts", "missing"])
 def test_execute_spec_rejects_delivery_tampering(bundle, mutation):
     obj = records(bundle)
     request = execute_request(obj)
@@ -210,6 +268,8 @@ def test_execute_spec_rejects_delivery_tampering(bundle, mutation):
         response["in_reply_to"] = "different-request"
     elif mutation == "roles":
         request["artifact_requirements"]["required_roles"].pop()
+    elif mutation == "duplicate_roles":
+        request["artifact_requirements"]["required_roles"].append("quality_summary")
     elif mutation == "bytes":
         entry = next(e for e in obj["artifact_manifest"]["entries"] if e["role"] == "quality_summary")
         path = bundle / entry["relative_path"]
@@ -224,7 +284,7 @@ def test_execute_spec_rejects_delivery_tampering(bundle, mutation):
             v2.check_record(obj[kind], kind)
             for kind in ("experiment_run", "artifact_manifest", "result_evidence")
         ]
-    with pytest.raises(ValueError):
+    with pytest.raises((ValueError, ValidationError)):
         v2.validate_handoff(request, obj, response, root=bundle)
 
 
@@ -262,3 +322,71 @@ def test_execute_spec_noncompleted_response_can_report_without_delivery(bundle, 
     invalid["output_refs"] = completed_response(request, obj)["output_refs"]
     with pytest.raises(ValidationError):
         v2.validate_handoff(request, minimal, invalid)
+
+
+@pytest.mark.parametrize("status, code", [
+    ("rejected", "invalid_input"), ("unsupported", "capability_unsupported"),
+])
+def test_execute_spec_problem_response_allows_unresolvable_context(bundle, status, code):
+    obj = records(bundle)
+    request = {
+        "schema_version": "research_lab.agent_handoff.v2",
+        "handoff_id": "unresolvable-execute-request",
+        "message_kind": "request",
+        "operation": "execute_spec",
+        "sender_role": "research",
+        "recipient_role": "execution",
+        "context_refs": {},
+    }
+    response = {
+        "schema_version": "research_lab.agent_handoff.v2",
+        "handoff_id": "unresolvable-execute-response",
+        "message_kind": "response",
+        "operation": "execute_spec",
+        "sender_role": "execution",
+        "recipient_role": "research",
+        "context_refs": {},
+        "in_reply_to": request["handoff_id"],
+        "status": status,
+        "problem": {"code": code, "reason": "cannot resolve submitted references",
+                    "affected_items": ["experiment_spec"], "resume_condition": "supply exact records",
+                    "execution_outcome": "not_started"},
+    }
+    assert v2.validate_handoff(request, {}, response)
+    bad_ref_request = execute_request(obj)
+    bad_ref_request["context_refs"]["experiment_spec"]["content_hash"] = "0" * 64
+    response.update(context_refs=bad_ref_request["context_refs"], in_reply_to=bad_ref_request["handoff_id"])
+    assert v2.validate_handoff(bad_ref_request, obj, response)
+
+
+@pytest.mark.parametrize("status, code, context", [
+    ("blocked", "dependency_unavailable", {}),
+    ("blocked", "execution_outcome_unknown", {"research_task": {}}),
+    ("incomplete", "missing_delivery", {}),
+])
+def test_execute_spec_blocked_or_incomplete_requires_valid_request(bundle, status, code, context):
+    request = {
+        "schema_version": "research_lab.agent_handoff.v2",
+        "handoff_id": "invalid-problem-request",
+        "message_kind": "request",
+        "operation": "execute_spec",
+        "sender_role": "research",
+        "recipient_role": "execution",
+        "context_refs": context,
+    }
+    response = {
+        "schema_version": "research_lab.agent_handoff.v2",
+        "handoff_id": "invalid-problem-response",
+        "message_kind": "response",
+        "operation": "execute_spec",
+        "sender_role": "execution",
+        "recipient_role": "research",
+        "context_refs": context,
+        "in_reply_to": request["handoff_id"],
+        "status": status,
+        "problem": {"code": code, "reason": "requires admitted request",
+                    "affected_items": ["experiment_spec"], "resume_condition": "admit request",
+                    "execution_outcome": "unknown" if code == "execution_outcome_unknown" else "known"},
+    }
+    with pytest.raises(ValidationError):
+        v2.validate_handoff(request, {}, response)

@@ -8,7 +8,7 @@
 - `Definitions().method(implementation_ref)`：核对登记的不可变方法定义及当前源码原始 SHA；不动态 import 或执行引用字符串。
 - `validate_spec(spec, task)`：公共 Spec Schema、记录摘要、Task 引用、固定快照绑定、日期范围、唯一参数/类型/单位、默认值与精确指标定义。返回生效参数，不授予执行资格。
 - `validate_manifest(bundle_root, manifest, run)`：公共 Manifest Schema、Run 绑定、角色完整性、唯一条目/路径、内容定义、原始字节长度/摘要、载荷 Schema。返回已检查的受控载荷映射，不证明科学结论正确。
-- `validate_handoff(request, objects, response=None, *, payloads=None, root=None)`：支持 `review_evidence`，以及仅限 `data_quality/validation` 的 `execute_spec`。后者 request-only 只绑定真实 Task/Spec、固定角色和预期输出，`exact_refs` 必须为空，不能伪造未来交付；`completed` 响应必须以 `root` 重读原始载荷，或传入未经复制或修改的 `validate_manifest` 返回值作为 `payloads`。非完成响应只校验控制记录、引用和问题字段，不预读未来 Run/Manifest/Evidence；unknown 仅允许 `blocked/execution_outcome_unknown`。其他 execute profile 和 operation 明确拒绝，不能把结构合格等同跨对象验证完成。
+- `validate_handoff(request, objects, response=None, *, payloads=None, root=None)`：支持 `review_evidence`，以及仅限 `data_quality/validation` 的 `execute_spec`。后者 request-only 只绑定真实 Task/Spec、唯一的固定角色集合和预期输出，`exact_refs` 必须为空，不能伪造未来交付；`completed` 响应将 Run 的已展开参数、快照、时间窗、产品范围和交付元数据回绑到 Task/Spec，并必须以 `root` 重读原始载荷，或传入未经复制或修改的 `validate_manifest` 返回值作为 `payloads`。FAILED 交付只能携带完整诊断、`typed_metrics=null` 与 `missing_reason=execution_failed`。非完成响应不预读未来 Run/Manifest/Evidence；无法解析的 Task/Spec 可用空或部分已核验 `context_refs` 报告 `rejected/invalid_input` 或 `unsupported/capability_unsupported`，但不表示原请求有效；`blocked`（包括 unknown outcome）和 `incomplete` 仍必须先通过完整请求准入。其他 execute profile 和 operation 明确拒绝，不能把结构合格等同跨对象验证完成。
 
 调用方必须分别完成适用检查。单独调用 Handoff 检查不替代文件内容核验，单独验证 Manifest 不替代实际输入、方法与科学指纹复算。
 

@@ -145,10 +145,16 @@ metric facts from `quality_summary`. Recomputing every affected record hash
 does not bypass these graph and payload checks. A FAILED Run may still have a
 completed handoff response only when its Manifest and Evidence deliver a real
 `failure_diagnostics` payload; this reports delivery completion, not successful
-execution. `blocked`, `rejected`, `incomplete`, and `unsupported` responses can
+execution. Its resolved parameters, fixed snapshot, scientific time, universe,
+normalization and trial metadata must bind back to the Task/Spec; FAILED Evidence
+must be `typed_metrics=null` with `missing_reason=execution_failed`. `blocked`, `rejected`, `incomplete`, and `unsupported` responses can
 report a valid problem without speculative future Run/Manifest/Evidence reads;
 unknown outcome remains only `blocked` with `execution_outcome_unknown` and
-does not authorize retry.
+does not authorize retry. An unresolvable Task/Spec can be reported as
+`rejected/invalid_input` or `unsupported/capability_unsupported` with empty or
+partially verified context references, but that problem response never validates
+the original request. `blocked` (including an unknown outcome) and `incomplete`
+still require a fully admitted Task/Spec request.
 
 `validate_handoff` also consumes three registered
 Task → Spec → Run → Manifest → Evidence → Review chains: the archived #544

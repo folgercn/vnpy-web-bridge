@@ -594,6 +594,29 @@ def _resolve_manifest_payload(manifest, definitions, role, *, payloads, root):
 
 def _validate_execute_spec_handoff(request, objects, response, schema, *, payloads, root):
     """Offline delivery check for the one registered data-quality execution profile."""
+    # A problem report may describe an unresolvable request without pretending it
+    # had a valid Task/Spec admission.  Do not inspect future delivery objects.
+    if response is not None and isinstance(response, dict) and response.get('status') != 'completed':
+        schema_check(response, schema)
+        require(isinstance(request, dict) and request.get('message_kind') == 'request' and
+                request.get('operation') == 'execute_spec' and
+                (request.get('sender_role'), request.get('recipient_role')) == ('research', 'execution'),
+                'execute_spec problem request')
+        require(isinstance(request.get('handoff_id'), str) and request['handoff_id'],
+                'execute_spec problem correlation')
+        require(isinstance(request.get('context_refs'), dict), 'execute_spec problem context')
+        require(response['message_kind'] == 'response' and response['in_reply_to'] == request['handoff_id'] and
+                response['operation'] == 'execute_spec' and
+                (response['sender_role'], response['recipient_role']) == ('execution', 'research') and
+                response['context_refs'] == request['context_refs'], 'execute_spec problem response')
+        _validate_problem_response(response)
+        if (response['status'], response['problem']['code']) in {
+            ('rejected', 'invalid_input'),
+            ('unsupported', 'capability_unsupported'),
+        }:
+            return True
+
+    schema_check(request, schema)
     require(request['message_kind'] == 'request', 'execute_spec request')
     require((request['sender_role'], request['recipient_role']) == ('research', 'execution'),
             'execute_spec request direction')
@@ -603,7 +626,7 @@ def _validate_execute_spec_handoff(request, objects, response, schema, *, payloa
     require((spec.get('experiment_type'), spec.get('research_stage')) == ('data_quality', 'validation'),
             'unsupported execute_spec profile')
     definitions = Definitions()
-    validate_spec(spec, task, definitions)
+    resolved = validate_spec(spec, task, definitions)
     require(set(request['context_refs']) == required_request_objects, 'execute_spec request context set')
     for kind in required_request_objects:
         require(request['context_refs'][kind] == check_record(objects[kind], kind),
@@ -611,7 +634,8 @@ def _validate_execute_spec_handoff(request, objects, response, schema, *, payloa
     required_roles = COMMON | TYPED['data_quality']
     requirements = request['artifact_requirements']
     require(requirements['role_profile_ref'] == ROLE_PROFILE, 'execute_spec role profile')
-    require(set(requirements['required_roles']) == required_roles, 'execute_spec required roles')
+    require(len(requirements['required_roles']) == len(set(requirements['required_roles'])) and
+            set(requirements['required_roles']) == required_roles, 'execute_spec required roles')
     require(requirements['exact_refs'] == [], 'execute_spec future artifact references')
     expected = [
         {'object_type': 'experiment_run', 'schema_version': 'research_lab.run.v2'},
@@ -632,7 +656,6 @@ def _validate_execute_spec_handoff(request, objects, response, schema, *, payloa
     if response['status'] != 'completed':
         _validate_problem_response(response)
         return True
-
     required_delivery = {'experiment_run', 'artifact_manifest', 'result_evidence'}
     require(required_delivery <= set(objects), 'missing execute_spec delivery')
     run, manifest, evidence = (objects['experiment_run'], objects['artifact_manifest'],
@@ -654,6 +677,22 @@ def _validate_execute_spec_handoff(request, objects, response, schema, *, payloa
             'Run time order')
     require(run['process_exit_code'] == (0 if run['run_status'] == 'COMPLETED' else 1),
             'Run exit status')
+    computation = run['resolved_computation_manifest']
+    requirements_spec = spec['dataset_requirements']
+    require(computation['raw_bytes_sha256'] == requirements_spec['snapshot_sha256'] and
+            computation['resolved_parameters'] == resolved['source_order'] and
+            computation['scientific_time'] == requirements_spec['time_range'] and
+            computation['universe'] == requirements_spec['universe'] and
+            computation['normalization_rule_version'] == requirements_spec['normalization_rule_version'],
+            'Run data-quality Spec binding')
+    require(requirements_spec['universe'] == task['data_requirements']['products'] and
+            requirements_spec['time_range']['start'][:10] == task['data_requirements']['date_start'] and
+            requirements_spec['time_range']['end'][:10] == task['data_requirements']['date_end_exclusive'],
+            'Task data-quality range binding')
+    require(computation['holdout_usage_state'] == 'not_applicable' and
+            run['trial_context'] == {'research_stage': 'validation', 'trial_kind': None,
+                                     'retry_of_run_id': None, 'holdout_usage_state': 'not_applicable'},
+            'Run data-quality metadata')
     verified = validate_manifest(root, manifest, run, definitions, task=task, spec=spec) if root is not None else payloads
     require(isinstance(verified, _VerifiedPayloads) and _is_verified_payloads(verified),
             'verified payloads required')
@@ -666,16 +705,21 @@ def _validate_execute_spec_handoff(request, objects, response, schema, *, payloa
             'Evidence Manifest reference')
     require(evidence['run_status_snapshot'] == evidence['execution_status'] == run['run_status'],
             'Evidence status')
+    require(manifest['experiment_type'] == spec['experiment_type'] and
+            manifest['artifact_profile'] == requirements['role_profile_ref'],
+            'Manifest data-quality delivery metadata')
     present = _present_artifact_refs(manifest)
     require(evidence['supporting_artifacts'] == present, 'Evidence artifact references')
     actual_roles = {item['role'] for item in present}
     manifest_roles = {entry['role'] for entry in manifest['entries']}
     expected_roles = required_roles | ({'failure_diagnostics'} if run['run_status'] == 'FAILED' else set())
-    require(expected_roles <= manifest_roles and requirements['required_roles'] == sorted(required_roles),
+    require(expected_roles <= manifest_roles,
             'execute_spec delivered roles')
     if run['run_status'] == 'FAILED':
         diagnostic = next((entry for entry in manifest['entries'] if entry['role'] == 'failure_diagnostics'), None)
         require(diagnostic is not None and diagnostic['availability'] == 'present', 'failure diagnostics delivery')
+        require(evidence['typed_metrics'] is None and evidence['missing_reason'] == 'execution_failed',
+                'FAILED evidence delivery')
     else:
         require(actual_roles == required_roles, 'unexpected completed delivery role')
     contents = {
@@ -702,10 +746,10 @@ def _validate_execute_spec_handoff(request, objects, response, schema, *, payloa
 def validate_handoff(request, objects, response=None, *, payloads=None, root=None):
     """Fail-closed offline admission for registered review and execute profiles."""
     schema = parse(safe_read(ROOT, 'docs/research-lab/agent-contract/agent-handoff.schema.json'))
-    schema_check(request, schema)
-    if request.get('operation') == 'execute_spec':
+    if isinstance(request, dict) and request.get('operation') == 'execute_spec':
         return _validate_execute_spec_handoff(request, objects, response, schema,
                                               payloads=payloads, root=root)
+    schema_check(request, schema)
     return _validate_review_handoff(request, objects, response, payloads=payloads, root=root)
 
 
