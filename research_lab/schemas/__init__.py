@@ -12,6 +12,7 @@ from .critic import CriticFinding, CriticReview
 from .alpha import AlphaIdea, ExperimentRecord, FailurePattern, FactorKnowledge, LiteratureReference
 from .astra import ResearchMaterial, ResearchProposal, ResearchTask
 from .sol import ExperimentPlan, PlanEvent, SolTaskInput, WorkerCapabilities, WorkerDescriptor
+from .farm import FarmClaim, FarmResultCallback, FarmTask, FarmWorker
 
 __all__ = [
     "ExperimentResult", "ExperimentSpec", "FeatureRequest", "ParameterStability",
@@ -23,4 +24,5 @@ __all__ = [
     "AlphaIdea", "ExperimentRecord", "FailurePattern", "FactorKnowledge", "LiteratureReference",
     "ResearchMaterial", "ResearchProposal", "ResearchTask",
     "ExperimentPlan", "PlanEvent", "SolTaskInput", "WorkerCapabilities", "WorkerDescriptor",
+    "FarmClaim", "FarmResultCallback", "FarmTask", "FarmWorker",
 ]
