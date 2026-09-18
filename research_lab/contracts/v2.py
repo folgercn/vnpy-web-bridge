@@ -594,7 +594,8 @@ def _resolve_manifest_payload(manifest, definitions, role, *, payloads, root):
 
 def _validate_execute_problem_context(request, objects, response):
     """Allow a problem report to retain only request references it can verify."""
-    request_refs, response_refs = request['context_refs'], response['context_refs']
+    request_refs, response_refs = request.get('context_refs', {}), response['context_refs']
+    require(isinstance(request_refs, dict), 'execute_spec problem context')
     require(set(response_refs) <= set(request_refs), 'execute_spec problem response context')
     for kind, reference in response_refs.items():
         require(kind in objects and reference == request_refs[kind] == check_record(objects[kind], kind),
@@ -606,9 +607,9 @@ def _validate_execute_spec_handoff(request, objects, response, schema, *, payloa
     # A problem report may describe an unresolvable request without pretending it
     # had a valid Task/Spec admission.  Do not inspect future delivery objects.
     if response is not None and isinstance(response, dict) and response.get('status') != 'completed':
-        schema_check(request, schema)
         schema_check(response, schema)
-        require(isinstance(request, dict) and request.get('message_kind') == 'request' and
+        require(isinstance(request, dict) and request.get('schema_version') == 'research_lab.agent_handoff.v2' and
+                request.get('message_kind') == 'request' and
                 request.get('operation') == 'execute_spec' and
                 (request.get('sender_role'), request.get('recipient_role')) == ('research', 'execution'),
                 'execute_spec problem request')
@@ -620,10 +621,11 @@ def _validate_execute_spec_handoff(request, objects, response, schema, *, payloa
                 (response['sender_role'], response['recipient_role']) == ('execution', 'research'),
                 'execute_spec problem response')
         _validate_problem_response(response)
-        if (response['status'], response['problem']['code']) in {
-            ('rejected', 'invalid_input'),
-            ('unsupported', 'capability_unsupported'),
-        }:
+        if (response['status'], response['problem']['code']) == ('rejected', 'invalid_input'):
+            _validate_execute_problem_context(request, objects, response)
+            return True
+        schema_check(request, schema)
+        if (response['status'], response['problem']['code']) == ('unsupported', 'capability_unsupported'):
             _validate_execute_problem_context(request, objects, response)
             return True
 

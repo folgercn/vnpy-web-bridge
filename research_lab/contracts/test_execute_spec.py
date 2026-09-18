@@ -364,11 +364,8 @@ def test_execute_spec_noncompleted_response_can_report_without_delivery(bundle, 
         v2.validate_handoff(request, minimal, invalid)
 
 
-@pytest.mark.parametrize("status, code", [
-    ("rejected", "invalid_input"), ("unsupported", "capability_unsupported"),
-])
 @pytest.mark.parametrize("context", [{}, {"research_task": "verified"}])
-def test_execute_spec_problem_response_allows_unresolvable_context(bundle, status, code, context):
+def test_execute_spec_rejected_response_allows_unresolvable_context(bundle, context):
     obj = records(bundle)
     request = execute_request(obj)
     request["handoff_id"] = "unresolvable-execute-request"
@@ -384,8 +381,8 @@ def test_execute_spec_problem_response_allows_unresolvable_context(bundle, statu
             "research_task": request["context_refs"]["research_task"],
         }),
         "in_reply_to": request["handoff_id"],
-        "status": status,
-        "problem": {"code": code, "reason": "cannot resolve submitted references",
+        "status": "rejected",
+        "problem": {"code": "invalid_input", "reason": "cannot resolve submitted references",
                     "affected_items": ["experiment_spec"], "resume_condition": "supply exact records",
                     "execution_outcome": "not_started"},
     }
@@ -394,6 +391,105 @@ def test_execute_spec_problem_response_allows_unresolvable_context(bundle, statu
     invalid["context_refs"] = {"experiment_spec": v2.check_record(obj["experiment_spec"], "experiment_spec")}
     with pytest.raises(ValueError, match="execute_spec problem context"):
         v2.validate_handoff(request, obj, invalid)
+
+
+@pytest.mark.parametrize("missing", ["artifact_requirements", "experiment_spec"])
+@pytest.mark.parametrize("context", [{}, {"research_task": "verified"}])
+def test_execute_spec_rejected_response_reports_structurally_invalid_request(bundle, missing, context):
+    obj = records(bundle)
+    request = execute_request(obj)
+    if missing == "artifact_requirements":
+        request.pop("artifact_requirements")
+    else:
+        request["context_refs"].pop("experiment_spec")
+    response = {
+        "schema_version": "research_lab.agent_handoff.v2",
+        "handoff_id": "invalid-execute-request-response",
+        "message_kind": "response",
+        "operation": "execute_spec",
+        "sender_role": "execution",
+        "recipient_role": "research",
+        "context_refs": ({} if not context else {
+            "research_task": request["context_refs"]["research_task"],
+        }),
+        "in_reply_to": request["handoff_id"],
+        "status": "rejected",
+        "problem": {"code": "invalid_input", "reason": "request structure is incomplete",
+                    "affected_items": [missing], "resume_condition": "supply a complete request",
+                    "execution_outcome": "not_started"},
+    }
+    assert v2.validate_handoff(request, obj, response)
+
+
+@pytest.mark.parametrize("implementation", [
+    "candidate.phase0.unknown.rev1", "candidate.phase0.source_order.rev99",
+])
+@pytest.mark.parametrize("context", [{}, {"research_task": "verified"}])
+def test_execute_spec_unsupported_response_precedes_method_admission(bundle, implementation, context):
+    obj = records(bundle)
+    obj["experiment_spec"]["quality_checks"][0]["implementation_ref"] = implementation
+    reseal_spec_and_run(obj)
+    request = execute_request(obj)
+    response = {
+        "schema_version": "research_lab.agent_handoff.v2",
+        "handoff_id": "unsupported-execute-response",
+        "message_kind": "response",
+        "operation": "execute_spec",
+        "sender_role": "execution",
+        "recipient_role": "research",
+        "context_refs": ({} if not context else {
+            "research_task": request["context_refs"]["research_task"],
+        }),
+        "in_reply_to": request["handoff_id"],
+        "status": "unsupported",
+        "problem": {"code": "capability_unsupported", "reason": "implementation is not registered",
+                    "affected_items": ["experiment_spec"], "resume_condition": "use a registered implementation",
+                    "execution_outcome": "not_started"},
+    }
+    assert v2.validate_handoff(request, obj, response)
+
+
+@pytest.mark.parametrize("mutation", ["schema_version", "correlation", "roles", "operation", "blocked", "unsupported"])
+def test_execute_spec_invalid_request_cannot_bypass_rejected_report_binding(bundle, mutation):
+    obj = records(bundle)
+    request = execute_request(obj)
+    request.pop("artifact_requirements")
+    response = {
+        "schema_version": "research_lab.agent_handoff.v2",
+        "handoff_id": "invalid-execute-request-response",
+        "message_kind": "response",
+        "operation": "execute_spec",
+        "sender_role": "execution",
+        "recipient_role": "research",
+        "context_refs": {},
+        "in_reply_to": request["handoff_id"],
+        "status": "rejected",
+        "problem": {"code": "invalid_input", "reason": "request structure is incomplete",
+                    "affected_items": ["artifact_requirements"], "resume_condition": "supply a complete request",
+                    "execution_outcome": "not_started"},
+    }
+    if mutation == "schema_version":
+        request["schema_version"] = "other"
+    elif mutation == "correlation":
+        request["handoff_id"] = ""
+    elif mutation == "roles":
+        request["sender_role"] = "critic"
+    elif mutation == "operation":
+        request["operation"] = "prepare_spec"
+    elif mutation == "blocked":
+        response.update(status="blocked", problem={
+            "code": "dependency_unavailable", "reason": "requires admitted request",
+            "affected_items": ["experiment_spec"], "resume_condition": "admit request",
+            "execution_outcome": "known",
+        })
+    else:
+        response.update(status="unsupported", problem={
+            "code": "capability_unsupported", "reason": "requires admitted request",
+            "affected_items": ["experiment_spec"], "resume_condition": "admit request",
+            "execution_outcome": "not_started",
+        })
+    with pytest.raises((ValidationError, ValueError)):
+        v2.validate_handoff(request, obj, response)
 
 
 @pytest.mark.parametrize("status, code, context", [
