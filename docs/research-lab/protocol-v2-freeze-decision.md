@@ -47,7 +47,7 @@ M1–M7 规则不仅完成了文本定义与纸面走查，更通过 #546～#552
 | M4 复现与证据 | #544 真实 input-driven 正向路径贯穿；#540 固化因子与回测真实历史事实；#548, #549 落实受限机器契约（明确两类外置明细当前不可读未取得，使用 synthetic structural fixtures）。 | 因子与回测的原生正向执行器延期至 Phase 1。 | **SATISFIED** |
 | M5 Evidence/Review | #539 事实解耦；#542 Payload 红线；#544 缺陷事实与 FAILED 诊断包；#550 review_evidence 机器化 criteria_ref 核对。 | 自动 Critic 智能体服务延期至 Phase 3。 | **SATISFIED** |
 | M6 兼容与扩展 | Schema `additionalProperties: false` 拒绝未知字段与版本；`catalogue.json` 受控解析拒绝未登记定义；v1 保持原义。 | 通用自动迁移适配器延期至 Phase 1+。 | **SATISFIED** |
-| M7 指标与选择 | Spec README 指标定义、精度、undefined 处理；Trend20 精度校验；50 项结构负例校验；**严格保留拒绝规则**（样本重叠未隔离、暴露历史 unknown、已暴露、自报时间不等登记、事后改阈值、择优 seed 均拒绝）。 | 真实 confirmation 预登记实验与跨任务暴露服务延期至 Phase 2。 | **SATISFIED** |
+| M7 指标与选择 | Spec README 指标定义、精度、undefined 处理；Trend20 精度校验；50项 Spec 结构正反例中的代表性确认结构检查；暴露unknown/已暴露/事后择优等为规范拒绝规则，未声称已完成相应runtime核验。 | 真实 confirmation 预登记实验与跨任务暴露服务延期至 Phase 2。 | **SATISFIED** |
 
 ## 4. S1–S7 语义契约与 Runtime 边界
 
