@@ -899,6 +899,8 @@ def failed_dq_review_chain(bundle):
         run_content_hash=run["run_content_hash"],
         run_status_snapshot="FAILED",
         execution_status="FAILED",
+        typed_metrics=None,
+        missing_reason="execution_failed",
         manifest_content_hash=manifest["manifest_content_hash"],
     )
     evidence["supporting_artifacts"] = [

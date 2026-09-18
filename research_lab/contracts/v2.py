@@ -526,7 +526,260 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
     return _remember_verified_payloads(_VerifiedPayloads(contents, manifest, entries))
 
 
+def _validate_problem_response(response):
+    """Validate the shared non-delivery response contract."""
+    require(response['status'] in ('blocked', 'rejected', 'incomplete', 'unsupported'), 'response status')
+    require('output_refs' not in response, 'noncompleted output reference')
+    problem = response.get('problem')
+    require(isinstance(problem, dict), 'problem definition')
+    expected_codes = {
+        'blocked': {'dependency_unavailable', 'execution_outcome_unknown'},
+        'rejected': {'invalid_input'},
+        'incomplete': {'missing_delivery'},
+        'unsupported': {'capability_unsupported'},
+    }
+    require(problem.get('code') in expected_codes[response['status']], 'problem status/code')
+    require(bool(problem.get('reason')), 'problem reason')
+    require(isinstance(problem.get('affected_items'), list) and len(problem['affected_items']) >= 1,
+            'problem affected items')
+    require(bool(problem.get('resume_condition')), 'problem resume condition')
+    require(problem.get('execution_outcome') in ('not_started', 'known', 'unknown'),
+            'problem execution outcome')
+    require((problem['execution_outcome'] == 'unknown') == (
+        response['status'] == 'blocked' and problem['code'] == 'execution_outcome_unknown'
+    ), 'problem unknown outcome/status')
+
+
+def _present_artifact_refs(manifest):
+    return [{**{key: manifest[value] for key, value in (
+        ('manifest_id', 'manifest_id'), ('manifest_revision', 'revision'),
+        ('manifest_content_hash', 'manifest_content_hash'))},
+        **{key: entry[key] for key in ('artifact_id', 'role', 'content_sha256')}}
+        for entry in manifest['entries'] if entry['availability'] == 'present']
+
+
+def _resolve_manifest_payload(manifest, definitions, role, *, payloads, root):
+    """Read one present payload with the same provenance checks for both inputs."""
+    entry = next((item for item in manifest['entries'] if item['role'] == role), None)
+    require(entry is not None and entry['availability'] == 'present',
+            'missing required payload: ' + role)
+    _, definition = definitions.resolve('payload', entry['content_schema_ref'])
+    if payloads is not None:
+        require(isinstance(payloads, _VerifiedPayloads) and _is_verified_payloads(payloads),
+                'verified payloads required')
+        require(payloads._manifest_ref == (
+            manifest['manifest_id'], manifest['revision'], manifest['manifest_content_hash'],
+        ), 'verified payload manifest mismatch')
+        artifact_id = entry['artifact_id']
+        require(payloads._entry_refs.get(artifact_id) == (
+            entry['content_sha256'], entry['byte_length'],
+        ), 'verified payload reference mismatch: ' + role)
+        require(artifact_id in payloads and artifact_id in payloads._content_digests,
+                'missing verified payload content for ' + role)
+        content = payloads[artifact_id]
+        require(payloads._content_digests[artifact_id] == digest(content),
+                'verified payload content mutated: ' + role)
+        schema_check(content, definition)
+        return content
+    if root is not None:
+        require('relative_path' in entry, 'missing relative_path for ' + role)
+        raw = safe_read(root, entry['relative_path'])
+        require(len(raw) == entry['byte_length'] and sha(raw) == entry['content_sha256'],
+                'payload bytes mismatch: ' + role)
+        content = parse(raw)
+        schema_check(content, definition)
+        return content
+    raise ValueError('verified payloads or root required for ' + role)
+
+
+def _validate_execute_problem_context(request, objects, response):
+    """Allow a problem report to retain only request references it can verify."""
+    response_refs = response['context_refs']
+    if not response_refs:
+        return
+    request_refs = request.get('context_refs')
+    require(isinstance(request_refs, dict), 'execute_spec problem context')
+    require(set(response_refs) <= set(request_refs), 'execute_spec problem response context')
+    for kind, reference in response_refs.items():
+        require(kind in objects and reference == request_refs[kind] == check_record(objects[kind], kind),
+                'execute_spec problem context reference: ' + kind)
+
+
+def _validate_execute_spec_handoff(request, objects, response, schema, *, payloads, root):
+    """Offline delivery check for the one registered data-quality execution profile."""
+    # A problem report may describe an unresolvable request without pretending it
+    # had a valid Task/Spec admission.  Do not inspect future delivery objects.
+    if response is not None and isinstance(response, dict) and response.get('status') != 'completed':
+        schema_check(response, schema)
+        require(isinstance(request, dict) and request.get('schema_version') == 'research_lab.agent_handoff.v2' and
+                request.get('message_kind') == 'request' and
+                request.get('operation') == 'execute_spec' and
+                (request.get('sender_role'), request.get('recipient_role')) == ('research', 'execution'),
+                'execute_spec problem request')
+        require(isinstance(request.get('handoff_id'), str) and request['handoff_id'],
+                'execute_spec problem correlation')
+        require(response['message_kind'] == 'response' and response['in_reply_to'] == request['handoff_id'] and
+                response['operation'] == 'execute_spec' and
+                (response['sender_role'], response['recipient_role']) == ('execution', 'research'),
+                'execute_spec problem response')
+        _validate_problem_response(response)
+        if (response['status'], response['problem']['code']) == ('rejected', 'invalid_input'):
+            _validate_execute_problem_context(request, objects, response)
+            return True
+        schema_check(request, schema)
+        if (response['status'], response['problem']['code']) == ('unsupported', 'capability_unsupported'):
+            _validate_execute_problem_context(request, objects, response)
+            return True
+
+    schema_check(request, schema)
+    require(request['message_kind'] == 'request', 'execute_spec request')
+    require((request['sender_role'], request['recipient_role']) == ('research', 'execution'),
+            'execute_spec request direction')
+    required_request_objects = {'research_task', 'experiment_spec'}
+    require(required_request_objects <= set(objects), 'missing execute_spec request context')
+    task, spec = objects['research_task'], objects['experiment_spec']
+    require((spec.get('experiment_type'), spec.get('research_stage')) == ('data_quality', 'validation'),
+            'unsupported execute_spec profile')
+    definitions = Definitions()
+    resolved = validate_spec(spec, task, definitions)
+    require(set(request['context_refs']) == required_request_objects, 'execute_spec request context set')
+    for kind in required_request_objects:
+        require(request['context_refs'][kind] == check_record(objects[kind], kind),
+                'context reference: ' + kind)
+    required_roles = COMMON | TYPED['data_quality']
+    requirements = request['artifact_requirements']
+    require(requirements['role_profile_ref'] == ROLE_PROFILE, 'execute_spec role profile')
+    require(len(requirements['required_roles']) == len(set(requirements['required_roles'])) and
+            set(requirements['required_roles']) == required_roles, 'execute_spec required roles')
+    require(requirements['exact_refs'] == [], 'execute_spec future artifact references')
+    expected = [
+        {'object_type': 'experiment_run', 'schema_version': 'research_lab.run.v2'},
+        {'object_type': 'artifact_manifest', 'schema_version': 'research_lab.artifact_manifest.v2'},
+        {'object_type': 'result_evidence', 'schema_version': 'research_lab.evidence.v2'},
+    ]
+    require(request['expected_outputs'] == expected, 'execute_spec expected outputs')
+    if response is None:
+        return True
+
+    schema_check(response, schema)
+    require(response['message_kind'] == 'response' and response['in_reply_to'] == request['handoff_id'],
+            'response correlation')
+    require(response['operation'] == request['operation'] and
+            (response['sender_role'], response['recipient_role']) == ('execution', 'research'),
+            'execute_spec response direction')
+    require(response['context_refs'] == request['context_refs'], 'execute_spec response context')
+    if response['status'] != 'completed':
+        _validate_problem_response(response)
+        return True
+    required_delivery = {'experiment_run', 'artifact_manifest', 'result_evidence'}
+    require(required_delivery <= set(objects), 'missing execute_spec delivery')
+    run, manifest, evidence = (objects['experiment_run'], objects['artifact_manifest'],
+                               objects['result_evidence'])
+    controls = parse(safe_read(DEFINITIONS, 'phase0-control.schema.json'))['$defs']
+    for kind, obj in objects.items():
+        if kind in controls:
+            schema_check(obj, controls[kind])
+        elif kind == 'experiment_spec':
+            schema_check(obj, parse(safe_read(ROOT, 'docs/schemas/research-experiment-spec-v2.schema.json')))
+        elif kind == 'artifact_manifest':
+            schema_check(obj, parse(safe_read(ROOT, 'docs/schemas/research-artifact-manifest-v2.schema.json')))
+    require(run['run_status'] in ('COMPLETED', 'FAILED'), 'nonterminal run')
+    require((run['spec_id'], run['spec_revision'], run['spec_content_hash']) ==
+            (spec['spec_id'], spec['revision'], spec['spec_content_hash']), 'Run Spec reference')
+    require(run['scientific_fingerprint'] == digest(run['resolved_computation_manifest']),
+            'scientific fingerprint')
+    require(time_value(run['timing']['started_at']) <= time_value(run['timing']['completed_at']),
+            'Run time order')
+    require(run['process_exit_code'] == (0 if run['run_status'] == 'COMPLETED' else 1),
+            'Run exit status')
+    computation = run['resolved_computation_manifest']
+    requirements_spec = spec['dataset_requirements']
+    require(computation['raw_bytes_sha256'] == requirements_spec['snapshot_sha256'] and
+            computation['resolved_parameters'] == resolved['source_order'] and
+            computation['scientific_time'] == requirements_spec['time_range'] and
+            computation['universe'] == requirements_spec['universe'] and
+            computation['normalization_rule_version'] == requirements_spec['normalization_rule_version'],
+            'Run data-quality Spec binding')
+    require(requirements_spec['universe'] == task['data_requirements']['products'] and
+            requirements_spec['time_range']['start'][:10] == task['data_requirements']['date_start'] and
+            requirements_spec['time_range']['end'][:10] == task['data_requirements']['date_end_exclusive'],
+            'Task data-quality range binding')
+    require(computation['holdout_usage_state'] == 'not_applicable' and
+            run['trial_context'] == {'research_stage': 'validation', 'trial_kind': None,
+                                     'retry_of_run_id': None, 'holdout_usage_state': 'not_applicable'},
+            'Run data-quality metadata')
+    verified = validate_manifest(root, manifest, run, definitions, task=task, spec=spec) if root is not None else payloads
+    require(isinstance(verified, _VerifiedPayloads) and _is_verified_payloads(verified),
+            'verified payloads required')
+    require(verified._manifest_ref == (manifest['manifest_id'], manifest['revision'],
+                                       manifest['manifest_content_hash']), 'verified payload manifest mismatch')
+    require((evidence['run_id'], evidence['run_content_hash']) ==
+            (run['run_id'], run['run_content_hash']), 'Evidence Run reference')
+    require((evidence['manifest_id'], evidence['manifest_revision'], evidence['manifest_content_hash']) ==
+            (manifest['manifest_id'], manifest['revision'], manifest['manifest_content_hash']),
+            'Evidence Manifest reference')
+    require(evidence['run_status_snapshot'] == evidence['execution_status'] == run['run_status'],
+            'Evidence status')
+    require(manifest['experiment_type'] == spec['experiment_type'] and
+            manifest['artifact_profile'] == requirements['role_profile_ref'],
+            'Manifest data-quality delivery metadata')
+    present = _present_artifact_refs(manifest)
+    require(evidence['supporting_artifacts'] == present, 'Evidence artifact references')
+    actual_roles = {item['role'] for item in present}
+    manifest_roles = {entry['role'] for entry in manifest['entries']}
+    expected_roles = required_roles | ({'failure_diagnostics'} if run['run_status'] == 'FAILED' else set())
+    require(expected_roles <= manifest_roles,
+            'execute_spec delivered roles')
+    if run['run_status'] == 'FAILED':
+        diagnostic = next((entry for entry in manifest['entries'] if entry['role'] == 'failure_diagnostics'), None)
+        require(diagnostic is not None and diagnostic['availability'] == 'present', 'failure diagnostics delivery')
+        require(evidence['typed_metrics'] is None and evidence['missing_reason'] == 'execution_failed',
+                'FAILED evidence delivery')
+    else:
+        require(actual_roles == required_roles, 'unexpected completed delivery role')
+    contents = {
+        entry['role']: _resolve_manifest_payload(manifest, definitions, entry['role'],
+                                                 payloads=verified, root=None)
+        for entry in manifest['entries'] if entry['availability'] == 'present'
+    }
+    metadata, method_definition = contents['dataset_metadata'], contents['method_definition']
+    method_entry = next(entry for entry in manifest['entries'] if entry['role'] == 'method_definition')
+    method = definitions.method(spec['quality_checks'][0]['implementation_ref'])
+    require(method_definition == method and
+            computation['method_definition_sha256'] == method_entry['content_sha256'],
+            'data-quality method binding')
+    require(metadata['snapshot_sha256'] == computation['raw_bytes_sha256'] == requirements_spec['snapshot_sha256'] and
+            metadata['time_range'] == computation['scientific_time'] == requirements_spec['time_range'] and
+            metadata['fields'] == requirements_spec['required_fields'] and
+            metadata['source']['projection'].split(';', 1)[0].strip() == ','.join(computation['universe']),
+            'data-quality dataset metadata binding')
+    if run['run_status'] == 'COMPLETED':
+        summary, anomalies = contents['quality_summary'], contents['quality_anomalies']
+        require(summary is not None and anomalies is not None, 'missing data quality payload')
+        metrics = evidence['typed_metrics']
+        require(isinstance(metrics, list) and len(metrics) == 1 and
+                metrics[0]['metric'] == spec['metric_specifications'][0] and
+                metrics[0]['sample_count'] == summary['comparison_count'] and
+                metrics[0]['value'] == summary['timestamp_monotonicity_violations'],
+                'Evidence data quality facts')
+    require(response['output_refs'] == [check_record(run, 'experiment_run'),
+                                        check_record(manifest, 'artifact_manifest'),
+                                        check_record(evidence, 'result_evidence')],
+            'execute_spec output references')
+    return True
+
+
 def validate_handoff(request, objects, response=None, *, payloads=None, root=None):
+    """Fail-closed offline admission for registered review and execute profiles."""
+    schema = parse(safe_read(ROOT, 'docs/research-lab/agent-contract/agent-handoff.schema.json'))
+    if isinstance(request, dict) and request.get('operation') == 'execute_spec':
+        return _validate_execute_spec_handoff(request, objects, response, schema,
+                                              payloads=payloads, root=root)
+    schema_check(request, schema)
+    return _validate_review_handoff(request, objects, response, payloads=payloads, root=root)
+
+
+def _validate_review_handoff(request, objects, response=None, *, payloads=None, root=None):
     """Fail-closed offline review consumption for three registered profiles only."""
     schema = parse(safe_read(ROOT, 'docs/research-lab/agent-contract/agent-handoff.schema.json'))
     schema_check(request, schema)
@@ -608,58 +861,12 @@ def validate_handoff(request, objects, response=None, *, payloads=None, root=Non
         require((response['sender_role'], response['recipient_role']) == (request['recipient_role'], request['sender_role']), 'response direction')
         require(response['review_scope'] == request['review_scope'], 'response review scope')
         if response['status'] != 'completed':
-            require(response['status'] in ('blocked', 'rejected', 'incomplete', 'unsupported'), 'response status')
-            require('output_refs' not in response, 'noncompleted output reference')
-            problem = response.get('problem')
-            require(isinstance(problem, dict), 'problem definition')
-            expected_codes = {
-                'blocked': {'dependency_unavailable', 'execution_outcome_unknown'},
-                'rejected': {'invalid_input'},
-                'incomplete': {'missing_delivery'},
-                'unsupported': {'capability_unsupported'},
-            }
-            require(problem.get('code') in expected_codes[response['status']], 'problem status/code')
-            require(bool(problem.get('reason')), 'problem reason')
-            require(isinstance(problem.get('affected_items'), list) and len(problem['affected_items']) >= 1, 'problem affected items')
-            require(bool(problem.get('resume_condition')), 'problem resume condition')
-            require(problem.get('execution_outcome') in ('not_started', 'known', 'unknown'), 'problem execution outcome')
-            require((problem['execution_outcome'] == 'unknown') == (
-                response['status'] == 'blocked' and problem['code'] == 'execution_outcome_unknown'
-            ), 'problem unknown outcome/status')
+            _validate_problem_response(response)
             return True
 
-    def resolve_payload(role):
-        entry = next((e for e in manifest['entries'] if e['role'] == role), None)
-        require(entry is not None and entry['availability'] == 'present', 'missing required payload: ' + role)
-        _, definition = definitions.resolve('payload', entry['content_schema_ref'])
-        if payloads is not None:
-            require(isinstance(payloads, _VerifiedPayloads) and _is_verified_payloads(payloads),
-                    'verified payloads required')
-            require(payloads._manifest_ref == (
-                manifest['manifest_id'], manifest['revision'], manifest['manifest_content_hash'],
-            ), 'verified payload manifest mismatch')
-            artifact_id = entry['artifact_id']
-            require(payloads._entry_refs.get(artifact_id) == (
-                entry['content_sha256'], entry['byte_length'],
-            ), 'verified payload reference mismatch: ' + role)
-            require(artifact_id in payloads and artifact_id in payloads._content_digests,
-                    'missing verified payload content for ' + role)
-            content = payloads[artifact_id]
-            require(payloads._content_digests[artifact_id] == digest(content),
-                    'verified payload content mutated: ' + role)
-            schema_check(content, definition)
-            return content
-        if root is not None:
-            require('relative_path' in entry, 'missing relative_path for ' + role)
-            raw = safe_read(root, entry['relative_path'])
-            require(len(raw) == entry['byte_length'] and sha(raw) == entry['content_sha256'], 'payload bytes mismatch: ' + role)
-            content = parse(raw)
-            schema_check(content, definition)
-            return content
-        raise ValueError('verified payloads or root required for ' + role)
-
     if profile[0] == 'statistical_factor':
-        summary = resolve_payload('statistical_summary')
+        summary = _resolve_manifest_payload(manifest, definitions, 'statistical_summary',
+                                            payloads=payloads, root=root)
         metrics = evidence['typed_metrics']
         require(metrics['daily_ic']['unit'] == 'correlation' and metrics['top_bottom_spread']['unit'] == 'log_return', 'Trend20 evidence units')
         require(metrics['daily_ic']['value'] == summary['mean_daily_pearson_ic'], 'Trend20 daily IC value mismatch')
@@ -668,7 +875,8 @@ def validate_handoff(request, objects, response=None, *, payloads=None, root=Non
         require(metrics['top_bottom_spread']['precision'] == summary['precision'], 'Trend20 top-bottom spread precision mismatch')
         require(metrics['metrics_precision'] == summary['precision'], 'Trend20 metrics precision mismatch')
     elif profile[0] == 'trading_backtest':
-        summary = resolve_payload('backtest_summary')
+        summary = _resolve_manifest_payload(manifest, definitions, 'backtest_summary',
+                                            payloads=payloads, root=root)
         rows = evidence['typed_metrics']['account_metrics']
         expected = {f'{p}:{s}:{x}' for p in ('CANDIDATE', 'PAIRED') for s in ('PRIMARY_2S', 'STRESS_5S') for x in ('ag', 'au', 'cu', 'rb', 'ru', 'sc')}
         require(len(rows) == 24 and {r['account_id'] for r in rows} == expected and all(r['account_id'] == ':'.join((r['path'], r['scenario'], r['product'])) for r in rows), 'Issue481 evidence account metrics')
