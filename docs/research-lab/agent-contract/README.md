@@ -1,6 +1,6 @@
 # #523 Agent Prompt / Handoff Contract 候选
 
-状态：**DRAFT_UNFROZEN**。本轮只定义角色输入输出、交接引用、Review 和错误表达，供人工审查。没有实现 Agent、Astra、Sol、Worker、Queue、MCP、消息系统、调度器或 Runtime，不关闭 #523/#498/#538。
+状态：**PROTOCOL_V2_PHASE0_FROZEN**（详见 [Phase 0 Exit Review](../phase0-exit-review.md)）。本轮只定义角色输入输出、交接引用、Review 和错误表达。没有实现 Agent、Astra、Sol、Worker、Queue、MCP、消息系统、调度器或 Runtime，冻结本协议不关闭 #523/#498/#538。
 
 依据：[Issue #523](https://github.com/folgercn/vnpy-web-bridge/issues/523) 与 Owner 本轮 Phase 0 设计授权、[Protocol v2 修订](../protocol-v2-freeze-gap-closure.md)、[#541 Spec 契约](../specs/README.md)、[#542 Artifact 契约](../artifacts/README.md)。旧 Issue 的暂缓评论继续约束运行实现；本次新授权仅推进协议设计。此 PR 基于尚未合并的 #542，不把依赖草案当已冻结标准。
 

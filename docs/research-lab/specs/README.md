@@ -1,6 +1,6 @@
 # #511 ExperimentSpec 契约候选
 
-状态：**DRAFT_UNFROZEN**。本目录收口 ExperimentSpec 的字段、类型与拒绝规则，供 #498 签收。三份正例是未绑定、未执行的设计输入，不是 #540 历史案例的执行记录。合并本变更不关闭 #511/#498/#538，不解锁 Runner、Worker、Queue 或自动调度。
+状态：**PROTOCOL_V2_PHASE0_FROZEN**（详见 [Phase 0 Exit Review](../phase0-exit-review.md)）。本目录收口 ExperimentSpec 的字段、类型与拒绝规则。三份正例是未绑定、未执行的设计输入，不是 #540 历史案例的执行记录。冻结本协议不关闭 #511/#498/#538，不解锁 Runner、Worker、Queue 或自动调度。
 
 依据：[Issue #511 最新执行边界](https://github.com/folgercn/vnpy-web-bridge/issues/511#issuecomment-5678136839)、[Protocol v2](../protocol-v2-design.md)、[Hash/Revision/确认规则](../protocol-v2-freeze-gap-closure.md)。本目录不改写上位协议；旧展示模板不必逐字段满足此候选 Schema，不能静默转换为正式记录。
 

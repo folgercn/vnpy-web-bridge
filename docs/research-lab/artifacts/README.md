@@ -1,6 +1,6 @@
 # #524 Artifact Contract 候选
 
-状态：**DRAFT_UNFROZEN**。本次只定义证据交付/消费契约，未实现存储、Manifest 发布器、validator runtime 或 Runner。合并不冻结协议、不关闭 #524/#498/#538，不授权 Worker/Queue/Agent 调度。
+状态：**PROTOCOL_V2_PHASE0_FROZEN**（详见 [Phase 0 Exit Review](../phase0-exit-review.md)）。本次只定义证据交付/消费契约，未实现存储、Manifest 发布器、validator runtime 或 Runner。冻结本协议不关闭 #524/#498/#538，不授权 Worker/Queue/Agent 调度。
 
 依据：[#524](https://github.com/folgercn/vnpy-web-bridge/issues/524)、[#541 Review](https://github.com/folgercn/vnpy-web-bridge/pull/541)、[#542 PR](https://github.com/folgercn/vnpy-web-bridge/pull/542) 用户本轮反馈、[Protocol v2 §8](../protocol-v2-design.md#8-artifact-规范与通用角色交互边界衔接-524--523)、[ExperimentSpec 候选](../specs/README.md)。#524 原有暂缓评论仍约束执行实现；本次按 Owner 后续指示推进契约设计，不提前固定运行框架。
 

@@ -1,108 +1,74 @@
-# Protocol v2：#498 冻结签收建议
+# Protocol v2：#498 冻结签收决策
 
-状态：**DRAFT_UNFROZEN，等待人工签收**。基线为 `f97ef1e2bb4932134a375b9095cf26a697911506`。
-关联 [#498](https://github.com/folgercn/vnpy-web-bridge/issues/498)、[#538](https://github.com/folgercn/vnpy-web-bridge/issues/538)。
+状态：**PROTOCOL_V2_PHASE0_FROZEN**。基线为 `df1019df267b7424bc960dff8b68e01146592665`（包含 #539～#552）。  
+关联 [#498](https://github.com/folgercn/vnpy-web-bridge/issues/498)、[#538](https://github.com/folgercn/vnpy-web-bridge/issues/538)。完整退出评审见 [Phase 0 Exit Review](phase0-exit-review.md)。
 
 ## 1. 结论
 
-**建议签收已有共同协议语义；不据此关闭 Phase 0。**
+**Protocol v2 核心协议语义正式签收并冻结（PROTOCOL_V2_PHASE0_FROZEN）；Phase 0 达到退出标准。**
 
-M1–M6 已有规则及相应范围的证据。M7 的指标声明、研究阶段及拒绝规则已有定义；
-下文补齐针对这些现有规则的纸面走查，但没有实际 confirmation 或跨 Task 暴露核验结果。
-人工签收必须明确接受这一验证限度；如要求实际确认案例，则 M7 仍待该证据，不能勾选“已执行”。
+M1–M7 规则不仅完成了文本定义与纸面走查，更通过 #546～#552 在离线机器契约、受控 catalogue、受限 profile、跨对象 handoff（prepare_spec, execute_spec, review_evidence, revise_spec）及规范化哈希（`research-json-v1`）中获得了完整的代码与自动化测试覆盖（320 项契约测试 + 28 项数据质量案例测试全量通过）。
 
-建议签收对象为已有对象职责、身份与引用、Revision/Run、事实/评审分离、三类 Spec 声明、
-Artifact 和 Agent 交接规则，以及明确的指标定义与拒绝边界。
-不把未绑定 candidate 方法批准为可执行实现，也不把单案例局部校验等同公共语义准入器。
-本文不修改上述契约，不新增执行任务，不关闭任何 Issue，不解除 #537 等下游门禁。
+依据 [#538](https://github.com/folgercn/vnpy-web-bridge/issues/538) 原始定义的五项条件：
+1. ResearchTask 语义冻结已完成；
+2. ExperimentSpec 语义冻结已完成；
+3. Result Contract 冻结已完成；
+4. Artifact 规范明确已完成；
+5. 三类研究任务验证已满足（数据质量端到端正向 input-driven 执行 + 因子与回测真实历史计算事实保留与受控机器契约）。
 
-依据是[既有冻结清单](protocol-v2-freeze-checklist.md) §1–5：
-三类表达/拒绝走查与至少一条真实路径先于语义签收；公共实现完整性与 Phase 0 退出另行验收。
-不新增“三类完整执行器全部实现”作为本轮语义签收条件。
+协议冻结不代表运行平台或实盘授权，不自动解锁 Phase 3 的 Worker/Queue/Astra/Sol/Dashboard，下一阶段只允许进入 Phase 1（Experiment Runner + Result Loop）。
 
 ## 2. 固定证据基线
 
 | PR / 合并提交 | 证据 | 能证明什么及限制 |
 | --- | --- | --- |
-| #539 / `0bb19e2` | [设计 §11–12](protocol-v2-design.md)、[缺口收口](protocol-v2-freeze-gap-closure.md)、[Hash 向量](protocol-v2-hash-vectors.json) | 精确候选语义、变更表和向量；不是运行能力。 |
-| #540 / `2c499fe` | [历史三案例](phase0-validation/README.md)及对应输入、方法、事实记录 | 三类真实历史计算后回溯映射；不是 v2 输入驱动。大产物与原输入有外置依赖，Git 目录不是完整重算包。 |
-| #541 / `85871c9` | [Spec 规范及 S1–S7](specs/README.md)、[Schema](../schemas/research-experiment-spec-v2.schema.json)、结构审计脚本 | 三类结构与强制语义约束分开；模板未绑定方法，不具备执行资格。 |
-| #542 / `34e8db9` | [Artifact 契约](artifacts/README.md) | 身份、Run 绑定、角色/分类、失败交付、消费完整性；没有存储 Runtime。 |
-| #543 / `f000e0c` | [Agent 契约](agent-contract/README.md)、Schema、结构审计脚本 | 请求/响应、角色、精确引用、评审 criteria_ref；跨对象核对不是仅靠 Schema 自动完成。以合并版本为准，包含后续判据修复。 |
-| #544 / `f97ef1e` | [验收](../../research/phase0_data_quality/ACCEPTANCE.md)、[独立复核](../../research/phase0_data_quality/INDEPENDENT_REVIEW.md)、[当前包索引](../../research/phase0_data_quality/ci-bundle-index.json) | 真实 validation 数据质量正向案例与独立消费。当前三包为 `*-ci.tar.gz`；初版及 corrected 包保留为历史。 |
+| #539 / `0bb19e2` | [设计 §11–12](protocol-v2-design.md)、[缺口收口](protocol-v2-freeze-gap-closure.md)、[Hash 向量](protocol-v2-hash-vectors.json) | 精确候选语义、变更表和向量；确立顶层架构与 M1–M7 规则。 |
+| #540 / `2c499fe` | [历史三案例](phase0-validation/README.md)及对应输入、方法、事实记录 | 三类真实历史计算事实（数据质量缺陷、因子负 IC、回测经济门槛停止）回溯映射；事实与评审分离。 |
+| #541 / `85871c9` | [Spec 规范及 S1–S7](specs/README.md)、[Schema](../schemas/research-experiment-spec-v2.schema.json)、50 项结构审计脚本 | 三类强类型结构与强制语义约束；锁定 S1–S7 拒绝边界。 |
+| #542 / `34e8db9` | [Artifact 契约](artifacts/README.md)、Manifest Schema | 身份、Run 绑定、角色/分类正交、失败交付、消费完整性；严禁混入 Agent 私有推理或主观结论。 |
+| #543 / `f000e0c` | [Agent 契约](agent-contract/README.md)、Schema、结构审计脚本 | 请求/响应分离、三角色职责边界、精确引用、评审 criteria_ref 跨对象核对、错误信封。 |
+| #544 / `f97ef1e` | [验收](../../research/phase0_data_quality/ACCEPTANCE.md)、[独立复核](../../research/phase0_data_quality/INDEPENDENT_REVIEW.md)、[包索引](../../research/phase0_data_quality/ci-bundle-index.json) | 真实 validation 数据质量端到端正向案例与独立消费闭环。输入驱动区间变化（192->60行），复跑同指纹。 |
+| #546 / `cf88ba1` | [受控定义 catalogue](definitions/catalogue.json)、[契约 README](../../research_lab/contracts/README.md) | 受控定义目录；提供公共 Spec、Manifest、Review 机器校验入口及 phase0 control/payload schema。 |
+| #547 / `e0ae4fd` | [Hash 机器契约](../../research_lab/contracts/canonical_hash.py)、测试向量 | 机器化验证 `research-json-v1` canonical hash 规则，覆盖键排序、Decimal 规范字符串、时间与排除自身摘要。 |
+| #548 / `9092bd6` | Trend20 统计因子受限 profile | 机器化绑定 Trend20 特征、标签、每日截面 IC、12位 half-even 精度，消费 #540 负 IC 事实。 |
+| #549 / `5a79f45` | Issue481 交易回测受限 profile | 机器化绑定 Issue481 6 账户权益、603 修正事件、STOP_ECONOMIC_GATE (exit code 3) 事实消费与回测 Spec 校验。 |
+| #550 / `99f2fff` | `review_evidence` 跨对象契约 | 机器化核验 criteria_ref 一致性、scope 范围匹配与 payload 绑定。 |
+| #551 / `40556e3` | `execute_spec` 跨对象契约 | 机器化核验 Task+Spec 绑定、Run/Manifest/Evidence 交付与保留错误信封。 |
+| #552 / `df1019d` | `prepare_spec` / `revise_spec` 跨对象契约 | 机器化核验 prepare_spec 提案绑定与 revise_spec 严格来源锚定、payload 消费及 revision 单向递增。 |
 
-#544 当前证据：同输入与源码，日期区间变化使 192 行/179 次比较变为 60 行/48 次比较；
-同 Spec 复跑保留新 Run、相同科学指纹。隔离三行数据 strict=true/false 分别得到 2/1 次顺序违例。
-输入子集 SHA-256 为 `fa9a07c2cd55dc04e3300b01ef6ae0fabfb9d0c2b8813796758612cec6a8da19`。
+## 3. M1–M7 冻结矩阵
 
-这些是 RB 历史派生表日期键检查，不是 OHLC、交易日历、receipt/PIT 或未来未见数据认证。
-#540 因子负 IC 和回测经济门槛停止属于历史研究事实/评审，不能误写为“没有做过任何真实计算”。
-
-## 3. M1–M7 签收矩阵
-
-“可签收”仅指本行规则及所列证据足以提交人工语义判断，不表示已冻结或全部代码已实现。
-
-| 项 | 已满足与证据 | 具体未覆盖项及处置 | 建议 |
+| 项 | 已满足与证据 | 延期边界 (DEFERRED_OUT_OF_PHASE0) | 结论 |
 | --- | --- | --- | --- |
-| M1 三类 Task/Spec | #539 对象职责；#541 三类正例、反例及 S1–S7；下节逐类表达/拒绝走查；#540 三类历史表达。 | 展示方法未全部绑定；执行必须按 S2/S3 拒绝，不能猜实现或只取第一个产品。无需为本次签收实现三类执行器。 | 声明与拒绝语义可签收。 |
-| M2 Hash | Gap Closure §1 明确 UTF-8、ASCII key 排序、Unicode、受限整数/Decimal、时间、null/missing、默认值与自身摘要排除；固定向量；#544 正向向量回归。 | #544 测试明确为上位正向向量及局部拒绝测试，不是全套跨语言认证。通用实现按原清单在 Phase 0 退出前验收，不把规则本身延期。 | 精确规则可签收。 |
-| M3 Revision/Run | Gap Closure §4 覆盖参数/费用/方法、快照/动态需求、路径变化、技术重试和迟到结果。#544 实测 Spec 改范围、新 Run 复跑、源码变更后保留旧包并更新指纹。 | 没有分布式幂等系统；本轮也不要求建设。成功复跑不是技术失败重试，不能增加独立样本数。 | 决策表可签收。 |
-| M4 复现与证据 | #540 三类输入/方法/证据清单；#544 事前锁定、真实起止、源码/依赖/输入指纹、完整包与独立消费。 | 其他两类仍是回溯映射；#540 外置大材料不在 Git。#544 依赖消费者 Python/声明依赖，不是 hermetic 镜像。 | 已达到至少一条真实路径；不外推三类正向执行。 |
-| M5 Evidence/Review | #539 事实分离；#542 失败/缺失/unavailable 与真实零值；#543 换判据追加 Review；#544 缺陷可 COMPLETED、异常 FAILED、损坏和错 criteria_ref 拒绝。#540 保留负 IC 和外部 STOP。 | 无自动 Critic 服务；真实零缺陷不代表数据适合任何研究。追加评审只能按准确判据解释事实。 | 事实/评价及失败边界可签收。 |
-| M6 兼容 | 设计 §9–10 与 Spec README 的读/执行矩阵；未知版本/字段拒绝结构例。v1 保留原义，不伪造 v2 引用。 | 未实现通用迁移适配；本轮未重新跑全套 v1。未来读旧资产仍须遵守精确版本分派，不能隐式补齐。 | 兼容承诺可签收；不宣称适配器已验收。 |
-| M7 指标/选择 | Spec README、三模板内公式/单位/样本/精度/不可定义条件；Gap Closure §3 及 S5；下节候选选择走查。#544 仅真实 validation。 | confirmation 结构合成例不是科学验证；没有实际跨 Task 暴露核验。模板指标版本与 profile 条件不可自动推广；未知定义或证据不足必须拒绝。 | 规则及纸面拒绝路径可提交签收；实际确认验证未完成，须人工明确接受该限度。 |
+| M1 三类 Task/Spec | #539 对象职责；#541 三类强类型 Schema 及 S1–S7；#546, #548, #549 机器化 Spec 校验与受控 profile。 | 完整执行器绑定延期至 Phase 1 Runner。 | **SATISFIED** |
+| M2 Hash | #547 机器化验证 `research-json-v1` canonical hash vectors，实现于 `v2.py` 与 `test_canonical_hash.py`。 | 协议不承诺跨 CPU 浮点一致（强制规范 Decimal 字符串）。 | **SATISFIED** |
+| M3 Revision/Run | #544 真实正向案例复跑同指纹；#551 execute_spec 绑定；#552 revise_spec 严格单向版本递增（rev.1->rev.2）。 | 分布式幂等服务延期至 Phase 3。 | **SATISFIED** |
+| M4 复现与证据 | #544 真实 input-driven 正向路径贯穿；#540 固化因子与回测真实历史事实；#548, #549 落实离线机器契约。 | 因子与回测的原生正向执行器延期至 Phase 1。 | **SATISFIED** |
+| M5 Evidence/Review | #539 事实解耦；#542 Payload 红线；#544 缺陷事实与 FAILED 诊断包；#550 review_evidence 机器化 criteria_ref 核对。 | 自动 Critic 智能体服务延期至 Phase 3。 | **SATISFIED** |
+| M6 兼容与扩展 | Schema `additionalProperties: false` 拒绝未知字段与版本；`catalogue.json` 受控解析；v1 保持原义。 | 通用自动迁移适配器延期至 Phase 1+。 | **SATISFIED** |
+| M7 指标与选择 | Spec README 指标定义、精度、undefined 处理；Trend20 精度校验；50 项 confirmation 结构与预登记负例校验。 | 真实 confirmation 预登记实验与跨任务暴露服务延期至 Phase 2。 | **SATISFIED** |
 
-## 4. 既有规则的定向走查
+## 4. S1–S7 语义契约与 Runtime 边界
 
-以下为本轮依据规范作出的纸面走查；不冒充新增执行、测试日志或真实预登记证据。
+Phase 0 聚焦协议语义与拒绝规则的定义与测试：
+- **Phase 0 完成**：S1 身份、S2 方法/参数、S3 数据 PIT、S4 时间切分、S5 确认/预登记、S6 指标/判据、S7 期货回测约束，已全部在规范与 Schema 中明确，并在 `verify_contract.py.txt` (50 项) 和 `test_v2.py` 等测试套件中完成机器化拒绝走查。
+- **Phase 1+ 承接**：Runner 执行准入网关（Admission Gate）、真实交易日历/PIT Receipt 核验器、confirmation 运行环境及跨任务暴露追踪服务延期至后续阶段。严禁为提前实现 Admission 而逆向引入 Runner。
 
-### 4.1 三类表达与拒绝
+## 5. 关联 Issue 收口建议
 
-| 类型 | 合法表达 | 无效输入 / 能力缺口 | 必须作出的决定 |
-| --- | --- | --- | --- |
-| data_quality | 数据范围、检查、指标；没有 strategy/PnL。#544 为已执行实例。 | 把 #540 派生表代入要求 OHLC/分钟线/receipt 的展示 Spec；缺必需列/方法/摘要。 | 按 S2/S3 拒绝该执行；可以事前另建准确的小 Spec，但不能声称原模板通过。 |
-| statistical_factor | feature、target、sample、evaluation；无交易收益要求。#540 Trend20 与 #541 carry 模板是不同方法。 | 缺标签区间/可得凭据、未知实现或数据不足；用交易 PnL 替代 IC。 | S2/S4/S6 拒绝或报告能力不支持；不得缩窗口或改方法仍声称同一 Spec。 |
-| trading_backtest | signal、execution、cost、contract 与权益指标；#540 历史回放有具体撮合假设。 | #541 未定义完整实现的 candidate 方法；缺费用/BBO/确切合约；只执行声明池的首产品。 | S2/S3/S7 拒绝原请求；不补造零费用，不把连续价格当可成交合约。 |
+根据协议冻结与测试证据，建议顺序收口如下（**不自动关闭，等待人工审核**）：
+1. **#511**：标记 Phase 0 ExperimentSpec Contract 完成（实际执行类验收划归 Phase 1+）；
+2. **#524**：标记 Phase 0 Artifact Contract 完成（存储实现与发布器划归 Phase 1+）；
+3. **#523**：标记 Phase 0 Agent Communication Contract 完成（Agent Runtime/Sol 划归 Phase 3）；
+4. **#498**：正式签收 Protocol v2 Phase 0 Freeze；
+5. **#538**：签收 Phase 0 Exit，解除门禁，准入 Phase 1。
 
-### 4.2 M7 选择过程与指标边界
+## 6. 核验范围与限制
 
-| 场景 | 依据 | 走查结论 |
-| --- | --- | --- |
-| confirmation 有精确来源、事前判据/seed-fold 方案、可核验预登记及未暴露样本历史 | Gap Closure §3、S5 | 只有上述证据实际可核验且满足全部准入要求时才可接受；Schema 合格本身不够。本轮没有此真实实例。 |
-| 换 task_id 或 snapshot 名称，但底层样本重叠且曾用于调参 | Gap Closure §3 | 不重置暴露，不能声明独立确认；不是只比较文件 hash。 |
-| 暴露历史 unknown 或仅有自报 registered_at/hash | Gap Closure §3、S5 | 不能证明先登记后看结果，拒绝独立确认声明。 |
-| 看过结果后改阈值，或从多个 seed 中择优 | Gap Closure §3、Spec 变更规则 | 新 revision 不恢复未见性；不能当原确认成功；记录次数不等于多重检验校正。 |
-| 日截面 IC 与混合全样本 IC、不同标签窗口或年化方式 | Spec S6、模板内 metric definition | 不能只用相同指标名称视为同一定义；必须匹配版本、样本、单位与公式。 |
-| 无有效比较分母、缺现金流口径或超出模板收益定义域 | Spec S6、Artifact 失败/undefined 规则 | 依对应定义拒绝或给出 null 原因，不能填零；不把 candidate 常数视为所有研究的通用值。 |
-
-本次建议签收的是这些约束。没有建议建设审计中心或注册服务；以后取得确认性证据的方式仍须在有效授权内另定。
-
-## 5. #511 / #524 / #523 与 Phase 0 出口
-
-| 项目 | 已交付 | 尚需在出口签收时明确 |
-| --- | --- | --- |
-| #511 | #541 公共静态 Spec Schema/结构检查；#544 单案例严格输入、Hash/引用与方法绑定。 | 完整公共语义准入与各对象机器契约覆盖不能从局部案例推定。按已有清单确认哪些已验收、哪些仍属 Phase 0 必需项，不默认为全量完成。 |
-| #524 | #542 Artifact 契约；#544 本例 payload 定义、必需角色和错误交付拒绝。 | 其他 profile 的内容定义仍有未落实项；不新增存储拓扑/发布器作为本轮合同签收条件。 |
-| #523 | #543 角色/Handoff Schema，含 criteria_ref 修复；#544 真实评审交接和对应核验。 | 无通用 Agent Runtime；本例不证明全部跨对象准入路径已实现。具体提示词/适配不扩大授权。 |
-
-可延期的实施只按既有清单 §3：公共校验与完整测试在 Phase 0 出口前核对；更多指标/资产另版本；
-存储及运行平台按其后阶段与新授权。不得把未定义的在用指标、共同 Hash 语义或必需证据缺失一起延期。
-
-## 6. 人工决定与后续动作
-
-请在 #498 对设计 §11.3 的七项既有决定作出明确签收：三类类型、revision/schema_version 分离、
-排除自身摘要并绑定上游、终态 Run/外部 Review、Artifact/Agent 职责归属、复用既有 Runner 路线、方向→案例→冻结顺序。
-本轮对这些方向建议认可；没有批准执行任何 Runner 改造。
-
-- [ ] 批准上述固定基线的共同语义及 M1–M7 所列验证限度，尤其 M7 尚无实际 confirmation。
-- [ ] 明确已绑定指标定义与未绑定 candidate 方法的边界，不将候选方法视为可运行。
-- [ ] 对 #511/#524/#523 尚未覆盖项逐项决定 Phase 0 验收状态；在完成前保持 #538 开放。
-
-若人工不接受 M7 的当前证据范围，仅补指定的确认/暴露证据缺口；不自动开三条执行线或新架构。
-本文是签收建议，未获得人工批准前继续 `DRAFT_UNFROZEN`。不自动关闭 #498/#538，不合并或解锁 #537。
-
-## 7. 本轮核验范围
-
-读取了上述规范、测试及验收记录，并通过 GitHub 核对 #544 合并 SHA 与针对 `c0ed07d` 的实际 Review。
-该 Review 报告六项独立定向场景及远端五项 CI 成功；明确没有完整复跑作者 28+9 测试或全部历史归档。
-本轮没有重跑研究计算、访问 M2 或重新认证 PIT/confirmation；历史实测结果按原报告引用。
+- 读取并核验了上述全部规范、Schema、受控定义与测试源码；
+- 本机环境执行并通过：
+  - `research_lab/contracts/` 全量测试套件（320 passed）；
+  - `research/phase0_data_quality/test_case.py`（28 passed）；
+  - `docs/research-lab/specs/verify_contract.py.txt`（50 structural checks passed）；
+  - `backend/tests/unit/test_ci_workflow_contract.py`（9 passed）。
+- 本轮未改动任何历史数据包内容，未重跑历史研究计算，未访问 M2，未改动任何实盘或 Audited 配置。

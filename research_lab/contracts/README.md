@@ -1,6 +1,6 @@
 # v2 离线机器契约校验
 
-**DRAFT_UNFROZEN**。关联 #511/#524/#523。本模块只读文件并检查契约；不执行方法、不调用 Agent、不连接网络，不是 Runner 或完整 S1–S7 准入器。
+状态：**PROTOCOL_V2_PHASE0_FROZEN**（详见 [Phase 0 Exit Review](../../docs/research-lab/phase0-exit-review.md)）。关联 #511/#524/#523。本模块只读文件并检查契约；不执行方法、不调用 Agent、不连接网络，不是 Runner 或完整 S1–S7 准入器。
 
 ## 入口
 
