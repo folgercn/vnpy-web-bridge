@@ -82,6 +82,19 @@ def reseal_delivery(obj):
     reseal(evidence, "evidence")
 
 
+def reseal_spec_and_run(obj):
+    """Resign synthetic Task/Spec/Run changes while retaining archived payloads."""
+    reseal(obj["research_task"], "task")
+    spec = obj["experiment_spec"]
+    spec.update(task_revision=obj["research_task"]["revision"],
+                task_content_hash=obj["research_task"]["task_content_hash"])
+    reseal(spec, "spec")
+    run = obj["experiment_run"]
+    run.update(spec_revision=spec["revision"], spec_content_hash=spec["spec_content_hash"])
+    run["scientific_fingerprint"] = v2.digest(run["resolved_computation_manifest"])
+    reseal_delivery(obj)
+
+
 def test_execute_spec_request_only_is_valid_offline_contract_fixture(bundle):
     obj = records(bundle)
     request = execute_request(obj)
@@ -152,6 +165,33 @@ def test_execute_spec_binds_resolved_data_quality_inputs(bundle, field, value, m
         "payloads": v2.validate_manifest(bundle, obj["artifact_manifest"], obj["experiment_run"])
     }
     with pytest.raises(ValueError, match="Run data-quality Spec binding"):
+        v2.validate_handoff(request, obj, response, **kwargs)
+
+
+@pytest.mark.parametrize("mode", ["root", "payloads"])
+@pytest.mark.parametrize("mutation", ["snapshot", "shorter_range"])
+def test_execute_spec_binds_verified_dataset_metadata_after_rehash(bundle, mode, mutation):
+    obj = records(bundle)
+    task, spec, run = (obj["research_task"], obj["experiment_spec"], obj["experiment_run"])
+    if mutation == "snapshot":
+        spec["dataset_requirements"]["snapshot_sha256"] = "0" * 64
+        run["resolved_computation_manifest"]["raw_bytes_sha256"] = "0" * 64
+    else:
+        task.update(revision="rev.2", data_requirements={
+            **task["data_requirements"], "date_end_exclusive": "2023-01-10",
+        })
+        spec.update(revision="rev.2", dataset_requirements={
+            **spec["dataset_requirements"], "time_range": {
+                **spec["dataset_requirements"]["time_range"], "end": "2023-01-10T00:00:00.000000Z",
+            },
+        })
+        run["resolved_computation_manifest"]["scientific_time"]["end"] = "2023-01-10T00:00:00.000000Z"
+    reseal_spec_and_run(obj)
+    request, response = execute_request(obj), completed_response(execute_request(obj), obj)
+    kwargs = {"root": bundle} if mode == "root" else {
+        "payloads": v2.validate_manifest(bundle, obj["artifact_manifest"], obj["experiment_run"])
+    }
+    with pytest.raises(ValueError, match="data-quality dataset metadata binding"):
         v2.validate_handoff(request, obj, response, **kwargs)
 
 
@@ -327,17 +367,12 @@ def test_execute_spec_noncompleted_response_can_report_without_delivery(bundle, 
 @pytest.mark.parametrize("status, code", [
     ("rejected", "invalid_input"), ("unsupported", "capability_unsupported"),
 ])
-def test_execute_spec_problem_response_allows_unresolvable_context(bundle, status, code):
+@pytest.mark.parametrize("context", [{}, {"research_task": "verified"}])
+def test_execute_spec_problem_response_allows_unresolvable_context(bundle, status, code, context):
     obj = records(bundle)
-    request = {
-        "schema_version": "research_lab.agent_handoff.v2",
-        "handoff_id": "unresolvable-execute-request",
-        "message_kind": "request",
-        "operation": "execute_spec",
-        "sender_role": "research",
-        "recipient_role": "execution",
-        "context_refs": {},
-    }
+    request = execute_request(obj)
+    request["handoff_id"] = "unresolvable-execute-request"
+    request["context_refs"]["experiment_spec"]["content_hash"] = "0" * 64
     response = {
         "schema_version": "research_lab.agent_handoff.v2",
         "handoff_id": "unresolvable-execute-response",
@@ -345,18 +380,20 @@ def test_execute_spec_problem_response_allows_unresolvable_context(bundle, statu
         "operation": "execute_spec",
         "sender_role": "execution",
         "recipient_role": "research",
-        "context_refs": {},
+        "context_refs": ({} if not context else {
+            "research_task": request["context_refs"]["research_task"],
+        }),
         "in_reply_to": request["handoff_id"],
         "status": status,
         "problem": {"code": code, "reason": "cannot resolve submitted references",
                     "affected_items": ["experiment_spec"], "resume_condition": "supply exact records",
                     "execution_outcome": "not_started"},
     }
-    assert v2.validate_handoff(request, {}, response)
-    bad_ref_request = execute_request(obj)
-    bad_ref_request["context_refs"]["experiment_spec"]["content_hash"] = "0" * 64
-    response.update(context_refs=bad_ref_request["context_refs"], in_reply_to=bad_ref_request["handoff_id"])
-    assert v2.validate_handoff(bad_ref_request, obj, response)
+    assert v2.validate_handoff(request, obj, response)
+    invalid = copy.deepcopy(response)
+    invalid["context_refs"] = {"experiment_spec": v2.check_record(obj["experiment_spec"], "experiment_spec")}
+    with pytest.raises(ValueError, match="execute_spec problem context"):
+        v2.validate_handoff(request, obj, invalid)
 
 
 @pytest.mark.parametrize("status, code, context", [

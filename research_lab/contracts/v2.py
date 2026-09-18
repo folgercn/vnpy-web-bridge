@@ -592,11 +592,21 @@ def _resolve_manifest_payload(manifest, definitions, role, *, payloads, root):
     raise ValueError('verified payloads or root required for ' + role)
 
 
+def _validate_execute_problem_context(request, objects, response):
+    """Allow a problem report to retain only request references it can verify."""
+    request_refs, response_refs = request['context_refs'], response['context_refs']
+    require(set(response_refs) <= set(request_refs), 'execute_spec problem response context')
+    for kind, reference in response_refs.items():
+        require(kind in objects and reference == request_refs[kind] == check_record(objects[kind], kind),
+                'execute_spec problem context reference: ' + kind)
+
+
 def _validate_execute_spec_handoff(request, objects, response, schema, *, payloads, root):
     """Offline delivery check for the one registered data-quality execution profile."""
     # A problem report may describe an unresolvable request without pretending it
     # had a valid Task/Spec admission.  Do not inspect future delivery objects.
     if response is not None and isinstance(response, dict) and response.get('status') != 'completed':
+        schema_check(request, schema)
         schema_check(response, schema)
         require(isinstance(request, dict) and request.get('message_kind') == 'request' and
                 request.get('operation') == 'execute_spec' and
@@ -607,13 +617,14 @@ def _validate_execute_spec_handoff(request, objects, response, schema, *, payloa
         require(isinstance(request.get('context_refs'), dict), 'execute_spec problem context')
         require(response['message_kind'] == 'response' and response['in_reply_to'] == request['handoff_id'] and
                 response['operation'] == 'execute_spec' and
-                (response['sender_role'], response['recipient_role']) == ('execution', 'research') and
-                response['context_refs'] == request['context_refs'], 'execute_spec problem response')
+                (response['sender_role'], response['recipient_role']) == ('execution', 'research'),
+                'execute_spec problem response')
         _validate_problem_response(response)
         if (response['status'], response['problem']['code']) in {
             ('rejected', 'invalid_input'),
             ('unsupported', 'capability_unsupported'),
         }:
+            _validate_execute_problem_context(request, objects, response)
             return True
 
     schema_check(request, schema)
@@ -727,6 +738,17 @@ def _validate_execute_spec_handoff(request, objects, response, schema, *, payloa
                                                  payloads=verified, root=None)
         for entry in manifest['entries'] if entry['availability'] == 'present'
     }
+    metadata, method_definition = contents['dataset_metadata'], contents['method_definition']
+    method_entry = next(entry for entry in manifest['entries'] if entry['role'] == 'method_definition')
+    method = definitions.method(spec['quality_checks'][0]['implementation_ref'])
+    require(method_definition == method and
+            computation['method_definition_sha256'] == method_entry['content_sha256'],
+            'data-quality method binding')
+    require(metadata['snapshot_sha256'] == computation['raw_bytes_sha256'] == requirements_spec['snapshot_sha256'] and
+            metadata['time_range'] == computation['scientific_time'] == requirements_spec['time_range'] and
+            metadata['fields'] == requirements_spec['required_fields'] and
+            metadata['source']['projection'].split(';', 1)[0].strip() == ','.join(computation['universe']),
+            'data-quality dataset metadata binding')
     if run['run_status'] == 'COMPLETED':
         summary, anomalies = contents['quality_summary'], contents['quality_anomalies']
         require(summary is not None and anomalies is not None, 'missing data quality payload')
