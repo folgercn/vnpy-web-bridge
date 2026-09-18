@@ -2,7 +2,7 @@
 
 > **文档元数据**
 > - **关联 Issue**: [#538](https://github.com/folgercn/vnpy-web-bridge/issues/538) (Phase 0: Research Protocol Foundation), [#498](https://github.com/folgercn/vnpy-web-bridge/issues/498) (唯一协议设计入口), [#497](https://github.com/folgercn/vnpy-web-bridge/issues/497)
-> - **协议状态**: `DRAFT_UNFROZEN` (语义设计与候选字段走查草案，待主控与人工确认评审后正式冻结)
+> - **协议状态**: `PENDING_OWNER_SIGNOFF`（建议目标状态为 `PROTOCOL_V2_PHASE0_FROZEN`，详见 [Phase 0 Exit Review](phase0-exit-review.md)）
 > - **设计约束**: 本阶段仅完成语义定义与样例走查，消除 Agent 沟通歧义；不等于设计已终审验收，更不宣称关闭 #538 或 #498。禁止提前实现 Worker Runtime、Task Queue、Research Farm、Astra 自动发现或 Sol 调度系统。
 
 本轮四项冻结缺口的精确候选规则见 [Freeze Gap Closure](protocol-v2-freeze-gap-closure.md)：Hash、Evidence/Review、研究阶段和 Revision/Run。保持草案，待 #498 最终审查。
