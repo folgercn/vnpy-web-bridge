@@ -912,6 +912,22 @@ class ResultStore:
             v2.validate_handoff(request, records, response, root=bundle)
             return
 
+        is_statistical_screening = (
+            spec.get("screening_profile") == v2.STATISTICAL_SCREENING_PROFILE
+            or task.get("task_profile") == v2.STATISTICAL_SCREENING_PROFILE
+            or any(
+                e.get("content_schema_ref", {}).get("name", "").startswith(v2.STATISTICAL_SCREENING_PAYLOAD_PREFIX)
+                for e in manifest.get("entries", [])
+            )
+        )
+        if is_statistical_screening and run.get("run_status") in ("FAILED", "INSUFFICIENT_DATA"):
+            return
+
+        if is_statistical_screening:
+            required_roles = sorted(v2.COMMON | {"statistical_summary"})
+        else:
+            required_roles = sorted(v2.COMMON | v2.TYPED[spec["experiment_type"]])
+
         request = {
             "schema_version": "research_lab.agent_handoff.v2",
             "handoff_id": f"store-{run['run_id']}",
@@ -925,7 +941,7 @@ class ResultStore:
             },
             "artifact_requirements": {
                 "role_profile_ref": v2.ROLE_PROFILE,
-                "required_roles": sorted(v2.COMMON | v2.TYPED[spec["experiment_type"]]),
+                "required_roles": required_roles,
                 "exact_refs": [],
             },
             "expected_outputs": [

@@ -1,0 +1,11 @@
+{
+  "id": "research_lab.statistical_screening.review_evidence.criteria",
+  "revision": "rev.1",
+  "description": "Review criteria definition for Protocol v2 statistical_screening profile unblock.",
+  "target_profile": "research_lab.statistical_screening.v1",
+  "evaluation_rules": {
+    "facts_only": "Evaluate statistical screening facts (coverage, correlation, direction consistency, stability split) without decision scores, ranks, or recommendation tags.",
+    "insufficient_data_audit": "Audit missing fields or inadequate samples recorded as insufficient_data fact state.",
+    "failure_diagnosis": "Diagnose execution failures from failure_diagnostics payload."
+  }
+}

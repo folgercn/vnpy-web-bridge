@@ -19,6 +19,9 @@
     },
     {
       "$ref": "#/$defs/single_contract_backtest_spec"
+    },
+    {
+      "$ref": "#/$defs/statistical_screening_spec"
     }
   ],
   "allOf": [
@@ -2012,6 +2015,137 @@
               "const": "CNY"
             }
           }
+        },
+        "holdout_policy": {
+          "type": "string"
+        }
+      }
+    },
+    "statistical_screening_spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "hash_profile",
+        "spec_id",
+        "revision",
+        "task_id",
+        "task_revision",
+        "task_content_hash",
+        "spec_content_hash",
+        "experiment_type",
+        "research_stage",
+        "screening_profile",
+        "dataset_requirements",
+        "methods"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "research_lab.experiment.v2"
+        },
+        "hash_profile": {
+          "const": "research-json-v1"
+        },
+        "spec_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "type": "string",
+          "pattern": "^rev\\.[1-9][0-9]*$"
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "task_revision": {
+          "type": "string",
+          "pattern": "^rev\\.[1-9][0-9]*$"
+        },
+        "task_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "spec_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "experiment_type": {
+          "const": "statistical_factor"
+        },
+        "research_stage": {
+          "enum": [
+            "exploration",
+            "validation"
+          ]
+        },
+        "screening_profile": {
+          "const": "research_lab.statistical_screening.v1"
+        },
+        "dataset_requirements": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "snapshot_sha256",
+            "snapshot_locator",
+            "snapshot_byte_length",
+            "required_fields",
+            "provenance"
+          ],
+          "properties": {
+            "snapshot_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "snapshot_locator": {
+              "type": "string",
+              "minLength": 1
+            },
+            "snapshot_byte_length": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required_fields": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            },
+            "provenance": {
+              "type": "string",
+              "minLength": 1
+            },
+            "time_range": {
+              "type": "object",
+              "properties": {
+                "start": { "type": "string" },
+                "end": { "type": "string" }
+              }
+            }
+          }
+        },
+        "methods": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "coverage",
+              "simple_correlation",
+              "direction_consistency",
+              "stability_split"
+            ]
+          },
+          "minItems": 1
+        },
+        "candidate_decision_criteria": {
+          "type": "object"
+        },
+        "metric_specifications": {
+          "type": "array"
+        },
+        "rejection_policy": {
+          "type": "object"
         },
         "holdout_policy": {
           "type": "string"

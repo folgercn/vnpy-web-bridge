@@ -1,0 +1,238 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "research_task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "hash_profile",
+        "task_id",
+        "revision",
+        "research_type",
+        "task_profile",
+        "objective",
+        "data_requirements",
+        "methods",
+        "task_content_hash"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "research_lab.task.v2"
+        },
+        "hash_profile": {
+          "const": "research-json-v1"
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "type": "string",
+          "pattern": "^rev\\.[1-9][0-9]*$"
+        },
+        "research_type": {
+          "const": "statistical_factor"
+        },
+        "task_profile": {
+          "const": "research_lab.statistical_screening.v1"
+        },
+        "objective": {
+          "type": "string",
+          "minLength": 1
+        },
+        "data_requirements": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "snapshot_sha256",
+            "snapshot_locator",
+            "snapshot_byte_length",
+            "required_fields",
+            "provenance"
+          ],
+          "properties": {
+            "snapshot_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "snapshot_locator": {
+              "type": "string",
+              "minLength": 1
+            },
+            "snapshot_byte_length": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required_fields": {
+              "type": "array",
+              "items": { "type": "string" },
+              "minItems": 1
+            },
+            "provenance": {
+              "type": "string",
+              "minLength": 1
+            },
+            "time_range": {
+              "type": "object",
+              "properties": {
+                "start": { "type": "string" },
+                "end": { "type": "string" }
+              }
+            }
+          }
+        },
+        "methods": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "coverage",
+              "simple_correlation",
+              "direction_consistency",
+              "stability_split"
+            ]
+          },
+          "minItems": 1
+        },
+        "task_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "experiment_run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "hash_profile",
+        "run_id",
+        "run_status",
+        "spec_id",
+        "spec_revision",
+        "spec_content_hash",
+        "trial_context",
+        "resolved_computation_manifest",
+        "scientific_fingerprint",
+        "timing",
+        "process_exit_code",
+        "run_content_hash"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "research_lab.run.v2"
+        },
+        "hash_profile": {
+          "const": "research-json-v1"
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "run_status": {
+          "enum": [
+            "COMPLETED",
+            "INSUFFICIENT_DATA",
+            "FAILED"
+          ]
+        },
+        "spec_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "spec_revision": {
+          "type": "string",
+          "pattern": "^rev\\.[1-9][0-9]*$"
+        },
+        "spec_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "trial_context": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "research_stage",
+            "trial_kind",
+            "retry_of_run_id",
+            "holdout_usage_state"
+          ],
+          "properties": {
+            "research_stage": {
+              "enum": ["exploration", "validation"]
+            },
+            "trial_kind": {
+              "type": ["string", "null"]
+            },
+            "retry_of_run_id": {
+              "type": ["string", "null"]
+            },
+            "holdout_usage_state": {
+              "type": "string"
+            }
+          }
+        },
+        "resolved_computation_manifest": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "profile",
+            "snapshot_locator",
+            "snapshot_sha256",
+            "snapshot_byte_length",
+            "required_fields",
+            "methods",
+            "provenance"
+          ],
+          "properties": {
+            "profile": {
+              "const": "research_lab.statistical_screening.v1"
+            },
+            "snapshot_locator": {
+              "type": "string",
+              "minLength": 1
+            },
+            "snapshot_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "snapshot_byte_length": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "required_fields": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "methods": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "provenance": {
+              "type": "string",
+              "minLength": 1
+            },
+            "status_reason": {
+              "type": ["string", "null"]
+            }
+          }
+        },
+        "scientific_fingerprint": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "timing": {
+          "type": "object"
+        },
+        "process_exit_code": {
+          "type": "integer"
+        },
+        "run_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    }
+  }
+}
