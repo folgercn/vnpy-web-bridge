@@ -2,10 +2,10 @@
 
 > **文档元数据**
 > - **关联 Issue**: [#538](https://github.com/folgercn/vnpy-web-bridge/issues/538) (Phase 0: Research Protocol Foundation), [#498](https://github.com/folgercn/vnpy-web-bridge/issues/498) (唯一协议设计入口), [#497](https://github.com/folgercn/vnpy-web-bridge/issues/497)
-> - **协议状态**: `DRAFT_UNFROZEN` (语义设计与候选字段走查草案，待主控与人工确认评审后正式冻结)
-> - **设计约束**: 本阶段仅完成语义定义与样例走查，消除 Agent 沟通歧义；不等于设计已终审验收，更不宣称关闭 #538 或 #498。禁止提前实现 Worker Runtime、Task Queue、Research Farm、Astra 自动发现或 Sol 调度系统。
+> - **生效后的协议状态**: `PROTOCOL_V2_PHASE0_FROZEN`（Owner 批准并合并 PR #553 后，本记录即生效；批准合并前为 `PENDING_OWNER_SIGNOFF`，详见 [Phase 0 Exit Review](phase0-exit-review.md)）
+> - **设计约束**: #539 原设计阶段仅交付语义定义与样例走查；PR #553 经 Owner 批准合并后完成 Phase 0 冻结签收，并按 Exit Review 的顺序收口 Issue。冻结不授权 Worker Runtime、Task Queue、Research Farm、Astra 自动发现或 Sol 调度系统。
 
-本轮四项冻结缺口的精确候选规则见 [Freeze Gap Closure](protocol-v2-freeze-gap-closure.md)：Hash、Evidence/Review、研究阶段和 Revision/Run。保持草案，待 #498 最终审查。
+本轮四项冻结缺口的精确候选规则见 [Freeze Gap Closure](protocol-v2-freeze-gap-closure.md)：Hash、Evidence/Review、研究阶段和 Revision/Run。下文保留 #539 设计草案时点的状态与验收记录；其中“保持草案”“merge 不等于 freeze”等仅描述原设计 PR，不覆盖 PR #553 的冻结生效规则。当前冻结状态与 Issue 收口以 [Phase 0 Exit Review](phase0-exit-review.md) 为准。
 
 ---
 
@@ -293,7 +293,9 @@
 
 ---
 
-## 11. Phase 0 验收决策清单、逐项验收矩阵与后续路线
+## 11. Phase 0 验收决策清单、逐项验收矩阵与后续路线（#539 历史设计记录）
+
+> 本节的“当前 PR”“草案”“未完成”“merge 不等于 freeze”均指 #539 当时的设计交付，不是 PR #553 合并后的状态。当前验收矩阵和冻结生效条件以 [Phase 0 Exit Review](phase0-exit-review.md) 为准。
 
 依据 [#538](https://github.com/folgercn/vnpy-web-bridge/issues/538) 及 [#498](https://github.com/folgercn/vnpy-web-bridge/issues/498)，必须明确：**本设计 PR 仅提交 Phase 0 协议设计草案供主控与付哥 Review，不宣称本 PR 关闭 #538 或 #498**。
 
@@ -337,7 +339,9 @@ Phase 0 全量验收通过 (#538 达成) → Phase 1 Runner/Result Loop → Phas
 
 ---
 
-## 12. 正式冻结前的未决项
+## 12. 正式冻结前的未决项（#539 历史设计记录）
+
+> 本节保留 #539 时点的未决项与候选案例说明，不作为当前 Phase 0 阻塞清单；后续证据处置与冻结结论见 [Freeze Decision](protocol-v2-freeze-decision.md)，Owner 批准并合并 PR #553 后按该记录生效。
 
 本节列出仍需案例和人工决策解决的缺口，不授权安装依赖、新建引擎或扩大数据范围。三份 JSON 是候选结构模板，不是可直接执行的 Schema 实例；其中解释性字段、数值与方法引用均待正式结构确认。
 

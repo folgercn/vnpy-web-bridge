@@ -1,6 +1,6 @@
 # #511 ExperimentSpec 契约候选
 
-状态：**DRAFT_UNFROZEN**。本目录收口 ExperimentSpec 的字段、类型与拒绝规则，供 #498 签收。三份正例是未绑定、未执行的设计输入，不是 #540 历史案例的执行记录。合并本变更不关闭 #511/#498/#538，不解锁 Runner、Worker、Queue 或自动调度。
+生效后的协议状态：**PROTOCOL_V2_PHASE0_FROZEN**（Owner 批准并合并 PR #553 后，本记录即生效；批准合并前为 `PENDING_OWNER_SIGNOFF`，详见 [Phase 0 Exit Review](../phase0-exit-review.md)）。本目录收口 ExperimentSpec 的字段、类型与拒绝规则。三份正例是未绑定、未执行的设计输入，不是 #540 历史案例的执行记录。冻结本协议不自动关闭 #511/#498/#538，不解锁 Runner、Worker、Queue 或自动调度。
 
 依据：[Issue #511 最新执行边界](https://github.com/folgercn/vnpy-web-bridge/issues/511#issuecomment-5678136839)、[Protocol v2](../protocol-v2-design.md)、[Hash/Revision/确认规则](../protocol-v2-freeze-gap-closure.md)。本目录不改写上位协议；旧展示模板不必逐字段满足此候选 Schema，不能静默转换为正式记录。
 
@@ -68,7 +68,7 @@ Spec 不含物理路径、实际 commit、Worker/Agent 名称或结果。`implem
 | v2 候选模板 | 按本目录 Schema 做结构走查 | null 绑定、candidate 方法不构成可执行记录 |
 | 冻结后的 v2 | 精确版本分派，拒绝未知版本/字段 | 需人工签收与执行准入，不因本 PR 合并自动启用 |
 
-本次静态 Schema 是设计候选。上位 §9.1 的 Pydantic 单一结构源方案仍待签收；后续若采用代码模型，应从该唯一来源生成 Schema，不能维护互相独立的两套权威定义。
+本次静态 Schema 的冻结按本文首段的 PR #553 生效规则执行。上位 §9.1 的 Pydantic 单一结构源方案属于后续实现选择；后续若采用代码模型，应从该唯一来源生成 Schema，不能维护互相独立的两套权威定义。
 
 JSON 是本次规范输入。YAML 仅可在未来明确无歧义转换规则后作为编辑格式，当前不提供 YAML parser 或将 YAML 默认值/时间解析视为协议。
 
@@ -83,4 +83,4 @@ JSON 是本次规范输入。YAML 仅可在未来明确无歧义转换规则后�
 
 审计脚本仅做离线 Schema 正反例验证，不是 Runner 或生产准入器；未实现 S1–S7 的完整执行验证。保留可重复的反例以及结构正例，包括三种 sizing、动态数据选择、confirmation 结构。结构 confirmation 用合成摘要，明确不是通过科学验证的案例。
 
-#511 提供此份契约候选供 Review；#524 Artifact、#523 Agent 契约、实际 v2 正向案例和 #498 签字仍需完成，再逐项判断 #538 退出。本 PR 不证明 #540 已变成原生 v2 执行链。
+#511/#524/#523 的 Phase 0 契约与实际 v2 正向案例已汇入 [Exit Review](../phase0-exit-review.md)；Owner 批准并合并 PR #553 后冻结生效，按 #511 → #524 → #523 → #498 → #538 顺序关闭。此签收不证明 #540 已变成原生 v2 执行链。

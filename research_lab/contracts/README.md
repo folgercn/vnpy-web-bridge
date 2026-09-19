@@ -1,6 +1,6 @@
 # v2 离线机器契约校验
 
-**DRAFT_UNFROZEN**。关联 #511/#524/#523。本模块只读文件并检查契约；不执行方法、不调用 Agent、不连接网络，不是 Runner 或完整 S1–S7 准入器。
+生效后的协议状态：**PROTOCOL_V2_PHASE0_FROZEN**（Owner 批准并合并 PR #553 后，本记录即生效；批准合并前为 `PENDING_OWNER_SIGNOFF`，详见 [Phase 0 Exit Review](../../docs/research-lab/phase0-exit-review.md)）。关联 #511/#524/#523。本模块只读文件并检查契约；不执行方法、不调用 Agent、不连接网络，不是 Runner 或完整 S1–S7 准入器。
 
 ## 入口
 
@@ -31,12 +31,12 @@
 
 | 条款 | 本轮机器证据 | 保留限制 |
 | --- | --- | --- |
-| #524 结构、present/unavailable、完整性 | Manifest Schema；必需角色不受 supporting 分类豁免；长度/摘要、重复/缺件、路径和内容 Schema 拒绝测试 | 不发布或修改任何包；未登记内容定义仍是冻结缺口，不能视为延期批准 |
-| #524 定义定位与身份 | 固定 catalogue、版本与定义摘要、方法实际源码、未知引用拒绝 | 不为缺失 candidate 猜算法；其他 profile 定义尚未提供 |
+| #524 结构、present/unavailable、完整性 | Manifest Schema；必需角色不受 supporting 分类豁免；长度/摘要、重复/缺件、路径和内容 Schema 拒绝测试 | 不发布或修改任何历史包；已登记支持 data_quality validation、Trend20 statistical_factor、Issue481 trading_backtest 三类受限 profile；其他未知 profile 或未登记内容定义仍然严格拒绝 |
+| #524 定义定位与身份 | 固定 catalogue、版本与定义摘要、方法实际源码、未知引用拒绝 | 不为缺失 candidate 猜算法；未登记的未知 profile 保持严格拒绝 |
 | #511 机器可检查部分 | Spec/Task 绑定、方法/参数/默认值、快照摘要、时间与指标定义检查 | 不认证实际数据可得性、完整时间切分、S7 交易语义；confirmation 显式拒绝，未实现暴露核验 |
 | #523 消费交接 | 原真实评审链正例；重算记录 hash 后仍拒绝错上下文、错 Evidence/criteria、错响应；受限支持 data_quality/validation 的 execute/prepare/revise 校验 | prepare/revise 仅限 data_quality/validation 且 revise 严格固定到 #544 确切来源身份与载荷（不支持通用自洽链替换、虚构历史 handoff 或 FAILED 来源）；其他 profile 暂无 prepare/revise 跨对象校验；无执行授权 |
 
-不宣称 #511/#524/#523 或 #498/#538 全部完成，不解锁运行平台。这里的剩余项是具体未实现条款，不是新增架构要求。
+Owner 批准并合并 PR #553 后完成 Phase 0 协议签收，按 #511 → #524 → #523 → #498 → #538 顺序关闭；不宣称延期的 runtime 已实现，不解锁运行平台。这里的剩余项是具体未实现条款，不是新增架构要求。
 
 ## 验证
 

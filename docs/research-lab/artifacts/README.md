@@ -1,6 +1,6 @@
 # #524 Artifact Contract 候选
 
-状态：**DRAFT_UNFROZEN**。本次只定义证据交付/消费契约，未实现存储、Manifest 发布器、validator runtime 或 Runner。合并不冻结协议、不关闭 #524/#498/#538，不授权 Worker/Queue/Agent 调度。
+生效后的协议状态：**PROTOCOL_V2_PHASE0_FROZEN**（Owner 批准并合并 PR #553 后，本记录即生效；批准合并前为 `PENDING_OWNER_SIGNOFF`，详见 [Phase 0 Exit Review](../phase0-exit-review.md)）。本次只定义证据交付/消费契约，未实现存储、Manifest 发布器、validator runtime 或 Runner。冻结本协议不自动关闭 #524/#498/#538，不授权 Worker/Queue/Agent 调度。
 
 依据：[#524](https://github.com/folgercn/vnpy-web-bridge/issues/524)、[#541 Review](https://github.com/folgercn/vnpy-web-bridge/pull/541)、[#542 PR](https://github.com/folgercn/vnpy-web-bridge/pull/542) 用户本轮反馈、[Protocol v2 §8](../protocol-v2-design.md#8-artifact-规范与通用角色交互边界衔接-524--523)、[ExperimentSpec 候选](../specs/README.md)。#524 原有暂缓评论仍约束执行实现；本次按 Owner 后续指示推进契约设计，不提前固定运行框架。
 
@@ -219,7 +219,9 @@ Manifest 条目显式标注用途分类（`classification`，正式条目仅允�
 
 这些预期还需在正向 v2 输入驱动案例中验证，不能凭本表认定已通过生产消费或完整复现验收。
 
-## 7. 冻结责任与 implementation_ref 待办
+## 7. 冻结责任与 implementation_ref 待办（历史设计记录）
+
+> 本节记录 #542 设计及后续早期机器化时点的待办；“冻结阻塞”“下一步 #523”等不是当前待办或当前冻结状态。各项最终处置与 Phase 0 验收见 [Freeze Decision](../protocol-v2-freeze-decision.md)；Owner 批准并合并 PR #553 后协议冻结生效。以下引用完整性与执行拒绝规则继续适用，冻结不代表完整科学准入已实现。
 
 机器化进展：已有 [离线契约校验](../../../research_lab/contracts/README.md) 与
 [Manifest Schema](../../schemas/research-artifact-manifest-v2.schema.json)。固定定义目录及本例载荷、引用拒绝已有测试；
