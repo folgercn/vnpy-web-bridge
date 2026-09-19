@@ -8,24 +8,19 @@ ExperimentRun, ArtifactManifest, and ResultEvidence records.
 from __future__ import annotations
 
 import argparse
+import builtins
 import copy
-import importlib
 import shutil
 import sys
 import tarfile
+import types
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from research_lab.contracts import v2
 
-# Ensure research/phase0_data_quality is in sys.path for importing frozen case and quality
-_DQ_DIR = str(Path(__file__).resolve().parents[2] / "research/phase0_data_quality")
-if _DQ_DIR not in sys.path:
-    sys.path.insert(0, _DQ_DIR)
-
-case = importlib.import_module("case")
-quality = importlib.import_module("quality")
+_DQ_DIR = Path(__file__).resolve().parents[2] / "research/phase0_data_quality"
 
 CONTROLLED_INPUT_SHA256 = "fa9a07c2cd55dc04e3300b01ef6ae0fabfb9d0c2b8813796758612cec6a8da19"
 CONTROLLED_PROVENANCE_SOURCE_SHA256 = "f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351"
@@ -42,6 +37,40 @@ CONTROLLED_IMMUTABLE_FILES: dict[str, str] = {
     "provenance.json": "3176a911c55fb0cd2a0f72c8893ef2a947274671af544351096bb08774e758a9",
     "input.csv": "fa9a07c2cd55dc04e3300b01ef6ae0fabfb9d0c2b8813796758612cec6a8da19",
 }
+
+
+def _load_controlled_modules() -> tuple[types.ModuleType, types.ModuleType]:
+    """Load the frozen capability without consulting or changing bare-module caches."""
+    quality_path = _DQ_DIR / "quality.py"
+    case_path = _DQ_DIR / "case.py"
+
+    def read_controlled(path: Path) -> bytes:
+        raw = path.read_bytes()
+        if v2.sha(raw) != CONTROLLED_IMMUTABLE_FILES[path.name]:
+            raise ImportError(f"Controlled module hash mismatch: {path}")
+        return raw
+
+    quality = types.ModuleType("_research_lab_v2_controlled_quality")
+    quality.__file__ = str(quality_path)
+    exec(compile(read_controlled(quality_path), str(quality_path), "exec"), quality.__dict__)  # noqa: S102
+
+    original_import = builtins.__import__
+
+    def case_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if level == 0 and name == "quality":
+            return quality
+        return original_import(name, globals, locals, fromlist, level)
+
+    case = types.ModuleType("_research_lab_v2_controlled_case")
+    case.__file__ = str(case_path)
+    case.__dict__["__builtins__"] = {**vars(builtins), "__import__": case_import}
+    exec(compile(read_controlled(case_path), str(case_path), "exec"), case.__dict__)  # noqa: S102
+    if case.quality is not quality:
+        raise ImportError("Controlled case did not bind controlled quality")
+    return case, quality
+
+
+case, quality = _load_controlled_modules()
 
 
 def _validate_caller_materials_directory(

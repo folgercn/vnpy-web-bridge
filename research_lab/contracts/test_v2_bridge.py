@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from research_lab.contracts import v2
-from research_lab.runners.v2_bridge import V2ExecutionBridge, execute_v2_spec
+from research_lab.runners.v2_bridge import V2ExecutionBridge, execute_v2_spec, quality
 
 
 def reseal(obj: dict, prefix: str) -> dict:
@@ -272,7 +272,7 @@ def test_pre_execution_admission_fail_closed_and_computation_not_started(
     elif mutation == "missing_provenance":
         prov = None
 
-    with patch("quality.scan") as mock_scan:
+    with patch("research_lab.runners.v2_bridge.quality.scan") as mock_scan:
         with pytest.raises((ValueError, Exception)):
             execute_v2_spec(task, spec, raw_csv, out_dir, provenance=prov)
 
@@ -293,7 +293,7 @@ def test_failed_execution_captures_diagnostics_without_fabricating_completion(
     bridge = V2ExecutionBridge()
 
     with patch(
-        "quality.scan",
+        "research_lab.runners.v2_bridge.quality.scan",
         side_effect=RuntimeError("Simulated scanner anomaly during row evaluation"),
     ):
         result = bridge.execute(
@@ -447,6 +447,49 @@ def test_cli_execution(phase0_materials, tmp_path):
     assert (out_dir / "run.json").is_file()
 
 
+def test_controlled_modules_ignore_poisoned_bare_import_cache(tmp_path):
+    """Bridge must execute its fixed sources when bare case and quality caches are poisoned."""
+    script = """
+import sys
+import tarfile
+import tempfile
+import types
+from pathlib import Path
+
+root = Path.cwd()
+quality_path = root / 'research/phase0_data_quality/quality.py'
+case_path = root / 'research/phase0_data_quality/case.py'
+fake_quality = types.ModuleType('quality')
+fake_quality.__file__ = str(quality_path)
+fake_quality.scan = lambda *args: (_ for _ in ()).throw(AssertionError('fake quality used'))
+fake_case = types.ModuleType('case')
+fake_case.__file__ = str(case_path)
+fake_case.run_case = lambda *args: (_ for _ in ()).throw(AssertionError('fake case used'))
+sys.modules['quality'] = fake_quality
+sys.modules['case'] = fake_case
+
+from research_lab.runners import v2_bridge
+
+assert v2_bridge.quality is not fake_quality
+assert v2_bridge.case is not fake_case
+assert v2_bridge.case.quality is v2_bridge.quality
+assert sys.modules['quality'] is fake_quality
+assert sys.modules['case'] is fake_case
+with tempfile.TemporaryDirectory() as directory:
+    extracted = Path(directory) / 'source'
+    with tarfile.open(root / 'research/phase0_data_quality/bundles/validation-rev1-ci.tar.gz') as archive:
+        archive.extractall(extracted, filter='data')
+    result = v2_bridge.V2ExecutionBridge().execute_from_materials(
+        extracted / 'materials', Path(directory) / 'output'
+    )
+    assert result['run_status'] == 'COMPLETED'
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script], cwd=v2.ROOT, capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_scan_concurrent_interference_prevented(phase0_materials, tmp_path):
     """Simulating another party planting output/run.json during scan must fail closed with FileExistsError and no overwrite."""
     out_dir = tmp_path / "concurrent_test"
@@ -455,7 +498,6 @@ def test_scan_concurrent_interference_prevented(phase0_materials, tmp_path):
     raw_csv = phase0_materials["raw_csv"]
     prov = phase0_materials["provenance"]
 
-    from research.phase0_data_quality import quality
     original_scan = quality.scan
 
     def malicious_interfering_scan(raw, spec_arg):
@@ -464,7 +506,9 @@ def test_scan_concurrent_interference_prevented(phase0_materials, tmp_path):
         return original_scan(raw, spec_arg)
 
     bridge = V2ExecutionBridge()
-    with patch("quality.scan", side_effect=malicious_interfering_scan), pytest.raises(FileExistsError):
+    with patch(
+        "research_lab.runners.v2_bridge.quality.scan", side_effect=malicious_interfering_scan
+    ), pytest.raises(FileExistsError):
         bridge.execute(
             task=task,
             spec=spec,
@@ -485,7 +529,7 @@ def test_issue_a_materials_dir_not_found_raises_file_not_found_without_fallback(
     bridge = V2ExecutionBridge()
     non_existent = tmp_path / "non_existent_materials_dir"
 
-    with patch("quality.scan") as mock_scan:
+    with patch("research_lab.runners.v2_bridge.quality.scan") as mock_scan:
         with pytest.raises(FileNotFoundError, match="Materials directory does not exist"):
             bridge.execute(
                 task=phase0_materials["task"],
@@ -514,7 +558,7 @@ def test_issue_a_spec_mismatch_with_materials_dir_fails_closed_before_scan(
     reseal(strict_false_spec, "spec")
 
     bridge = V2ExecutionBridge()
-    with patch("quality.scan") as mock_scan:
+    with patch("research_lab.runners.v2_bridge.quality.scan") as mock_scan:
         with pytest.raises(ValueError, match="single source of truth violated"):
             bridge.execute(
                 task=phase0_materials["task"],
@@ -542,7 +586,7 @@ def test_issue_b_corrupted_provenance_source_sha_fails_closed_before_scan(
     corrupted_prov["source_sha256"] = "a" * 64
 
     bridge = V2ExecutionBridge()
-    with patch("quality.scan") as mock_scan:
+    with patch("research_lab.runners.v2_bridge.quality.scan") as mock_scan:
         with pytest.raises(ValueError, match="Provenance violates phase0-payload|source_sha256 mismatch"):
             bridge.execute(
                 task=task,
@@ -570,7 +614,7 @@ def test_issue_b_criteria_mismatch_fails_closed_before_scan(
     reseal(spec, "spec")
 
     bridge = V2ExecutionBridge()
-    with patch("quality.scan") as mock_scan:
+    with patch("research_lab.runners.v2_bridge.quality.scan") as mock_scan:
         with pytest.raises(ValueError, match="candidate_decision_criteria"):
             bridge.execute(
                 task=task,
@@ -599,7 +643,7 @@ def test_issue_c_arbitrary_raw_bytes_fails_closed_without_fabricating_preparatio
     reseal(spec, "spec")
 
     bridge = V2ExecutionBridge()
-    with patch("quality.scan") as mock_scan:
+    with patch("research_lab.runners.v2_bridge.quality.scan") as mock_scan:
         with pytest.raises(ValueError, match="Arbitrary raw data injection is prohibited"):
             bridge.execute(
                 task=task,
@@ -660,7 +704,7 @@ def test_review_r3_tampered_source_base_revision_rejected_before_scan(
     out_dir = tmp_path / "tampered_rev_out"
     bridge = V2ExecutionBridge()
 
-    with patch("quality.scan") as mock_scan:
+    with patch("research_lab.runners.v2_bridge.quality.scan") as mock_scan:
         with pytest.raises(ValueError, match="Invalid preparation.source_base_revision"):
             bridge.execute_from_materials(materials_copy, out_dir)
         assert mock_scan.call_count == 0
@@ -692,7 +736,7 @@ def test_review_r3_tampered_payload_schema_rejected_before_scan(
     out_dir = tmp_path / "tampered_schema_out"
     bridge = V2ExecutionBridge()
 
-    with patch("quality.scan") as mock_scan:
+    with patch("research_lab.runners.v2_bridge.quality.scan") as mock_scan:
         with pytest.raises(ValueError, match="Tampered immutable material"):
             bridge.execute_from_materials(materials_copy, out_dir)
         assert mock_scan.call_count == 0
