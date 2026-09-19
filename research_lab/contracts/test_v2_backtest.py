@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import shutil
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -290,3 +291,23 @@ def test_v2_backtest_from_materials_success(
     assert res["run_status"] == "COMPLETED"
     assert (tmp_path / "out_mat" / "manifest.json").is_file()
 
+
+def test_v2_backtest_failed_run_captures_diagnostics_and_fails_closed(
+    issue481_bundle: tuple[dict, dict, Path], tmp_path: Path
+) -> None:
+    """Verify that execution failure captures failure diagnostics and fails closed without fabricating invalid run schemas."""
+    task, spec, _ = issue481_bundle
+    output_dir = tmp_path / "out_failed"
+
+    with patch(
+        "research_lab.backtest.DeterministicBacktestAdapter.run",
+        side_effect=RuntimeError("simulated adapter failure"),
+    ), pytest.raises(RuntimeError, match="Backtest computation failed"):
+        execute_v2_backtest_spec(task, spec, output_dir)
+
+    diag_file = output_dir / "failure_diagnostics.json"
+    assert diag_file.is_file()
+    diag = v2.parse(diag_file.read_bytes())
+    assert diag["error_type"] == "RuntimeError"
+    assert "simulated adapter failure" in diag["error_message"]
+    assert diag["phase"] == "computation"

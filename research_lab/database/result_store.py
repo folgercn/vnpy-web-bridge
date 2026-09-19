@@ -814,6 +814,8 @@ class ResultStore:
     ) -> None:
         exp_type = spec.get("experiment_type")
         if exp_type == "trading_backtest":
+            if run.get("run_status") == "FAILED":
+                return
             definitions = v2.Definitions()
             criteria_id = "phase0.issue481.review_evidence.criteria"
             criteria_def = next(

@@ -434,8 +434,8 @@ class V2BacktestExecutionBridge:
             self._seal(evidence_record, "evidence")
             (target_dir / "evidence.json").write_text(v2.canonical(evidence_record) + "\n", encoding="utf-8")
 
-        except Exception as exc:  # noqa: BLE001
-            # Failure handling: capture failure diagnostics without fabricating completed metrics
+        except Exception as exc:
+            # Failure handling: capture failure diagnostics and fail closed without fabricating invalid run schemas
             diag = {
                 "error_type": type(exc).__name__,
                 "error_message": str(exc),
@@ -443,74 +443,9 @@ class V2BacktestExecutionBridge:
             }
             diag_raw = v2.canonical(diag).encode("utf-8")
             (target_dir / "failure_diagnostics.json").write_bytes(diag_raw)
+            raise RuntimeError(f"Backtest computation failed: {exc}") from exc
 
-            run_record = {
-                "schema_version": "research_lab.run.v2",
-                "hash_profile": "research-json-v1",
-                "run_id": run_id,
-                "run_status": "FAILED",
-                "spec_id": spec_dict["spec_id"],
-                "spec_revision": spec_dict["revision"],
-                "spec_content_hash": spec_dict["spec_content_hash"],
-                "trial_context": {
-                    "research_stage": "validation",
-                    "trial_kind": None,
-                    "retry_of_run_id": None,
-                    "holdout_usage_state": "unknown",
-                },
-                "resolved_computation_manifest": computation,
-                "scientific_fingerprint": scientific_fingerprint,
-                "timing": {
-                    "started_at": None,
-                    "completed_at": None,
-                    "recorded_at": "2026-09-19T00:00:00.000000Z",
-                },
-                "process_exit_code": 1,
-            }
-            self._seal(run_record, "run")
-            (target_dir / "run.json").write_text(v2.canonical(run_record) + "\n", encoding="utf-8")
-
-            manifest_entries = self._build_manifest_entries(target_dir, is_failed=True)
-            manifest_record = {
-                "schema_version": "research_lab.artifact_manifest.v2",
-                "hash_profile": "research-json-v1",
-                "manifest_id": manifest_id,
-                "revision": "rev.1",
-                "run_id": run_id,
-                "run_content_hash": run_record["run_content_hash"],
-                "experiment_type": "trading_backtest",
-                "artifact_profile": "research_lab.artifact_roles.v2.candidate1",
-                "entries": manifest_entries,
-            }
-            self._seal(manifest_record, "manifest")
-            (target_dir / "manifest.json").write_text(v2.canonical(manifest_record) + "\n", encoding="utf-8")
-
-            evidence_record = {
-                "schema_version": "research_lab.evidence.v2",
-                "hash_profile": "research-json-v1",
-                "evidence_id": evidence_id,
-                "run_id": run_id,
-                "run_content_hash": run_record["run_content_hash"],
-                "manifest_id": manifest_id,
-                "manifest_revision": "rev.1",
-                "manifest_content_hash": manifest_record["manifest_content_hash"],
-                "execution_status": "FAILED",
-                "missing_reason": "execution_failed",
-                "typed_metrics": None,
-                "supporting_artifacts": [
-                    {
-                        "artifact_id": e["artifact_id"],
-                        "role": e["role"],
-                        "content_schema_ref": e["content_schema_ref"],
-                        "manifest_content_hash": manifest_record["manifest_content_hash"],
-                    }
-                    for e in manifest_entries
-                ],
-            }
-            self._seal(evidence_record, "evidence")
-            (target_dir / "evidence.json").write_text(v2.canonical(evidence_record) + "\n", encoding="utf-8")
-
-        # 4. Independent re-consumption via public validate_handoff API
+        # 4. Independent re-consumption via public validate_manifest / validate_handoff API
         _validate_with_public_handoff(target_dir, task_dict, spec_dict, self.definitions)
 
         # 5. Append-only persistence into ResultStore if available
