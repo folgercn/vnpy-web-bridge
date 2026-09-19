@@ -19,6 +19,8 @@ from typing import Any
 from uuid import uuid4
 
 from research_lab.contracts import v2
+from research_lab.database import ResultStore
+from research_lab.reports import write_v2_report
 
 _DQ_DIR = Path(__file__).resolve().parents[2] / "research/phase0_data_quality"
 
@@ -390,8 +392,9 @@ class V2ExecutionBridge:
     fail-closed pre-execution admission and post-execution public handoff validation.
     """
 
-    def __init__(self, definitions: v2.Definitions | None = None) -> None:
+    def __init__(self, definitions: v2.Definitions | None = None, result_store: ResultStore | None = None) -> None:
         self.definitions = definitions or v2.Definitions()
+        self.result_store = result_store
 
     def execute(
         self,
@@ -490,6 +493,13 @@ class V2ExecutionBridge:
         run_record = v2.parse((target_dir / "run.json").read_bytes())
         manifest_record = v2.parse((target_dir / "manifest.json").read_bytes())
         evidence_record = v2.parse((target_dir / "evidence.json").read_bytes())
+        stored_result = None
+        report_path = None
+        if self.result_store is not None:
+            stored_result = self.result_store.save_v2(target_dir)
+            temp_report_path = write_v2_report(self.result_store.config.artifacts_dir, stored_result)
+            report_record = self.result_store.save_v2_report(stored_result, temp_report_path)
+            report_path = Path(report_record["report_location"])
 
         return {
             "run": run_record,
@@ -498,6 +508,8 @@ class V2ExecutionBridge:
             "output_dir": target_dir,
             "run_status": run_record["run_status"],
             "process_exit_code": run_record["process_exit_code"],
+            "stored_result": stored_result,
+            "report_path": report_path,
         }
 
     def execute_from_materials(
@@ -555,9 +567,10 @@ def execute_v2_spec(
     *,
     provenance: dict[str, Any] | Path | str | None = None,
     definitions: v2.Definitions | None = None,
+    result_store: ResultStore | None = None,
 ) -> dict[str, Any]:
     """Functional entrypoint for V2ExecutionBridge.execute."""
-    bridge = V2ExecutionBridge(definitions=definitions)
+    bridge = V2ExecutionBridge(definitions=definitions, result_store=result_store)
     return bridge.execute(
         task=task,
         spec=spec,
