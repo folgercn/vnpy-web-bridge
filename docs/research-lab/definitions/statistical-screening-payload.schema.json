@@ -1,0 +1,281 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "dataset_metadata": {
+      "type": "object",
+      "required": [
+        "profile",
+        "snapshot_locator",
+        "snapshot_sha256",
+        "snapshot_byte_length",
+        "required_fields",
+        "time_range",
+        "sample_count",
+        "provenance",
+        "limitations"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "const": "research_lab.statistical_screening.v1"
+        },
+        "snapshot_locator": {
+          "type": "string",
+          "minLength": 1
+        },
+        "snapshot_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "snapshot_byte_length": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "required_fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "time_range": {
+          "type": "object",
+          "required": ["start", "end"],
+          "additionalProperties": false,
+          "properties": {
+            "start": { "type": "string" },
+            "end": { "type": "string" }
+          }
+        },
+        "sample_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provenance": {
+          "type": "string",
+          "minLength": 1
+        },
+        "limitations": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "method_definition": {
+      "type": "object",
+      "required": [
+        "profile",
+        "methods",
+        "parameters",
+        "limitations"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "const": "research_lab.statistical_screening.v1"
+        },
+        "methods": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "coverage",
+              "simple_correlation",
+              "direction_consistency",
+              "stability_split"
+            ]
+          },
+          "minItems": 1
+        },
+        "parameters": {
+          "type": "object"
+        },
+        "limitations": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "environment_lock": {
+      "type": "object",
+      "required": [
+        "profile",
+        "source_sha256",
+        "limitations"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "const": "research_lab.statistical_screening.v1"
+        },
+        "source_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "environment_details": {
+          "type": ["object", "string"]
+        },
+        "limitations": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "replay_instructions": {
+      "type": "object",
+      "required": [
+        "profile",
+        "command",
+        "limitations"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "const": "research_lab.statistical_screening.v1"
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1
+        },
+        "entry_point": {
+          "type": "string"
+        },
+        "limitations": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "statistical_summary": {
+      "type": "object",
+      "required": [
+        "profile",
+        "sample_count",
+        "methods_applied",
+        "facts"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "const": "research_lab.statistical_screening.v1"
+        },
+        "sample_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "methods_applied": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "coverage",
+              "simple_correlation",
+              "direction_consistency",
+              "stability_split"
+            ]
+          },
+          "minItems": 1
+        },
+        "facts": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "coverage": {
+              "type": "object",
+              "required": [
+                "total_rows",
+                "valid_rows",
+                "missing_rows",
+                "coverage_ratio"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "total_rows": { "type": "integer", "minimum": 0 },
+                "valid_rows": { "type": "integer", "minimum": 0 },
+                "missing_rows": { "type": "integer", "minimum": 0 },
+                "coverage_ratio": { "type": "string" },
+                "start_time": { "type": ["string", "null"] },
+                "end_time": { "type": ["string", "null"] }
+              }
+            },
+            "simple_correlation": {
+              "type": "object",
+              "required": [
+                "sample_size",
+                "pearson_ic"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "sample_size": { "type": "integer", "minimum": 0 },
+                "pearson_ic": { "type": ["string", "null"] }
+              }
+            },
+            "direction_consistency": {
+              "type": "object",
+              "required": [
+                "sample_size",
+                "matching_pairs",
+                "consistency_ratio"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "sample_size": { "type": "integer", "minimum": 0 },
+                "matching_pairs": { "type": "integer", "minimum": 0 },
+                "consistency_ratio": { "type": ["string", "null"] }
+              }
+            },
+            "stability_split": {
+              "type": "object",
+              "required": [
+                "split_point",
+                "first_half_sample_size",
+                "second_half_sample_size",
+                "first_half_correlation",
+                "second_half_correlation",
+                "correlation_difference"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "split_point": { "type": "string" },
+                "first_half_sample_size": { "type": "integer", "minimum": 0 },
+                "second_half_sample_size": { "type": "integer", "minimum": 0 },
+                "first_half_correlation": { "type": ["string", "null"] },
+                "second_half_correlation": { "type": ["string", "null"] },
+                "correlation_difference": { "type": ["string", "null"] }
+              }
+            }
+          }
+        }
+      }
+    },
+    "failure_diagnostics": {
+      "type": "object",
+      "required": [
+        "profile",
+        "error_type",
+        "error_message"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "const": "research_lab.statistical_screening.v1"
+        },
+        "error_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "error_message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "missing_fields": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "snapshot_reference": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

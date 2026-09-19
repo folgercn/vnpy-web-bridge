@@ -20,6 +20,10 @@ ROLE_PROFILE = 'research_lab.artifact_roles.v2.candidate1'
 SINGLE_CONTRACT_PROFILE = 'research_lab.single_contract_backtest.v1'
 SINGLE_CONTRACT_PAYLOAD_PREFIX = 'research_lab.single_contract.'
 SINGLE_CONTRACT_CRITERIA_ID = 'research_lab.single_contract_backtest.review_evidence.criteria'
+STATISTICAL_SCREENING_PROFILE = 'research_lab.statistical_screening.v1'
+STATISTICAL_SCREENING_PAYLOAD_PREFIX = 'research_lab.statistical_screening.'
+STATISTICAL_SCREENING_CRITERIA_ID = 'research_lab.statistical_screening.review_evidence.criteria'
+STATISTICAL_SCREENING_METHODS = frozenset({'coverage', 'simple_correlation', 'direction_consistency', 'stability_split'})
 COMMON = {'dataset_metadata', 'method_definition', 'environment_lock', 'replay_instructions'}
 TYPED = {'data_quality': {'quality_summary', 'quality_anomalies'},
          'statistical_factor': {'statistical_summary', 'sample_feature_target', 'daily_ic_series'},
@@ -367,7 +371,10 @@ def validate_spec(spec, task, definitions=None, *, root=None):
         else:
             raise ValueError('unsupported trading_backtest profile')
     elif spec['experiment_type'] == 'statistical_factor':
-        task_schema = 'trend20-control.schema.json'
+        if spec.get('screening_profile') == STATISTICAL_SCREENING_PROFILE:
+            task_schema = 'statistical-screening-control.schema.json'
+        else:
+            task_schema = 'trend20-control.schema.json'
     else:
         task_schema = 'phase0-control.schema.json'
     schema_check(task, parse(safe_read(DEFINITIONS, task_schema))['$defs']['research_task'])
@@ -399,7 +406,7 @@ def validate_spec(spec, task, definitions=None, *, root=None):
                     try:
                         meta_decl = parse(meta_file.read_bytes())
                         is_captured_bundle = meta_decl.get('snapshot_locator') == 'materials/snapshot.csv'
-                    except Exception:
+                    except (ValueError, OSError):
                         is_captured_bundle = False
                 if not is_captured_bundle and (root / 'materials/snapshot.csv').exists():
                     is_captured_bundle = True
@@ -417,12 +424,51 @@ def validate_spec(spec, task, definitions=None, *, root=None):
         method = definitions.method(spec['method_id'])
         require(method['corrected_events'] == spec['corrected_events'] == 603, 'Issue481 corrected events')
         return {'method': method}
+    if spec['experiment_type'] == 'statistical_factor':
+        if spec.get('screening_profile') == STATISTICAL_SCREENING_PROFILE:
+            req = spec['dataset_requirements']
+            task_data = task['data_requirements']
+            require(req['snapshot_sha256'] == task_data['snapshot_sha256'], 'snapshot hash mismatch')
+            require(req['snapshot_locator'] == task_data['snapshot_locator'], 'snapshot locator mismatch')
+            require(req['snapshot_byte_length'] == task_data['snapshot_byte_length'], 'snapshot byte length mismatch')
+            require(req['provenance'] == task_data['provenance'], 'snapshot provenance mismatch')
+            require(req['required_fields'] == task_data['required_fields'], 'required_fields mismatch')
+            require(spec['methods'] == task['methods'], 'methods mismatch')
+            for m in spec['methods']:
+                require(m in STATISTICAL_SCREENING_METHODS, f'unsupported screening method: {m}')
+
+            is_captured_bundle = False
+            if root is not None:
+                meta_file = root / 'dataset_metadata.json'
+                if meta_file.is_file():
+                    try:
+                        meta_decl = parse(meta_file.read_bytes())
+                        is_captured_bundle = meta_decl.get('snapshot_locator') == 'materials/snapshot.csv'
+                    except (ValueError, OSError):
+                        is_captured_bundle = False
+                if not is_captured_bundle and (root / 'materials/snapshot.csv').exists():
+                    is_captured_bundle = True
+
+            if is_captured_bundle:
+                target_path = root / 'materials/snapshot.csv'
+                require(target_path.is_file() and not target_path.is_symlink(), 'StatisticalScreening captured snapshot missing or not regular file')
+            else:
+                locator = req['snapshot_locator']
+                target_path = Path(locator) if os.path.isabs(locator) else ROOT / locator
+                require(target_path.is_file() and not target_path.is_symlink(), 'StatisticalScreening physical snapshot file missing or not regular file')
+            raw_bytes = target_path.read_bytes()
+            require(sha(raw_bytes) == req['snapshot_sha256'], 'StatisticalScreening physical snapshot sha256 mismatch')
+            require(len(raw_bytes) == req['snapshot_byte_length'], 'StatisticalScreening physical snapshot byte length mismatch')
+            return {'profile': STATISTICAL_SCREENING_PROFILE}
+        req = spec['dataset_requirements']
+        require(time_value(req['time_range']['start']) < time_value(req['time_range']['end']), 'reversed range')
+        require(req['snapshot_selection_mode'] == 'fixed_snapshot' and re.fullmatch(r'[a-f0-9]{64}', req.get('snapshot_sha256') or ''), 'unbound snapshot')
+        require(len(set(req['universe'])) == len(req['universe']), 'duplicate universe')
+        return validate_trend20_spec(spec, definitions)
     req = spec['dataset_requirements']
     require(time_value(req['time_range']['start']) < time_value(req['time_range']['end']), 'reversed range')
     require(req['snapshot_selection_mode'] == 'fixed_snapshot' and re.fullmatch(r'[a-f0-9]{64}', req.get('snapshot_sha256') or ''), 'unbound snapshot')
     require(len(set(req['universe'])) == len(req['universe']), 'duplicate universe')
-    if spec['experiment_type'] == 'statistical_factor':
-        return validate_trend20_spec(spec, definitions)
     require(spec['experiment_type'] == 'data_quality', 'unsupported method profile: no registered implementation')
     resolved = {}
     metrics = []
@@ -519,6 +565,7 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
     definitions = definitions or Definitions()
     schema_check(manifest, parse(safe_read(ROOT, 'docs/schemas/research-artifact-manifest-v2.schema.json')))
     is_single_contract = False
+    is_statistical_screening = False
     if manifest['experiment_type'] == 'trading_backtest':
         if manifest.get('artifact_profile') == SINGLE_CONTRACT_PROFILE:
             run_schema = 'single-contract-backtest-control.schema.json'
@@ -541,8 +588,18 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
         else:
             raise ValueError('unsupported trading_backtest artifact profile')
     elif manifest['experiment_type'] == 'statistical_factor':
-        run_schema = 'trend20-control.schema.json'
-        expected_prefix = 'phase0.trend20.'
+        entries_list = manifest.get('entries', [])
+        has_stat_screening = (
+            manifest.get('artifact_profile') == STATISTICAL_SCREENING_PROFILE
+            or any(e.get('content_schema_ref', {}).get('name', '').startswith(STATISTICAL_SCREENING_PAYLOAD_PREFIX) for e in entries_list)
+        )
+        if has_stat_screening:
+            run_schema = 'statistical-screening-control.schema.json'
+            expected_prefix = STATISTICAL_SCREENING_PAYLOAD_PREFIX
+            is_statistical_screening = True
+        else:
+            run_schema = 'trend20-control.schema.json'
+            expected_prefix = 'phase0.trend20.'
     else:
         run_schema = 'phase0-control.schema.json'
         expected_prefix = 'phase0.'
@@ -550,10 +607,18 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
     schema_check(run, parse(safe_read(DEFINITIONS, run_schema))['$defs'][run_definition])
     check_record(manifest, 'artifact_manifest')
     check_record(run, 'experiment_run')
-    require(run['run_status'] in ('COMPLETED', 'FAILED'), 'nonterminal run')
+    if is_statistical_screening:
+        require(run['run_status'] in ('COMPLETED', 'INSUFFICIENT_DATA', 'FAILED'), 'nonterminal run')
+    else:
+        require(run['run_status'] in ('COMPLETED', 'FAILED'), 'nonterminal run')
     require((manifest['run_id'], manifest['run_content_hash']) == (run['run_id'], run['run_content_hash']), 'Run reference')
     if is_single_contract and run['run_status'] == 'FAILED':
         required = COMMON | {'failure_diagnostics'}
+    elif is_statistical_screening:
+        if run['run_status'] in ('FAILED', 'INSUFFICIENT_DATA'):
+            required = COMMON | {'failure_diagnostics'}
+        else:
+            required = COMMON | {'statistical_summary'}
     else:
         required = COMMON | TYPED[manifest['experiment_type']]
         if run['run_status'] == 'FAILED':
@@ -573,7 +638,10 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
         require(e['role'] not in roles, 'unsupported/duplicate shard')
         roles.add(e['role'])
         if e['availability'] == 'unavailable':
-            require(run['run_status'] == 'FAILED' and e['role'] != 'failure_diagnostics', 'unavailable required output')
+            if is_statistical_screening:
+                require(run['run_status'] in ('FAILED', 'INSUFFICIENT_DATA') and e['role'] != 'failure_diagnostics', 'unavailable required output')
+            else:
+                require(run['run_status'] == 'FAILED' and e['role'] != 'failure_diagnostics', 'unavailable required output')
             continue
         require(e['coverage'] == 'complete', 'unsupported partial payload definition')
         require(e['media_type'] == 'application/json', 'unsupported media')
@@ -584,12 +652,51 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
         contents[e['artifact_id']] = content
     if manifest['experiment_type'] == 'statistical_factor':
         require(spec is not None and task is not None and spec['experiment_type'] == 'statistical_factor', 'statistical manifest requires Task and Spec')
-        validate_spec(spec, task, definitions)
-        require((run['spec_id'], run['spec_revision'], run['spec_content_hash']) == (spec['spec_id'], spec['revision'], spec['spec_content_hash']), 'Trend20 Run Spec reference')
-        require(run['scientific_fingerprint'] == digest(run['resolved_computation_manifest']), 'Trend20 scientific fingerprint')
-        metadata = next(contents[e['artifact_id']] for e in entries if e['role'] == 'dataset_metadata')
-        require(metadata['snapshot_sha256'] == spec['dataset_requirements']['snapshot_sha256'], 'Trend20 payload snapshot')
-        validate_statistical_payloads(entries, contents)
+        validate_spec(spec, task, definitions, root=root)
+        if is_statistical_screening:
+            require(spec.get('screening_profile') == STATISTICAL_SCREENING_PROFILE, 'StatisticalScreening Spec profile mismatch')
+            require((run['spec_id'], run['spec_revision'], run['spec_content_hash']) == (spec['spec_id'], spec['revision'], spec['spec_content_hash']), 'StatisticalScreening Run Spec reference')
+            require(run['scientific_fingerprint'] == digest(run['resolved_computation_manifest']), 'StatisticalScreening scientific fingerprint')
+            requirements = spec['dataset_requirements']
+            computation = run['resolved_computation_manifest']
+            task_data = task['data_requirements']
+            metadata = next(contents[e['artifact_id']] for e in entries if e['role'] == 'dataset_metadata')
+            require(task_data['snapshot_sha256'] == requirements['snapshot_sha256'] == computation['snapshot_sha256'] == metadata['snapshot_sha256'], 'StatisticalScreening snapshot sha256 binding')
+            require(computation['snapshot_byte_length'] == metadata['snapshot_byte_length'] == requirements['snapshot_byte_length'], 'StatisticalScreening snapshot byte length binding')
+            require(task_data['snapshot_locator'] == requirements['snapshot_locator'] == computation['snapshot_locator'], 'StatisticalScreening snapshot locator binding')
+            require(metadata['snapshot_locator'] in (requirements['snapshot_locator'], 'materials/snapshot.csv'), 'StatisticalScreening metadata snapshot locator binding')
+            require(task_data['provenance'] == requirements['provenance'] == computation['provenance'] == metadata['provenance'], 'StatisticalScreening provenance binding')
+            require(task_data['required_fields'] == requirements['required_fields'] == computation['required_fields'] == metadata['required_fields'], 'StatisticalScreening required_fields binding')
+            require(task['methods'] == spec['methods'] == computation['methods'], 'StatisticalScreening methods binding')
+
+            # Physical snapshot verification:
+            if metadata['snapshot_locator'] == 'materials/snapshot.csv' or (root is not None and (root / 'materials/snapshot.csv').exists()):
+                target_path = root / 'materials/snapshot.csv' if root is not None else None
+                require(target_path is not None and target_path.is_file() and not target_path.is_symlink(), 'StatisticalScreening captured snapshot missing or not regular file')
+                raw_bytes = target_path.read_bytes()
+                require(sha(raw_bytes) == requirements['snapshot_sha256'], 'StatisticalScreening captured snapshot sha256 mismatch')
+                require(len(raw_bytes) == computation['snapshot_byte_length'] == metadata['snapshot_byte_length'], 'StatisticalScreening captured snapshot byte length mismatch')
+            else:
+                locator = requirements['snapshot_locator']
+                target_path = Path(locator) if os.path.isabs(locator) else ROOT / locator
+                require(target_path.is_file() and not target_path.is_symlink(), 'StatisticalScreening physical snapshot file missing or not regular file')
+                raw_bytes = target_path.read_bytes()
+                require(sha(raw_bytes) == requirements['snapshot_sha256'], 'StatisticalScreening physical snapshot sha256 mismatch')
+                require(len(raw_bytes) == computation['snapshot_byte_length'] == metadata['snapshot_byte_length'], 'StatisticalScreening physical snapshot byte length mismatch')
+
+            if run['run_status'] == 'COMPLETED':
+                summary = next(contents[e['artifact_id']] for e in entries if e['role'] == 'statistical_summary')
+                require(set(summary['methods_applied']) == set(spec['methods']), 'methods_applied mismatch')
+                require('score' not in summary and 'rank' not in summary and 'recommendation' not in summary and 'decision' not in summary, 'decision fields forbidden in summary')
+            else:
+                diagnostics = next(contents[e['artifact_id']] for e in entries if e['role'] == 'failure_diagnostics')
+                require(diagnostics.get('error_type') and diagnostics.get('error_message'), 'failure diagnostics empty')
+        else:
+            require((run['spec_id'], run['spec_revision'], run['spec_content_hash']) == (spec['spec_id'], spec['revision'], spec['spec_content_hash']), 'Trend20 Run Spec reference')
+            require(run['scientific_fingerprint'] == digest(run['resolved_computation_manifest']), 'Trend20 scientific fingerprint')
+            metadata = next(contents[e['artifact_id']] for e in entries if e['role'] == 'dataset_metadata')
+            require(metadata['snapshot_sha256'] == spec['dataset_requirements']['snapshot_sha256'], 'Trend20 payload snapshot')
+            validate_statistical_payloads(entries, contents)
     if manifest['experiment_type'] == 'trading_backtest':
         require(spec is not None and task is not None and spec['experiment_type'] == 'trading_backtest', 'backtest manifest requires Task and Spec')
         validate_spec(spec, task, definitions, root=root)
@@ -817,7 +924,11 @@ def _validate_execute_spec_handoff(request, objects, response, schema, *, payloa
         spec_profile == ('trading_backtest', 'validation') and
         spec.get('backtest_profile') == SINGLE_CONTRACT_PROFILE
     )
-    require(spec_profile == ('data_quality', 'validation') or is_single_contract,
+    is_statistical_screening = (
+        spec.get('experiment_type') == 'statistical_factor' and
+        spec.get('screening_profile') == STATISTICAL_SCREENING_PROFILE
+    )
+    require(spec_profile == ('data_quality', 'validation') or is_single_contract or is_statistical_screening,
             'unsupported execute_spec profile')
     definitions = Definitions()
     resolved = validate_spec(spec, task, definitions)
@@ -825,7 +936,10 @@ def _validate_execute_spec_handoff(request, objects, response, schema, *, payloa
     for kind in required_request_objects:
         require(request['context_refs'][kind] == check_record(objects[kind], kind),
                 'context reference: ' + kind)
-    required_roles = COMMON | TYPED[spec['experiment_type']]
+    if is_statistical_screening:
+        required_roles = COMMON | {'statistical_summary'}
+    else:
+        required_roles = COMMON | TYPED[spec['experiment_type']]
     requirements = request['artifact_requirements']
     require(requirements['role_profile_ref'] == ROLE_PROFILE, 'execute_spec role profile')
     require(len(requirements['required_roles']) == len(set(requirements['required_roles'])) and
@@ -857,20 +971,29 @@ def _validate_execute_spec_handoff(request, objects, response, schema, *, payloa
     if is_single_contract:
         control_defs = parse(safe_read(DEFINITIONS, 'single-contract-backtest-control.schema.json'))['$defs']
         evidence_defs = parse(safe_read(DEFINITIONS, 'review-evidence.schema.json'))['$defs']
+        evidence_schema_name = 'single_contract_result_evidence'
+    elif is_statistical_screening:
+        control_defs = parse(safe_read(DEFINITIONS, 'statistical-screening-control.schema.json'))['$defs']
+        evidence_defs = parse(safe_read(DEFINITIONS, 'review-evidence.schema.json'))['$defs']
+        evidence_schema_name = 'statistical_screening_result_evidence'
     else:
         control_defs = parse(safe_read(DEFINITIONS, 'phase0-control.schema.json'))['$defs']
         evidence_defs = None
+        evidence_schema_name = None
 
     for kind, obj in objects.items():
-        if kind == 'result_evidence' and evidence_defs is not None:
-            schema_check(obj, {'$defs': evidence_defs, '$ref': '#/$defs/single_contract_result_evidence'})
+        if kind == 'result_evidence' and evidence_defs is not None and evidence_schema_name is not None:
+            schema_check(obj, {'$defs': evidence_defs, '$ref': f'#/$defs/{evidence_schema_name}'})
         elif kind in control_defs:
             schema_check(obj, control_defs[kind])
         elif kind == 'experiment_spec':
             schema_check(obj, parse(safe_read(ROOT, 'docs/schemas/research-experiment-spec-v2.schema.json')))
         elif kind == 'artifact_manifest':
             schema_check(obj, parse(safe_read(ROOT, 'docs/schemas/research-artifact-manifest-v2.schema.json')))
-    require(run['run_status'] in ('COMPLETED', 'FAILED'), 'nonterminal run')
+    if is_statistical_screening:
+        require(run['run_status'] in ('COMPLETED', 'INSUFFICIENT_DATA', 'FAILED'), 'nonterminal run')
+    else:
+        require(run['run_status'] in ('COMPLETED', 'FAILED'), 'nonterminal run')
     require((run['spec_id'], run['spec_revision'], run['spec_content_hash']) ==
             (spec['spec_id'], spec['revision'], spec['spec_content_hash']), 'Run Spec reference')
     require(run['scientific_fingerprint'] == digest(run['resolved_computation_manifest']),
@@ -886,6 +1009,12 @@ def _validate_execute_spec_handoff(request, objects, response, schema, *, payloa
         require(computation['product'] == requirements_spec['product'], 'Run product binding')
         require(computation['exact_contract'] == requirements_spec['exact_contract'], 'Run exact_contract binding')
         require(computation['snapshot_sha256'] == requirements_spec['snapshot_sha256'], 'Run snapshot hash binding')
+    elif is_statistical_screening:
+        require(computation['profile'] == STATISTICAL_SCREENING_PROFILE, 'Run profile binding')
+        require(computation['snapshot_sha256'] == requirements_spec['snapshot_sha256'], 'Run snapshot hash binding')
+        require(computation['snapshot_byte_length'] == requirements_spec['snapshot_byte_length'], 'Run snapshot byte length binding')
+        require(computation['snapshot_locator'] == requirements_spec['snapshot_locator'], 'Run snapshot locator binding')
+        require(computation['methods'] == spec['methods'], 'Run methods binding')
     else:
         require(computation['raw_bytes_sha256'] == requirements_spec['snapshot_sha256'] and
                 computation['resolved_parameters'] == resolved['source_order'] and
@@ -922,15 +1051,24 @@ def _validate_execute_spec_handoff(request, objects, response, schema, *, payloa
     manifest_roles = {entry['role'] for entry in manifest['entries']}
     if is_single_contract and run['run_status'] == 'FAILED':
         expected_roles = COMMON | {'failure_diagnostics'}
+    elif is_statistical_screening:
+        if run['run_status'] in ('FAILED', 'INSUFFICIENT_DATA'):
+            expected_roles = COMMON | {'failure_diagnostics'}
+        else:
+            expected_roles = COMMON | {'statistical_summary'}
     else:
         expected_roles = required_roles | ({'failure_diagnostics'} if run['run_status'] == 'FAILED' else set())
     require(expected_roles <= manifest_roles,
             'execute_spec delivered roles')
-    if run['run_status'] == 'FAILED':
+    if run['run_status'] in ('FAILED', 'INSUFFICIENT_DATA'):
         diagnostic = next((entry for entry in manifest['entries'] if entry['role'] == 'failure_diagnostics'), None)
         require(diagnostic is not None and diagnostic['availability'] == 'present', 'failure diagnostics delivery')
-        require(evidence['typed_metrics'] is None and evidence['missing_reason'] == 'execution_failed',
-                'FAILED evidence delivery')
+        if run['run_status'] == 'FAILED':
+            require(evidence['typed_metrics'] is None and evidence['missing_reason'] == 'execution_failed',
+                    'FAILED evidence delivery')
+        else:
+            require(evidence['typed_metrics'] is None and evidence['missing_reason'] == 'insufficient_data',
+                    'INSUFFICIENT_DATA evidence delivery')
     else:
         require(actual_roles == required_roles, 'unexpected completed delivery role')
     contents = {
@@ -952,6 +1090,18 @@ def _validate_execute_spec_handoff(request, objects, response, schema, *, payloa
             require(metrics is not None and metrics['profile'] == SINGLE_CONTRACT_PROFILE, 'SingleContract evidence profile')
             require(metrics['net_pnl'] == summary['net_pnl'] and metrics['total_fees'] == summary['total_fees'] and metrics['trade_count'] == summary['total_trades'],
                     'SingleContract evidence facts')
+    elif is_statistical_screening:
+        metadata = contents['dataset_metadata']
+        require(metadata['snapshot_sha256'] == computation['snapshot_sha256'] == requirements_spec['snapshot_sha256'],
+                'statistical-screening dataset metadata binding')
+        if run['run_status'] == 'COMPLETED':
+            summary = contents['statistical_summary']
+            metrics = evidence['typed_metrics']
+            require(metrics is not None and metrics['profile'] == STATISTICAL_SCREENING_PROFILE, 'StatisticalScreening evidence profile')
+            require(metrics['sample_count'] == summary['sample_count'] and set(metrics['methods_applied']) == set(summary['methods_applied']),
+                    'StatisticalScreening evidence facts')
+            require('score' not in metrics and 'rank' not in metrics and 'recommendation' not in metrics and 'decision' not in metrics,
+                    'decision fields forbidden in evidence')
     else:
         metadata, method_definition = contents['dataset_metadata'], contents['method_definition']
         method_entry = next(entry for entry in manifest['entries'] if entry['role'] == 'method_definition')
