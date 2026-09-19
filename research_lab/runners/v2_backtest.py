@@ -338,24 +338,34 @@ class V2BacktestExecutionBridge:
         try:
             # 3. Run backtest simulation using existing adapter core
             effective_prices = prices if prices is not None else [100.0, 105.0, 110.0, 108.0, 115.0]
+            exec_cfg = spec_dict.get("execution_config") or {}
+            initial_capital = float(exec_cfg.get("initial_capital", 1_000_000.0))
+            position_size = float(exec_cfg.get("position_size", 1.0))
+
+            cost_cfg = spec_dict.get("cost_model_config") or {}
+            fee_bps = float(cost_cfg.get("commission_open_bps", 1.0))
+            slippage_ticks = float(cost_cfg.get("slippage_ticks_per_side", 0.0))
+            effective_cost_bps = fee_bps + slippage_ticks
+
             v1_exp = ExperimentSpec(
                 schema_version="research_lab.experiment.v1",
                 experiment_id=run_id,
                 strategy=StrategySpec(name="buy_and_hold"),
                 factor=FactorSpec(name="close_return"),
                 dataset=DatasetSpec(name="rb_prices", prices=effective_prices),
-                execution=ExecutionConfig(initial_capital=1_000_000.0, position_size=1.0),
-                cost_model=CostModel(bps=1.0),
+                execution=ExecutionConfig(initial_capital=initial_capital, position_size=position_size),
+                cost_model=CostModel(bps=effective_cost_bps),
                 universe=["rb"],
             )
             backtest_run = self.adapter.run(v1_exp)
 
-            # Generate real factual payloads
+            # Generate factual payloads bound to actual backtest execution
             account_metrics = self._write_completed_payloads(
                 target_dir=target_dir,
                 computation=computation,
                 backtest_run=backtest_run,
                 prices=effective_prices,
+                initial_capital=initial_capital,
             )
 
             # Run record
@@ -474,6 +484,7 @@ class V2BacktestExecutionBridge:
         computation: dict[str, Any],
         backtest_run: Any,
         prices: list[float],
+        initial_capital: float = 1_000_000.0,
     ) -> None:
         """Write all 7 factual payload files conforming strictly to frozen phase0.issue481 definitions."""
         # 1. dataset_metadata
@@ -542,7 +553,7 @@ class V2BacktestExecutionBridge:
         for ident in ACCOUNT_IDENTITIES:
             is_active = (ident["account_id"] == "CANDIDATE:PRIMARY_2S:rb")
             for seq, date_label in enumerate(date_labels, start=1):
-                eq_val = backtest_run.equity_curve[seq - 1] if is_active else 1_000_000.0
+                eq_val = backtest_run.equity_curve[seq - 1] if is_active else initial_capital
                 points.append({
                     "account": ident["product"],
                     "product": ident["product"],
@@ -565,7 +576,7 @@ class V2BacktestExecutionBridge:
 
         # 7. backtest_summary: 24 account metrics
         account_metrics = []
-        net_pnl = backtest_run.metrics.final_equity - 1_000_000.0
+        net_pnl = backtest_run.metrics.final_equity - initial_capital
         fees = backtest_run.metrics.transaction_cost
         for ident in ACCOUNT_IDENTITIES:
             if ident["account_id"] == "CANDIDATE:PRIMARY_2S:rb":

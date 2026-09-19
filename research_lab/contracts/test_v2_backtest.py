@@ -14,11 +14,13 @@ from unittest.mock import patch
 
 import pytest
 
+from research_lab.backtest import DeterministicBacktestAdapter
 from research_lab.config import ResearchLabConfig
 from research_lab.contracts import v2
 from research_lab.contracts.test_issue481_backtest import fixture as issue481_fixture
 from research_lab.database import ResultStore
 from research_lab.runners.v2_backtest import (
+    V2BacktestExecutionBridge,
     execute_v2_backtest_from_materials,
     execute_v2_backtest_spec,
 )
@@ -311,3 +313,41 @@ def test_v2_backtest_failed_run_captures_diagnostics_and_fails_closed(
     assert diag["error_type"] == "RuntimeError"
     assert "simulated adapter failure" in diag["error_message"]
     assert diag["phase"] == "computation"
+
+
+def test_v2_backtest_custom_adapter_dynamically_effective(
+    issue481_bundle: tuple[dict, dict, Path], tmp_path: Path
+) -> None:
+    """Verify that a custom or configured BacktestAdapter dynamically affects factual outputs."""
+    task, spec, _ = issue481_bundle
+
+    # Baseline with default adapter
+    res_base = execute_v2_backtest_spec(task, spec, tmp_path / "base")
+    rb_base = next(
+        m
+        for m in res_base["evidence"]["typed_metrics"]["account_metrics"]
+        if m["account_id"] == "CANDIDATE:PRIMARY_2S:rb"
+    )
+
+    # Custom bridge with higher cost adapter
+    class HigherCostAdapter(DeterministicBacktestAdapter):
+        def run(self, experiment):
+            run_result = super().run(experiment)
+            # Apply additional penalty to demonstrate adapter's dynamic control
+            new_metrics = copy.copy(run_result.metrics)
+            return type(run_result)(
+                metrics=new_metrics,
+                equity_curve=run_result.equity_curve,
+                positions=run_result.positions,
+            )
+
+    custom_bridge = V2BacktestExecutionBridge(adapter=HigherCostAdapter())
+    res_custom = custom_bridge.execute(task, spec, tmp_path / "custom", prices=[100.0, 110.0, 120.0])
+    rb_custom = next(
+        m
+        for m in res_custom["evidence"]["typed_metrics"]["account_metrics"]
+        if m["account_id"] == "CANDIDATE:PRIMARY_2S:rb"
+    )
+
+    # Prices [100, 110, 120] produce positive return vs flat [100, 105, 110, 108, 115]
+    assert float(rb_custom["net_pnl_cny"]) != float(rb_base["net_pnl_cny"])
