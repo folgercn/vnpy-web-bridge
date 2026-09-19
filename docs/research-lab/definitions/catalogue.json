@@ -344,6 +344,119 @@
       "locator": "issue481-review-criteria.json",
       "file": "issue481-review-criteria.json",
       "pointer": []
+    },
+    {
+      "kind": "payload",
+      "name": "research_lab.single_contract.dataset_metadata",
+      "revision": "rev.1",
+      "content_hash": "bd7de8c9322d3a94bfbb8f7f57eb6d33a246a8530f4a61ab240910fc21683366",
+      "locator": "single-contract-backtest-payload.schema.json#/$defs/dataset_metadata",
+      "file": "single-contract-backtest-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "dataset_metadata"
+      ],
+      "role": "dataset_metadata"
+    },
+    {
+      "kind": "payload",
+      "name": "research_lab.single_contract.method_definition",
+      "revision": "rev.1",
+      "content_hash": "82bfa77a4b8277139480acd9e0a463c3c2d2ff4bd827591c907da45267307882",
+      "locator": "single-contract-backtest-payload.schema.json#/$defs/method_definition",
+      "file": "single-contract-backtest-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "method_definition"
+      ],
+      "role": "method_definition"
+    },
+    {
+      "kind": "payload",
+      "name": "research_lab.single_contract.environment_lock",
+      "revision": "rev.1",
+      "content_hash": "c80bbc963a529c955999d6b29dd2283e221d57862fbf176f443622bcca27b06c",
+      "locator": "single-contract-backtest-payload.schema.json#/$defs/environment_lock",
+      "file": "single-contract-backtest-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "environment_lock"
+      ],
+      "role": "environment_lock"
+    },
+    {
+      "kind": "payload",
+      "name": "research_lab.single_contract.replay_instructions",
+      "revision": "rev.1",
+      "content_hash": "64e52fbc08d88f5802430809238bae2a2f5df3d683860515508b910fc7cb176e",
+      "locator": "single-contract-backtest-payload.schema.json#/$defs/replay_instructions",
+      "file": "single-contract-backtest-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "replay_instructions"
+      ],
+      "role": "replay_instructions"
+    },
+    {
+      "kind": "payload",
+      "name": "research_lab.single_contract.backtest_summary",
+      "revision": "rev.1",
+      "content_hash": "9027f1c80a875b7e3b629972f9e51aeae99ad250009dca16a79b232e2a761666",
+      "locator": "single-contract-backtest-payload.schema.json#/$defs/backtest_summary",
+      "file": "single-contract-backtest-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "backtest_summary"
+      ],
+      "role": "backtest_summary"
+    },
+    {
+      "kind": "payload",
+      "name": "research_lab.single_contract.trade_blotter",
+      "revision": "rev.1",
+      "content_hash": "99e23c5aad6892d06b587fc3580fa44510c1c264fb7665b18bd5f39cef969729",
+      "locator": "single-contract-backtest-payload.schema.json#/$defs/trade_blotter",
+      "file": "single-contract-backtest-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "trade_blotter"
+      ],
+      "role": "trade_blotter"
+    },
+    {
+      "kind": "payload",
+      "name": "research_lab.single_contract.equity_curve",
+      "revision": "rev.1",
+      "content_hash": "e6c6cfbecd6cbe42440225bf498c90e0bba8073a54d97b6d2bc765c93a44edc4",
+      "locator": "single-contract-backtest-payload.schema.json#/$defs/equity_curve",
+      "file": "single-contract-backtest-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "equity_curve"
+      ],
+      "role": "equity_curve"
+    },
+    {
+      "kind": "payload",
+      "name": "research_lab.single_contract.failure_diagnostics",
+      "revision": "rev.1",
+      "content_hash": "1d69bea1d590e17f53d0147a9fe27da59ec9c1cebc88eab7a537698322b92b90",
+      "locator": "single-contract-backtest-payload.schema.json#/$defs/failure_diagnostics",
+      "file": "single-contract-backtest-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "failure_diagnostics"
+      ],
+      "role": "failure_diagnostics"
+    },
+    {
+      "kind": "criteria",
+      "name": "research_lab.single_contract_backtest.review_evidence.criteria",
+      "revision": "rev.1",
+      "content_hash": "1c5a66a03f3bc8a3503a4bd56748534be3def31589e0490d963991ad58120b23",
+      "locator": "single-contract-review-criteria.json",
+      "file": "single-contract-review-criteria.json",
+      "pointer": []
     }
   ]
 }
