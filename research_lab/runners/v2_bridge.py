@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import importlib
 import shutil
 import sys
 import tarfile
@@ -16,13 +17,15 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-# Ensure research/phase0_data_quality is in sys.path for importing case and quality
+from research_lab.contracts import v2
+
+# Ensure research/phase0_data_quality is in sys.path for importing frozen case and quality
 _DQ_DIR = str(Path(__file__).resolve().parents[2] / "research/phase0_data_quality")
 if _DQ_DIR not in sys.path:
     sys.path.insert(0, _DQ_DIR)
 
-from research.phase0_data_quality import case, quality
-from research_lab.contracts import v2
+case = importlib.import_module("case")
+quality = importlib.import_module("quality")
 
 CONTROLLED_INPUT_SHA256 = "fa9a07c2cd55dc04e3300b01ef6ae0fabfb9d0c2b8813796758612cec6a8da19"
 CONTROLLED_PROVENANCE_SOURCE_SHA256 = "f9526c90a515f914d9c26fb2824c27869b171aa17ffd4864258968f4df9a6351"
