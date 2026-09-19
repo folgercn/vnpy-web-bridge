@@ -1,6 +1,6 @@
 # Phase 0 Exit Review & Protocol v2 Freeze Record
 
-状态：**PENDING_OWNER_SIGNOFF**（建议目标状态为 `PROTOCOL_V2_PHASE0_FROZEN`）
+生效后的协议状态：**PROTOCOL_V2_PHASE0_FROZEN**（Owner 批准并合并 PR #553 后，本记录即生效；批准合并前为 `PENDING_OWNER_SIGNOFF`）
 
 基线 Commit：`df1019df267b7424bc960dff8b68e01146592665`（PR #552 合并提交）
 
@@ -15,10 +15,10 @@
 
 ## 1. 评审结论：PASS（建议冻结并退出）
 
-基于 [#538](https://github.com/folgercn/vnpy-web-bridge/issues/538) 原始定义的 Phase 0 五项完成条件，经系统核验 #539～#552 真实代码、机器契约、离线测试及历史验证证据，**本评审建议 Phase 0 Research Protocol Foundation 达到退出标准，建议在 Owner Review 签收后将协议正式冻结为 PROTOCOL_V2_PHASE0_FROZEN**。
+基于 [#538](https://github.com/folgercn/vnpy-web-bridge/issues/538) 原始定义的 Phase 0 五项完成条件，经系统核验 #539～#552 真实代码、机器契约、离线测试及历史验证证据，**本评审建议 Phase 0 Research Protocol Foundation 达到退出标准，Owner 批准并合并 PR #553 后，本记录即生效，协议状态为 PROTOCOL_V2_PHASE0_FROZEN**。
 
 ### 核心原则澄清与授权边界（红线）
-1. **建议状态不代替人工签收**：本评审由实施者整理提交，最终冻结决策由项目 Owner 独立审核确认；本文件不代替人工签收，亦不授权 Phase 1 实施。
+1. **建议状态不代替人工签收**：本评审由实施者整理提交，最终冻结决策由项目 Owner 审核确认；批准并合并 PR #553 即使本记录生效，无需另一个状态更新提交，亦不授权 Phase 1 实施。
 2. **冻结不等于运行授权（Freeze != Runtime Authorization）**：协议冻结仅固化研究语言、对象模式、哈希规范与交接边界；不代表实盘交易授权，不代表生产/Audited 环境授权，亦不代表离线/仿真环境无限制运行授权。
 3. **不自动解锁后续基础设施**：本退出建议**严格不自动解锁** Worker Runtime (#505 / #536)、Task Queue (#514)、分布式 Research Farm (#504)、Astra 自动发现 (#502)、Sol 自动调度 (#500) 或 Research Dashboard (#521)。
 4. **不可变性约束**：历史归档、bundle、artifact 及历史实验记录保持不可变（保留原有历史标记如 `DRAFT_UNFROZEN`），严禁篡改历史计算事实。
@@ -110,23 +110,23 @@
 
 ## 6. 关联 Issue 收口建议
 
-根据本 Exit Review 结论，向项目 Owner 提出以下 Issue 收口建议（**前提需 Owner 接受 Phase 0 范围及相应 runtime 延期；本 PR 绝不自动关闭任何 Issue**）：
+Owner 签收并合并 PR #553 后，按 **#511 → #524 → #523 → #498 → #538** 顺序关闭。后续 Phase 1/2/3 由各自 Issue / milestone 跟踪。具体收口依据如下（**前提需 Owner 接受 Phase 0 范围及相应 runtime 延期；本 PR 绝不自动关闭任何 Issue**）：
 
 1. **[#511 Experiment Schema](https://github.com/folgercn/vnpy-web-bridge/issues/511)**：
-   - **建议状态**：建议在接受 Phase 0 范围及 runtime 延期前提下标记完成；
+   - **建议状态**：Owner 接受 Phase 0 范围及 runtime 延期并合并 PR #553 后，按上述顺序关闭；
    - **依据**：ExperimentSpec Typed Schema、S1–S7 语义定义、50 项结构校验及受控机器契约已在 #541, #546, #548, #549 中全部交付并通过测试；原 Issue 中提及的实际执行类验收已由 #538 顶层规划划归 Phase 1+。
 2. **[#524 Experiment Artifact Standard](https://github.com/folgercn/vnpy-web-bridge/issues/524)**：
-   - **建议状态**：建议在接受 Phase 0 范围及 runtime 延期前提下标记完成；
+   - **建议状态**：Owner 接受 Phase 0 范围及 runtime 延期并合并 PR #553 后，按上述顺序关闭；
    - **依据**：Artifact / Manifest 规范、Payload 红线、Manifest Schema 及机器核验已在 #542, #546, #548, #549 中全部交付并通过测试；存储实现与发布器延期至 Phase 1+。
 3. **[#523 Agent Prompt Contract](https://github.com/folgercn/vnpy-web-bridge/issues/523)**：
-   - **建议状态**：建议在接受 Phase 0 范围及 runtime 延期前提下标记完成；
+   - **建议状态**：Owner 接受 Phase 0 范围及 runtime 延期并合并 PR #553 后，按上述顺序关闭；
    - **依据**：三角色职责契约、四种交接操作 Schema、criteria_ref 跨对象核对及错误信封已在 #543, #550, #551, #552 中全部交付并通过机器测试；Agent 运行时与自动调用延期至 Phase 3。
 4. **[#498 Research Task Protocol](https://github.com/folgercn/vnpy-web-bridge/issues/498)**：
-   - **建议状态**：建议正式签收 Protocol v2 Phase 0 Freeze 并关闭；
+   - **建议状态**：Owner 批准并合并 PR #553 后，签收 Protocol v2 Phase 0 Freeze 并按上述顺序关闭；
    - **依据**：Protocol v2 Phase 0 Freeze 语义与受控机器证据已齐备，M1–M7 均已满足。
 5. **[#538 Roadmap Gate Phase 0](https://github.com/folgercn/vnpy-web-bridge/issues/538)**：
-   - **建议状态**：**保持 OPEN**；
-   - **依据**：作为量化实验室开发总门禁，继续用于跟踪后续 Phase 1 / Phase 2 / Phase 3 的路线图进展。
+   - **建议状态**：Owner 签收并合并 PR #553 后，作为顺序最后一项关闭；
+   - **依据**：作为 Phase 0 Gate，在 Phase 0 Exit 后形成明确完成态；Phase 1/2/3 由后续 Issue / milestone 跟踪。
 
 ---
 

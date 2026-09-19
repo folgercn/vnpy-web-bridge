@@ -1,12 +1,12 @@
 # Protocol v2：#498 冻结签收建议
 
-状态：**PENDING_OWNER_SIGNOFF**（建议目标状态为 `PROTOCOL_V2_PHASE0_FROZEN`）。基线为 `df1019df267b7424bc960dff8b68e01146592665`（包含 #539～#552）。
+生效后的协议状态：**PROTOCOL_V2_PHASE0_FROZEN**（Owner 批准并合并 PR #553 后，本记录即生效；批准合并前为 `PENDING_OWNER_SIGNOFF`）。基线为 `df1019df267b7424bc960dff8b68e01146592665`（包含 #539～#552）。
 
 关联 [#498](https://github.com/folgercn/vnpy-web-bridge/issues/498)、[#538](https://github.com/folgercn/vnpy-web-bridge/issues/538)。完整退出评审见 [Phase 0 Exit Review](phase0-exit-review.md)。
 
 ## 1. 结论
 
-**建议签收已有共同协议语义，建议将协议冻结为 PROTOCOL_V2_PHASE0_FROZEN，建议批准 Phase 0 达到退出标准；但不代替人工签收，亦不授权 Phase 1 实施。**
+**建议签收已有共同协议语义，Owner 批准并合并 PR #553 后，本记录即生效，协议状态为 PROTOCOL_V2_PHASE0_FROZEN，建议批准 Phase 0 达到退出标准；但不代替人工签收，亦不授权 Phase 1 实施。**
 
 M1–M7 规则不仅完成了文本定义与纸面走查，更通过 #546～#552 在离线机器契约、受控 catalogue、三类受限 profile、跨对象 handoff（prepare_spec, execute_spec, review_evidence, revise_spec）及规范化哈希（`research-json-v1`）中获得了 representative 机器契约测试覆盖（受限契约测试 320 passed，数据质量案例测试 28 passed，离线结构检查 50 passed）。
 
@@ -57,17 +57,17 @@ Phase 0 聚焦协议语义与拒绝规则的定义与受控测试：
 
 ## 5. 关联 Issue 收口建议
 
-根据协议冻结与测试证据，建议顺序收口如下（**前提需 Owner 接受 Phase 0 范围及相应 runtime 延期，本 PR 绝不自动关闭任何 Issue**）：
+根据协议冻结与测试证据，Owner 签收并合并 PR #553 后，按 **#511 → #524 → #523 → #498 → #538** 顺序关闭（**前提需 Owner 接受 Phase 0 范围及相应 runtime 延期，本 PR 绝不自动关闭任何 Issue**）：
 1. **#511**：建议标记 Phase 0 ExperimentSpec Contract 完成（实际执行类验收划归 Phase 1+）；
 2. **#524**：建议标记 Phase 0 Artifact Contract 完成（存储实现与发布器划归 Phase 1+）；
 3. **#523**：建议标记 Phase 0 Agent Communication Contract 完成（Agent Runtime/Sol 划归 Phase 3）；
 4. **#498**：建议正式签收 Protocol v2 Phase 0 Freeze；
-5. **#538**：**保持 OPEN**，继续用于跟踪量化实验室后续 Phase 1/2/3 路线图。
+5. **#538**：签收 Phase 0 Exit 后关闭该 Phase 0 Gate；后续 Phase 1/2/3 由各自 Issue / milestone 跟踪。
 
 ## 6. 人工签收选项（待 Owner Review 确认）
 
 - [ ] 批准上述固定基线的共同协议语义及 M1–M7 所列 representative 验证限度；
 - [ ] 确认 Trend20 与 Issue481 完整历史明细当前未取得之现状（受控测试使用 synthetic structural fixtures）；
 - [ ] 明确已绑定指标定义与未绑定 candidate 方法的边界，不将候选方法视为可运行实现；
-- [ ] 对 #511/#524/#523 建议完成状态及 Phase 0 边界逐项核定，并保持 #538 OPEN 跟踪路线图；
+- [ ] 对 #511/#524/#523 建议完成状态及 Phase 0 边界逐项核定，签收并合并 PR #553 后按 #511 → #524 → #523 → #498 → #538 顺序关闭，后续阶段由各自 Issue / milestone 跟踪；
 - [ ] Phase 0 退出后建议准入 Phase 1，具体实施另获明确授权。

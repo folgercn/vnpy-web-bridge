@@ -1,6 +1,6 @@
 # Protocol v2 冻结清单
 
-状态：**PENDING_OWNER_SIGNOFF**（建议目标状态为 `PROTOCOL_V2_PHASE0_FROZEN`）。本清单汇总核验证据，供 [#498](https://github.com/folgercn/vnpy-web-bridge/issues/498) 协议冻结与 [#538](https://github.com/folgercn/vnpy-web-bridge/issues/538) Phase 0 Exit Review 人工审查使用。基线为 `df1019df267b7424bc960dff8b68e01146592665`。完整退出评审见 [Phase 0 Exit Review](phase0-exit-review.md)。
+生效后的协议状态：**PROTOCOL_V2_PHASE0_FROZEN**（Owner 批准并合并 PR #553 后，本记录即生效；批准合并前为 `PENDING_OWNER_SIGNOFF`）。本清单汇总核验证据，供 [#498](https://github.com/folgercn/vnpy-web-bridge/issues/498) 协议冻结与 [#538](https://github.com/folgercn/vnpy-web-bridge/issues/538) Phase 0 Exit Review 人工审查使用。基线为 `df1019df267b7424bc960dff8b68e01146592665`。完整退出评审见 [Phase 0 Exit Review](phase0-exit-review.md)。
 
 设计正文见 [Protocol v2 设计](protocol-v2-design.md)。规则修订见 [Freeze Gap Closure](protocol-v2-freeze-gap-closure.md)。
 
@@ -43,9 +43,9 @@
 
 ## 3. 核心冻结签收确认（待 Owner Review 签署）
 
-以下复选框代表正式人工签收动作，本实施 PR 保持未勾选，由 Owner Review 签收时决定：
+以下复选框供 Owner 审核，不另设状态生效门禁：Owner 批准并合并 PR #553 即完成本记录签收，协议状态为 `PROTOCOL_V2_PHASE0_FROZEN`，无需另行勾选或提交才能生效。批准合并前不代替人工签收：
 
 - [ ] **批准 M1–M7 共同协议语义及所列 representative 验证限度**：包含 Hash、Revision/Run、事实/评审分离及三类受限机器契约，明确 Trend20/Issue481 完整历史明细当前未取得（使用 synthetic structural fixtures）；
 - [ ] **明确已绑定指标定义与未绑定 candidate 方法的边界**：不将候选方法视为可运行实现；
-- [ ] **对 #511/#524/#523 建议完成状态及 Phase 0 边界逐项核定**：接受上述 runtime 延期清单，同时 **#538 保持 OPEN** 跟踪后续路线图；
+- [ ] **对 #511/#524/#523 建议完成状态及 Phase 0 边界逐项核定**：接受上述 runtime 延期清单，Owner 签收并合并 PR #553 后按 **#511 → #524 → #523 → #498 → #538** 顺序关闭；后续 Phase 1/2/3 由各自 Issue / milestone 跟踪；
 - [ ] **Phase 0 退出后建议准入 Phase 1**：具体实施需另获明确授权，不因本 PR 合并自动解锁任何执行系统。

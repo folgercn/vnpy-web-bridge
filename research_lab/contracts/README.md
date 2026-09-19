@@ -1,6 +1,6 @@
 # v2 离线机器契约校验
 
-状态：**PENDING_OWNER_SIGNOFF**（建议目标状态为 `PROTOCOL_V2_PHASE0_FROZEN`，详见 [Phase 0 Exit Review](../../docs/research-lab/phase0-exit-review.md)）。关联 #511/#524/#523。本模块只读文件并检查契约；不执行方法、不调用 Agent、不连接网络，不是 Runner 或完整 S1–S7 准入器。
+生效后的协议状态：**PROTOCOL_V2_PHASE0_FROZEN**（Owner 批准并合并 PR #553 后，本记录即生效；批准合并前为 `PENDING_OWNER_SIGNOFF`，详见 [Phase 0 Exit Review](../../docs/research-lab/phase0-exit-review.md)）。关联 #511/#524/#523。本模块只读文件并检查契约；不执行方法、不调用 Agent、不连接网络，不是 Runner 或完整 S1–S7 准入器。
 
 ## 入口
 
@@ -36,7 +36,7 @@
 | #511 机器可检查部分 | Spec/Task 绑定、方法/参数/默认值、快照摘要、时间与指标定义检查 | 不认证实际数据可得性、完整时间切分、S7 交易语义；confirmation 显式拒绝，未实现暴露核验 |
 | #523 消费交接 | 原真实评审链正例；重算记录 hash 后仍拒绝错上下文、错 Evidence/criteria、错响应；受限支持 data_quality/validation 的 execute/prepare/revise 校验 | prepare/revise 仅限 data_quality/validation 且 revise 严格固定到 #544 确切来源身份与载荷（不支持通用自洽链替换、虚构历史 handoff 或 FAILED 来源）；其他 profile 暂无 prepare/revise 跨对象校验；无执行授权 |
 
-不宣称 #511/#524/#523 或 #498/#538 全部完成（建议状态由 Owner Review 签收裁定），不解锁运行平台。这里的剩余项是具体未实现条款，不是新增架构要求。
+Owner 批准并合并 PR #553 后完成 Phase 0 协议签收，按 #511 → #524 → #523 → #498 → #538 顺序关闭；不宣称延期的 runtime 已实现，不解锁运行平台。这里的剩余项是具体未实现条款，不是新增架构要求。
 
 ## 验证
 

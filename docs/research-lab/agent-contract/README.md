@@ -1,6 +1,6 @@
 # #523 Agent Prompt / Handoff Contract 候选
 
-状态：**PENDING_OWNER_SIGNOFF**（建议目标状态为 `PROTOCOL_V2_PHASE0_FROZEN`，详见 [Phase 0 Exit Review](../phase0-exit-review.md)）。本轮只定义角色输入输出、交接引用、Review 和错误表达。没有实现 Agent、Astra、Sol、Worker、Queue、MCP、消息系统、调度器或 Runtime，冻结本协议不关闭 #523/#498/#538。
+生效后的协议状态：**PROTOCOL_V2_PHASE0_FROZEN**（Owner 批准并合并 PR #553 后，本记录即生效；批准合并前为 `PENDING_OWNER_SIGNOFF`，详见 [Phase 0 Exit Review](../phase0-exit-review.md)）。本轮只定义角色输入输出、交接引用、Review 和错误表达。没有实现 Agent、Astra、Sol、Worker、Queue、MCP、消息系统、调度器或 Runtime，冻结本协议不自动关闭 #523/#498/#538。
 
 依据：[Issue #523](https://github.com/folgercn/vnpy-web-bridge/issues/523) 与 Owner 本轮 Phase 0 设计授权、[Protocol v2 修订](../protocol-v2-freeze-gap-closure.md)、[#541 Spec 契约](../specs/README.md)、[#542 Artifact 契约](../artifacts/README.md)。旧 Issue 的暂缓评论继续约束运行实现；本次新授权仅推进协议设计。（注：初版草案基于当时尚未合并的 #542，现 #542 依赖已合入主线）。
 
@@ -194,5 +194,6 @@ request `handoff_id`.
 profile, and the Issue481 `trading_backtest/validation` profile. Neither Trend20
 nor Issue481 supports `prepare_spec` or `revise_spec` cross-object validation.
 
-This offline contract check remains strictly **DRAFT_UNFROZEN**. It provides no
+After Owner approval and merge of PR #553, this protocol record takes effect as
+**PROTOCOL_V2_PHASE0_FROZEN**; before then it awaits Owner signoff. It provides no
 execution authorization, runtime implementation, scheduling, or retry mechanism.
