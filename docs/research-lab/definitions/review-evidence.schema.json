@@ -270,6 +270,170 @@
           "const": "half_even_12_decimal_places_from_unrounded_daily_values"
         }
       }
+    },
+    "single_contract_result_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "hash_profile",
+        "evidence_id",
+        "revision",
+        "run_id",
+        "run_status_snapshot",
+        "run_content_hash",
+        "execution_status",
+        "manifest_id",
+        "manifest_revision",
+        "manifest_content_hash",
+        "missing_reason",
+        "supporting_artifacts",
+        "evidence_content_hash",
+        "typed_metrics"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "research_lab.evidence.v2"
+        },
+        "hash_profile": {
+          "const": "research-json-v1"
+        },
+        "evidence_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "const": "rev.1"
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "run_status_snapshot": {
+          "enum": [
+            "COMPLETED",
+            "FAILED"
+          ]
+        },
+        "run_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "execution_status": {
+          "enum": [
+            "COMPLETED",
+            "FAILED"
+          ]
+        },
+        "manifest_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "manifest_revision": {
+          "const": "rev.1"
+        },
+        "manifest_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "missing_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "supporting_artifacts": {
+          "type": "array"
+        },
+        "evidence_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "typed_metrics": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "profile": {
+              "const": "research_lab.single_contract_backtest.v1"
+            },
+            "product": {
+              "type": "string",
+              "minLength": 1
+            },
+            "exact_contract": {
+              "type": "string",
+              "minLength": 1
+            },
+            "net_pnl": {
+              "type": "string"
+            },
+            "total_fees": {
+              "type": "string"
+            },
+            "trade_count": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "run_status_snapshot": {
+                "const": "COMPLETED"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "execution_status": {
+                "const": "COMPLETED"
+              },
+              "missing_reason": {
+                "type": "null"
+              },
+              "typed_metrics": {
+                "type": "object",
+                "required": [
+                  "profile",
+                  "product",
+                  "exact_contract",
+                  "net_pnl",
+                  "total_fees",
+                  "trade_count"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "run_status_snapshot": {
+                "const": "FAILED"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "execution_status": {
+                "const": "FAILED"
+              },
+              "missing_reason": {
+                "type": "string",
+                "minLength": 1
+              },
+              "typed_metrics": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }

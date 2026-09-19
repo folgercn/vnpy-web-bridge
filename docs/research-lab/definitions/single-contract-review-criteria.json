@@ -1,0 +1,10 @@
+{
+  "id": "research_lab.single_contract_backtest.review_evidence.criteria",
+  "revision": "rev.1",
+  "description": "Review criteria definition for Protocol v2 single-contract trading_backtest profile unblock.",
+  "target_profile": "research_lab.single_contract_backtest.v1",
+  "evaluation_rules": {
+    "completed_assessment": "Evaluate single-contract execution facts (net_pnl, fees, trade count) without 24-account artificial padding.",
+    "failure_diagnosis": "Diagnose failure原因 from failure_diagnostics payload without masking errors as zero PnL."
+  }
+}
