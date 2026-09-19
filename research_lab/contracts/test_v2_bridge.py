@@ -717,6 +717,3 @@ def test_review_r3_execution_isolated_from_subsequent_external_materials_mutatio
     assert result["run_status"] == "COMPLETED"
     assert result["run"]["resolved_computation_manifest"]["code_revision"] == "4c4691c3f1491d54b4a2f84aa24192e33552db67"
     assert not (v2.ROOT / "tmp").exists() or not list((v2.ROOT / "tmp").glob("stage-*"))
-
-
-
