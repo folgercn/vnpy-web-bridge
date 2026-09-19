@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from typing import Any
 
-from research_lab.schemas import CriticReview, ExperimentResult, SweepResult, ValidationResult
+from research_lab.schemas import (
+    CriticReview,
+    ExperimentResult,
+    SweepResult,
+    ValidationResult,
+)
 
 
 def write_report(root: Path, result: ExperimentResult) -> Path:
@@ -28,6 +35,65 @@ def write_report(root: Path, result: ExperimentResult) -> Path:
     if result.error_code:
         lines.extend(["", "## Failure", "", f"- Code: {result.error_code}", f"- Message: {result.error_message or ''}"])
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def render_v2_report(receipt: dict[str, Any]) -> str:
+    """Deterministically render a Protocol v2 markdown report from a stored receipt."""
+    run = receipt["run"]
+    evidence = receipt["evidence"]
+    task = receipt["task"]
+    spec = receipt["spec"]
+    manifest = receipt["manifest"]
+    lines = [
+        f"# Protocol v2 run {run['object_id']}",
+        "",
+        "This report is derived from the stored result receipt and is not a fact source.",
+        "",
+        "## Exact references",
+        "",
+        f"- Task: `{task['object_id']}` {task['revision']} `{task['content_hash']}`",
+        f"- Spec: `{spec['object_id']}` {spec['revision']} `{spec['content_hash']}`",
+        f"- Run: `{run['object_id']}` `{run['content_hash']}`",
+        f"- Manifest: `{manifest['object_id']}` {manifest['revision']} `{manifest['content_hash']}`",
+        f"- Evidence: `{evidence['object_id']}` `{evidence['content_hash']}`",
+        f"- Status: {receipt['run_status']}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _validate_safe_run_id(run_id: str) -> str:
+    """Validate that run_id is a safe single filename without path traversal or separators."""
+    if not isinstance(run_id, str) or not run_id.strip():
+        raise ValueError(f"Invalid run_id: must be a non-empty string, got {run_id!r}")
+    if "/" in run_id or "\\" in run_id:
+        raise ValueError(f"Path separators forbidden in run_id: {run_id!r}")
+    if run_id in (".", ".."):
+        raise ValueError(f"Dot path references forbidden in run_id: {run_id!r}")
+    if "\0" in run_id:
+        raise ValueError(f"Null byte forbidden in run_id: {run_id!r}")
+    path = Path(run_id)
+    if path.is_absolute() or len(path.parts) != 1 or path.name != run_id:
+        raise ValueError(f"Unsafe path component in run_id: {run_id!r}")
+    return run_id
+
+
+def write_v2_report(root: Path, receipt: dict[str, Any]) -> Path:
+    """Write a create-only derived report that points to immutable Protocol v2 facts."""
+    run = receipt["run"]
+    run_id = _validate_safe_run_id(run["object_id"])
+    reports_root = (root / "v2" / "reports").resolve()
+    reports_root.mkdir(parents=True, exist_ok=True)
+    path = (reports_root / f"{run_id}.report.md").resolve()
+    if path.parent != reports_root:
+        raise ValueError(f"Report path escapes reports directory: {path}")
+    encoded = render_v2_report(receipt).encode("utf-8")
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        raise FileExistsError(f"Refusing to overwrite existing Protocol v2 report: {path}") from None
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(encoded)
     return path
 
 
