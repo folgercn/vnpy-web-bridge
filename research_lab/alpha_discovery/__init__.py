@@ -3,6 +3,7 @@
 from research_lab.alpha_discovery.hypothesis import (
     AlphaHypothesis,
     compute_hypothesis_content_hash,
+    compute_scientific_identity_hash,
     compute_semantic_hash,
     compute_structured_key,
     is_exact_duplicate,
@@ -14,6 +15,7 @@ from research_lab.alpha_discovery.hypothesis import (
 __all__ = [
     "AlphaHypothesis",
     "compute_hypothesis_content_hash",
+    "compute_scientific_identity_hash",
     "compute_semantic_hash",
     "compute_structured_key",
     "is_exact_duplicate",

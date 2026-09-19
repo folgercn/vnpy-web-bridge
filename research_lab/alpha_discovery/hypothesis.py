@@ -194,7 +194,12 @@ class AlphaHypothesis(BaseModel):
     hash_profile: Literal["research-json-v1"] = HASH_PROFILE
     hypothesis_id: str
     revision: str = "rev.1"
-    hypothesis_content_hash: str = ""
+    hypothesis_content_hash: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[a-f0-9]{64}$",
+        description="Canonical SHA-256 digest of the entire revision record (excluding itself).",
+    )
 
     title: str = Field(min_length=1)
     economic_rationale: str = Field(min_length=1)
@@ -250,25 +255,26 @@ class AlphaHypothesis(BaseModel):
 
 
 def compute_hypothesis_content_hash(data: dict[str, Any]) -> str:
-    """Compute repository-pinned research-json-v1 SHA-256 digest of hypothesis."""
+    """Compute repository-pinned research-json-v1 SHA-256 digest of hypothesis revision record."""
     clean = {k: v for k, v in data.items() if k != "hypothesis_content_hash"}
     return v2.digest(clean)
 
 
 def compute_semantic_hash(data: dict[str, Any]) -> str:
-    """Compute stable content hash for core scientific proposition.
+    """Compute stable content hash for the core scientific proposition (Alpha Idea identity).
 
-    Ignores title, metadata, provenance, whitespace variations, and dictionary key order.
-    Used for exact duplicate identification.
+    Strictly bound to CORE_SCIENTIFIC_FIELDS.
+    Ignores revision, title, metadata, risks, falsification_conditions,
+    proposed_screening_methods, provenance, and dictionary key order.
+    Used for exact duplicate identification: two hypotheses sharing the identical
+    scientific proposition represent the same Alpha Idea.
     """
     source_features = sorted(data.get("source_features", []))
-    falsification = sorted(data.get("falsification_conditions", []))
     universe = data.get("universe")
 
     semantic_payload = {
         "economic_rationale": str(data.get("economic_rationale", "")).strip(),
         "expected_direction": data.get("expected_direction"),
-        "falsification_conditions": falsification,
         "frequency": str(data.get("frequency", "")).strip(),
         "holding_horizon": str(data.get("holding_horizon", "")).strip(),
         "signal_definition": str(data.get("signal_definition", "")).strip(),
@@ -278,6 +284,10 @@ def compute_semantic_hash(data: dict[str, Any]) -> str:
         "universe": universe,
     }
     return v2.digest(semantic_payload)
+
+
+# Alias for explicit clarity between revision record content hash and scientific identity hash
+compute_scientific_identity_hash = compute_semantic_hash
 
 
 def compute_structured_key(data: dict[str, Any]) -> str:
@@ -335,18 +345,24 @@ def validate_hypothesis(data: dict[str, Any]) -> dict[str, Any]:
     if data.get("hash_profile") != HASH_PROFILE:
         raise ValueError(f"Unknown or unsupported hash_profile: {data.get('hash_profile')!r}")
 
+    # Enforce non-empty, cryptographically valid hypothesis_content_hash matching canonical content
+    if "hypothesis_content_hash" not in data:
+        raise ValueError("Missing required field: 'hypothesis_content_hash'")
+    declared_hash = data.get("hypothesis_content_hash")
+    if not isinstance(declared_hash, str) or not declared_hash.strip():
+        raise ValueError(f"hypothesis_content_hash must be non-empty string, got {declared_hash!r}")
+    if not HASH_PATTERN.fullmatch(declared_hash):
+        raise ValueError(f"hypothesis_content_hash must be 64-character lowercase hex SHA-256 digest, got {declared_hash!r}")
+
+    expected_hash = compute_hypothesis_content_hash(data)
+    if declared_hash != expected_hash:
+        raise ValueError(f"hypothesis_content_hash mismatch: declared {declared_hash}, computed {expected_hash}")
+
     # Parse and validate via Pydantic model
     try:
         model = AlphaHypothesis.model_validate(data)
     except Exception as err:
         raise ValueError(f"Hypothesis validation failed: {err}") from err
-
-    # Check content hash integrity if provided
-    declared_hash = data.get("hypothesis_content_hash")
-    if declared_hash:
-        expected_hash = compute_hypothesis_content_hash(data)
-        if declared_hash != expected_hash:
-            raise ValueError(f"hypothesis_content_hash mismatch: declared {declared_hash}, computed {expected_hash}")
 
     return model.model_dump(exclude_none=True)
 

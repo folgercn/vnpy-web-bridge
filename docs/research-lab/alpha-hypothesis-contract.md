@@ -38,7 +38,7 @@
 | `hash_profile` | string | 是 | 固定 `"research-json-v1"` |
 | `hypothesis_id` | string | 是 | 假说唯一标识符，满足 `^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$` |
 | `revision` | string | 是 | 版本号，满足 `^rev\.[1-9][0-9]*$`（默认 `"rev.1"`） |
-| `hypothesis_content_hash` | string | 否/是 | 64 位 SHA-256 摘要（排除自身后计算，遵循 Protocol v2 规则） |
+| `hypothesis_content_hash` | string | 是 | 64 位 SHA-256 摘要（排除自身后对完整记录计算，不可为空，错误或缺失均 fail closed） |
 | `title` | string | 是 | 简短描述性标题 |
 | `economic_rationale` | string | 是 | 经济学因果逻辑说明（严禁混入实现代码或结果宣称） |
 | `signal_family` | string | 是 | 信号分类族（如 `"momentum"`, `"mean_reversion"`, `"volatility"` 等） |
@@ -61,18 +61,26 @@
 
 ## 4. 机器可测试规则
 
-### 4.1 Canonicalization & Hash 稳定性
-* 遵循仓库标准 `research-json-v1` 协议规范。
-* 序列化时按字典键排序，对非语义换行、空格及字段声明顺序完全免疫。
-* `compute_hypothesis_content_hash` 保证同一内容生成唯一的 64 位 SHA-256。
+### 4.1 双层 Hash 架构与 Canonicalization
+为严格解耦“单次修订记录的版本快照”与“科学命题本身的本质身份”，系统明确区分两个层面的 Hash：
+1. **Revision Record Content Hash (`compute_hypothesis_content_hash`)**：
+   - 针对单个 Revision 记录的完整不可变快照计算 SHA-256（排除自身字段）；
+   - 涵盖包括 title, revision, known_risks, falsification_conditions, proposed_screening_methods, provenance 在内的所有字段；
+   - 作为该版本的唯一物理指纹，**必填且不可为空，任何字段缺失、空字符串或篡改均 fail closed**。
+2. **Scientific Identity Hash (`compute_semantic_hash` / `compute_scientific_identity_hash`)**：
+   - 针对科学假设核心命题计算 SHA-256；
+   - 严格且仅由 `CORE_SCIENTIFIC_FIELDS` 决定，忽略非核心命题字段（如 title, known_risks, falsification_conditions, provenance 等）；
+   - 两个假设若该 Hash 相同，即代表它们描述的是同一个 Alpha Idea。
 
-### 4.2 Revision 边界 vs New Hypothesis
+### 4.2 统一科学身份边界与 Revision 边界
+由同一组 `CORE_SCIENTIFIC_FIELDS` 统一决定“是否允许 Revision”以及“是否是同一 Alpha Idea / Exact Semantic Identity”：
 * **Revision（修订版）**：
-  * 本质科学命题保持不变。
-  * 仅允许修正表述、细化 `title`、补充 `known_risks`、澄清 `falsification_conditions` 或调整 `proposed_screening_methods`。
-  * 继承原 `hypothesis_id`，递增 `revision`（如 `rev.2`），必须显式包含 `parent_hypothesis_ref`。
+  * 本质科学命题保持不变（`CORE_SCIENTIFIC_FIELDS` 完全一致，Scientific Identity Hash 不变）；
+  * 仅允许修正表述、细化 `title`、补充 `known_risks`、澄清/补充 `falsification_conditions` 或调整 `proposed_screening_methods`；
+  * 继承原 `hypothesis_id`，递增 `revision`（如 `rev.2`），必须显式包含 `parent_hypothesis_ref`；
+  * 修改 `falsification_conditions` 产生的新版本记录，其 Revision Record Content Hash 会改变，但 Scientific Identity Hash 保持一致，依然识别为同一个 Alpha Idea，不会被误判为 New Hypothesis。
 * **New Hypothesis（新假设）**：
-  * 核心科学命题发生改变：
+  * 核心科学命题发生改变（任一 `CORE_SCIENTIFIC_FIELDS` 改变）：
     * `signal_family` 改变
     * `signal_definition` 改变
     * `source_features` 改变
@@ -82,12 +90,12 @@
     * `universe` 核心语义改变
     * `frequency` 改变
     * `economic_rationale` 改变
-  * 必须分配新的 `hypothesis_id`，绝对不允许伪装成原有假设的 Revision。
+  * Scientific Identity Hash 改变，必须分配新的 `hypothesis_id`，绝对不允许伪装成原有假设的 Revision。
 
 ### 4.3 去重规则 (Dedup)
 * **Exact Duplicate（精确重复）**：
-  * 基于 `compute_semantic_hash`，提取核心科学假设字段排序规范化后计算 SHA-256。
-  * 核心科学定义完全相同时判定为 Exact Duplicate，阻止重复 Idea 产生冗余实验。
+  * 基于 `compute_semantic_hash`（即 `compute_scientific_identity_hash`）；
+  * 核心科学命题完全相同时判定为 Exact Duplicate，阻止重复 Idea 产生冗余实验。
 * **Structured Similarity Key（结构相关键）**：
   * 格式：`family={family}|target={target}|dir={dir}|horizon={horizon}|universe={universe}|freq={freq}`。
   * 相同者仅标记为 `potentially_related`，供研究员/检索系统参考，**绝不自动判定为 Duplicate**。

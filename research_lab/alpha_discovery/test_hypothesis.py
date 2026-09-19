@@ -184,83 +184,132 @@ def test_valid_revision(valid_hypothesis_data: dict[str, Any]):
     assert child["parent_hypothesis_ref"]["content_hash"] == valid_hypothesis_data["hypothesis_content_hash"]
 
 
-# 10. 应属于新 hypothesis 的变化不能冒充 revision
-def test_core_change_cannot_disguise_as_revision(valid_hypothesis_data: dict[str, Any]):
-    # Mutating signal_definition
-    with pytest.raises(ValueError, match="Cannot mutate core scientific field 'signal_definition'"):
-        create_revision(
-            valid_hypothesis_data,
-            {"signal_definition": "close / ts_mean(close, 60)"},
-            created_by="fujun",
-        )
+# P1-1: 缺失、空字符串、错误/篡改 hash 均 fail closed；合法生成/验证保持幂等
+def test_hypothesis_content_hash_fail_closed_and_idempotent(valid_hypothesis_data: dict[str, Any]):
+    # 1. 缺失 hypothesis_content_hash
+    missing = copy.deepcopy(valid_hypothesis_data)
+    del missing["hypothesis_content_hash"]
+    with pytest.raises(ValueError, match="Missing required field: 'hypothesis_content_hash'"):
+        validate_hypothesis(missing)
 
-    # Mutating signal_family
-    with pytest.raises(ValueError, match="Cannot mutate core scientific field 'signal_family'"):
-        create_revision(
-            valid_hypothesis_data,
-            {"signal_family": "mean_reversion"},
-            created_by="fujun",
-        )
+    # 2. 空字符串 hypothesis_content_hash
+    empty_hash = copy.deepcopy(valid_hypothesis_data)
+    empty_hash["hypothesis_content_hash"] = ""
+    with pytest.raises(ValueError, match="hypothesis_content_hash must be non-empty string"):
+        validate_hypothesis(empty_hash)
 
-    # Mutating hypothesis_id
-    with pytest.raises(ValueError, match="Cannot change hypothesis_id in revision"):
-        create_revision(
-            valid_hypothesis_data,
-            {"hypothesis_id": "hypo-other-id"},
-            created_by="fujun",
-        )
+    # 3. 非法格式 hash (非 64 字符十六进制)
+    invalid_format = copy.deepcopy(valid_hypothesis_data)
+    invalid_format["hypothesis_content_hash"] = "not-a-valid-sha256"
+    with pytest.raises(ValueError, match="64-character lowercase hex SHA-256 digest"):
+        validate_hypothesis(invalid_format)
 
-    # Manually constructed child with mutated target
-    fake_child = copy.deepcopy(valid_hypothesis_data)
-    fake_child["revision"] = "rev.2"
-    fake_child["target"] = "forward_return_20d"  # Core change!
-    fake_child["parent_hypothesis_ref"] = {
-        "hypothesis_id": valid_hypothesis_data["hypothesis_id"],
-        "revision": "rev.1",
-        "content_hash": valid_hypothesis_data["hypothesis_content_hash"],
-    }
-    fake_child["hypothesis_content_hash"] = compute_hypothesis_content_hash(fake_child)
+    # 4. 篡改/不匹配 hash
+    tampered = copy.deepcopy(valid_hypothesis_data)
+    tampered["hypothesis_content_hash"] = "0" * 64
+    with pytest.raises(ValueError, match="hypothesis_content_hash mismatch"):
+        validate_hypothesis(tampered)
 
-    is_valid, msg = is_valid_revision(valid_hypothesis_data, fake_child)
-    assert not is_valid
-    assert "Core scientific field 'target' changed" in msg
-
-    # Manually constructed child with mutated signal_family
-    fake_child_family = copy.deepcopy(valid_hypothesis_data)
-    fake_child_family["revision"] = "rev.2"
-    fake_child_family["signal_family"] = "mean_reversion"  # Core change!
-    fake_child_family["parent_hypothesis_ref"] = {
-        "hypothesis_id": valid_hypothesis_data["hypothesis_id"],
-        "revision": "rev.1",
-        "content_hash": valid_hypothesis_data["hypothesis_content_hash"],
-    }
-    fake_child_family["hypothesis_content_hash"] = compute_hypothesis_content_hash(fake_child_family)
-
-    is_valid_fam, msg_fam = is_valid_revision(valid_hypothesis_data, fake_child_family)
-    assert not is_valid_fam
-    assert "Core scientific field 'signal_family' changed" in msg_fam
+    # 5. 合法生成与多次验证保持严格幂等
+    first_pass = validate_hypothesis(valid_hypothesis_data)
+    second_pass = validate_hypothesis(first_pass)
+    third_pass = validate_hypothesis(second_pass)
+    assert first_pass == valid_hypothesis_data
+    assert second_pass == first_pass
+    assert third_pass == second_pass
 
 
-def test_omitted_optional_fields_hash_and_idempotency(valid_hypothesis_data: dict[str, Any]):
-    """Test that omitting optional fields like related_hypothesis_refs maintains content hash integrity and validator idempotency."""
-    minimal = copy.deepcopy(valid_hypothesis_data)
-    del minimal["related_hypothesis_refs"]
-    minimal["hypothesis_content_hash"] = compute_hypothesis_content_hash(minimal)
+# P1-2: 统一 Exact Duplicate 科学身份与 CORE_SCIENTIFIC_FIELDS
+def test_falsification_revision_preserves_scientific_identity(valid_hypothesis_data: dict[str, Any]):
+    """Modifying falsification_conditions is a valid revision that preserves exact scientific identity."""
+    original_sem_hash = compute_semantic_hash(valid_hypothesis_data)
+    original_content_hash = valid_hypothesis_data["hypothesis_content_hash"]
 
-    # First validation pass
-    validated_once = validate_hypothesis(minimal)
-    assert "related_hypothesis_refs" not in validated_once
-    assert validated_once["hypothesis_content_hash"] == minimal["hypothesis_content_hash"]
+    # Create revision modifying only falsification_conditions and known_risks
+    revised = create_revision(
+        valid_hypothesis_data,
+        {
+            "falsification_conditions": [
+                "Information coefficient (IC) mean is <= 0 across window.",
+                "Directional consistency is below 45% over rolling 90-day periods.",
+                "Trading friction and fees exceed 80% of gross alpha.",
+            ],
+            "known_risks": [
+                "Low-volatility chop generates frequent false breakouts.",
+                "Structural trend exhaustion at extreme resistance.",
+                "Execution slippage in stressed liquidity regimes.",
+            ],
+        },
+        created_by="fujun",
+        origin_ref="falsification criteria clarification",
+    )
 
-    # Second validation pass (idempotency check)
-    validated_twice = validate_hypothesis(validated_once)
-    assert validated_twice == validated_once
+    # 1. Revision is valid
+    is_valid, msg = is_valid_revision(valid_hypothesis_data, revised)
+    assert is_valid, msg
+
+    # 2. Revision record content hash changes (different record snapshot)
+    assert revised["hypothesis_content_hash"] != original_content_hash
+
+    # 3. Scientific identity hash remains identical (same Alpha Idea)
+    assert compute_semantic_hash(revised) == original_sem_hash
+
+    # 4. Exact duplicate recognises them as the same scientific proposition
+    assert is_exact_duplicate(valid_hypothesis_data, revised)
+
+
+def test_core_field_mutation_changes_identity_and_rejects_revision(valid_hypothesis_data: dict[str, Any]):
+    """Mutating any CORE_SCIENTIFIC_FIELDS changes scientific identity and cannot disguise as revision."""
+    original_sem_hash = compute_semantic_hash(valid_hypothesis_data)
+
+    core_mutations = [
+        ("signal_family", "mean_reversion"),
+        ("signal_definition", "(close - ts_mean(close, 10)) / ts_std(close, 10)"),
+        ("source_features", ["close", "volume"]),
+        ("target", "forward_return_20d"),
+        ("expected_direction", "negative"),
+        ("holding_horizon", "20d"),
+        ("universe", "equity_index_futures"),
+        ("frequency", "1h"),
+        ("economic_rationale", "Completely different macro causal theory."),
+    ]
+
+    for field_name, new_val in core_mutations:
+        # Cannot disguise as revision via create_revision
+        with pytest.raises(ValueError, match=f"Cannot mutate core scientific field {field_name!r}"):
+            create_revision(
+                valid_hypothesis_data,
+                {field_name: new_val},
+                created_by="fujun",
+            )
+
+        # Manually constructed child fails is_valid_revision
+        fake_child = copy.deepcopy(valid_hypothesis_data)
+        fake_child["revision"] = "rev.2"
+        fake_child[field_name] = new_val
+        fake_child["parent_hypothesis_ref"] = {
+            "hypothesis_id": valid_hypothesis_data["hypothesis_id"],
+            "revision": "rev.1",
+            "content_hash": valid_hypothesis_data["hypothesis_content_hash"],
+        }
+        fake_child["hypothesis_content_hash"] = compute_hypothesis_content_hash(fake_child)
+
+        is_valid, msg = is_valid_revision(valid_hypothesis_data, fake_child)
+        assert not is_valid
+        assert f"Core scientific field {field_name!r} changed" in msg
+
+        # Scientific identity hash must change
+        assert compute_semantic_hash(fake_child) != original_sem_hash
+
+        # Not an exact duplicate
+        assert not is_exact_duplicate(valid_hypothesis_data, fake_child)
 
 
 # 11. 缺 economic_rationale 拒绝
 def test_missing_economic_rationale_rejected(valid_hypothesis_data: dict[str, Any]):
     invalid = copy.deepcopy(valid_hypothesis_data)
     del invalid["economic_rationale"]
+    invalid["hypothesis_content_hash"] = compute_hypothesis_content_hash(invalid)
     with pytest.raises(ValueError, match="economic_rationale"):
         validate_hypothesis(invalid)
 
@@ -269,6 +318,7 @@ def test_missing_economic_rationale_rejected(valid_hypothesis_data: dict[str, An
 def test_missing_signal_definition_rejected(valid_hypothesis_data: dict[str, Any]):
     invalid = copy.deepcopy(valid_hypothesis_data)
     del invalid["signal_definition"]
+    invalid["hypothesis_content_hash"] = compute_hypothesis_content_hash(invalid)
     with pytest.raises(ValueError, match="signal_definition"):
         validate_hypothesis(invalid)
 
@@ -277,11 +327,13 @@ def test_missing_signal_definition_rejected(valid_hypothesis_data: dict[str, Any
 def test_missing_falsification_conditions_rejected(valid_hypothesis_data: dict[str, Any]):
     invalid = copy.deepcopy(valid_hypothesis_data)
     del invalid["falsification_conditions"]
+    invalid["hypothesis_content_hash"] = compute_hypothesis_content_hash(invalid)
     with pytest.raises(ValueError, match="falsification_conditions"):
         validate_hypothesis(invalid)
 
     invalid_empty = copy.deepcopy(valid_hypothesis_data)
     invalid_empty["falsification_conditions"] = []
+    invalid_empty["hypothesis_content_hash"] = compute_hypothesis_content_hash(invalid_empty)
     with pytest.raises(ValueError, match="falsification_conditions"):
         validate_hypothesis(invalid_empty)
 
@@ -302,6 +354,8 @@ def test_missing_falsification_conditions_rejected(valid_hypothesis_data: dict[s
 def test_forbidden_fields_rejected(valid_hypothesis_data: dict[str, Any], forbidden_field: str):
     invalid = copy.deepcopy(valid_hypothesis_data)
     invalid[forbidden_field] = "forbidden_value"
+    # Even with hash matching, forbidden field must be rejected
+    invalid["hypothesis_content_hash"] = compute_hypothesis_content_hash(invalid)
     with pytest.raises(ValueError, match="Forbidden.*field"):
         validate_hypothesis(invalid)
 
@@ -309,6 +363,7 @@ def test_forbidden_fields_rejected(valid_hypothesis_data: dict[str, Any], forbid
 def test_forbidden_result_claim_in_text_rejected(valid_hypothesis_data: dict[str, Any]):
     invalid = copy.deepcopy(valid_hypothesis_data)
     invalid["economic_rationale"] = "History shows Sharpe=2.5 and this is guaranteed to work."
+    invalid["hypothesis_content_hash"] = compute_hypothesis_content_hash(invalid)
     with pytest.raises(ValueError, match="Result or evidence claim forbidden"):
         validate_hypothesis(invalid)
 
@@ -317,11 +372,13 @@ def test_forbidden_result_claim_in_text_rejected(valid_hypothesis_data: dict[str
 def test_malformed_provenance_rejected(valid_hypothesis_data: dict[str, Any]):
     invalid = copy.deepcopy(valid_hypothesis_data)
     invalid["provenance"]["origin_type"] = "unsupported_origin"
+    invalid["hypothesis_content_hash"] = compute_hypothesis_content_hash(invalid)
     with pytest.raises(ValueError):
         validate_hypothesis(invalid)
 
     invalid_time = copy.deepcopy(valid_hypothesis_data)
     invalid_time["provenance"]["created_at"] = "2026-09-19 12:00:00"  # Not UTC ISO formatted
+    invalid_time["hypothesis_content_hash"] = compute_hypothesis_content_hash(invalid_time)
     with pytest.raises(ValueError, match="UTC timestamp"):
         validate_hypothesis(invalid_time)
 
