@@ -389,9 +389,9 @@ def validate_spec(spec, task, definitions=None):
             require(req['provenance'] == task_data['provenance'], 'snapshot provenance mismatch')
             locator = req['snapshot_locator']
             target_path = Path(locator) if os.path.isabs(locator) else ROOT / locator
-            if target_path.exists():
-                raw_bytes = target_path.read_bytes()
-                require(sha(raw_bytes) == req['snapshot_sha256'], 'physical snapshot sha256 mismatch')
+            require(target_path.is_file() and not target_path.is_symlink(), 'physical snapshot file missing or not regular file')
+            raw_bytes = target_path.read_bytes()
+            require(sha(raw_bytes) == req['snapshot_sha256'], 'physical snapshot sha256 mismatch')
             return {'profile': SINGLE_CONTRACT_PROFILE}
         method = definitions.method(spec['method_id'])
         require(method['corrected_events'] == spec['corrected_events'] == 603, 'Issue481 corrected events')
@@ -588,10 +588,10 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
             require(task_data['provenance'] == requirements['provenance'] == computation['provenance'] == metadata['provenance'], 'SingleContract provenance binding')
             locator = requirements['snapshot_locator']
             target_path = Path(locator) if os.path.isabs(locator) else ROOT / locator
-            if target_path.exists():
-                raw_bytes = target_path.read_bytes()
-                require(sha(raw_bytes) == requirements['snapshot_sha256'], 'SingleContract physical snapshot sha256 mismatch')
-                require(len(raw_bytes) == computation['snapshot_byte_length'], 'SingleContract physical snapshot byte length mismatch')
+            require(target_path.is_file() and not target_path.is_symlink(), 'SingleContract physical snapshot file missing or not regular file')
+            raw_bytes = target_path.read_bytes()
+            require(sha(raw_bytes) == requirements['snapshot_sha256'], 'SingleContract physical snapshot sha256 mismatch')
+            require(len(raw_bytes) == computation['snapshot_byte_length'], 'SingleContract physical snapshot byte length mismatch')
             if run['run_status'] == 'COMPLETED':
                 summary = next(contents[e['artifact_id']] for e in entries if e['role'] == 'backtest_summary')
                 blotter = next(contents[e['artifact_id']] for e in entries if e['role'] == 'trade_blotter')

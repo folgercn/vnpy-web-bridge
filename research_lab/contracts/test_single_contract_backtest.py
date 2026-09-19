@@ -640,3 +640,138 @@ def test_17_criteria_profile_isolation(tmp_path):
             },
             root=bundle_dir,
         )
+
+
+def test_18_snapshot_missing_file_rejected_in_validate_spec(tmp_path):
+    """18. Task/Spec with locator pointing to nonexistent file must be rejected by validate_spec."""
+    task, spec, _, _, _, _ = build_single_contract_fixture(tmp_path, "COMPLETED")
+    nonexistent = str(tmp_path / "nonexistent_snapshot.csv")
+    task_bad = deepcopy(task)
+    task_bad["data_requirements"]["snapshot_locator"] = nonexistent
+    _seal(task_bad, "task")
+    spec_bad = deepcopy(spec)
+    spec_bad["task_content_hash"] = task_bad["task_content_hash"]
+    spec_bad["dataset_requirements"]["snapshot_locator"] = nonexistent
+    _seal(spec_bad, "spec")
+
+    with pytest.raises(ValueError, match="physical snapshot file missing or not regular file"):
+        v2.validate_spec(spec_bad, task_bad)
+
+
+def test_19_snapshot_missing_or_deleted_rejected_in_validate_manifest_and_result_store(tmp_path):
+    """19. validate_manifest and ResultStore.save_v2 reject when snapshot is missing or deleted."""
+    snap_file = tmp_path / "temp_snapshot.csv"
+    orig_bytes = Path(SYNTHETIC_FIXTURE_PATH).read_bytes()
+    snap_file.write_bytes(orig_bytes)
+
+    task, spec, run, manifest, evidence, bundle_dir = build_single_contract_fixture(tmp_path, "COMPLETED", "run-sc-del")
+
+    for obj, prefix, key in [
+        (task, "task", "data_requirements"),
+        (spec, "spec", "dataset_requirements"),
+    ]:
+        obj[key]["snapshot_locator"] = str(snap_file)
+    spec["task_content_hash"] = v2.digest({k: v for k, v in task.items() if k != "task_content_hash"})
+    _seal(task, "task")
+    _seal(spec, "spec")
+
+    run["spec_content_hash"] = spec["spec_content_hash"]
+    run["resolved_computation_manifest"]["snapshot_locator"] = str(snap_file)
+    run["scientific_fingerprint"] = v2.digest(run["resolved_computation_manifest"])
+    _seal(run, "run")
+
+    meta_path = bundle_dir / "dataset_metadata.json"
+    meta = v2.parse(meta_path.read_bytes())
+    meta["snapshot_locator"] = str(snap_file)
+    meta_raw = v2.canonical(meta).encode()
+    meta_path.write_bytes(meta_raw)
+    entry = next(e for e in manifest["entries"] if e["role"] == "dataset_metadata")
+    entry["content_sha256"] = v2.sha(meta_raw)
+    entry["byte_length"] = len(meta_raw)
+    manifest["run_id"] = run["run_id"]
+    manifest["run_content_hash"] = run["run_content_hash"]
+    _seal(manifest, "manifest")
+
+    evidence["run_id"] = run["run_id"]
+    evidence["run_content_hash"] = run["run_content_hash"]
+    evidence["manifest_content_hash"] = manifest["manifest_content_hash"]
+    evidence["supporting_artifacts"] = [
+        {
+            "manifest_id": manifest["manifest_id"],
+            "manifest_revision": manifest["revision"],
+            "manifest_content_hash": manifest["manifest_content_hash"],
+            "artifact_id": e["artifact_id"],
+            "role": e["role"],
+            "content_sha256": e["content_sha256"],
+        }
+        for e in manifest["entries"]
+    ]
+    _seal(evidence, "evidence")
+
+    (bundle_dir / "materials/task.json").write_bytes(v2.canonical(task).encode())
+    (bundle_dir / "materials/spec.json").write_bytes(v2.canonical(spec).encode())
+    (bundle_dir / "run.json").write_bytes(v2.canonical(run).encode())
+    (bundle_dir / "manifest.json").write_bytes(v2.canonical(manifest).encode())
+    (bundle_dir / "evidence.json").write_bytes(v2.canonical(evidence).encode())
+
+    # Verify initially valid
+    v2.validate_spec(spec, task)
+    v2.validate_manifest(bundle_dir, manifest, run, task=task, spec=spec)
+
+    # Now DELETE the physical snapshot file
+    snap_file.unlink()
+
+    # validate_manifest must fail closed
+    with pytest.raises(ValueError, match="physical snapshot file missing or not regular file"):
+        v2.validate_manifest(bundle_dir, manifest, run, task=task, spec=spec)
+
+    # ResultStore.save_v2 must fail closed and leave 0 records
+    store = ResultStore(ResearchLabConfig(root=tmp_path / "store"))
+    with pytest.raises(ValueError, match="physical snapshot file missing or not regular file"):
+        store.save_v2(bundle_dir)
+
+    assert store.get_v2_run("run-sc-del") is None
+    assert store.query_v2_runs(run_id="run-sc-del") == []
+
+
+def test_20_snapshot_directory_or_non_regular_file_rejected(tmp_path):
+    """20. Locator pointing to a directory or non-regular file must be rejected."""
+    dir_path = tmp_path / "a_snapshot_directory"
+    dir_path.mkdir()
+
+    task, spec, run, manifest, _, bundle_dir = build_single_contract_fixture(tmp_path, "COMPLETED")
+    task_bad = deepcopy(task)
+    task_bad["data_requirements"]["snapshot_locator"] = str(dir_path)
+    _seal(task_bad, "task")
+    spec_bad = deepcopy(spec)
+    spec_bad["task_content_hash"] = task_bad["task_content_hash"]
+    spec_bad["dataset_requirements"]["snapshot_locator"] = str(dir_path)
+    _seal(spec_bad, "spec")
+
+    # validate_spec rejects directory
+    with pytest.raises(ValueError, match="physical snapshot file missing or not regular file"):
+        v2.validate_spec(spec_bad, task_bad)
+
+    # validate_manifest rejects directory
+    manifest_bad = deepcopy(manifest)
+    manifest_bad["entries"] = [deepcopy(e) for e in manifest["entries"]]
+    meta_path = bundle_dir / "dataset_metadata.json"
+    meta = v2.parse(meta_path.read_bytes())
+    meta["snapshot_locator"] = str(dir_path)
+    meta_raw = v2.canonical(meta).encode()
+    meta_path.write_bytes(meta_raw)
+    entry = next(e for e in manifest_bad["entries"] if e["role"] == "dataset_metadata")
+    entry["content_sha256"] = v2.sha(meta_raw)
+    entry["byte_length"] = len(meta_raw)
+
+    run_bad = deepcopy(run)
+    run_bad["spec_content_hash"] = spec_bad["spec_content_hash"]
+    run_bad["resolved_computation_manifest"]["snapshot_locator"] = str(dir_path)
+    run_bad["scientific_fingerprint"] = v2.digest(run_bad["resolved_computation_manifest"])
+    _seal(run_bad, "run")
+
+    manifest_bad["run_content_hash"] = run_bad["run_content_hash"]
+    _seal(manifest_bad, "manifest")
+
+    with pytest.raises(ValueError, match="physical snapshot file missing or not regular file"):
+        v2.validate_manifest(bundle_dir, manifest_bad, run_bad, task=task_bad, spec=spec_bad)
