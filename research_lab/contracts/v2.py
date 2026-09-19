@@ -17,6 +17,9 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFINITIONS = ROOT / 'docs/research-lab/definitions'
 PROFILE = 'research-json-v1'
 ROLE_PROFILE = 'research_lab.artifact_roles.v2.candidate1'
+SINGLE_CONTRACT_PROFILE = 'research_lab.single_contract_backtest.v1'
+SINGLE_CONTRACT_PAYLOAD_PREFIX = 'research_lab.single_contract.'
+SINGLE_CONTRACT_CRITERIA_ID = 'research_lab.single_contract_backtest.review_evidence.criteria'
 COMMON = {'dataset_metadata', 'method_definition', 'environment_lock', 'replay_instructions'}
 TYPED = {'data_quality': {'quality_summary', 'quality_anomalies'},
          'statistical_factor': {'statistical_summary', 'sample_feature_target', 'daily_ic_series'},
@@ -356,7 +359,17 @@ def validate_spec(spec, task, definitions=None):
     """Machine checks for bound methods. No execution, PIT or confirmation approval."""
     definitions = definitions or Definitions()
     schema_check(spec, parse(safe_read(ROOT, 'docs/schemas/research-experiment-spec-v2.schema.json')))
-    task_schema = {'statistical_factor': 'trend20-control.schema.json', 'trading_backtest': 'issue481-backtest-control.schema.json'}.get(spec['experiment_type'], 'phase0-control.schema.json')
+    if spec['experiment_type'] == 'trading_backtest':
+        if spec.get('backtest_profile') == SINGLE_CONTRACT_PROFILE:
+            task_schema = 'single-contract-backtest-control.schema.json'
+        elif spec.get('method_id') == 'phase0.issue481_minimal_causal_replay.rev1' and spec.get('corrected_events') == 603:
+            task_schema = 'issue481-backtest-control.schema.json'
+        else:
+            raise ValueError('unsupported trading_backtest profile')
+    elif spec['experiment_type'] == 'statistical_factor':
+        task_schema = 'trend20-control.schema.json'
+    else:
+        task_schema = 'phase0-control.schema.json'
     schema_check(task, parse(safe_read(DEFINITIONS, task_schema))['$defs']['research_task'])
     check_record(spec, 'experiment_spec')
     check_record(task, 'research_task')
@@ -365,6 +378,21 @@ def validate_spec(spec, task, definitions=None):
     require(task['research_type'] == spec['experiment_type'], 'Task type')
     require(spec['research_stage'] != 'confirmation', 'unsupported confirmation admission: exposure evidence not verified')
     if spec['experiment_type'] == 'trading_backtest':
+        if spec.get('backtest_profile') == SINGLE_CONTRACT_PROFILE:
+            req = spec['dataset_requirements']
+            task_data = task['data_requirements']
+            require(req['product'] == task_data['product'], 'product mismatch')
+            require(req['exact_contract'] == task_data['exact_contract'], 'exact_contract mismatch')
+            require(time_value(req['time_range']['start']) < time_value(req['time_range']['end']), 'reversed range')
+            require(req['snapshot_sha256'] == task_data['snapshot_sha256'], 'snapshot hash mismatch')
+            require(req['snapshot_locator'] == task_data['snapshot_locator'], 'snapshot locator mismatch')
+            require(req['provenance'] == task_data['provenance'], 'snapshot provenance mismatch')
+            locator = req['snapshot_locator']
+            target_path = Path(locator) if os.path.isabs(locator) else ROOT / locator
+            if target_path.exists():
+                raw_bytes = target_path.read_bytes()
+                require(sha(raw_bytes) == req['snapshot_sha256'], 'physical snapshot sha256 mismatch')
+            return {'profile': SINGLE_CONTRACT_PROFILE}
         method = definitions.method(spec['method_id'])
         require(method['corrected_events'] == spec['corrected_events'] == 603, 'Issue481 corrected events')
         return {'method': method}
@@ -469,16 +497,46 @@ def _is_verified_payloads(payloads):
 def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=None):
     definitions = definitions or Definitions()
     schema_check(manifest, parse(safe_read(ROOT, 'docs/schemas/research-artifact-manifest-v2.schema.json')))
-    run_schema = {'statistical_factor': 'trend20-control.schema.json', 'trading_backtest': 'issue481-backtest-control.schema.json'}.get(manifest['experiment_type'], 'phase0-control.schema.json')
+    is_single_contract = False
+    if manifest['experiment_type'] == 'trading_backtest':
+        if manifest.get('artifact_profile') == SINGLE_CONTRACT_PROFILE:
+            run_schema = 'single-contract-backtest-control.schema.json'
+            expected_prefix = SINGLE_CONTRACT_PAYLOAD_PREFIX
+            is_single_contract = True
+        elif manifest.get('artifact_profile') == ROLE_PROFILE:
+            entries_list = manifest.get('entries', [])
+            has_issue481 = any(e.get('content_schema_ref', {}).get('name', '').startswith('phase0.issue481.') for e in entries_list)
+            has_single_contract = any(e.get('content_schema_ref', {}).get('name', '').startswith(SINGLE_CONTRACT_PAYLOAD_PREFIX) for e in entries_list)
+            if has_issue481 and not has_single_contract:
+                run_schema = 'issue481-backtest-control.schema.json'
+                expected_prefix = 'phase0.issue481.'
+                is_single_contract = False
+            elif has_single_contract and not has_issue481:
+                run_schema = 'single-contract-backtest-control.schema.json'
+                expected_prefix = SINGLE_CONTRACT_PAYLOAD_PREFIX
+                is_single_contract = True
+            else:
+                raise ValueError('unsupported/mixed trading_backtest manifest profile')
+        else:
+            raise ValueError('unsupported trading_backtest artifact profile')
+    elif manifest['experiment_type'] == 'statistical_factor':
+        run_schema = 'trend20-control.schema.json'
+        expected_prefix = 'phase0.trend20.'
+    else:
+        run_schema = 'phase0-control.schema.json'
+        expected_prefix = 'phase0.'
     run_definition = 'experiment_run'
     schema_check(run, parse(safe_read(DEFINITIONS, run_schema))['$defs'][run_definition])
     check_record(manifest, 'artifact_manifest')
     check_record(run, 'experiment_run')
     require(run['run_status'] in ('COMPLETED', 'FAILED'), 'nonterminal run')
     require((manifest['run_id'], manifest['run_content_hash']) == (run['run_id'], run['run_content_hash']), 'Run reference')
-    required = COMMON | TYPED[manifest['experiment_type']]
-    if run['run_status'] == 'FAILED':
-        required |= {'failure_diagnostics'}
+    if is_single_contract and run['run_status'] == 'FAILED':
+        required = COMMON | {'failure_diagnostics'}
+    else:
+        required = COMMON | TYPED[manifest['experiment_type']]
+        if run['run_status'] == 'FAILED':
+            required |= {'failure_diagnostics'}
     entries = manifest['entries']
     require(required <= {e['role'] for e in entries}, 'missing required role')
     for field in ('artifact_id', 'relative_path'):
@@ -488,7 +546,7 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
     for e in entries:
         entry, definition = definitions.resolve('payload', e['content_schema_ref'])
         require(entry['role'] == e['role'], 'schema role mismatch')
-        expected_name = {'statistical_factor': 'phase0.trend20.', 'trading_backtest': 'phase0.issue481.'}.get(manifest['experiment_type'], 'phase0.') + e['role']
+        expected_name = expected_prefix + e['role']
         require(entry['name'] == expected_name, 'profile payload definition mismatch')
         # Registered rev.1 definitions specify one complete file, no implicit shards.
         require(e['role'] not in roles, 'unsupported/duplicate shard')
@@ -514,51 +572,88 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
     if manifest['experiment_type'] == 'trading_backtest':
         require(spec is not None and task is not None and spec['experiment_type'] == 'trading_backtest', 'backtest manifest requires Task and Spec')
         validate_spec(spec, task, definitions)
-        require((run['spec_id'], run['spec_revision'], run['spec_content_hash']) == (spec['spec_id'], spec['revision'], spec['spec_content_hash']), 'Issue481 Run Spec reference')
-        require(run['scientific_fingerprint'] == digest(run['resolved_computation_manifest']), 'Issue481 scientific fingerprint')
-        requirements = spec['dataset_requirements']
-        computation = run['resolved_computation_manifest']
-        task_data = task['data_requirements']
-        summary = next(contents[e['artifact_id']] for e in entries if e['role'] == 'backtest_summary')
-        blotter = next(contents[e['artifact_id']] for e in entries if e['role'] == 'trade_blotter')
-        metadata = next(contents[e['artifact_id']] for e in entries if e['role'] == 'dataset_metadata')
-        require(task_data['products'] == requirements['products'] == computation['products'] == metadata['products'], 'Issue481 product binding')
-        require(task_data['input_snapshots'] == requirements['input_snapshots'] == computation['input_snapshots'] == metadata['input_snapshots'], 'Issue481 input snapshot binding')
-        require(requirements['snapshot_sha256'] == computation['snapshot_sha256'] == metadata['snapshot_sha256'], 'Issue481 curve snapshot binding')
-        require(task_data['dev_dates'] == computation['dev_dates'] == [requirements['time_range']['start'][:10], requirements['time_range']['end'][:10]], 'Issue481 DEV date binding')
-        require(task_data['warmup_from'] == requirements['warmup_from'] == computation['warmup_from'], 'Issue481 warmup binding')
-        require(spec['cost_model'] == computation['cost_scenarios']['fee_model'], 'Issue481 cost binding')
-        require(summary['accounts'] == summary['products'] == blotter['accounts'] == ['ag', 'au', 'cu', 'rb', 'ru', 'sc'], 'account products')
-        curve = next(contents[e['artifact_id']] for e in entries if e['role'] == 'equity_curve')
-        require(curve['accounts'] == summary['accounts'], 'equity account coverage')
-        expected = {(path, scenario, product) for path in ('CANDIDATE', 'PAIRED') for scenario in ('PRIMARY_2S', 'STRESS_5S') for product in summary['accounts']}
-        def identities(value):
-            rows = value['account_identities']
-            actual = {(row['path'], row['scenario'], row['product']) for row in rows}
-            require(len(rows) == len(actual) == 24 and actual == expected, 'account identity coverage')
-            require(all(row['account_id'] == ':'.join((row['path'], row['scenario'], row['product'])) for row in rows), 'account identity format')
-        identities(summary)
-        identities(blotter)
-        identities(curve)
-        metrics = summary['account_metrics']
-        metric_ids = {row['account_id'] for row in metrics}
-        require(len(metrics) == len(metric_ids) == 24 and metric_ids == {':'.join(row) for row in expected}, 'account metric coverage')
-        require(all(row['account_id'] == ':'.join((row['path'], row['scenario'], row['product'])) for row in metrics), 'account metric identity')
-        point_ids = {point['account_id'] for point in curve['points']}
-        require(point_ids == {':'.join(row) for row in expected}, 'missing equity account')
-        point_times = {}
-        for point in curve['points']:
-            require(point['account'] == point['product'] and point['account_id'] == ':'.join((point['path'], point['scenario'], point['product'])), 'equity account identity')
-            time_value(point['official_day'] + 'T00:00:00.000000Z')
-            require('2023-01-03' <= point['official_day'] < '2025-01-01', 'equity DEV range')
-            point_times.setdefault(point['account_id'], []).append(point['official_day'])
-        require(all(times == sorted(times) and len(times) == len(set(times)) for times in point_times.values()), 'equity point order')
-        by_account = {}
-        for item in blotter['fills']:
-            require(item['account'] == item['product'] and item['account_id'] == ':'.join((item['path'], item['scenario'], item['product'])), 'fill account identity')
-            require(item['exact_contract'].startswith(item['product']) and len(item['exact_contract']) > len(item['product']), 'exact contract product')
-            by_account.setdefault(item['account_id'], []).append(item['fill_sequence'])
-        require(all(values == sorted(values) and len(values) == len(set(values)) for values in by_account.values()), 'fill order')
+        if is_single_contract:
+            require(spec.get('backtest_profile') == SINGLE_CONTRACT_PROFILE, 'SingleContract Spec profile mismatch')
+            require((run['spec_id'], run['spec_revision'], run['spec_content_hash']) == (spec['spec_id'], spec['revision'], spec['spec_content_hash']), 'SingleContract Run Spec reference')
+            require(run['scientific_fingerprint'] == digest(run['resolved_computation_manifest']), 'SingleContract scientific fingerprint')
+            requirements = spec['dataset_requirements']
+            computation = run['resolved_computation_manifest']
+            task_data = task['data_requirements']
+            metadata = next(contents[e['artifact_id']] for e in entries if e['role'] == 'dataset_metadata')
+            require(task_data['product'] == requirements['product'] == computation['product'] == metadata['product'], 'SingleContract product binding')
+            require(task_data['exact_contract'] == requirements['exact_contract'] == computation['exact_contract'] == metadata['exact_contract'], 'SingleContract exact contract binding')
+            require(task_data['snapshot_sha256'] == requirements['snapshot_sha256'] == computation['snapshot_sha256'] == metadata['snapshot_sha256'], 'SingleContract snapshot sha256 binding')
+            require(computation['snapshot_byte_length'] == metadata['snapshot_byte_length'], 'SingleContract snapshot byte length binding')
+            require(task_data['snapshot_locator'] == requirements['snapshot_locator'] == computation['snapshot_locator'] == metadata['snapshot_locator'], 'SingleContract snapshot locator binding')
+            require(task_data['provenance'] == requirements['provenance'] == computation['provenance'] == metadata['provenance'], 'SingleContract provenance binding')
+            locator = requirements['snapshot_locator']
+            target_path = Path(locator) if os.path.isabs(locator) else ROOT / locator
+            if target_path.exists():
+                raw_bytes = target_path.read_bytes()
+                require(sha(raw_bytes) == requirements['snapshot_sha256'], 'SingleContract physical snapshot sha256 mismatch')
+                require(len(raw_bytes) == computation['snapshot_byte_length'], 'SingleContract physical snapshot byte length mismatch')
+            if run['run_status'] == 'COMPLETED':
+                summary = next(contents[e['artifact_id']] for e in entries if e['role'] == 'backtest_summary')
+                blotter = next(contents[e['artifact_id']] for e in entries if e['role'] == 'trade_blotter')
+                curve = next(contents[e['artifact_id']] for e in entries if e['role'] == 'equity_curve')
+                require(summary['product'] == blotter['product'] == curve['product'] == requirements['product'], 'SingleContract payload product mismatch')
+                require(summary['exact_contract'] == blotter['exact_contract'] == curve['exact_contract'] == requirements['exact_contract'], 'SingleContract payload exact contract mismatch')
+                require('accounts' not in summary and 'accounts' not in blotter and 'accounts' not in curve, 'artificial multi-account padding forbidden')
+                for t in blotter.get('trades', []):
+                    require(isinstance(t.get('volume'), int) and t['volume'] > 0, 'invalid trade volume')
+                points = curve.get('points', [])
+                if points:
+                    pts_time = [p['timestamp'] for p in points]
+                    require(pts_time == sorted(pts_time), 'equity curve timestamps must be sorted')
+            else:
+                diagnostics = next(contents[e['artifact_id']] for e in entries if e['role'] == 'failure_diagnostics')
+                require(diagnostics.get('error_type') and diagnostics.get('error_message'), 'failure diagnostics empty')
+        else:
+            require((run['spec_id'], run['spec_revision'], run['spec_content_hash']) == (spec['spec_id'], spec['revision'], spec['spec_content_hash']), 'Issue481 Run Spec reference')
+            require(run['scientific_fingerprint'] == digest(run['resolved_computation_manifest']), 'Issue481 scientific fingerprint')
+            requirements = spec['dataset_requirements']
+            computation = run['resolved_computation_manifest']
+            task_data = task['data_requirements']
+            summary = next(contents[e['artifact_id']] for e in entries if e['role'] == 'backtest_summary')
+            blotter = next(contents[e['artifact_id']] for e in entries if e['role'] == 'trade_blotter')
+            metadata = next(contents[e['artifact_id']] for e in entries if e['role'] == 'dataset_metadata')
+            require(task_data['products'] == requirements['products'] == computation['products'] == metadata['products'], 'Issue481 product binding')
+            require(task_data['input_snapshots'] == requirements['input_snapshots'] == computation['input_snapshots'] == metadata['input_snapshots'], 'Issue481 input snapshot binding')
+            require(requirements['snapshot_sha256'] == computation['snapshot_sha256'] == metadata['snapshot_sha256'], 'Issue481 curve snapshot binding')
+            require(task_data['dev_dates'] == computation['dev_dates'] == [requirements['time_range']['start'][:10], requirements['time_range']['end'][:10]], 'Issue481 DEV date binding')
+            require(task_data['warmup_from'] == requirements['warmup_from'] == computation['warmup_from'], 'Issue481 warmup binding')
+            require(spec['cost_model'] == computation['cost_scenarios']['fee_model'], 'Issue481 cost binding')
+            require(summary['accounts'] == summary['products'] == blotter['accounts'] == ['ag', 'au', 'cu', 'rb', 'ru', 'sc'], 'account products')
+            curve = next(contents[e['artifact_id']] for e in entries if e['role'] == 'equity_curve')
+            require(curve['accounts'] == summary['accounts'], 'equity account coverage')
+            expected = {(path, scenario, product) for path in ('CANDIDATE', 'PAIRED') for scenario in ('PRIMARY_2S', 'STRESS_5S') for product in summary['accounts']}
+            def identities(value):
+                rows = value['account_identities']
+                actual = {(row['path'], row['scenario'], row['product']) for row in rows}
+                require(len(rows) == len(actual) == 24 and actual == expected, 'account identity coverage')
+                require(all(row['account_id'] == ':'.join((row['path'], row['scenario'], row['product'])) for row in rows), 'account identity format')
+            identities(summary)
+            identities(blotter)
+            identities(curve)
+            metrics = summary['account_metrics']
+            metric_ids = {row['account_id'] for row in metrics}
+            require(len(metrics) == len(metric_ids) == 24 and metric_ids == {':'.join(row) for row in expected}, 'account metric coverage')
+            require(all(row['account_id'] == ':'.join((row['path'], row['scenario'], row['product'])) for row in metrics), 'account metric identity')
+            point_ids = {point['account_id'] for point in curve['points']}
+            require(point_ids == {':'.join(row) for row in expected}, 'missing equity account')
+            point_times = {}
+            for point in curve['points']:
+                require(point['account'] == point['product'] and point['account_id'] == ':'.join((point['path'], point['scenario'], point['product'])), 'equity account identity')
+                time_value(point['official_day'] + 'T00:00:00.000000Z')
+                require('2023-01-03' <= point['official_day'] < '2025-01-01', 'equity DEV range')
+                point_times.setdefault(point['account_id'], []).append(point['official_day'])
+            require(all(times == sorted(times) and len(times) == len(set(times)) for times in point_times.values()), 'equity point order')
+            by_account = {}
+            for item in blotter['fills']:
+                require(item['account'] == item['product'] and item['account_id'] == ':'.join((item['path'], item['scenario'], item['product'])), 'fill account identity')
+                require(item['exact_contract'].startswith(item['product']) and len(item['exact_contract']) > len(item['product']), 'exact contract product')
+                by_account.setdefault(item['account_id'], []).append(item['fill_sequence'])
+            require(all(values == sorted(values) and len(values) == len(set(values)) for values in by_account.values()), 'fill order')
     return _remember_verified_payloads(_VerifiedPayloads(contents, manifest, entries))
 
 
@@ -684,7 +779,12 @@ def _validate_execute_spec_handoff(request, objects, response, schema, *, payloa
     required_request_objects = {'research_task', 'experiment_spec'}
     require(required_request_objects <= set(objects), 'missing execute_spec request context')
     task, spec = objects['research_task'], objects['experiment_spec']
-    require((spec.get('experiment_type'), spec.get('research_stage')) == ('data_quality', 'validation'),
+    spec_profile = (spec.get('experiment_type'), spec.get('research_stage'))
+    is_single_contract = (
+        spec_profile == ('trading_backtest', 'validation') and
+        spec.get('backtest_profile') == SINGLE_CONTRACT_PROFILE
+    )
+    require(spec_profile == ('data_quality', 'validation') or is_single_contract,
             'unsupported execute_spec profile')
     definitions = Definitions()
     resolved = validate_spec(spec, task, definitions)
@@ -692,7 +792,7 @@ def _validate_execute_spec_handoff(request, objects, response, schema, *, payloa
     for kind in required_request_objects:
         require(request['context_refs'][kind] == check_record(objects[kind], kind),
                 'context reference: ' + kind)
-    required_roles = COMMON | TYPED['data_quality']
+    required_roles = COMMON | TYPED[spec['experiment_type']]
     requirements = request['artifact_requirements']
     require(requirements['role_profile_ref'] == ROLE_PROFILE, 'execute_spec role profile')
     require(len(requirements['required_roles']) == len(set(requirements['required_roles'])) and
@@ -721,10 +821,18 @@ def _validate_execute_spec_handoff(request, objects, response, schema, *, payloa
     require(required_delivery <= set(objects), 'missing execute_spec delivery')
     run, manifest, evidence = (objects['experiment_run'], objects['artifact_manifest'],
                                objects['result_evidence'])
-    controls = parse(safe_read(DEFINITIONS, 'phase0-control.schema.json'))['$defs']
+    if is_single_contract:
+        control_defs = parse(safe_read(DEFINITIONS, 'single-contract-backtest-control.schema.json'))['$defs']
+        evidence_defs = parse(safe_read(DEFINITIONS, 'review-evidence.schema.json'))['$defs']
+    else:
+        control_defs = parse(safe_read(DEFINITIONS, 'phase0-control.schema.json'))['$defs']
+        evidence_defs = None
+
     for kind, obj in objects.items():
-        if kind in controls:
-            schema_check(obj, controls[kind])
+        if kind == 'result_evidence' and evidence_defs is not None:
+            schema_check(obj, {'$defs': evidence_defs, '$ref': '#/$defs/single_contract_result_evidence'})
+        elif kind in control_defs:
+            schema_check(obj, control_defs[kind])
         elif kind == 'experiment_spec':
             schema_check(obj, parse(safe_read(ROOT, 'docs/schemas/research-experiment-spec-v2.schema.json')))
         elif kind == 'artifact_manifest':
@@ -740,20 +848,26 @@ def _validate_execute_spec_handoff(request, objects, response, schema, *, payloa
             'Run exit status')
     computation = run['resolved_computation_manifest']
     requirements_spec = spec['dataset_requirements']
-    require(computation['raw_bytes_sha256'] == requirements_spec['snapshot_sha256'] and
-            computation['resolved_parameters'] == resolved['source_order'] and
-            computation['scientific_time'] == requirements_spec['time_range'] and
-            computation['universe'] == requirements_spec['universe'] and
-            computation['normalization_rule_version'] == requirements_spec['normalization_rule_version'],
-            'Run data-quality Spec binding')
-    require(requirements_spec['universe'] == task['data_requirements']['products'] and
-            requirements_spec['time_range']['start'][:10] == task['data_requirements']['date_start'] and
-            requirements_spec['time_range']['end'][:10] == task['data_requirements']['date_end_exclusive'],
-            'Task data-quality range binding')
-    require(computation['holdout_usage_state'] == 'not_applicable' and
-            run['trial_context'] == {'research_stage': 'validation', 'trial_kind': None,
-                                     'retry_of_run_id': None, 'holdout_usage_state': 'not_applicable'},
-            'Run data-quality metadata')
+    if is_single_contract:
+        require(computation['profile'] == SINGLE_CONTRACT_PROFILE, 'Run profile binding')
+        require(computation['product'] == requirements_spec['product'], 'Run product binding')
+        require(computation['exact_contract'] == requirements_spec['exact_contract'], 'Run exact_contract binding')
+        require(computation['snapshot_sha256'] == requirements_spec['snapshot_sha256'], 'Run snapshot hash binding')
+    else:
+        require(computation['raw_bytes_sha256'] == requirements_spec['snapshot_sha256'] and
+                computation['resolved_parameters'] == resolved['source_order'] and
+                computation['scientific_time'] == requirements_spec['time_range'] and
+                computation['universe'] == requirements_spec['universe'] and
+                computation['normalization_rule_version'] == requirements_spec['normalization_rule_version'],
+                'Run data-quality Spec binding')
+        require(requirements_spec['universe'] == task['data_requirements']['products'] and
+                requirements_spec['time_range']['start'][:10] == task['data_requirements']['date_start'] and
+                requirements_spec['time_range']['end'][:10] == task['data_requirements']['date_end_exclusive'],
+                'Task data-quality range binding')
+        require(computation['holdout_usage_state'] == 'not_applicable' and
+                run['trial_context'] == {'research_stage': 'validation', 'trial_kind': None,
+                                         'retry_of_run_id': None, 'holdout_usage_state': 'not_applicable'},
+                'Run data-quality metadata')
     verified = validate_manifest(root, manifest, run, definitions, task=task, spec=spec) if root is not None else payloads
     require(isinstance(verified, _VerifiedPayloads) and _is_verified_payloads(verified),
             'verified payloads required')
@@ -768,12 +882,15 @@ def _validate_execute_spec_handoff(request, objects, response, schema, *, payloa
             'Evidence status')
     require(manifest['experiment_type'] == spec['experiment_type'] and
             manifest['artifact_profile'] == requirements['role_profile_ref'],
-            'Manifest data-quality delivery metadata')
+            'Manifest delivery metadata')
     present = _present_artifact_refs(manifest)
     require(evidence['supporting_artifacts'] == present, 'Evidence artifact references')
     actual_roles = {item['role'] for item in present}
     manifest_roles = {entry['role'] for entry in manifest['entries']}
-    expected_roles = required_roles | ({'failure_diagnostics'} if run['run_status'] == 'FAILED' else set())
+    if is_single_contract and run['run_status'] == 'FAILED':
+        expected_roles = COMMON | {'failure_diagnostics'}
+    else:
+        expected_roles = required_roles | ({'failure_diagnostics'} if run['run_status'] == 'FAILED' else set())
     require(expected_roles <= manifest_roles,
             'execute_spec delivered roles')
     if run['run_status'] == 'FAILED':
@@ -788,26 +905,41 @@ def _validate_execute_spec_handoff(request, objects, response, schema, *, payloa
                                                  payloads=verified, root=None)
         for entry in manifest['entries'] if entry['availability'] == 'present'
     }
-    metadata, method_definition = contents['dataset_metadata'], contents['method_definition']
-    method_entry = next(entry for entry in manifest['entries'] if entry['role'] == 'method_definition')
-    method = definitions.method(spec['quality_checks'][0]['implementation_ref'])
-    require(method_definition == method and
-            computation['method_definition_sha256'] == method_entry['content_sha256'],
-            'data-quality method binding')
-    require(metadata['snapshot_sha256'] == computation['raw_bytes_sha256'] == requirements_spec['snapshot_sha256'] and
-            metadata['time_range'] == computation['scientific_time'] == requirements_spec['time_range'] and
-            metadata['fields'] == requirements_spec['required_fields'] and
-            metadata['source']['projection'].split(';', 1)[0].strip() == ','.join(computation['universe']),
-            'data-quality dataset metadata binding')
-    if run['run_status'] == 'COMPLETED':
-        summary, anomalies = contents['quality_summary'], contents['quality_anomalies']
-        require(summary is not None and anomalies is not None, 'missing data quality payload')
-        metrics = evidence['typed_metrics']
-        require(isinstance(metrics, list) and len(metrics) == 1 and
-                metrics[0]['metric'] == spec['metric_specifications'][0] and
-                metrics[0]['sample_count'] == summary['comparison_count'] and
-                metrics[0]['value'] == summary['timestamp_monotonicity_violations'],
-                'Evidence data quality facts')
+    if is_single_contract:
+        metadata = contents['dataset_metadata']
+        require(metadata['snapshot_sha256'] == computation['snapshot_sha256'] == requirements_spec['snapshot_sha256'],
+                'single-contract dataset metadata binding')
+        require(metadata['product'] == computation['product'] == requirements_spec['product'],
+                'single-contract dataset product binding')
+        require(metadata['exact_contract'] == computation['exact_contract'] == requirements_spec['exact_contract'],
+                'single-contract dataset exact contract binding')
+        if run['run_status'] == 'COMPLETED':
+            summary = contents['backtest_summary']
+            metrics = evidence['typed_metrics']
+            require(metrics is not None and metrics['profile'] == SINGLE_CONTRACT_PROFILE, 'SingleContract evidence profile')
+            require(metrics['net_pnl'] == summary['net_pnl'] and metrics['total_fees'] == summary['total_fees'] and metrics['trade_count'] == summary['total_trades'],
+                    'SingleContract evidence facts')
+    else:
+        metadata, method_definition = contents['dataset_metadata'], contents['method_definition']
+        method_entry = next(entry for entry in manifest['entries'] if entry['role'] == 'method_definition')
+        method = definitions.method(spec['quality_checks'][0]['implementation_ref'])
+        require(method_definition == method and
+                computation['method_definition_sha256'] == method_entry['content_sha256'],
+                'data-quality method binding')
+        require(metadata['snapshot_sha256'] == computation['raw_bytes_sha256'] == requirements_spec['snapshot_sha256'] and
+                metadata['time_range'] == computation['scientific_time'] == requirements_spec['time_range'] and
+                metadata['fields'] == requirements_spec['required_fields'] and
+                metadata['source']['projection'].split(';', 1)[0].strip() == ','.join(computation['universe']),
+                'data-quality dataset metadata binding')
+        if run['run_status'] == 'COMPLETED':
+            summary, anomalies = contents['quality_summary'], contents['quality_anomalies']
+            require(summary is not None and anomalies is not None, 'missing data quality payload')
+            metrics = evidence['typed_metrics']
+            require(isinstance(metrics, list) and len(metrics) == 1 and
+                    metrics[0]['metric'] == spec['metric_specifications'][0] and
+                    metrics[0]['sample_count'] == summary['comparison_count'] and
+                    metrics[0]['value'] == summary['timestamp_monotonicity_violations'],
+                    'Evidence data quality facts')
     require(response['output_refs'] == [check_record(run, 'experiment_run'),
                                         check_record(manifest, 'artifact_manifest'),
                                         check_record(evidence, 'result_evidence')],
@@ -1173,7 +1305,19 @@ def _validate_review_handoff(request, objects, response=None, *, payloads=None, 
     profile = (spec.get('experiment_type'), spec.get('research_stage'))
     supported = {('data_quality', 'validation'), ('statistical_factor', 'exploration'), ('trading_backtest', 'validation')}
     require(profile in supported, 'unsupported cross-object profile')
-    controls = parse(safe_read(DEFINITIONS, {'statistical_factor': 'trend20-control.schema.json', 'trading_backtest': 'issue481-backtest-control.schema.json'}.get(profile[0], 'phase0-control.schema.json')))['$defs']
+    is_single_contract = (
+        profile == ('trading_backtest', 'validation') and
+        spec.get('backtest_profile') == SINGLE_CONTRACT_PROFILE
+    )
+    if is_single_contract:
+        controls_file = 'single-contract-backtest-control.schema.json'
+    elif profile[0] == 'trading_backtest':
+        controls_file = 'issue481-backtest-control.schema.json'
+    elif profile[0] == 'statistical_factor':
+        controls_file = 'trend20-control.schema.json'
+    else:
+        controls_file = 'phase0-control.schema.json'
+    controls = parse(safe_read(DEFINITIONS, controls_file))['$defs']
     profile_schema = None
     if profile[0] != 'data_quality':
         profile_schema = parse(safe_read(DEFINITIONS, 'review-evidence.schema.json'))['$defs']
@@ -1181,7 +1325,12 @@ def _validate_review_handoff(request, objects, response=None, *, payloads=None, 
         if kind in ('research_task', 'experiment_run'):
             schema_check(obj, controls[kind])
         elif kind == 'result_evidence' and profile_schema is not None:
-            name = {'statistical_factor': 'trend20_result_evidence', 'trading_backtest': 'issue481_result_evidence'}[profile[0]]
+            if is_single_contract:
+                name = 'single_contract_result_evidence'
+            elif profile[0] == 'trading_backtest':
+                name = 'issue481_result_evidence'
+            else:
+                name = 'trend20_result_evidence'
             schema_check(obj, {'$defs': profile_schema, '$ref': '#/$defs/' + name})
         elif kind in parse(safe_read(DEFINITIONS, 'phase0-control.schema.json'))['$defs']:
             schema_check(obj, parse(safe_read(DEFINITIONS, 'phase0-control.schema.json'))['$defs'][kind])
@@ -1196,7 +1345,10 @@ def _validate_review_handoff(request, objects, response=None, *, payloads=None, 
     candidates = [e for e in definitions.entries if e['kind'] == 'criteria' and (e['name'], e['revision']) == (criteria['id'], criteria['revision'])]
     require(len(candidates) == 1, 'unknown criteria definition')
     _, criterion = definitions.resolve('criteria', {'name': criteria['id'], 'revision': criteria['revision'], 'content_hash': criteria['content_hash'], 'locator': candidates[0]['locator']})
-    expected_criteria = {('data_quality', 'validation'): 'phase0-date-order-criteria', ('statistical_factor', 'exploration'): 'phase0.trend20.review_evidence.criteria', ('trading_backtest', 'validation'): 'phase0.issue481.review_evidence.criteria'}[profile]
+    if is_single_contract:
+        expected_criteria = SINGLE_CONTRACT_CRITERIA_ID
+    else:
+        expected_criteria = {('data_quality', 'validation'): 'phase0-date-order-criteria', ('statistical_factor', 'exploration'): 'phase0.trend20.review_evidence.criteria', ('trading_backtest', 'validation'): 'phase0.issue481.review_evidence.criteria'}[profile]
     require(criterion['id'] == expected_criteria, 'criteria profile')
     for kind, ref in request['context_refs'].items():
         require(kind in objects and ref == check_record(objects[kind], kind), 'context reference: ' + kind)
@@ -1209,12 +1361,19 @@ def _validate_review_handoff(request, objects, response=None, *, payloads=None, 
         require(time_value(run['timing']['started_at']) <= time_value(run['timing']['completed_at']), 'Run time order')
         require(run['process_exit_code'] == (0 if run['run_status'] == 'COMPLETED' else 1), 'Run exit status')
     elif profile[0] == 'trading_backtest':
-        require(run['run_status'] == 'COMPLETED' and run['process_exit_code'] == 3 and run['resolved_computation_manifest']['stop_reason'] == 'STOP_ECONOMIC_GATE', 'Issue481 stop status')
+        if is_single_contract:
+            require(time_value(run['timing']['started_at']) <= time_value(run['timing']['completed_at']), 'Run time order')
+            require(run['process_exit_code'] == (0 if run['run_status'] == 'COMPLETED' else 1), 'Run exit status')
+        else:
+            require(run['run_status'] == 'COMPLETED' and run['process_exit_code'] == 3 and run['resolved_computation_manifest']['stop_reason'] == 'STOP_ECONOMIC_GATE', 'Issue481 stop status')
     else:
         require(run['run_status'] == 'COMPLETED' and run['process_exit_code'] == 0, 'Trend20 run status')
     require((manifest['run_id'], manifest['run_content_hash']) == (run['run_id'], run['run_content_hash']), 'Manifest Run reference')
     require(manifest['experiment_type'] == spec['experiment_type'], 'Manifest Spec type')
-    prefix = {'data_quality': 'phase0.', 'statistical_factor': 'phase0.trend20.', 'trading_backtest': 'phase0.issue481.'}[profile[0]]
+    if is_single_contract:
+        prefix = SINGLE_CONTRACT_PAYLOAD_PREFIX
+    else:
+        prefix = {'data_quality': 'phase0.', 'statistical_factor': 'phase0.trend20.', 'trading_backtest': 'phase0.issue481.'}[profile[0]]
     for entry in manifest['entries']:
         definition, _ = definitions.resolve('payload', entry['content_schema_ref'])
         require(definition['role'] == entry['role'] and definition['name'] == prefix + entry['role'], 'profile payload definition')
@@ -1224,9 +1383,12 @@ def _validate_review_handoff(request, objects, response=None, *, payloads=None, 
     present = [{**{k: manifest[v] for k, v in [('manifest_id', 'manifest_id'), ('manifest_revision', 'revision'), ('manifest_content_hash', 'manifest_content_hash')]}, **{k: e[k] for k in ('artifact_id', 'role', 'content_sha256')}} for e in manifest['entries'] if e['availability'] == 'present']
     require(evidence['supporting_artifacts'] == present and request['artifact_requirements']['exact_refs'] == present, 'Evidence artifact references')
     require(request['artifact_requirements']['role_profile_ref'] == manifest['artifact_profile'], 'role profile')
-    required_roles = COMMON | TYPED[manifest['experiment_type']]
-    if run['run_status'] == 'FAILED':
-        required_roles |= {'failure_diagnostics'}
+    if is_single_contract and run['run_status'] == 'FAILED':
+        required_roles = COMMON | {'failure_diagnostics'}
+    else:
+        required_roles = COMMON | TYPED[manifest['experiment_type']]
+        if run['run_status'] == 'FAILED':
+            required_roles |= {'failure_diagnostics'}
     if profile[0] == 'data_quality' and run['run_status'] == 'FAILED':
         diagnostics = [entry for entry in manifest['entries'] if entry['role'] == 'failure_diagnostics']
         require(len(diagnostics) == 1 and diagnostics[0]['availability'] == 'present', 'failure diagnostics delivery')
@@ -1258,19 +1420,31 @@ def _validate_review_handoff(request, objects, response=None, *, payloads=None, 
         require(metrics['top_bottom_spread']['precision'] == summary['precision'], 'Trend20 top-bottom spread precision mismatch')
         require(metrics['metrics_precision'] == summary['precision'], 'Trend20 metrics precision mismatch')
     elif profile[0] == 'trading_backtest':
-        summary = _resolve_manifest_payload(manifest, definitions, 'backtest_summary',
-                                            payloads=payloads, root=root)
-        rows = evidence['typed_metrics']['account_metrics']
-        expected = {f'{p}:{s}:{x}' for p in ('CANDIDATE', 'PAIRED') for s in ('PRIMARY_2S', 'STRESS_5S') for x in ('ag', 'au', 'cu', 'rb', 'ru', 'sc')}
-        require(len(rows) == 24 and {r['account_id'] for r in rows} == expected and all(r['account_id'] == ':'.join((r['path'], r['scenario'], r['product'])) for r in rows), 'Issue481 evidence account metrics')
-        summary_rows = summary.get('account_metrics', [])
-        summary_by_id = {r['account_id']: r for r in summary_rows}
-        require(len(summary_by_id) == 24 and set(summary_by_id) == expected, 'Issue481 summary account metrics')
-        for r in rows:
-            acc_id = r['account_id']
-            s_row = summary_by_id[acc_id]
-            for field in ('net_pnl_cny', 'fees_cny', 'trade_count', 'path', 'scenario', 'product'):
-                require(r[field] == s_row[field], f'Issue481 {field} mismatch: {acc_id}')
+        if is_single_contract:
+            if run['run_status'] == 'COMPLETED':
+                summary = _resolve_manifest_payload(manifest, definitions, 'backtest_summary',
+                                                    payloads=payloads, root=root)
+                metrics = evidence['typed_metrics']
+                require(metrics is not None and metrics.get('profile') == SINGLE_CONTRACT_PROFILE, 'SingleContract evidence profile')
+                require(metrics['product'] == summary['product'] and metrics['exact_contract'] == summary['exact_contract'], 'SingleContract evidence contract mismatch')
+                require(metrics['net_pnl'] == summary['net_pnl'] and metrics['total_fees'] == summary['total_fees'] and metrics['trade_count'] == summary['total_trades'], 'SingleContract evidence metrics mismatch')
+            else:
+                require(evidence['typed_metrics'] is None, 'failed evidence typed_metrics must be null')
+                require(isinstance(evidence.get('missing_reason'), str) and evidence['missing_reason'], 'failed evidence missing_reason required')
+        else:
+            summary = _resolve_manifest_payload(manifest, definitions, 'backtest_summary',
+                                                payloads=payloads, root=root)
+            rows = evidence['typed_metrics']['account_metrics']
+            expected = {f'{p}:{s}:{x}' for p in ('CANDIDATE', 'PAIRED') for s in ('PRIMARY_2S', 'STRESS_5S') for x in ('ag', 'au', 'cu', 'rb', 'ru', 'sc')}
+            require(len(rows) == 24 and {r['account_id'] for r in rows} == expected and all(r['account_id'] == ':'.join((r['path'], r['scenario'], r['product'])) for r in rows), 'Issue481 evidence account metrics')
+            summary_rows = summary.get('account_metrics', [])
+            summary_by_id = {r['account_id']: r for r in summary_rows}
+            require(len(summary_by_id) == 24 and set(summary_by_id) == expected, 'Issue481 summary account metrics')
+            for r in rows:
+                acc_id = r['account_id']
+                s_row = summary_by_id[acc_id]
+                for field in ('net_pnl_cny', 'fees_cny', 'trade_count', 'path', 'scenario', 'product'):
+                    require(r[field] == s_row[field], f'Issue481 {field} mismatch: {acc_id}')
 
     if response is not None:
         require(len(response.get('output_refs', [])) == 1 and response['output_refs'][0]['object_type'] == 'review', 'review output')

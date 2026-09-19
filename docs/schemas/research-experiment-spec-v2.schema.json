@@ -16,6 +16,9 @@
     },
     {
       "$ref": "#/$defs/issue481_backtest_spec"
+    },
+    {
+      "$ref": "#/$defs/single_contract_backtest_spec"
     }
   ],
   "allOf": [
@@ -1820,6 +1823,198 @@
         },
         "holdout_policy": {
           "const": "unknown"
+        }
+      }
+    },
+    "single_contract_backtest_spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "hash_profile",
+        "spec_id",
+        "revision",
+        "task_id",
+        "task_revision",
+        "task_content_hash",
+        "spec_content_hash",
+        "experiment_type",
+        "research_stage",
+        "backtest_profile",
+        "dataset_requirements",
+        "contract_specifications",
+        "strategy_spec",
+        "execution_config",
+        "cost_model"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "research_lab.experiment.v2"
+        },
+        "hash_profile": {
+          "const": "research-json-v1"
+        },
+        "spec_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "type": "string",
+          "pattern": "^rev\\.[1-9][0-9]*$"
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "task_revision": {
+          "type": "string",
+          "pattern": "^rev\\.[1-9][0-9]*$"
+        },
+        "task_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "spec_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "experiment_type": {
+          "const": "trading_backtest"
+        },
+        "research_stage": {
+          "const": "validation"
+        },
+        "backtest_profile": {
+          "const": "research_lab.single_contract_backtest.v1"
+        },
+        "dataset_requirements": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "product",
+            "exact_contract",
+            "time_range",
+            "snapshot_sha256",
+            "snapshot_locator",
+            "provenance"
+          ],
+          "properties": {
+            "product": {
+              "type": "string",
+              "minLength": 1
+            },
+            "exact_contract": {
+              "type": "string",
+              "minLength": 1
+            },
+            "time_range": {
+              "$ref": "#/$defs/time_range"
+            },
+            "snapshot_sha256": {
+              "$ref": "#/$defs/sha256_hash"
+            },
+            "snapshot_locator": {
+              "type": "string",
+              "minLength": 1
+            },
+            "provenance": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "contract_specifications": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "target_symbol",
+            "multiplier",
+            "price_tick",
+            "price_currency"
+          ],
+          "properties": {
+            "target_symbol": {
+              "type": "string",
+              "minLength": 1
+            },
+            "multiplier": {
+              "$ref": "#/$defs/decimal_string"
+            },
+            "price_tick": {
+              "$ref": "#/$defs/decimal_string"
+            },
+            "price_currency": {
+              "const": "CNY"
+            },
+            "margin_ratio": {
+              "$ref": "#/$defs/decimal_string"
+            }
+          }
+        },
+        "strategy_spec": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "strategy_name",
+            "implementation_ref",
+            "parameters"
+          ],
+          "properties": {
+            "strategy_name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "implementation_ref": {
+              "type": "string",
+              "minLength": 1
+            },
+            "parameters": {
+              "type": "object"
+            }
+          }
+        },
+        "execution_config": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "initial_capital",
+            "capital_currency"
+          ],
+          "properties": {
+            "initial_capital": {
+              "$ref": "#/$defs/decimal_string"
+            },
+            "capital_currency": {
+              "const": "CNY"
+            },
+            "position_sizing": {
+              "type": "object"
+            }
+          }
+        },
+        "cost_model": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "commission_bps",
+            "slippage_ticks",
+            "currency"
+          ],
+          "properties": {
+            "commission_bps": {
+              "$ref": "#/$defs/decimal_string"
+            },
+            "slippage_ticks": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "currency": {
+              "const": "CNY"
+            }
+          }
+        },
+        "holdout_policy": {
+          "type": "string"
         }
       }
     }

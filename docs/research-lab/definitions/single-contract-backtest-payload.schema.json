@@ -1,0 +1,329 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "dataset_metadata": {
+      "type": "object",
+      "required": [
+        "profile",
+        "product",
+        "exact_contract",
+        "snapshot_locator",
+        "snapshot_sha256",
+        "snapshot_byte_length",
+        "provenance",
+        "limitations"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "const": "research_lab.single_contract_backtest.v1"
+        },
+        "product": {
+          "type": "string",
+          "minLength": 1
+        },
+        "exact_contract": {
+          "type": "string",
+          "minLength": 1
+        },
+        "snapshot_locator": {
+          "type": "string",
+          "minLength": 1
+        },
+        "snapshot_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "snapshot_byte_length": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "provenance": {
+          "type": "string",
+          "minLength": 1
+        },
+        "limitations": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "method_definition": {
+      "type": "object",
+      "required": [
+        "profile",
+        "strategy_name",
+        "strategy_id",
+        "source_sha256",
+        "parameters",
+        "limitations"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "const": "research_lab.single_contract_backtest.v1"
+        },
+        "strategy_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "strategy_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "parameters": {
+          "type": "object"
+        },
+        "limitations": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "environment_lock": {
+      "type": "object",
+      "required": [
+        "profile",
+        "source_sha256",
+        "limitations"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "const": "research_lab.single_contract_backtest.v1"
+        },
+        "source_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "environment_details": {
+          "type": ["object", "string"]
+        },
+        "limitations": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "replay_instructions": {
+      "type": "object",
+      "required": [
+        "profile",
+        "command",
+        "limitations"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "const": "research_lab.single_contract_backtest.v1"
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1
+        },
+        "entry_point": {
+          "type": "string"
+        },
+        "limitations": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "backtest_summary": {
+      "type": "object",
+      "required": [
+        "profile",
+        "product",
+        "exact_contract",
+        "initial_capital",
+        "ending_equity",
+        "net_pnl",
+        "total_fees",
+        "total_trades"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "const": "research_lab.single_contract_backtest.v1"
+        },
+        "product": {
+          "type": "string",
+          "minLength": 1
+        },
+        "exact_contract": {
+          "type": "string",
+          "minLength": 1
+        },
+        "initial_capital": {
+          "type": "string"
+        },
+        "ending_equity": {
+          "type": "string"
+        },
+        "net_pnl": {
+          "type": "string"
+        },
+        "total_fees": {
+          "type": "string"
+        },
+        "total_trades": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "summary_metrics": {
+          "type": "object"
+        }
+      }
+    },
+    "trade_blotter": {
+      "type": "object",
+      "required": [
+        "profile",
+        "product",
+        "exact_contract",
+        "trades"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "const": "research_lab.single_contract_backtest.v1"
+        },
+        "product": {
+          "type": "string",
+          "minLength": 1
+        },
+        "exact_contract": {
+          "type": "string",
+          "minLength": 1
+        },
+        "trades": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "trade_id",
+              "timestamp",
+              "side",
+              "price",
+              "volume",
+              "fee",
+              "turnover"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "trade_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "timestamp": {
+                "type": "string"
+              },
+              "side": {
+                "enum": [
+                  "BUY",
+                  "SELL"
+                ]
+              },
+              "price": {
+                "type": "string"
+              },
+              "volume": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "fee": {
+                "type": "string"
+              },
+              "turnover": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "equity_curve": {
+      "type": "object",
+      "required": [
+        "profile",
+        "product",
+        "exact_contract",
+        "points"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "const": "research_lab.single_contract_backtest.v1"
+        },
+        "product": {
+          "type": "string",
+          "minLength": 1
+        },
+        "exact_contract": {
+          "type": "string",
+          "minLength": 1
+        },
+        "points": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "timestamp",
+              "equity",
+              "cash",
+              "margin"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "timestamp": {
+                "type": "string"
+              },
+              "equity": {
+                "type": "string"
+              },
+              "cash": {
+                "type": "string"
+              },
+              "margin": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "failure_diagnostics": {
+      "type": "object",
+      "required": [
+        "profile",
+        "error_type",
+        "error_message"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "const": "research_lab.single_contract_backtest.v1"
+        },
+        "error_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "error_message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "process_exit_code": {
+          "type": "integer"
+        },
+        "details": {
+          "type": "object"
+        }
+      }
+    }
+  }
+}
