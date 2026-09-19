@@ -1,9 +1,9 @@
 """Protocol v2 minimal deterministic trading_backtest execution bridge (#556).
 
 Bridges Protocol v2 Task/Spec admission to existing BacktestAdapter capability,
-directly consuming physical snapshot bytes, and produces verified ExperimentRun,
-ArtifactManifest, and ResultEvidence records conforming to
-research_lab.single_contract_backtest.v1.
+directly consuming physical snapshot bytes without any override bypass,
+and produces verified ExperimentRun, ArtifactManifest, and ResultEvidence records
+conforming to research_lab.single_contract_backtest.v1.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import copy
 import csv
 import decimal
 import os
+import sys
 import traceback
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,8 @@ from research_lab.schemas.experiment import (
     FactorSpec,
     StrategySpec,
 )
+
+CURRENT_SOURCE_PATH = Path(__file__).resolve()
 
 
 def _format_cny(val: float | str | decimal.Decimal) -> str:
@@ -322,8 +325,8 @@ class V2BacktestExecutionBridge:
 
     Strictly admits ('trading_backtest', 'validation') under research_lab.single_contract_backtest.v1.
     Reuses existing BacktestAdapter and directly consumes physical snapshot bytes
-    to produce verifiable, reproducible Run, Manifest, and Evidence facts without
-    introducing worker queues, fake accounts, or external runtimes.
+    (without any override bypass) to produce verifiable, reproducible Run, Manifest, and Evidence
+    facts without introducing worker queues, fake accounts, or external runtimes.
     """
 
     def __init__(
@@ -342,10 +345,9 @@ class V2BacktestExecutionBridge:
         spec: dict[str, Any] | Path | str,
         output_dir: Path | str,
         *,
-        override_prices: list[float] | None = None,
         force_failure: bool = False,
     ) -> dict[str, Any]:
-        """Execute a Protocol v2 single-contract trading_backtest experiment."""
+        """Execute a Protocol v2 single-contract trading_backtest experiment directly from physical snapshot."""
         target_dir = Path(output_dir).resolve()
         task_dict = self._load_dict(task)
         spec_dict = self._load_dict(spec)
@@ -371,7 +373,7 @@ class V2BacktestExecutionBridge:
         manifest_id = f"manifest-backtest-{uuid4().hex[:12]}"
         evidence_id = f"evidence-backtest-{uuid4().hex[:12]}"
 
-        # Physical snapshot bytes reading
+        # Physical snapshot bytes reading (strict: zero override allowed)
         req = spec_dict["dataset_requirements"]
         snapshot_locator = req["snapshot_locator"]
         target_path = Path(snapshot_locator) if os.path.isabs(snapshot_locator) else v2.ROOT / snapshot_locator
@@ -386,7 +388,7 @@ class V2BacktestExecutionBridge:
         exec_cfg = spec_dict.get("execution_config") or {}
         initial_capital = float(exec_cfg.get("initial_capital", 100000.0))
         pos_sizing = exec_cfg.get("position_sizing") or {}
-        position_size = float(pos_sizing.get("lots", 1.0))
+        lots = round(float(pos_sizing.get("lots", 1.0)))
 
         contract_specs = spec_dict.get("contract_specifications") or {}
         multiplier = float(contract_specs.get("multiplier", 10.0))
@@ -416,6 +418,9 @@ class V2BacktestExecutionBridge:
             "stop_reason": "COMPLETED_END_OF_DATA",
         }
 
+        # Real source code hash for environment lock
+        source_sha256 = v2.sha(CURRENT_SOURCE_PATH.read_bytes())
+
         # 4 common payloads always written
         dataset_meta = {
             "profile": SINGLE_CONTRACT_PROFILE,
@@ -436,7 +441,7 @@ class V2BacktestExecutionBridge:
             "profile": SINGLE_CONTRACT_PROFILE,
             "strategy_name": strategy_name,
             "strategy_id": f"strat-{strategy_name}-001",
-            "source_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "source_sha256": source_sha256,
             "parameters": strategy_spec.get("parameters", {}),
             "limitations": "Single-contract deterministic simulation.",
         }
@@ -444,58 +449,65 @@ class V2BacktestExecutionBridge:
 
         env_lock = {
             "profile": SINGLE_CONTRACT_PROFILE,
-            "source_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "source_sha256": source_sha256,
             "environment_details": "vnpy-web-bridge-v2-single-contract",
             "limitations": "Pure Python offline backtest environment.",
         }
         self._write_payload(target_dir / "environment_lock.json", env_lock)
 
+        replay_command = (
+            f"python -m research_lab.runners.v2_backtest "
+            f"--task {materials_dir / 'task.json'} --spec {materials_dir / 'spec.json'} --output <replayed_output>"
+        )
         replay_inst = {
             "profile": SINGLE_CONTRACT_PROFILE,
-            "command": f"python -m research_lab.runners.v2_backtest --spec {spec_dict['spec_id']}",
+            "command": replay_command,
             "entry_point": "research_lab.runners.v2_backtest",
             "limitations": "Local single-contract deterministic execution.",
         }
         self._write_payload(target_dir / "replay_instructions.json", replay_inst)
 
         is_failed = False
-        summary_payload = None
+        backtest_run = None
 
         try:
             if force_failure:
                 raise RuntimeError("Forced simulation failure requested for FAILED state testing")
 
-            # Parse physical snapshot CSV bytes directly
+            # Parse physical snapshot CSV bytes directly (100% genuine data consumption)
             timestamps, file_prices = _parse_physical_snapshot(raw_bytes, exact_contract)
-            effective_prices = override_prices if override_prices is not None else file_prices
 
-            # Run deterministic backtest adapter
+            # Construct experiment spec and execute via existing adapter
             v1_exp = ExperimentSpec(
                 schema_version="research_lab.experiment.v1",
                 experiment_id=run_id,
                 strategy=StrategySpec(name=strategy_name),
                 factor=FactorSpec(name="close_return"),
-                dataset=DatasetSpec(name=exact_contract, prices=effective_prices),
-                execution=ExecutionConfig(initial_capital=initial_capital, position_size=position_size),
+                dataset=DatasetSpec(name=exact_contract, prices=file_prices),
+                execution=ExecutionConfig(initial_capital=initial_capital, position_size=float(lots)),
                 cost_model=CostModel(bps=commission_bps),
                 universe=[product],
             )
-            backtest_run = self.adapter.run(v1_exp)
 
-            # Generate factual single-contract payloads
-            summary_payload = self._write_completed_payloads(
+            # Unified single-contract execution inside the Adapter:
+            # produces trades, points, fees, and equity from ONE truth source
+            backtest_run = self.adapter.run(
+                v1_exp,
+                multiplier=multiplier,
+                price_tick=price_tick,
+                margin_ratio=margin_ratio,
+                slippage_ticks=slippage_ticks,
+                timestamps=timestamps,
+                lots=lots,
+            )
+
+            # Bridge only serializes facts directly exported by the Adapter
+            self._write_completed_payloads(
                 target_dir=target_dir,
                 product=product,
                 exact_contract=exact_contract,
                 backtest_run=backtest_run,
-                prices=effective_prices,
-                timestamps=timestamps,
                 initial_capital=initial_capital,
-                multiplier=multiplier,
-                margin_ratio=margin_ratio,
-                commission_bps=commission_bps,
-                slippage_ticks=slippage_ticks,
-                price_tick=price_tick,
             )
 
         except Exception as exc:  # noqa: BLE001
@@ -570,14 +582,16 @@ class V2BacktestExecutionBridge:
         ]
 
         typed_metrics = None
-        if not is_failed and summary_payload is not None:
+        if not is_failed and backtest_run is not None:
+            net_pnl_cny = _format_cny(backtest_run.equity_curve[-1] - initial_capital)
+            total_fees_cny = _format_cny(backtest_run.total_fees)
             typed_metrics = {
                 "profile": SINGLE_CONTRACT_PROFILE,
                 "product": product,
                 "exact_contract": exact_contract,
-                "net_pnl": summary_payload["net_pnl"],
-                "total_fees": summary_payload["total_fees"],
-                "trade_count": summary_payload["total_trades"],
+                "net_pnl": net_pnl_cny,
+                "total_fees": total_fees_cny,
+                "trade_count": len(backtest_run.trades),
             }
 
         evidence_record = {
@@ -628,40 +642,22 @@ class V2BacktestExecutionBridge:
         product: str,
         exact_contract: str,
         backtest_run: Any,
-        prices: list[float],
-        timestamps: list[str],
         initial_capital: float,
-        multiplier: float,
-        margin_ratio: float,
-        commission_bps: float,
-        slippage_ticks: int,
-        price_tick: float,
     ) -> dict[str, Any]:
-        """Write single-contract trade_blotter, equity_curve, and backtest_summary without multi-account padding."""
-        positions = backtest_run.positions
-        trades = []
-        accumulated_fees = decimal.Decimal(0)
-
-        for i in range(1, len(positions)):
-            diff = positions[i] - positions[i - 1]
-            if diff != 0:
-                side = "BUY" if diff > 0 else "SELL"
-                vol = int(abs(diff))
-                price = prices[i]
-                turnover = price * multiplier * vol
-                fee = turnover * (commission_bps / 10000.0) + (slippage_ticks * price_tick * multiplier * vol)
-                accumulated_fees += decimal.Decimal(str(fee))
-                ts = timestamps[i] if i < len(timestamps) else f"2024-01-02T09:0{i}:00.000000Z"
-                trades.append({
-                    "trade_id": f"T{len(trades) + 1:03d}",
-                    "timestamp": ts,
-                    "side": side,
-                    "price": _format_cny(price),
-                    "volume": vol,
-                    "fee": _format_cny(fee),
-                    "turnover": _format_cny(turnover),
-                })
-
+        """Serialize unified single-contract execution facts exported directly by the adapter."""
+        # 1. trade_blotter
+        trades = [
+            {
+                "trade_id": t.trade_id,
+                "timestamp": t.timestamp,
+                "side": t.side,
+                "price": _format_cny(t.price),
+                "volume": t.volume,
+                "fee": _format_cny(t.fee),
+                "turnover": _format_cny(t.turnover),
+            }
+            for t in backtest_run.trades
+        ]
         trade_blotter = {
             "profile": SINGLE_CONTRACT_PROFILE,
             "product": product,
@@ -670,21 +666,16 @@ class V2BacktestExecutionBridge:
         }
         self._write_payload(target_dir / "trade_blotter.json", trade_blotter)
 
-        # Equity curve points
-        points = []
-        for idx, eq in enumerate(backtest_run.equity_curve):
-            pos = positions[idx]
-            price = prices[idx] if idx < len(prices) else prices[-1]
-            ts = timestamps[idx] if idx < len(timestamps) else f"2024-01-02T09:0{idx}:00.000000Z"
-            margin_val = abs(pos) * price * multiplier * margin_ratio
-            cash_val = eq - margin_val
-            points.append({
-                "timestamp": ts,
-                "equity": _format_cny(eq),
-                "cash": _format_cny(cash_val),
-                "margin": _format_cny(margin_val),
-            })
-
+        # 2. equity_curve points
+        points = [
+            {
+                "timestamp": p.timestamp,
+                "equity": _format_cny(p.equity),
+                "cash": _format_cny(p.cash),
+                "margin": _format_cny(p.margin),
+            }
+            for p in backtest_run.points
+        ]
         equity_curve = {
             "profile": SINGLE_CONTRACT_PROFILE,
             "product": product,
@@ -693,10 +684,10 @@ class V2BacktestExecutionBridge:
         }
         self._write_payload(target_dir / "equity_curve.json", equity_curve)
 
-        # Backtest summary
+        # 3. backtest_summary
         ending_equity_val = backtest_run.equity_curve[-1]
         net_pnl_val = ending_equity_val - initial_capital
-        total_fees_cny = _format_cny(accumulated_fees)
+        total_fees_cny = _format_cny(backtest_run.total_fees)
 
         backtest_summary = {
             "profile": SINGLE_CONTRACT_PROFILE,
@@ -706,7 +697,7 @@ class V2BacktestExecutionBridge:
             "ending_equity": _format_cny(ending_equity_val),
             "net_pnl": _format_cny(net_pnl_val),
             "total_fees": total_fees_cny,
-            "total_trades": len(trades),
+            "total_trades": len(backtest_run.trades),
             "summary_metrics": {
                 "sharpe_ratio": _format_cny(backtest_run.metrics.sharpe),
                 "max_drawdown": _format_cny(backtest_run.metrics.max_drawdown),
@@ -822,7 +813,6 @@ class V2BacktestExecutionBridge:
         materials_dir: Path | str,
         output_dir: Path | str,
         *,
-        override_prices: list[float] | None = None,
         force_failure: bool = False,
     ) -> dict[str, Any]:
         """Convenience loader from materials directory containing task.json and spec.json."""
@@ -837,7 +827,6 @@ class V2BacktestExecutionBridge:
             task=task_path,
             spec=spec_path,
             output_dir=output_dir,
-            override_prices=override_prices,
             force_failure=force_failure,
         )
 
@@ -848,7 +837,6 @@ def execute_v2_backtest_spec(
     output_dir: Path | str,
     *,
     result_store: ResultStore | None = None,
-    override_prices: list[float] | None = None,
     force_failure: bool = False,
 ) -> dict[str, Any]:
     """Convenience top-level execution runner for Protocol v2 trading_backtest."""
@@ -857,7 +845,6 @@ def execute_v2_backtest_spec(
         task=task,
         spec=spec,
         output_dir=output_dir,
-        override_prices=override_prices,
         force_failure=force_failure,
     )
 
@@ -867,7 +854,6 @@ def execute_v2_backtest_from_materials(
     output_dir: Path | str,
     *,
     result_store: ResultStore | None = None,
-    override_prices: list[float] | None = None,
     force_failure: bool = False,
 ) -> dict[str, Any]:
     """Convenience top-level loader and runner from a materials directory."""
@@ -875,6 +861,39 @@ def execute_v2_backtest_from_materials(
     return bridge.execute_from_materials(
         materials_dir,
         output_dir,
-        override_prices=override_prices,
         force_failure=force_failure,
     )
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Executable CLI entry point for replay and execution."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Execute Protocol v2 single-contract trading_backtest")
+    parser.add_argument("--spec", help="Path to spec.json or materials directory", required=True)
+    parser.add_argument("--task", help="Path to task.json (optional if --spec is materials dir)")
+    parser.add_argument("--output", help="Path to output bundle directory", required=True)
+    args = parser.parse_args(argv)
+
+    spec_path = Path(args.spec).resolve()
+    output_path = Path(args.output).resolve()
+
+    if spec_path.is_dir():
+        res = execute_v2_backtest_from_materials(spec_path, output_path)
+    else:
+        if not args.task:
+            candidate_task = spec_path.parent / "task.json"
+            if candidate_task.is_file():
+                task_path = candidate_task
+            else:
+                raise ValueError("--task is required when --spec points to a file")
+        else:
+            task_path = Path(args.task).resolve()
+        res = execute_v2_backtest_spec(task_path, spec_path, output_path)
+
+    print(f"Run {res['run']['run_id']} finished with status {res['run_status']}")
+    return int(res["process_exit_code"])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

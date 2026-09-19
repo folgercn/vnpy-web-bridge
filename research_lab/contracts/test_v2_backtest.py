@@ -453,20 +453,282 @@ def test_8_from_materials_success(
     assert (tmp_path / "out_mat" / "backtest_summary.json").is_file()
 
 
-def test_9_custom_price_series_dynamically_effective(
+def test_9_custom_physical_snapshot_dynamically_effective(
     single_contract_bundle: tuple[dict, dict], tmp_path: Path
 ) -> None:
-    """Verify that different price series dynamically change factual returns and costs."""
-    task, spec = single_contract_bundle
+    """Verify that different physical snapshot bytes dynamically change factual returns and costs.
 
-    res_flat = execute_v2_backtest_spec(
-        task, spec, tmp_path / "flat", override_prices=[3900.0, 3900.0, 3900.0, 3900.0, 3900.0]
-    )
-    res_up = execute_v2_backtest_spec(
-        task, spec, tmp_path / "up", override_prices=[3900.0, 4000.0, 4100.0, 4200.0, 4300.0]
-    )
+    Strictly satisfies P1-A: Zero override_prices bypass. Must consume real physical CSV files.
+    """
+    task_base, spec_base = single_contract_bundle
+
+    # 1. Create two physical CSV files: one flat, one trending up
+    flat_csv = tmp_path / "flat_snapshot.csv"
+    up_csv = tmp_path / "up_snapshot.csv"
+
+    header = "timestamp,symbol,open,high,low,close,volume,open_interest\n"
+    flat_lines = [
+        "2024-01-02T09:00:00.000000Z,rb2405,3900.0,3900.0,3900.0,3900.0,100,500\n",
+        "2024-01-02T09:01:00.000000Z,rb2405,3900.0,3900.0,3900.0,3900.0,100,500\n",
+        "2024-01-02T09:02:00.000000Z,rb2405,3900.0,3900.0,3900.0,3900.0,100,500\n",
+        "2024-01-02T09:03:00.000000Z,rb2405,3900.0,3900.0,3900.0,3900.0,100,500\n",
+        "2024-01-02T09:04:00.000000Z,rb2405,3900.0,3900.0,3900.0,3900.0,100,500\n",
+    ]
+    up_lines = [
+        "2024-01-02T09:00:00.000000Z,rb2405,3900.0,3910.0,3890.0,3900.0,100,500\n",
+        "2024-01-02T09:01:00.000000Z,rb2405,3900.0,4010.0,3900.0,4000.0,120,510\n",
+        "2024-01-02T09:02:00.000000Z,rb2405,4000.0,4110.0,4000.0,4100.0,80,505\n",
+        "2024-01-02T09:03:00.000000Z,rb2405,4100.0,4210.0,4100.0,4200.0,150,520\n",
+        "2024-01-02T09:04:00.000000Z,rb2405,4200.0,4310.0,4200.0,4300.0,200,530\n",
+    ]
+    flat_bytes = (header + "".join(flat_lines)).encode("utf-8")
+    up_bytes = (header + "".join(up_lines)).encode("utf-8")
+
+    flat_csv.write_bytes(flat_bytes)
+    up_csv.write_bytes(up_bytes)
+
+    flat_sha = v2.sha(flat_bytes)
+    up_sha = v2.sha(up_bytes)
+
+    # 2. Build flat Task & Spec
+    task_flat = copy.deepcopy(task_base)
+    task_flat["data_requirements"]["snapshot_locator"] = str(flat_csv)
+    task_flat["data_requirements"]["snapshot_sha256"] = flat_sha
+    _seal(task_flat, "task")
+
+    spec_flat = copy.deepcopy(spec_base)
+    spec_flat["task_content_hash"] = task_flat["task_content_hash"]
+    spec_flat["dataset_requirements"]["snapshot_locator"] = str(flat_csv)
+    spec_flat["dataset_requirements"]["snapshot_sha256"] = flat_sha
+    _seal(spec_flat, "spec")
+
+    # 3. Build up Task & Spec
+    task_up = copy.deepcopy(task_base)
+    task_up["data_requirements"]["snapshot_locator"] = str(up_csv)
+    task_up["data_requirements"]["snapshot_sha256"] = up_sha
+    _seal(task_up, "task")
+
+    spec_up = copy.deepcopy(spec_base)
+    spec_up["task_content_hash"] = task_up["task_content_hash"]
+    spec_up["dataset_requirements"]["snapshot_locator"] = str(up_csv)
+    spec_up["dataset_requirements"]["snapshot_sha256"] = up_sha
+    _seal(spec_up, "spec")
+
+    # 4. Execute both via physical files
+    res_flat = execute_v2_backtest_spec(task_flat, spec_flat, tmp_path / "flat_out")
+    res_up = execute_v2_backtest_spec(task_up, spec_up, tmp_path / "up_out")
 
     metrics_flat = res_flat["evidence"]["typed_metrics"]
     metrics_up = res_up["evidence"]["typed_metrics"]
 
     assert float(metrics_up["net_pnl"]) > float(metrics_flat["net_pnl"])
+    assert res_flat["run"]["resolved_computation_manifest"]["snapshot_sha256"] == flat_sha
+    assert res_up["run"]["resolved_computation_manifest"]["snapshot_sha256"] == up_sha
+
+
+def test_10_cost_multiplier_lot_slippage_accounting_reconciliation(
+    single_contract_bundle: tuple[dict, dict], tmp_path: Path
+) -> None:
+    """Validate numerical accounting reconciliation across blotter, summary, evidence, and adapter facts.
+
+    Satisfies P1-B:
+    - blotter trade fee sum == summary total_fees == evidence typed_metrics total_fees
+    - ending_equity == initial_capital + floating_pnl - total_fees
+    - net_pnl == ending_equity - initial_capital
+    - non-zero multiplier, lot, slippage, and commission are reconciled down to the cent.
+    """
+    task_base, spec_base = single_contract_bundle
+
+    # Configure non-zero parameters: lots=2, multiplier=10, price_tick=1, slippage_ticks=2, commission_bps=2
+    task = copy.deepcopy(task_base)
+    _seal(task, "task")
+
+    spec = copy.deepcopy(spec_base)
+    spec["task_content_hash"] = task["task_content_hash"]
+    spec["contract_specifications"]["multiplier"] = "10"
+    spec["contract_specifications"]["price_tick"] = "1"
+    spec["execution_config"]["initial_capital"] = "100000"
+    spec["execution_config"]["position_sizing"] = {"mode": "fixed_lots", "lots": 2}
+    spec["cost_model"]["commission_bps"] = "2"  # 2 bps = 0.0002
+    spec["cost_model"]["slippage_ticks"] = 2    # 2 ticks * 1 * 10 = 20 CNY per lot
+    _seal(spec, "spec")
+
+    output_dir = tmp_path / "reconciliation_out"
+    res = execute_v2_backtest_spec(task, spec, output_dir)
+
+    assert res["run_status"] == "COMPLETED"
+
+    # Read factual payloads
+    blotter = v2.parse((output_dir / "trade_blotter.json").read_bytes())
+    summary = v2.parse((output_dir / "backtest_summary.json").read_bytes())
+    curve = v2.parse((output_dir / "equity_curve.json").read_bytes())
+    typed = res["evidence"]["typed_metrics"]
+
+    # 1. Trade blotter vs summary vs evidence fee reconciliation
+    blotter_trades = blotter["trades"]
+    assert len(blotter_trades) == 1  # 1 buy trade for buy_and_hold
+    t0 = blotter_trades[0]
+    assert t0["side"] == "BUY"
+    assert t0["volume"] == 2
+
+    trade_p = float(t0["price"])  # 3910.0 (bar 1 price where position shifted 0 -> 2)
+    turnover = trade_p * 10 * 2
+    commission_fee = turnover * 0.0002
+    slippage_cost = 2 * 1 * 10 * 2  # 40.0
+    expected_trade_fee = commission_fee + slippage_cost
+
+    actual_trade_fee = float(t0["fee"])
+    assert round(actual_trade_fee, 4) == round(expected_trade_fee, 4)
+
+    blotter_fee_sum = sum(float(t["fee"]) for t in blotter_trades)
+    summary_fees = float(summary["total_fees"])
+    evidence_fees = float(typed["total_fees"])
+
+    assert round(blotter_fee_sum, 4) == round(summary_fees, 4)
+    assert round(summary_fees, 4) == round(evidence_fees, 4)
+
+    # 2. Equity curve and PnL reconciliation
+    initial_cap = float(summary["initial_capital"])
+    ending_eq = float(summary["ending_equity"])
+    net_pnl = float(summary["net_pnl"])
+
+    assert round(ending_eq, 4) == round(initial_cap + net_pnl, 4)
+    assert round(float(curve["points"][-1]["equity"]), 4) == round(ending_eq, 4)
+
+    # Floating PnL from bar 1 entry (3910.0) to bar 4 close (3945.0)
+    last_price = 3945.0
+    entry_price = trade_p
+    floating_pnl = (last_price - entry_price) * 10 * 2
+    expected_ending_equity = initial_cap + floating_pnl - actual_trade_fee
+
+    assert round(ending_eq, 4) == round(expected_ending_equity, 4)
+    assert round(net_pnl, 4) == round(floating_pnl - actual_trade_fee, 4)
+
+
+def test_11_flat_market_net_pnl_equals_negative_cost(
+    single_contract_bundle: tuple[dict, dict], tmp_path: Path
+) -> None:
+    """Validate that in a flat market, net PnL is exactly equal to negative transaction cost."""
+    task_base, spec_base = single_contract_bundle
+
+    # Create 5-bar flat CSV at 3900.0
+    flat_csv = tmp_path / "flat.csv"
+    header = "timestamp,symbol,open,high,low,close,volume,open_interest\n"
+    lines = [
+        f"2024-01-02T09:0{i}:00.000000Z,rb2405,3900.0,3900.0,3900.0,3900.0,100,500\n"
+        for i in range(5)
+    ]
+    raw = (header + "".join(lines)).encode("utf-8")
+    flat_csv.write_bytes(raw)
+    raw_sha = v2.sha(raw)
+
+    task = copy.deepcopy(task_base)
+    task["data_requirements"]["snapshot_locator"] = str(flat_csv)
+    task["data_requirements"]["snapshot_sha256"] = raw_sha
+    _seal(task, "task")
+
+    spec = copy.deepcopy(spec_base)
+    spec["task_content_hash"] = task["task_content_hash"]
+    spec["dataset_requirements"]["snapshot_locator"] = str(flat_csv)
+    spec["dataset_requirements"]["snapshot_sha256"] = raw_sha
+    spec["cost_model"]["commission_bps"] = "1"
+    spec["cost_model"]["slippage_ticks"] = 1
+    _seal(spec, "spec")
+
+    output_dir = tmp_path / "flat_run"
+    res = execute_v2_backtest_spec(task, spec, output_dir)
+    assert res["run_status"] == "COMPLETED"
+
+    summary = v2.parse((output_dir / "backtest_summary.json").read_bytes())
+    net_pnl = float(summary["net_pnl"])
+    total_fees = float(summary["total_fees"])
+    initial_cap = float(summary["initial_capital"])
+    ending_eq = float(summary["ending_equity"])
+
+    assert total_fees > 0
+    assert round(net_pnl, 4) == round(-total_fees, 4)
+    assert round(ending_eq, 4) == round(initial_cap - total_fees, 4)
+
+
+def test_12_single_lot_return_matches_multiplier(
+    single_contract_bundle: tuple[dict, dict], tmp_path: Path
+) -> None:
+    """Validate that single-lot gross return is strictly proportional to multiplier."""
+    task_base, spec_base = single_contract_bundle
+
+    # Run 1: multiplier = 10, zero cost
+    spec10 = copy.deepcopy(spec_base)
+    spec10["contract_specifications"]["multiplier"] = "10"
+    spec10["cost_model"]["commission_bps"] = "0"
+    spec10["cost_model"]["slippage_ticks"] = 0
+    _seal(spec10, "spec")
+
+    # Run 2: multiplier = 20, zero cost
+    spec20 = copy.deepcopy(spec_base)
+    spec20["contract_specifications"]["multiplier"] = "20"
+    spec20["cost_model"]["commission_bps"] = "0"
+    spec20["cost_model"]["slippage_ticks"] = 0
+    _seal(spec20, "spec")
+
+    res10 = execute_v2_backtest_spec(task_base, spec10, tmp_path / "mult_10")
+    res20 = execute_v2_backtest_spec(task_base, spec20, tmp_path / "mult_20")
+
+    pnl10 = float(res10["evidence"]["typed_metrics"]["net_pnl"])
+    pnl20 = float(res20["evidence"]["typed_metrics"]["net_pnl"])
+
+    assert pnl10 > 0
+    assert round(pnl20, 4) == round(pnl10 * 2.0, 4)
+
+
+def test_13_zero_trades_no_fabrication(
+    single_contract_bundle: tuple[dict, dict], tmp_path: Path
+) -> None:
+    """Validate that when strategy generates no trades, 0 trades are recorded without fabrication."""
+    task_base, spec_base = single_contract_bundle
+
+    spec = copy.deepcopy(spec_base)
+    spec["strategy_spec"]["strategy_name"] = "flat"
+    _seal(spec, "spec")
+
+    output_dir = tmp_path / "zero_trades_out"
+    res = execute_v2_backtest_spec(task_base, spec, output_dir)
+    assert res["run_status"] == "COMPLETED"
+
+    blotter = v2.parse((output_dir / "trade_blotter.json").read_bytes())
+    summary = v2.parse((output_dir / "backtest_summary.json").read_bytes())
+    typed = res["evidence"]["typed_metrics"]
+
+    assert blotter["trades"] == []
+    assert summary["total_trades"] == 0
+    assert summary["total_fees"] == "0"
+    assert summary["net_pnl"] == "0"
+    assert summary["ending_equity"] == summary["initial_capital"]
+    assert typed["trade_count"] == 0
+    assert float(typed["total_fees"]) == 0.0
+    assert float(typed["net_pnl"]) == 0.0
+
+
+def test_14_cli_replay_command_executable(
+    single_contract_bundle: tuple[dict, dict], tmp_path: Path
+) -> None:
+    """Validate that the CLI entry point main() directly executes and satisfies replay instructions."""
+    task, spec = single_contract_bundle
+    spec_file = tmp_path / "spec.json"
+    task_file = tmp_path / "task.json"
+    cli_out = tmp_path / "cli_out"
+
+    spec_file.write_text(v2.canonical(spec) + "\n", encoding="utf-8")
+    task_file.write_text(v2.canonical(task) + "\n", encoding="utf-8")
+
+    from research_lab.runners.v2_backtest import main
+
+    # Execute CLI with --spec, --task, --output
+    ret = main(["--spec", str(spec_file), "--task", str(task_file), "--output", str(cli_out)])
+    assert ret == 0
+
+    assert (cli_out / "run.json").is_file()
+    assert (cli_out / "manifest.json").is_file()
+    assert (cli_out / "evidence.json").is_file()
+    assert (cli_out / "backtest_summary.json").is_file()
+    assert (cli_out / "trade_blotter.json").is_file()
+    assert (cli_out / "equity_curve.json").is_file()
