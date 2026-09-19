@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,43 @@ def render_v2_report(receipt: dict[str, Any]) -> str:
         f"- Evidence: `{evidence['object_id']}` `{evidence['content_hash']}`",
         f"- Status: {receipt['run_status']}",
     ]
+    bundle_loc = receipt.get("bundle_location")
+    if bundle_loc:
+        bundle_path = Path(bundle_loc)
+        spec_path = bundle_path / "materials" / "spec.json"
+        evidence_path = bundle_path / "evidence.json"
+        if spec_path.is_file():
+            spec_data = json.loads(spec_path.read_text(encoding="utf-8"))
+            req = spec_data.get("dataset_requirements") or {}
+            product = req.get("product")
+            exact_contract = req.get("exact_contract")
+            if product and exact_contract:
+                lines.extend([
+                    "",
+                    "## Target",
+                    "",
+                    f"- Product: {product}",
+                    f"- Exact contract: {exact_contract}",
+                    "",
+                    "## Result summary",
+                    "",
+                ])
+                if receipt["run_status"] == "COMPLETED" and evidence_path.is_file():
+                    evidence_data = json.loads(evidence_path.read_text(encoding="utf-8"))
+                    typed_metrics = evidence_data.get("typed_metrics")
+                    if isinstance(typed_metrics, dict):
+                        lines.extend([
+                            f"- Net PnL: {typed_metrics.get('net_pnl')}",
+                            f"- Total fees: {typed_metrics.get('total_fees')}",
+                            f"- Trade count: {typed_metrics.get('trade_count')}",
+                        ])
+                    else:
+                        lines.append("- Net PnL: unavailable")
+                else:
+                    lines.extend([
+                        f"- Execution status: {receipt['run_status']}",
+                        "- Missing reason: execution_failed",
+                    ])
     return "\n".join(lines) + "\n"
 
 
@@ -152,11 +190,11 @@ def write_validation_report(root: Path, result: ValidationResult) -> Path:
     lines.extend(["", "## Stability and degradation", ""])
     if result.stability and result.degradation:
         lines.extend([
-            "- Score: %.6f / 100 (heuristic; not a promotion decision)" % result.stability.stability_score,
-            "- Positive OOS fraction: %.6f" % result.stability.positive_oos_fraction,
-            "- OOS Sharpe standard deviation: %.6f" % result.stability.oos_sharpe_stddev,
-            "- Mean total-return delta (OOS - IS): %.6f" % result.degradation.total_return_delta,
-            "- Mean Sharpe delta (OOS - IS): %.6f" % result.degradation.sharpe_delta,
+            f"- Score: {result.stability.stability_score:.6f} / 100 (heuristic; not a promotion decision)",
+            f"- Positive OOS fraction: {result.stability.positive_oos_fraction:.6f}",
+            f"- OOS Sharpe standard deviation: {result.stability.oos_sharpe_stddev:.6f}",
+            f"- Mean total-return delta (OOS - IS): {result.degradation.total_return_delta:.6f}",
+            f"- Mean Sharpe delta (OOS - IS): {result.degradation.sharpe_delta:.6f}",
         ])
     else:
         lines.append("- No completed IS/OOS fold pairs")
@@ -166,8 +204,10 @@ def write_validation_report(root: Path, result: ValidationResult) -> Path:
         lines.append(f"- {regime.regime}: folds={regime.completed_folds}, mean_total_return={mean}")
     lines.extend([
         "", "## Boundary", "",
-        "This artifact is a stable local validation handoff for a future Critic integration. "
-        "It does not implement a Critic Agent, candidate selection, LLM evaluation, live data, or promotion.",
+        (
+            "This artifact is a stable local validation handoff for a future Critic integration. "
+            "It does not implement a Critic Agent, candidate selection, LLM evaluation, live data, or promotion."
+        ),
     ])
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path

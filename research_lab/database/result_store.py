@@ -817,7 +817,19 @@ class ResultStore:
             if run.get("run_status") == "FAILED":
                 return
             definitions = v2.Definitions()
-            criteria_id = "phase0.issue481.review_evidence.criteria"
+            is_single_contract = (
+                spec.get("backtest_profile") == v2.SINGLE_CONTRACT_PROFILE
+                or task.get("task_profile") == v2.SINGLE_CONTRACT_PROFILE
+                or any(
+                    e.get("content_schema_ref", {}).get("name", "").startswith(v2.SINGLE_CONTRACT_PAYLOAD_PREFIX)
+                    for e in manifest.get("entries", [])
+                )
+            )
+            criteria_id = (
+                v2.SINGLE_CONTRACT_CRITERIA_ID
+                if is_single_contract
+                else "phase0.issue481.review_evidence.criteria"
+            )
             criteria_def = next(
                 e for e in definitions.entries if e["kind"] == "criteria" and e["name"] == criteria_id
             )
