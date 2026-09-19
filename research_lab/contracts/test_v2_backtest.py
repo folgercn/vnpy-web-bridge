@@ -820,12 +820,15 @@ def test_15_captured_snapshot_tamper_and_missing_rejected(
     with pytest.raises(ValueError, match="(?:SingleContract captured )?snapshot sha256 mismatch"):
         v2.validate_manifest(output_dir, manifest, run, task=task, spec=spec)
 
-    # 2. Missing captured snapshot -> validate_manifest must reject (no silent fallback)
+    # 2. Missing captured snapshot -> validate_manifest and validate_spec must reject (zero fallback)
     captured_csv.unlink()
     assert not captured_csv.exists()
 
-    with pytest.raises(ValueError, match="snapshot (?:file )?missing or not regular file"):
+    with pytest.raises(ValueError, match="SingleContract captured snapshot missing or not regular file"):
         v2.validate_manifest(output_dir, manifest, run, task=task, spec=spec)
+
+    with pytest.raises(ValueError, match="SingleContract captured snapshot missing or not regular file"):
+        v2.validate_spec(spec, task, root=output_dir)
 
 
 def test_16_captured_snapshot_create_only_no_overwrite(
@@ -858,3 +861,41 @@ def test_17_failed_run_preserves_captured_snapshot(
 
     # validate_manifest for FAILED run succeeds with captured snapshot
     v2.validate_manifest(output_dir, res["manifest"], res["run"], task=task, spec=spec)
+
+
+def test_18_dataset_metadata_byte_length_mismatch_rejected(
+    single_contract_bundle: tuple[dict, dict], tmp_path: Path
+) -> None:
+    """Validate that tampered snapshot_byte_length in dataset_metadata is rejected even if entry is sealed in manifest."""
+    task, spec = single_contract_bundle
+    output_dir = tmp_path / "metadata_byte_len_tamper_out"
+
+    res = execute_v2_backtest_spec(task, spec, output_dir)
+    assert res["run_status"] == "COMPLETED"
+
+    manifest = copy.deepcopy(res["manifest"])
+    run = res["run"]
+
+    # Read and tamper dataset_metadata.json's snapshot_byte_length
+    meta_path = output_dir / "dataset_metadata.json"
+    meta = v2.parse(meta_path.read_bytes())
+    original_byte_len = meta["snapshot_byte_length"]
+    meta["snapshot_byte_length"] = original_byte_len + 100
+
+    # Write back tampered dataset_metadata
+    tampered_bytes = (v2.canonical(meta) + "\n").encode("utf-8")
+    meta_path.write_bytes(tampered_bytes)
+
+    # Update manifest entry for dataset_metadata with new byte_length and content_sha256
+    for entry in manifest["entries"]:
+        if entry["role"] == "dataset_metadata":
+            entry["byte_length"] = len(tampered_bytes)
+            entry["content_sha256"] = v2.sha(tampered_bytes)
+
+    # Reseal manifest so payload bytes/sha match manifest entry, but metadata byte length mismatches computation/captured bytes
+    _seal(manifest, "manifest")
+    (output_dir / "manifest.json").write_text(v2.canonical(manifest) + "\n", encoding="utf-8")
+
+    # validate_manifest must reject due to snapshot byte length mismatch
+    with pytest.raises(ValueError, match="SingleContract snapshot byte length binding"):
+        v2.validate_manifest(output_dir, manifest, run, task=task, spec=spec)

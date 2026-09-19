@@ -389,12 +389,24 @@ def validate_spec(spec, task, definitions=None, *, root=None):
             require(req['provenance'] == task_data['provenance'], 'snapshot provenance mismatch')
 
             # Physical snapshot verification:
-            # For a completed bundle with root provided and materials/snapshot.csv present, validate captured snapshot.
-            # Otherwise (fresh Task/Spec admission), strictly require external physical source exists and matches.
-            captured = root / 'materials/snapshot.csv' if root is not None else None
-            if captured is not None and captured.is_file():
-                target_path = captured
-                require(not target_path.is_symlink(), 'SingleContract captured snapshot cannot be symlink')
+            # For a completed bundle declaring captured snapshot 'materials/snapshot.csv' (or having captured snapshot in root),
+            # it MUST be validated from the captured path and fail closed if missing/invalid without falling back to external source.
+            # Otherwise (external locator mode or fresh Task/Spec admission where root is None), strictly require external physical source.
+            is_captured_bundle = False
+            if root is not None:
+                meta_file = root / 'dataset_metadata.json'
+                if meta_file.is_file():
+                    try:
+                        meta_decl = parse(meta_file.read_bytes())
+                        is_captured_bundle = meta_decl.get('snapshot_locator') == 'materials/snapshot.csv'
+                    except Exception:
+                        is_captured_bundle = False
+                if not is_captured_bundle and (root / 'materials/snapshot.csv').exists():
+                    is_captured_bundle = True
+
+            if is_captured_bundle:
+                target_path = root / 'materials/snapshot.csv'
+                require(target_path.is_file() and not target_path.is_symlink(), 'SingleContract captured snapshot missing or not regular file')
             else:
                 locator = req['snapshot_locator']
                 target_path = Path(locator) if os.path.isabs(locator) else ROOT / locator
@@ -592,6 +604,7 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
             require(task_data['product'] == requirements['product'] == computation['product'] == metadata['product'], 'SingleContract product binding')
             require(task_data['exact_contract'] == requirements['exact_contract'] == computation['exact_contract'] == metadata['exact_contract'], 'SingleContract exact contract binding')
             require(task_data['snapshot_sha256'] == requirements['snapshot_sha256'] == computation['snapshot_sha256'] == metadata['snapshot_sha256'], 'SingleContract snapshot sha256 binding')
+            require(computation['snapshot_byte_length'] == metadata['snapshot_byte_length'], 'SingleContract snapshot byte length binding')
             require(task_data['snapshot_locator'] == requirements['snapshot_locator'] == computation['snapshot_locator'], 'SingleContract snapshot locator binding')
             require(metadata['snapshot_locator'] in (requirements['snapshot_locator'], 'materials/snapshot.csv'), 'SingleContract metadata snapshot locator binding')
             require(task_data['provenance'] == requirements['provenance'] == computation['provenance'] == metadata['provenance'], 'SingleContract provenance binding')
@@ -604,14 +617,14 @@ def validate_manifest(root, manifest, run, definitions=None, *, task=None, spec=
                 require(target_path is not None and target_path.is_file() and not target_path.is_symlink(), 'SingleContract captured snapshot missing or not regular file')
                 raw_bytes = target_path.read_bytes()
                 require(sha(raw_bytes) == requirements['snapshot_sha256'], 'SingleContract captured snapshot sha256 mismatch')
-                require(len(raw_bytes) == computation['snapshot_byte_length'], 'SingleContract captured snapshot byte length mismatch')
+                require(len(raw_bytes) == computation['snapshot_byte_length'] == metadata['snapshot_byte_length'], 'SingleContract captured snapshot byte length mismatch')
             else:
                 locator = requirements['snapshot_locator']
                 target_path = Path(locator) if os.path.isabs(locator) else ROOT / locator
                 require(target_path.is_file() and not target_path.is_symlink(), 'SingleContract physical snapshot file missing or not regular file')
                 raw_bytes = target_path.read_bytes()
                 require(sha(raw_bytes) == requirements['snapshot_sha256'], 'SingleContract physical snapshot sha256 mismatch')
-                require(len(raw_bytes) == computation['snapshot_byte_length'], 'SingleContract physical snapshot byte length mismatch')
+                require(len(raw_bytes) == computation['snapshot_byte_length'] == metadata['snapshot_byte_length'], 'SingleContract physical snapshot byte length mismatch')
             if run['run_status'] == 'COMPLETED':
                 summary = next(contents[e['artifact_id']] for e in entries if e['role'] == 'backtest_summary')
                 blotter = next(contents[e['artifact_id']] for e in entries if e['role'] == 'trade_blotter')
