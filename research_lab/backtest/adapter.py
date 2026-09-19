@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Protocol, Sequence
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from typing import Protocol
 
 from research_lab.schemas import ExperimentSpec, PerformanceMetrics
 
@@ -24,10 +25,32 @@ class MetricsCalculator(Protocol):
 
 
 @dataclass(frozen=True)
+class BacktestTrade:
+    trade_id: str
+    timestamp: str
+    side: str
+    price: float
+    volume: int
+    fee: float
+    turnover: float
+
+
+@dataclass(frozen=True)
+class BacktestPoint:
+    timestamp: str
+    equity: float
+    cash: float
+    margin: float
+
+
+@dataclass(frozen=True)
 class BacktestRun:
     metrics: PerformanceMetrics
     equity_curve: tuple[float, ...]
     positions: tuple[float, ...]
+    trades: tuple[BacktestTrade, ...] = field(default_factory=tuple)
+    points: tuple[BacktestPoint, ...] = field(default_factory=tuple)
+    total_fees: float = 0.0
 
 
 class BacktestAdapter(ABC):
