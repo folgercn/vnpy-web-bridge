@@ -88,7 +88,8 @@ def _admit_before_execution(
     spec: dict[str, Any],
     output_dir: Path,
     definitions: v2.Definitions,
-) -> None:
+    snapshot_path: Path | str | None = None,
+) -> bytes:
     """Strict fail-closed pre-execution admission gate enforcing S1-S7 rules."""
     # 1. Profile / Stage check
     exp_type = spec.get("experiment_type")
@@ -153,9 +154,12 @@ def _admit_before_execution(
         raise ValueError("provenance mismatch or missing between Spec and Task")
 
     # Physical snapshot file verification
-    target_path = Path(snapshot_locator) if os.path.isabs(snapshot_locator) else v2.ROOT / snapshot_locator
+    if snapshot_path is not None:
+        target_path = Path(snapshot_path)
+    else:
+        target_path = Path(snapshot_locator) if os.path.isabs(snapshot_locator) else v2.ROOT / snapshot_locator
     if not target_path.is_file() or target_path.is_symlink():
-        raise ValueError(f"Physical snapshot file missing or not regular file: {snapshot_locator}")
+        raise ValueError(f"Physical snapshot file missing or not regular file: {target_path}")
     raw_bytes = target_path.read_bytes()
     if v2.sha(raw_bytes) != snapshot_sha:
         raise ValueError(f"Physical snapshot sha256 mismatch: expected {snapshot_sha}, got {v2.sha(raw_bytes)}")
@@ -207,7 +211,9 @@ def _admit_before_execution(
         raise ValueError(f"S7 violation: capital_currency must be CNY, got {currency}")
 
     # 4. Official v2 Spec validation
-    v2.validate_spec(spec, task, definitions)
+    root_for_validation = Path(snapshot_path).parent.parent if snapshot_path is not None else None
+    v2.validate_spec(spec, task, definitions, root=root_for_validation)
+    return raw_bytes
 
 
 def _validate_with_public_handoff(
@@ -345,6 +351,7 @@ class V2BacktestExecutionBridge:
         spec: dict[str, Any] | Path | str,
         output_dir: Path | str,
         *,
+        snapshot_path: Path | str | None = None,
         force_failure: bool = False,
     ) -> dict[str, Any]:
         """Execute a Protocol v2 single-contract trading_backtest experiment directly from physical snapshot."""
@@ -353,11 +360,12 @@ class V2BacktestExecutionBridge:
         spec_dict = self._load_dict(spec)
 
         # 1. Fail-closed Pre-execution Admission Gate
-        _admit_before_execution(
+        raw_bytes = _admit_before_execution(
             task=task_dict,
             spec=spec_dict,
             output_dir=target_dir,
             definitions=self.definitions,
+            snapshot_path=snapshot_path,
         )
 
         # 2. Local execution boundary & materials setup
@@ -369,16 +377,19 @@ class V2BacktestExecutionBridge:
         (materials_dir / "task.json").write_text(v2.canonical(task_dict) + "\n", encoding="utf-8")
         (materials_dir / "spec.json").write_text(v2.canonical(spec_dict) + "\n", encoding="utf-8")
 
+        # Create-only capture of raw snapshot bytes into materials/snapshot.csv
+        captured_snapshot_path = materials_dir / "snapshot.csv"
+        if captured_snapshot_path.exists():
+            raise FileExistsError(f"Target captured snapshot already exists: {captured_snapshot_path}")
+        captured_snapshot_path.write_bytes(raw_bytes)
+
         run_id = f"run-backtest-{uuid4().hex[:12]}"
         manifest_id = f"manifest-backtest-{uuid4().hex[:12]}"
         evidence_id = f"evidence-backtest-{uuid4().hex[:12]}"
 
-        # Physical snapshot bytes reading (strict: zero override allowed)
+        snapshot_byte_length = len(raw_bytes)
         req = spec_dict["dataset_requirements"]
         snapshot_locator = req["snapshot_locator"]
-        target_path = Path(snapshot_locator) if os.path.isabs(snapshot_locator) else v2.ROOT / snapshot_locator
-        raw_bytes = target_path.read_bytes()
-        snapshot_byte_length = len(raw_bytes)
 
         # Basic experiment parameters
         product = req["product"]
@@ -426,13 +437,13 @@ class V2BacktestExecutionBridge:
             "profile": SINGLE_CONTRACT_PROFILE,
             "product": product,
             "exact_contract": exact_contract,
-            "snapshot_locator": snapshot_locator,
+            "snapshot_locator": "materials/snapshot.csv",
             "snapshot_sha256": req["snapshot_sha256"],
             "snapshot_byte_length": snapshot_byte_length,
             "provenance": req["provenance"],
             "limitations": (
                 "Synthetic physical fixture for contract testing only; "
-                "does not constitute real-market scientific validation."
+                "captured into materials/snapshot.csv for self-contained replay."
             ),
         }
         self._write_payload(target_dir / "dataset_metadata.json", dataset_meta)
@@ -457,13 +468,13 @@ class V2BacktestExecutionBridge:
 
         replay_command = (
             f"python -m research_lab.runners.v2_backtest "
-            f"--task {materials_dir / 'task.json'} --spec {materials_dir / 'spec.json'} --output <replayed_output>"
+            f"--materials {materials_dir} --output <replayed_output>"
         )
         replay_inst = {
             "profile": SINGLE_CONTRACT_PROFILE,
             "command": replay_command,
             "entry_point": "research_lab.runners.v2_backtest",
-            "limitations": "Local single-contract deterministic execution.",
+            "limitations": "Local single-contract deterministic execution from captured materials.",
         }
         self._write_payload(target_dir / "replay_instructions.json", replay_inst)
 
@@ -815,7 +826,7 @@ class V2BacktestExecutionBridge:
         *,
         force_failure: bool = False,
     ) -> dict[str, Any]:
-        """Convenience loader from materials directory containing task.json and spec.json."""
+        """Convenience loader from materials directory containing task.json, spec.json, and optional snapshot.csv."""
         mdir = Path(materials_dir).resolve()
         task_path = mdir / "task.json"
         spec_path = mdir / "spec.json"
@@ -823,10 +834,13 @@ class V2BacktestExecutionBridge:
             raise FileNotFoundError(f"Missing task.json in {materials_dir}")
         if not spec_path.is_file():
             raise FileNotFoundError(f"Missing spec.json in {materials_dir}")
+        snapshot_file = mdir / "snapshot.csv"
+        snapshot_path = snapshot_file if snapshot_file.is_file() else None
         return self.execute(
             task=task_path,
             spec=spec_path,
             output_dir=output_dir,
+            snapshot_path=snapshot_path,
             force_failure=force_failure,
         )
 
@@ -836,6 +850,7 @@ def execute_v2_backtest_spec(
     spec: dict[str, Any] | Path | str,
     output_dir: Path | str,
     *,
+    snapshot_path: Path | str | None = None,
     result_store: ResultStore | None = None,
     force_failure: bool = False,
 ) -> dict[str, Any]:
@@ -845,6 +860,7 @@ def execute_v2_backtest_spec(
         task=task,
         spec=spec,
         output_dir=output_dir,
+        snapshot_path=snapshot_path,
         force_failure=force_failure,
     )
 
@@ -870,26 +886,44 @@ def main(argv: list[str] | None = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(description="Execute Protocol v2 single-contract trading_backtest")
-    parser.add_argument("--spec", help="Path to spec.json or materials directory", required=True)
-    parser.add_argument("--task", help="Path to task.json (optional if --spec is materials dir)")
+    parser.add_argument("--materials", help="Path to materials directory containing task.json, spec.json, and snapshot.csv")
+    parser.add_argument("--spec", help="Path to spec.json or materials directory")
+    parser.add_argument("--task", help="Path to task.json (optional if --spec or --materials is provided)")
+    parser.add_argument("--snapshot", help="Optional path to captured snapshot.csv")
     parser.add_argument("--output", help="Path to output bundle directory", required=True)
     args = parser.parse_args(argv)
 
-    spec_path = Path(args.spec).resolve()
     output_path = Path(args.output).resolve()
 
-    if spec_path.is_dir():
-        res = execute_v2_backtest_from_materials(spec_path, output_path)
-    else:
-        if not args.task:
-            candidate_task = spec_path.parent / "task.json"
-            if candidate_task.is_file():
-                task_path = candidate_task
-            else:
-                raise ValueError("--task is required when --spec points to a file")
+    if args.materials:
+        mat_path = Path(args.materials).resolve()
+        res = execute_v2_backtest_from_materials(mat_path, output_path)
+    elif args.spec:
+        spec_path = Path(args.spec).resolve()
+        if spec_path.is_dir():
+            res = execute_v2_backtest_from_materials(spec_path, output_path)
         else:
-            task_path = Path(args.task).resolve()
-        res = execute_v2_backtest_spec(task_path, spec_path, output_path)
+            if not args.task:
+                candidate_task = spec_path.parent / "task.json"
+                if candidate_task.is_file():
+                    task_path = candidate_task
+                else:
+                    raise ValueError("--task is required when --spec points to a file")
+            else:
+                task_path = Path(args.task).resolve()
+
+            snapshot_path = args.snapshot
+            if snapshot_path is None and (task_path.parent / "snapshot.csv").is_file():
+                snapshot_path = task_path.parent / "snapshot.csv"
+
+            res = execute_v2_backtest_spec(
+                task_path,
+                spec_path,
+                output_path,
+                snapshot_path=snapshot_path,
+            )
+    else:
+        raise ValueError("Must specify either --materials or --spec")
 
     print(f"Run {res['run']['run_id']} finished with status {res['run_status']}")
     return int(res["process_exit_code"])

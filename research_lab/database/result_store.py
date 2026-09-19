@@ -760,7 +760,7 @@ class ResultStore:
         raw = {name: v2.safe_read(bundle, relative) for name, relative in file_names.items()}
         task, spec, run, manifest, evidence = (v2.parse(raw[name]) for name in file_names)
         definitions = v2.Definitions()
-        v2.validate_spec(spec, task, definitions)
+        v2.validate_spec(spec, task, definitions, root=bundle)
         v2.validate_manifest(bundle, manifest, run, definitions, task=task, spec=spec)
         ResultStore._validate_v2_handoff(bundle, task, spec, run, manifest, evidence)
 

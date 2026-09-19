@@ -171,6 +171,12 @@ def test_1_completed_e2e_with_result_store_and_report(
     summary = v2.parse((output_dir / "backtest_summary.json").read_bytes())
     blotter = v2.parse((output_dir / "trade_blotter.json").read_bytes())
     curve = v2.parse((output_dir / "equity_curve.json").read_bytes())
+    metadata = v2.parse((output_dir / "dataset_metadata.json").read_bytes())
+
+    assert (output_dir / "materials" / "snapshot.csv").is_file()
+    assert metadata["snapshot_locator"] == "materials/snapshot.csv"
+    assert metadata["snapshot_sha256"] == SYNTHETIC_FIXTURE_SHA256
+    assert metadata["snapshot_byte_length"] == SYNTHETIC_FIXTURE_BYTES
 
     assert "accounts" not in summary and "accounts" not in blotter and "accounts" not in curve
     assert summary["product"] == "rb" and summary["exact_contract"] == "rb2405"
@@ -355,28 +361,84 @@ def test_5_physical_snapshot_tamper_1byte_rejected(
 def test_6_owned_snapshot_standalone_reconsumption(
     single_contract_bundle: tuple[dict, dict], tmp_path: Path
 ) -> None:
-    """Ensure ResultStore owned snapshot can be independently validated even if original directory is deleted."""
-    task, spec = single_contract_bundle
+    """Strict 8-step core regression: temporary physical snapshot -> execution -> delete external snapshot ->
+    delete output dir -> only Store owned bundle remains -> load facts -> validate manifest -> CLI replay.
+
+    Proves that captured snapshot in materials/snapshot.csv guarantees 100% self-contained replayability.
+    """
+    from research_lab.runners.v2_backtest import main
+
+    task_base, spec_base = single_contract_bundle
+
+    # Step 1: Create a temporary physical snapshot outside the repository
+    temp_snapshot = tmp_path / "temp_external_snapshot.csv"
+    orig_bytes = (v2.ROOT / SYNTHETIC_FIXTURE_PATH).read_bytes()
+    temp_snapshot.write_bytes(orig_bytes)
+    temp_sha = v2.sha(orig_bytes)
+
+    task = copy.deepcopy(task_base)
+    task["data_requirements"]["snapshot_locator"] = str(temp_snapshot)
+    task["data_requirements"]["snapshot_sha256"] = temp_sha
+    _seal(task, "task")
+
+    spec = copy.deepcopy(spec_base)
+    spec["task_content_hash"] = task["task_content_hash"]
+    spec["dataset_requirements"]["snapshot_locator"] = str(temp_snapshot)
+    spec["dataset_requirements"]["snapshot_sha256"] = temp_sha
+    _seal(spec, "spec")
+
+    # Step 2: Execute and persist to ResultStore
     output_dir = tmp_path / "original_output"
     store = ResultStore(ResearchLabConfig(tmp_path / "store"))
-
     res = execute_v2_backtest_spec(task, spec, output_dir, result_store=store)
-    run_id = res["run"]["run_id"]
 
-    # Delete original output directory completely
+    run_id = res["run"]["run_id"]
+    original_fingerprint = res["run"]["scientific_fingerprint"]
+    original_summary = v2.parse((output_dir / "backtest_summary.json").read_bytes())
+    original_blotter = v2.parse((output_dir / "trade_blotter.json").read_bytes())
+    original_curve = v2.parse((output_dir / "equity_curve.json").read_bytes())
+    store_bundle = Path(res["stored_result"]["bundle_location"])
+
+    # Step 3: Delete the external physical snapshot file
+    temp_snapshot.unlink()
+    assert not temp_snapshot.exists()
+
+    # Step 4: Delete the original execution output directory
     shutil.rmtree(output_dir)
     assert not output_dir.exists()
 
-    # Load bundle facts from store
+    # Step 5: Only ResultStore owned bundle remains
+    assert store_bundle.is_dir()
+    assert (store_bundle / "materials" / "snapshot.csv").is_file()
+
+    # Step 6: load_v2_bundle_facts succeeds from Store owned bundle
     facts = store.load_v2_bundle_facts(run_id)
     assert facts["run"]["run_id"] == run_id
     assert facts["run"]["run_status"] == "COMPLETED"
+    assert facts["run"]["scientific_fingerprint"] == original_fingerprint
 
-    # Verify frozen public validator can re-consume the stored bundle
-    bundle_path = Path(res["stored_result"]["bundle_location"])
+    # Step 7: validate_manifest succeeds using ONLY the Store owned bundle
     manifest = facts["manifest"]
     run = facts["run"]
-    v2.validate_manifest(bundle_path, manifest, run, task=task, spec=spec)
+    v2.validate_manifest(store_bundle, manifest, run, task=task, spec=spec)
+
+    # Step 8: CLI replay succeeds completely independently from store bundle materials
+    replayed_out = tmp_path / "replayed_output"
+    ret = main(["--materials", str(store_bundle / "materials"), "--output", str(replayed_out)])
+    assert ret == 0
+
+    replayed_run = v2.parse((replayed_out / "run.json").read_bytes())
+    replayed_summary = v2.parse((replayed_out / "backtest_summary.json").read_bytes())
+    replayed_blotter = v2.parse((replayed_out / "trade_blotter.json").read_bytes())
+    replayed_curve = v2.parse((replayed_out / "equity_curve.json").read_bytes())
+
+    # Verify replay produces identical scientific fingerprint, new run_id, and identical facts
+    assert replayed_run["scientific_fingerprint"] == original_fingerprint
+    assert replayed_run["run_id"] != run_id
+    assert replayed_summary["net_pnl"] == original_summary["net_pnl"]
+    assert replayed_summary["total_fees"] == original_summary["total_fees"]
+    assert len(replayed_blotter["trades"]) == len(original_blotter["trades"])
+    assert replayed_curve["points"][-1]["equity"] == original_curve["points"][-1]["equity"]
 
 
 def test_7_s7_admission_fail_closed_on_invalid_parameters(
@@ -732,3 +794,67 @@ def test_14_cli_replay_command_executable(
     assert (cli_out / "backtest_summary.json").is_file()
     assert (cli_out / "trade_blotter.json").is_file()
     assert (cli_out / "equity_curve.json").is_file()
+
+
+def test_15_captured_snapshot_tamper_and_missing_rejected(
+    single_contract_bundle: tuple[dict, dict], tmp_path: Path
+) -> None:
+    """Validate that missing or tampering captured snapshot in materials/snapshot.csv fails closed."""
+    task, spec = single_contract_bundle
+    output_dir = tmp_path / "captured_tamper_out"
+
+    res = execute_v2_backtest_spec(task, spec, output_dir)
+    assert res["run_status"] == "COMPLETED"
+
+    captured_csv = output_dir / "materials" / "snapshot.csv"
+    assert captured_csv.is_file()
+
+    manifest = res["manifest"]
+    run = res["run"]
+
+    # 1. Tamper 1 byte of captured snapshot -> validate_manifest must reject
+    raw = captured_csv.read_bytes()
+    tampered_bytes = raw[:-1] + (b"X" if raw[-1:] != b"X" else b"Y")
+    captured_csv.write_bytes(tampered_bytes)
+
+    with pytest.raises(ValueError, match="(?:SingleContract captured )?snapshot sha256 mismatch"):
+        v2.validate_manifest(output_dir, manifest, run, task=task, spec=spec)
+
+    # 2. Missing captured snapshot -> validate_manifest must reject (no silent fallback)
+    captured_csv.unlink()
+    assert not captured_csv.exists()
+
+    with pytest.raises(ValueError, match="snapshot (?:file )?missing or not regular file"):
+        v2.validate_manifest(output_dir, manifest, run, task=task, spec=spec)
+
+
+def test_16_captured_snapshot_create_only_no_overwrite(
+    single_contract_bundle: tuple[dict, dict], tmp_path: Path
+) -> None:
+    """Validate that create-only capture forbids overwriting existing captured snapshot."""
+    task, spec = single_contract_bundle
+    output_dir = tmp_path / "create_only_out"
+
+    # Pre-create output directory to trigger exclusivity check
+    output_dir.mkdir(parents=True)
+    with pytest.raises(FileExistsError, match="Target output directory already exists"):
+        execute_v2_backtest_spec(task, spec, output_dir)
+
+
+def test_17_failed_run_preserves_captured_snapshot(
+    single_contract_bundle: tuple[dict, dict], tmp_path: Path
+) -> None:
+    """Validate that even when execution fails, captured snapshot is preserved in materials."""
+    task, spec = single_contract_bundle
+    output_dir = tmp_path / "failed_capture_out"
+
+    res = execute_v2_backtest_spec(task, spec, output_dir, force_failure=True)
+    assert res["run_status"] == "FAILED"
+
+    captured_csv = output_dir / "materials" / "snapshot.csv"
+    assert captured_csv.is_file()
+    assert v2.sha(captured_csv.read_bytes()) == spec["dataset_requirements"]["snapshot_sha256"]
+    assert len(captured_csv.read_bytes()) == SYNTHETIC_FIXTURE_BYTES
+
+    # validate_manifest for FAILED run succeeds with captured snapshot
+    v2.validate_manifest(output_dir, res["manifest"], res["run"], task=task, spec=spec)
