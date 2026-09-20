@@ -91,6 +91,7 @@ def build_protocol_v2_task(
     plan: ScreeningPlan,
     method: str,
     snapshot_path: Path,
+    parameters: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Generate isolated Protocol v2 Task for a single screening method."""
     raw_bytes = snapshot_path.read_bytes()
@@ -140,6 +141,8 @@ def build_protocol_v2_task(
         "data_requirements": task_data_req,
         "methods": [method],
     }
+    if parameters:
+        task["parameters"] = parameters
     task["task_content_hash"] = v2.digest({k: v for k, v in task.items() if k != "task_content_hash"})
     return task
 
@@ -148,6 +151,7 @@ def build_protocol_v2_spec(
     task: dict[str, Any],
     plan: ScreeningPlan,
     method: str,
+    parameters: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Generate isolated Protocol v2 ExperimentSpec corresponding to Task."""
     task_token = v2.digest({
@@ -169,6 +173,8 @@ def build_protocol_v2_spec(
         "dataset_requirements": dict(task["data_requirements"]),
         "methods": [method],
     }
+    if parameters:
+        spec["parameters"] = parameters
     spec["spec_content_hash"] = v2.digest({k: v for k, v in spec.items() if k != "spec_content_hash"})
     return spec
 
@@ -260,10 +266,42 @@ class SequentialScreeningExecutor:
                     ),
                 )
 
+        # Strict validation for cost_sensitivity sealed parameters:
+        # 1. Unmappable or missing proxy => INSUFFICIENT_DATA
+        # 2. Tampered sealed proxy => EXECUTION_FAILED fail-closed with NO pseudo-evidence
+        if method_name == "cost_sensitivity" and method_req.status == "PLANNED":
+            cost_p = method_req.parameters or {}
+            exp_dir = cost_p.get("expected_direction")
+            proxy = cost_p.get("position_proxy")
+            if not exp_dir or not proxy or exp_dir not in ("positive", "negative"):
+                return MethodExecutionResult(
+                    method=method_name,
+                    status="INSUFFICIENT_DATA",
+                    error_message=f"Unmappable or missing cost proxy/expected_direction: {cost_p}",
+                )
+            if (exp_dir == "positive" and proxy != "sign(feature_val)") or (
+                exp_dir == "negative" and proxy != "-sign(feature_val)"
+            ):
+                return MethodExecutionResult(
+                    method=method_name,
+                    status="EXECUTION_FAILED",
+                    error_message=f"Tampered sealed proxy mismatch: expected_direction={exp_dir!r}, position_proxy={proxy!r}",
+                )
+
         # PLANNED method: build Task & Spec, validate against Protocol v2, and execute runner
         try:
-            task = build_protocol_v2_task(plan, method_name, snapshot_path)
-            spec = build_protocol_v2_spec(task, plan, method_name)
+            task = build_protocol_v2_task(
+                plan,
+                method_name,
+                snapshot_path,
+                parameters=method_req.parameters if method_req.parameters else None,
+            )
+            spec = build_protocol_v2_spec(
+                task,
+                plan,
+                method_name,
+                parameters=method_req.parameters if method_req.parameters else None,
+            )
             # Contract admission check
             v2.validate_spec(spec, task, self.definitions)
         except Exception as exc:  # noqa: BLE001

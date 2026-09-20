@@ -475,7 +475,7 @@
       "kind": "payload",
       "name": "research_lab.statistical_screening.method_definition",
       "revision": "rev.1",
-      "content_hash": "456acc0cd64debd939cbd3518a446bac2d75b3c12e6b0e0a44bc346540c79eae",
+      "content_hash": "89254955926b035a61f03da9d3ca0fcc1dfe77d1c21fcc55d6510dadb0cb4a95",
       "locator": "statistical-screening-payload.schema.json#/$defs/method_definition",
       "file": "statistical-screening-payload.schema.json",
       "pointer": [
@@ -514,7 +514,7 @@
       "kind": "payload",
       "name": "research_lab.statistical_screening.statistical_summary",
       "revision": "rev.1",
-      "content_hash": "77de93345340d32758d5f31f3859c8ef539ccc2ac07968ce5fc961e8962b0b5b",
+      "content_hash": "e51143e9732c8bd109ea48cac3178d7e38e4a69e37862e19ca0a1abe4282f153",
       "locator": "statistical-screening-payload.schema.json#/$defs/statistical_summary",
       "file": "statistical-screening-payload.schema.json",
       "pointer": [

@@ -1,5 +1,16 @@
-"""Alpha Discovery MVP: AlphaHypothesis and Cheap Screening Pipeline."""
+"""Alpha Discovery MVP: AlphaHypothesis, Cheap Screening Pipeline, Critic Gate, and Research Memory (#562)."""
 
+from research_lab.alpha_discovery.critic_gate import (
+    CriticDecision,
+    CriticFinding,
+    CriticGate,
+    validate_critic_decision,
+)
+from research_lab.alpha_discovery.engine import (
+    AlphaDiscoveryEngine,
+    DiscoveryBatchResult,
+    DiscoveryItemResult,
+)
 from research_lab.alpha_discovery.hypothesis import (
     AlphaHypothesis,
     compute_hypothesis_content_hash,
@@ -12,6 +23,10 @@ from research_lab.alpha_discovery.hypothesis import (
     validate_hypothesis,
 )
 from research_lab.alpha_discovery.planner import ScreeningPlanner
+from research_lab.alpha_discovery.research_memory import (
+    ResearchMemory,
+    ResearchMemoryRecord,
+)
 from research_lab.alpha_discovery.screening import (
     MethodExecutionResult,
     ScreeningPipeline,
@@ -30,10 +45,18 @@ from research_lab.alpha_discovery.screening_plan import (
 )
 
 __all__ = [
+    "AlphaDiscoveryEngine",
     "AlphaHypothesis",
+    "CriticDecision",
+    "CriticFinding",
+    "CriticGate",
     "DatasetRequirements",
+    "DiscoveryBatchResult",
+    "DiscoveryItemResult",
     "MethodExecutionResult",
     "PlanProvenance",
+    "ResearchMemory",
+    "ResearchMemoryRecord",
     "ScreeningMethodRequest",
     "ScreeningPipeline",
     "ScreeningPipelineReport",
@@ -50,6 +73,7 @@ __all__ = [
     "is_exact_duplicate",
     "is_potentially_related",
     "is_valid_revision",
+    "validate_critic_decision",
     "validate_hypothesis",
     "validate_screening_plan",
 ]

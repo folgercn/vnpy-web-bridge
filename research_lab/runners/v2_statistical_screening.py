@@ -107,6 +107,45 @@ def run_statistical_screening(
     # Check for missing required fields
     missing_fields = [f for f in required_fields if f not in fieldnames]
 
+    # Additional temporal metadata check for leakage_audit
+    leakage_missing_temporal: list[str] = []
+    avail_col = None
+    as_of_col = None
+    target_start_col = None
+    if "leakage_audit" in methods:
+        avail_col = "feature_availability_time" if "feature_availability_time" in fieldnames else ("availability_time" if "availability_time" in fieldnames else None)
+        as_of_col = "as_of_time" if "as_of_time" in fieldnames else ("decision_time" if "decision_time" in fieldnames else None)
+        target_start_col = "target_start_time" if "target_start_time" in fieldnames else ("target_window_start_time" if "target_window_start_time" in fieldnames else None)
+        if not avail_col:
+            leakage_missing_temporal.append("feature_availability_time")
+        if not as_of_col:
+            leakage_missing_temporal.append("as_of_time")
+        if not target_start_col:
+            leakage_missing_temporal.append("target_start_time")
+
+    # Additional parameter validation for cost_sensitivity
+    cost_insufficient = False
+    cost_reason = None
+    pos_proxy = None
+    expected_direction = None
+    if "cost_sensitivity" in methods:
+        spec_params = spec.get("parameters") or {}
+        cost_params = spec_params.get("cost_sensitivity") if "cost_sensitivity" in spec_params else spec_params
+        pos_proxy = cost_params.get("position_proxy") if isinstance(cost_params, dict) else None
+        expected_direction = cost_params.get("expected_direction") if isinstance(cost_params, dict) else None
+
+        # 1. Missing or unmappable proxy/direction => INSUFFICIENT_DATA (data/definition insufficient)
+        if not pos_proxy or not expected_direction or expected_direction not in ("positive", "negative"):
+            cost_insufficient = True
+            cost_reason = f"Unmappable cost proxy or missing expected_direction for cost_sensitivity: {cost_params}"
+        # 2. Tampered sealed proxy mismatch => Fail closed immediately (raise ValueError, producing NO pseudo-evidence)
+        elif (expected_direction == "positive" and pos_proxy != "sign(feature_val)") or (
+            expected_direction == "negative" and pos_proxy != "-sign(feature_val)"
+        ):
+            raise ValueError(
+                f"Tampered sealed proxy mismatch: expected_direction={expected_direction!r}, position_proxy={pos_proxy!r}"
+            )
+
     run_id = f"run-screening-{uuid4().hex[:16]}"
     manifest_id = f"manifest-{run_id}"
     evidence_id = f"evidence-{run_id}"
@@ -120,9 +159,34 @@ def run_statistical_screening(
     elif missing_fields or len(reader) == 0:
         run_status = "INSUFFICIENT_DATA"
         status_reason = f"Missing required fields: {missing_fields}" if missing_fields else "Empty snapshot sample"
+    elif leakage_missing_temporal:
+        run_status = "INSUFFICIENT_DATA"
+        status_reason = f"Missing mandatory temporal metadata fields for leakage_audit: {leakage_missing_temporal}"
+        for f in leakage_missing_temporal:
+            if f not in missing_fields:
+                missing_fields.append(f)
+    elif cost_insufficient:
+        run_status = "INSUFFICIENT_DATA"
+        status_reason = cost_reason
     else:
-        run_status = "COMPLETED"
-        status_reason = None
+        # Check if leakage_audit has unverifiable rows
+        if "leakage_audit" in methods:
+            unverifiable = 0
+            for row in reader:
+                t_avail = row.get(avail_col) if avail_col else None
+                t_as_of = row.get(as_of_col) if as_of_col else None
+                t_tgt = row.get(target_start_col) if target_start_col else None
+                if not t_avail or not t_as_of or not t_tgt:
+                    unverifiable += 1
+            if unverifiable > 0:
+                run_status = "INSUFFICIENT_DATA"
+                status_reason = f"Incomplete temporal metadata: {unverifiable} unverifiable rows in leakage_audit"
+            else:
+                run_status = "COMPLETED"
+                status_reason = None
+        else:
+            run_status = "COMPLETED"
+            status_reason = None
 
     computation_manifest = {
         "profile": ssd.PROFILE_NAME,
@@ -134,6 +198,8 @@ def run_statistical_screening(
         "provenance": spec_req["provenance"],
         "status_reason": status_reason,
     }
+    if spec.get("parameters"):
+        computation_manifest["parameters"] = spec["parameters"]
     scientific_fingerprint = v2.digest(computation_manifest)
 
     # 4. Generate payloads according to status
@@ -156,7 +222,7 @@ def run_statistical_screening(
     method_definition = {
         "profile": ssd.PROFILE_NAME,
         "methods": methods,
-        "parameters": {},
+        "parameters": spec.get("parameters") or {},
         "limitations": "Deterministic facts-only screening without optimization.",
     }
     (out_dir / "method_definition.json").write_bytes(v2.canonical(method_definition).encode("utf-8"))
@@ -288,6 +354,185 @@ def run_statistical_screening(
                     "second_half_correlation": _format_decimal(r2, 6),
                     "correlation_difference": _format_decimal(diff, 6),
                 }
+
+            # 5. leakage_audit
+            if "leakage_audit" in methods:
+                total_rows = len(reader)
+                temporal_violations = 0
+                target_overlap_violations = 0
+                for row in reader:
+                    t_avail = row.get(avail_col) if avail_col else None
+                    t_as_of = row.get(as_of_col) if as_of_col else None
+                    t_tgt = row.get(target_start_col) if target_start_col else None
+                    if t_avail and t_as_of and t_avail > t_as_of:
+                        temporal_violations += 1
+                    if t_tgt and t_as_of and t_tgt <= t_as_of:
+                        target_overlap_violations += 1
+
+                cov_ratio = _format_decimal(1.0 if total_rows > 0 else 0.0, 4) or "1.0000"
+                facts["leakage_audit"] = {
+                    "audit_status": "COMPLETED",
+                    "rows_checked": total_rows,
+                    "audited_fields": [f for f in [avail_col, as_of_col, target_start_col] if f],
+                    "audit_coverage_ratio": cov_ratio,
+                    "temporal_violation_count": temporal_violations,
+                    "target_overlap_violation_count": target_overlap_violations,
+                    "missing_availability_metadata": False,
+                    "unverifiable_rows": 0,
+                }
+
+            # 6. outlier_sensitivity
+            if "outlier_sensitivity" in methods:
+                feat_field = "feature_val" if "feature_val" in fieldnames else (required_fields[0] if required_fields else "")
+                tgt_field = "target_val" if "target_val" in fieldnames else (required_fields[1] if len(required_fields) > 1 else "")
+                pairs = []
+                for row in reader:
+                    try:
+                        xv = float(row[feat_field])
+                        yv = float(row[tgt_field])
+                        pairs.append((xv, yv))
+                    except (ValueError, KeyError):
+                        continue
+
+                total_samples = len(pairs)
+                if total_samples < 2:
+                    facts["outlier_sensitivity"] = {
+                        "baseline_ic": None,
+                        "trimmed_ic": None,
+                        "removed_count": 0,
+                        "removed_ratio": "0",
+                        "ic_delta": None,
+                        "baseline_direction": "neutral",
+                        "trimmed_direction": "neutral",
+                        "direction_preserved": False,
+                    }
+                else:
+                    x_all = [p[0] for p in pairs]
+                    y_all = [p[1] for p in pairs]
+                    base_r = _compute_pearson(x_all, y_all)
+
+                    cut_n = max(1, math.floor(total_samples * 0.01)) if total_samples >= 10 else 0
+                    sorted_x = sorted(x_all)
+                    sorted_y = sorted(y_all)
+
+                    low_x, high_x = (sorted_x[cut_n], sorted_x[-(cut_n + 1)]) if cut_n > 0 else (sorted_x[0], sorted_x[-1])
+                    low_y, high_y = (sorted_y[cut_n], sorted_y[-(cut_n + 1)]) if cut_n > 0 else (sorted_y[0], sorted_y[-1])
+
+                    trimmed_pairs = [
+                        (xv, yv) for xv, yv in pairs
+                        if low_x <= xv <= high_x and low_y <= yv <= high_y
+                    ]
+
+                    removed_count = total_samples - len(trimmed_pairs)
+                    rem_ratio = _format_decimal(removed_count / total_samples if total_samples > 0 else 0.0, 4) or "0"
+                    trimmed_r = _compute_pearson([p[0] for p in trimmed_pairs], [p[1] for p in trimmed_pairs]) if len(trimmed_pairs) >= 2 else None
+
+                    ic_delta = None
+                    if base_r is not None and trimmed_r is not None:
+                        ic_delta = _format_decimal(trimmed_r - base_r, 6)
+
+                    base_dir = "positive" if (base_r is not None and base_r > 0) else ("negative" if (base_r is not None and base_r < 0) else "neutral")
+                    trim_dir = "positive" if (trimmed_r is not None and trimmed_r > 0) else ("negative" if (trimmed_r is not None and trimmed_r < 0) else "neutral")
+                    dir_preserved = (base_dir == trim_dir and base_dir != "neutral")
+
+                    facts["outlier_sensitivity"] = {
+                        "baseline_ic": _format_decimal(base_r, 6),
+                        "trimmed_ic": _format_decimal(trimmed_r, 6),
+                        "removed_count": removed_count,
+                        "removed_ratio": rem_ratio,
+                        "ic_delta": ic_delta,
+                        "baseline_direction": base_dir,
+                        "trimmed_direction": trim_dir,
+                        "direction_preserved": dir_preserved,
+                    }
+
+            # 7. cost_sensitivity
+            if "cost_sensitivity" in methods:
+                spec_params = spec.get("parameters") or {}
+                cost_params = spec_params.get("cost_sensitivity") if "cost_sensitivity" in spec_params else spec_params
+                pos_proxy = cost_params.get("position_proxy")
+                expected_direction = cost_params.get("expected_direction")
+
+                if not pos_proxy or not expected_direction:
+                    raise ValueError(
+                        f"cost_sensitivity requires Spec parameters containing position_proxy and expected_direction, got {spec_params}"
+                    )
+                if (expected_direction == "positive" and pos_proxy != "sign(feature_val)") or (
+                    expected_direction == "negative" and pos_proxy != "-sign(feature_val)"
+                ):
+                    raise ValueError(
+                        f"Tampered sealed proxy mismatch: expected_direction={expected_direction!r}, position_proxy={pos_proxy!r}"
+                    )
+
+                feat_field = "feature_val" if "feature_val" in fieldnames else (required_fields[0] if required_fields else "")
+                tgt_field = "target_val" if "target_val" in fieldnames else (required_fields[1] if len(required_fields) > 1 else "")
+
+                pos_series = []
+                ret_series = []
+                for row in reader:
+                    try:
+                        fv = float(row[feat_field])
+                        tv = float(row[tgt_field])
+                        if pos_proxy == "sign(feature_val)":
+                            pos = 1.0 if fv > 0 else (-1.0 if fv < 0 else 0.0)
+                        elif pos_proxy == "-sign(feature_val)":
+                            pos = -1.0 if fv > 0 else (1.0 if fv < 0 else 0.0)
+                        else:
+                            raise ValueError(f"Unsupported position_proxy: {pos_proxy!r}")
+                        pos_series.append(pos)
+                        ret_series.append(tv)
+                    except (ValueError, KeyError):
+                        continue
+
+                n_obs = len(pos_series)
+                if n_obs < 2:
+                    facts["cost_sensitivity"] = {
+                        "position_rule": pos_proxy,
+                        "expected_direction": expected_direction,
+                        "observations": n_obs,
+                        "turnover": "0",
+                        "gross_screening_return": "0",
+                        "net_return_0bps": "0",
+                        "net_return_1bps": "0",
+                        "net_return_3bps": "0",
+                        "net_return_5bps": "0",
+                        "net_return_10bps": "0",
+                        "breakeven_cost_bps": None,
+                    }
+                else:
+                    turnover_deltas = [abs(pos_series[0])]
+                    gross_returns = []
+                    for t in range(1, n_obs):
+                        turnover_deltas.append(abs(pos_series[t] - pos_series[t - 1]))
+                        gross_returns.append(pos_series[t - 1] * ret_series[t])
+
+                    tot_turnover = sum(turnover_deltas)
+                    tot_gross_ret = sum(gross_returns)
+
+                    net_0 = tot_gross_ret - tot_turnover * 0.0000
+                    net_1 = tot_gross_ret - tot_turnover * 0.0001
+                    net_3 = tot_gross_ret - tot_turnover * 0.0003
+                    net_5 = tot_gross_ret - tot_turnover * 0.0005
+                    net_10 = tot_gross_ret - tot_turnover * 0.0010
+
+                    breakeven = None
+                    if tot_turnover > 0 and tot_gross_ret > 0:
+                        be_bps = (tot_gross_ret / tot_turnover) * 10000.0
+                        breakeven = _format_decimal(be_bps, 2)
+
+                    facts["cost_sensitivity"] = {
+                        "position_rule": pos_proxy,
+                        "expected_direction": expected_direction,
+                        "observations": n_obs,
+                        "turnover": _format_decimal(tot_turnover, 4) or "0",
+                        "gross_screening_return": _format_decimal(tot_gross_ret, 6) or "0",
+                        "net_return_0bps": _format_decimal(net_0, 6) or "0",
+                        "net_return_1bps": _format_decimal(net_1, 6) or "0",
+                        "net_return_3bps": _format_decimal(net_3, 6) or "0",
+                        "net_return_5bps": _format_decimal(net_5, 6) or "0",
+                        "net_return_10bps": _format_decimal(net_10, 6) or "0",
+                        "breakeven_cost_bps": breakeven,
+                    }
 
             statistical_summary = {
                 "profile": ssd.PROFILE_NAME,

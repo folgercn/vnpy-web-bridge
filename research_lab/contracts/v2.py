@@ -23,7 +23,15 @@ SINGLE_CONTRACT_CRITERIA_ID = 'research_lab.single_contract_backtest.review_evid
 STATISTICAL_SCREENING_PROFILE = 'research_lab.statistical_screening.v1'
 STATISTICAL_SCREENING_PAYLOAD_PREFIX = 'research_lab.statistical_screening.'
 STATISTICAL_SCREENING_CRITERIA_ID = 'research_lab.statistical_screening.review_evidence.criteria'
-STATISTICAL_SCREENING_METHODS = frozenset({'coverage', 'simple_correlation', 'direction_consistency', 'stability_split'})
+STATISTICAL_SCREENING_METHODS = frozenset({
+    'coverage',
+    'simple_correlation',
+    'direction_consistency',
+    'stability_split',
+    'leakage_audit',
+    'outlier_sensitivity',
+    'cost_sensitivity',
+})
 COMMON = {'dataset_metadata', 'method_definition', 'environment_lock', 'replay_instructions'}
 TYPED = {'data_quality': {'quality_summary', 'quality_anomalies'},
          'statistical_factor': {'statistical_summary', 'sample_feature_target', 'daily_ic_series'},

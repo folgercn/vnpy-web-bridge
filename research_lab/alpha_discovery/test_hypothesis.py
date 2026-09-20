@@ -272,6 +272,7 @@ def test_core_field_mutation_changes_identity_and_rejects_revision(valid_hypothe
         ("universe", "equity_index_futures"),
         ("frequency", "1h"),
         ("economic_rationale", "Completely different macro causal theory."),
+        ("signal_type", "signed_scalar"),
     ]
 
     for field_name, new_val in core_mutations:
@@ -413,3 +414,74 @@ def test_structured_similarity_key(valid_hypothesis_data: dict[str, Any]):
 
     assert is_potentially_related(valid_hypothesis_data, related)
     assert not is_exact_duplicate(valid_hypothesis_data, related)
+
+
+def test_signal_type_is_frozen_core_scientific_field_and_revision_fails_closed(valid_hypothesis_data: dict[str, Any]):
+    """P1: signal_type belongs to CORE_SCIENTIFIC_FIELDS and is frozen; cannot mutate across revisions."""
+    # 1. Base hypothesis with signal_type="unspecified"
+    base_unspecified = copy.deepcopy(valid_hypothesis_data)
+    base_unspecified["signal_type"] = "unspecified"
+    base_unspecified["hypothesis_content_hash"] = compute_hypothesis_content_hash(base_unspecified)
+    validate_hypothesis(base_unspecified)
+
+    # 1a. Attempt revision from unspecified -> signed_scalar via create_revision must fail closed
+    with pytest.raises(ValueError, match="Cannot mutate core scientific field 'signal_type' in a revision"):
+        create_revision(base_unspecified, {"signal_type": "signed_scalar"}, created_by="fujun")
+
+    # 1b. Attempt revision from None -> signed_scalar via create_revision must fail closed
+    base_none = copy.deepcopy(valid_hypothesis_data)
+    assert base_none.get("signal_type") is None
+    with pytest.raises(ValueError, match="Cannot mutate core scientific field 'signal_type' in a revision"):
+        create_revision(base_none, {"signal_type": "signed_scalar"}, created_by="fujun")
+
+    # 2. Base hypothesis with signal_type="signed_scalar"
+    base_signed = copy.deepcopy(valid_hypothesis_data)
+    base_signed["signal_type"] = "signed_scalar"
+    base_signed["hypothesis_content_hash"] = compute_hypothesis_content_hash(base_signed)
+    validate_hypothesis(base_signed)
+
+    # 2a. Attempt revision from signed_scalar -> unspecified must fail closed
+    with pytest.raises(ValueError, match="Cannot mutate core scientific field 'signal_type' in a revision"):
+        create_revision(base_signed, {"signal_type": "unspecified"}, created_by="fujun")
+
+    # 2b. Attempt revision from signed_scalar -> None must fail closed
+    with pytest.raises(ValueError, match="Cannot mutate core scientific field 'signal_type' in a revision"):
+        create_revision(base_signed, {"signal_type": None}, created_by="fujun")
+
+    # 2c. Manually constructed child bypassing create_revision is rejected by is_valid_revision
+    fake_child = copy.deepcopy(base_signed)
+    fake_child["revision"] = "rev.2"
+    fake_child["signal_type"] = "unspecified"
+    fake_child["parent_hypothesis_ref"] = {
+        "hypothesis_id": base_signed["hypothesis_id"],
+        "revision": "rev.1",
+        "content_hash": base_signed["hypothesis_content_hash"],
+    }
+    fake_child["hypothesis_content_hash"] = compute_hypothesis_content_hash(fake_child)
+    is_valid, msg = is_valid_revision(base_signed, fake_child)
+    assert not is_valid
+    assert "Core scientific field 'signal_type' changed: cannot disguise as revision" in msg
+
+    # 3. Legitimate non-core revision with identical signal_type succeeds
+    legal_rev_signed = create_revision(
+        base_signed,
+        {"title": "Updated Title for Same Idea", "signal_type": "signed_scalar"},
+        created_by="fujun",
+    )
+    is_valid, msg = is_valid_revision(base_signed, legal_rev_signed)
+    assert is_valid, msg
+    assert compute_semantic_hash(base_signed) == compute_semantic_hash(legal_rev_signed)
+
+    # 4. Semantic hash differentiates signal_type variants (distinct scientific identities)
+    hash_none = compute_semantic_hash(base_none)
+    hash_unspecified = compute_semantic_hash(base_unspecified)
+    hash_signed = compute_semantic_hash(base_signed)
+    assert hash_signed != hash_unspecified
+    assert hash_signed != hash_none
+    assert hash_unspecified != hash_none
+
+    # 5. Pydantic model instance entrypoint validation cannot bypass
+    model_signed = AlphaHypothesis.model_validate(base_signed)
+    is_valid_model, msg_model = is_valid_revision(model_signed.model_dump(exclude_none=True), fake_child)
+    assert not is_valid_model
+    assert "Core scientific field 'signal_type' changed" in msg_model

@@ -16,6 +16,7 @@ from typing import Any
 from research_lab.alpha_discovery.hypothesis import (
     AlphaHypothesis,
     compute_scientific_identity_hash,
+    is_signed_scalar_feature_signal,
     validate_hypothesis,
 )
 from research_lab.alpha_discovery.screening_plan import (
@@ -34,6 +35,9 @@ METHOD_REQUIRED_FIELDS: dict[str, list[str]] = {
     "simple_correlation": ["feature_val", "target_val"],
     "direction_consistency": ["feature_val", "target_val"],
     "stability_split": ["feature_val", "target_val"],
+    "leakage_audit": ["as_of_time", "feature_availability_time", "target_start_time"],
+    "outlier_sensitivity": ["feature_val", "target_val"],
+    "cost_sensitivity": ["feature_val", "target_val"],
 }
 
 
@@ -48,6 +52,7 @@ class ScreeningPlanner:
         hypothesis: AlphaHypothesis | dict[str, Any],
         *,
         dataset_requirements: dict[str, Any] | None = None,
+        override_methods: list[str] | None = None,
         planned_at: str | None = None,
         created_by: str = "research_lab.screening_planner",
     ) -> ScreeningPlan:
@@ -89,7 +94,7 @@ class ScreeningPlanner:
             ds_req_model = DatasetRequirements.model_validate(clean_ds)
 
         # Process proposed screening methods deterministically
-        raw_methods = hyp_dict.get("proposed_screening_methods", [])
+        raw_methods = override_methods if override_methods is not None else hyp_dict.get("proposed_screening_methods", [])
         # Deduplicate and sort alphabetically for 100% stable ordering
         unique_methods = sorted(dict.fromkeys(raw_methods))
 
@@ -136,6 +141,49 @@ class ScreeningPlanner:
                         )
                     )
                 else:
+                    params: dict[str, Any] = {}
+                    if m == "cost_sensitivity":
+                        # P1-1: Only permit generating/binding position proxy if hypothesis
+                        # is explicitly and machine-verifiably a signed feature_val scalar signal.
+                        # Complex, ambiguous, or non-signed-scalar signal_definition must NOT be guessed.
+                        if not is_signed_scalar_feature_signal(hyp_dict):
+                            method_requests.append(
+                                ScreeningMethodRequest(
+                                    method=m,
+                                    status="INSUFFICIENT_DATA",
+                                    reason="unmappable_cost_proxy_not_signed_scalar",
+                                    missing_fields=None,
+                                    required_fields=expected_fields,
+                                    parameters={},
+                                )
+                            )
+                            continue
+
+                        exp_dir = hyp_dict.get("expected_direction")
+                        if exp_dir == "positive":
+                            proxy = "sign(feature_val)"
+                        elif exp_dir == "negative":
+                            proxy = "-sign(feature_val)"
+                        else:
+                            proxy = None
+
+                        if proxy is None:
+                            method_requests.append(
+                                ScreeningMethodRequest(
+                                    method=m,
+                                    status="INSUFFICIENT_DATA",
+                                    reason="unsupported_or_missing_expected_direction",
+                                    missing_fields=None,
+                                    required_fields=expected_fields,
+                                    parameters={},
+                                )
+                            )
+                            continue
+                        params = {
+                            "position_proxy": proxy,
+                            "expected_direction": exp_dir,
+                        }
+
                     method_requests.append(
                         ScreeningMethodRequest(
                             method=m,
@@ -143,7 +191,7 @@ class ScreeningPlanner:
                             reason=None,
                             missing_fields=None,
                             required_fields=expected_fields,
-                            parameters={},
+                            parameters=params,
                         )
                     )
 
@@ -191,6 +239,82 @@ class ScreeningPlanner:
         if ds_req_model is not None:
             plan_dict["dataset_requirements"] = ds_req_model.model_dump(exclude_none=True)
 
+        plan_dict["plan_content_hash"] = compute_plan_content_hash(plan_dict)
+        validated = validate_screening_plan(plan_dict)
+        return ScreeningPlan.model_validate(validated)
+
+    def plan_supplemental(
+        self,
+        hypothesis: AlphaHypothesis | dict[str, Any],
+        prior_decision: Any,
+        prior_evidence_refs: list[dict[str, Any]],
+        missing_evidence: list[str],
+        *,
+        dataset_requirements: dict[str, Any] | None = None,
+        planned_at: str | None = None,
+        created_by: str = "research_lab.screening_planner.supplemental",
+    ) -> ScreeningPlan:
+        """Create a deterministic supplemental ScreeningPlan covering missing evidence (Section 15 & 16).
+
+        Binds:
+        - Hypothesis exact ref
+        - Prior CriticDecision exact ref
+        - Prior Evidence refs
+        - missing_evidence list
+        - Dataset exact identity
+        - New method set
+        Guarantees that identical inputs yield identical supplemental plan identity.
+        """
+        # Map missing evidence descriptors to candidate screening methods
+        # (e.g. "leakage_audit", "leakage_audit_verifiable_metadata" -> "leakage_audit")
+        candidate_methods: set[str] = set()
+        for item in missing_evidence:
+            for allowed in ALLOWED_METHODS:
+                if allowed in item or item in allowed:
+                    candidate_methods.add(allowed)
+
+        if not candidate_methods:
+            # If no direct method match, fall back to any method in ALLOWED_METHODS not in prior evidence
+            prior_methods = {
+                ref.get("method") for ref in prior_evidence_refs if ref.get("method")
+            }
+            candidate_methods = set(ALLOWED_METHODS) - prior_methods
+
+        if not candidate_methods:
+            candidate_methods = {"coverage"}
+
+        unique_methods = sorted(candidate_methods)
+
+        if isinstance(prior_decision, dict):
+            dec_id = prior_decision.get("decision_id", "dec-unknown")
+            dec_hash = prior_decision.get("review_content_hash", "0" * 64)
+        else:
+            dec_id = getattr(prior_decision, "decision_id", "dec-unknown")
+            dec_hash = getattr(prior_decision, "review_content_hash", "0" * 64)
+
+        # Generate base plan with the specific supplemental methods without mutating hypothesis
+        base_plan = self.plan(
+            hypothesis,
+            dataset_requirements=dataset_requirements,
+            override_methods=unique_methods,
+            planned_at=planned_at,
+            created_by=created_by,
+        )
+
+        # Re-tag plan_id with supplemental token sealing prior decision, prior evidence, and missing evidence
+        supp_token = v2.digest({
+            "prior_decision_id": dec_id,
+            "prior_decision_hash": dec_hash,
+            "prior_evidence_refs": prior_evidence_refs,
+            "missing_evidence": sorted(missing_evidence),
+            "base_plan_content_hash": base_plan.plan_content_hash,
+        })[:12]
+
+        hyp_ref = base_plan.hypothesis_ref
+        supp_plan_id = f"plan-supp-{hyp_ref.hypothesis_id}-{hyp_ref.revision}-{supp_token}"
+
+        plan_dict = base_plan.model_dump(exclude_none=True)
+        plan_dict["plan_id"] = supp_plan_id
         plan_dict["plan_content_hash"] = compute_plan_content_hash(plan_dict)
         validated = validate_screening_plan(plan_dict)
         return ScreeningPlan.model_validate(validated)

@@ -90,10 +90,16 @@
               "coverage",
               "simple_correlation",
               "direction_consistency",
-              "stability_split"
+              "stability_split",
+              "leakage_audit",
+              "outlier_sensitivity",
+              "cost_sensitivity"
             ]
           },
           "minItems": 1
+        },
+        "parameters": {
+          "type": "object"
         },
         "task_content_hash": {
           "type": "string",
@@ -212,6 +218,9 @@
             "provenance": {
               "type": "string",
               "minLength": 1
+            },
+            "parameters": {
+              "type": "object"
             },
             "status_reason": {
               "type": ["string", "null"]
