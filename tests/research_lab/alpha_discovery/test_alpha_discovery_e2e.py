@@ -535,20 +535,25 @@ def test_p1_1_leakage_audit_missing_metadata_cannot_be_completed(tmp_path: Path)
         report = pipeline.execute_plan(plan, csv_path, Path(td) / "staging")
         m_res = report.method_results[0]
         assert m_res.method == "leakage_audit"
-        assert m_res.status == "COMPLETED"
-        facts = m_res.facts
-        assert facts["audit_status"] == "INSUFFICIENT_DATA"
-        assert facts["missing_availability_metadata"] is True
-        assert facts["temporal_violation_count"] is None  # FORBIDDEN to output 0!
-        assert facts["target_overlap_violation_count"] is None  # FORBIDDEN to output 0!
-        assert facts["unverifiable_rows"] == 24
+        assert m_res.status == "INSUFFICIENT_DATA"
+        assert report.overall_status == "INSUFFICIENT_DATA"
+
+        bundle_p = Path(m_res.bundle_dir)
+        assert not (bundle_p / "statistical_summary.json").exists()
+        assert (bundle_p / "failure_diagnostics.json").exists()
+
+        run_dict = json.loads((bundle_p / "run.json").read_text("utf-8"))
+        assert run_dict["run_status"] == "INSUFFICIENT_DATA"
+
+        evidence_dict = json.loads((bundle_p / "evidence.json").read_text("utf-8"))
+        assert evidence_dict["execution_status"] == "INSUFFICIENT_DATA"
+        assert evidence_dict["run_status_snapshot"] == "INSUFFICIENT_DATA"
 
         # Critic evaluation must yield NEED_MORE_EVIDENCE, never pass or REJECT
-        evidence_dict = json.loads((Path(m_res.bundle_dir) / "evidence.json").read_text("utf-8"))
         critic = CriticGate()
         dec = critic.evaluate(hyp, evidence_dict)
         assert dec.decision == "NEED_MORE_EVIDENCE"
-        assert "leakage_audit_verifiable_metadata" in dec.missing_evidence
+        assert "leakage_audit" in dec.missing_evidence
 
 
 def test_p1_1_leakage_audit_partial_unverifiable_rows(tmp_path: Path):
@@ -584,11 +589,19 @@ def test_p1_1_leakage_audit_partial_unverifiable_rows(tmp_path: Path):
     with tempfile.TemporaryDirectory() as td:
         report = pipeline.execute_plan(plan, csv_path, Path(td) / "staging")
         m_res = report.method_results[0]
-        facts = m_res.facts
-        assert facts["audit_status"] == "INSUFFICIENT_DATA"
-        assert facts["unverifiable_rows"] == 12
-        assert facts["temporal_violation_count"] is None
-        assert facts["target_overlap_violation_count"] is None
+        assert m_res.status == "INSUFFICIENT_DATA"
+        assert report.overall_status == "INSUFFICIENT_DATA"
+
+        bundle_p = Path(m_res.bundle_dir)
+        assert not (bundle_p / "statistical_summary.json").exists()
+        assert (bundle_p / "failure_diagnostics.json").exists()
+
+        run_dict = json.loads((bundle_p / "run.json").read_text("utf-8"))
+        assert run_dict["run_status"] == "INSUFFICIENT_DATA"
+
+        evidence_dict = json.loads((bundle_p / "evidence.json").read_text("utf-8"))
+        assert evidence_dict["execution_status"] == "INSUFFICIENT_DATA"
+        assert evidence_dict["run_status_snapshot"] == "INSUFFICIENT_DATA"
 
 
 def test_p1_2_negative_alpha_cost_sensitivity_proxy_binding(tmp_path: Path):
@@ -637,32 +650,33 @@ def test_p1_2_negative_alpha_cost_sensitivity_proxy_binding(tmp_path: Path):
         assert float(facts["gross_screening_return"]) > 0
 
 
-def test_p1_2_cost_sensitivity_tampered_or_missing_proxy_fails_closed(tmp_path: Path):
-    """P1-2: Missing or conflicting position_proxy in Spec fails closed."""
+def test_p1_2_unmappable_cost_proxy_insufficient_data(tmp_path: Path):
+    """P1-2: Missing or unmappable cost proxy outputs INSUFFICIENT_DATA in runner, planner and pipeline."""
     csv_path = tmp_path / "data.csv"
     rows = [{"timestamp": "2026-01-01T00:00:00.000000Z", "symbol": "RB", "feature_val": "1.0", "target_val": "0.1"}]
     c_sha, c_len = _create_synthetic_csv(csv_path, rows, ["timestamp", "symbol", "feature_val", "target_val"])
 
+    data_req = {
+        "snapshot_sha256": c_sha,
+        "snapshot_locator": str(csv_path),
+        "snapshot_byte_length": c_len,
+        "required_fields": ["timestamp", "symbol", "feature_val", "target_val"],
+        "provenance": "test",
+    }
     task = {
         "schema_version": "research_lab.task.v2",
         "hash_profile": "research-json-v1",
-        "task_id": "task-test-p12",
+        "task_id": "task-test-p12-insufficient",
         "revision": "rev.1",
         "research_type": "statistical_factor",
         "task_profile": "research_lab.statistical_screening.v1",
         "objective": "test",
-        "data_requirements": {
-            "snapshot_sha256": c_sha,
-            "snapshot_locator": str(csv_path),
-            "snapshot_byte_length": c_len,
-            "required_fields": ["timestamp", "symbol", "feature_val", "target_val"],
-            "provenance": "test",
-        },
+        "data_requirements": data_req,
         "methods": ["cost_sensitivity"],
     }
     task["task_content_hash"] = v2.digest(task)
 
-    # Case 1: missing parameters
+    # 1. Direct Runner execution with missing parameters -> INSUFFICIENT_DATA
     spec_missing = {
         "schema_version": "research_lab.experiment.v2",
         "hash_profile": "research-json-v1",
@@ -674,7 +688,7 @@ def test_p1_2_cost_sensitivity_tampered_or_missing_proxy_fails_closed(tmp_path: 
         "experiment_type": "statistical_factor",
         "research_stage": "validation",
         "screening_profile": "research_lab.statistical_screening.v1",
-        "dataset_requirements": task["data_requirements"],
+        "dataset_requirements": data_req,
         "methods": ["cost_sensitivity"],
     }
     spec_missing["spec_content_hash"] = v2.digest(spec_missing)
@@ -683,20 +697,96 @@ def test_p1_2_cost_sensitivity_tampered_or_missing_proxy_fails_closed(tmp_path: 
         out1 = Path(td) / "run1"
         res_dir = run_statistical_screening(task=task, spec=spec_missing, snapshot_path=csv_path, output_dir=out1)
         run_record = json.loads((res_dir / "run.json").read_text("utf-8"))
-        assert run_record["run_status"] == "FAILED"
-        assert "requires Spec parameters" in run_record["resolved_computation_manifest"]["status_reason"]
+        assert run_record["run_status"] == "INSUFFICIENT_DATA"
+        ev_record = json.loads((res_dir / "evidence.json").read_text("utf-8"))
+        assert ev_record["execution_status"] == "INSUFFICIENT_DATA"
+        assert ev_record["run_status_snapshot"] == "INSUFFICIENT_DATA"
+        assert not (res_dir / "statistical_summary.json").exists()
+        assert (res_dir / "failure_diagnostics.json").exists()
 
-    # Case 2: conflicting direction and proxy
-    spec_conflict = dict(spec_missing)
-    spec_conflict["parameters"] = {"position_proxy": "-sign(feature_val)", "expected_direction": "positive"}
-    spec_conflict["spec_content_hash"] = v2.digest({k: v for k, v in spec_conflict.items() if k != "spec_content_hash"})
+    # 2. Pipeline executing plan with missing proxy -> INSUFFICIENT_DATA
+    planner = ScreeningPlanner()
+    hyp = _make_hypothesis("hypo-unmappable", direction="positive", methods=["cost_sensitivity"])
+    plan_dict = planner.plan(hyp, dataset_requirements=data_req).model_dump()
+    plan_dict["methods"][0]["parameters"] = {}
+    from research_lab.alpha_discovery.screening_plan import compute_plan_content_hash
+    plan_dict["plan_content_hash"] = compute_plan_content_hash(plan_dict)
+
+    pipeline = ScreeningPipeline(planner=planner)
+    with tempfile.TemporaryDirectory() as td:
+        report = pipeline.execute_plan(plan_dict, csv_path, Path(td) / "staging_unmappable")
+        assert report.method_results[0].status == "INSUFFICIENT_DATA"
+
+
+def test_p1_2_cost_sensitivity_tampered_sealed_proxy_failclosed(tmp_path: Path):
+    """P1-2: Tampered sealed proxy fails closed with NO pseudo-evidence in runner and pipeline."""
+    csv_path = tmp_path / "data.csv"
+    rows = [{"timestamp": "2026-01-01T00:00:00.000000Z", "symbol": "RB", "feature_val": "1.0", "target_val": "0.1"}]
+    c_sha, c_len = _create_synthetic_csv(csv_path, rows, ["timestamp", "symbol", "feature_val", "target_val"])
+
+    data_req = {
+        "snapshot_sha256": c_sha,
+        "snapshot_locator": str(csv_path),
+        "snapshot_byte_length": c_len,
+        "required_fields": ["timestamp", "symbol", "feature_val", "target_val"],
+        "provenance": "test",
+    }
+    task = {
+        "schema_version": "research_lab.task.v2",
+        "hash_profile": "research-json-v1",
+        "task_id": "task-test-p12-tampered",
+        "revision": "rev.1",
+        "research_type": "statistical_factor",
+        "task_profile": "research_lab.statistical_screening.v1",
+        "objective": "test",
+        "data_requirements": data_req,
+        "methods": ["cost_sensitivity"],
+    }
+    task["task_content_hash"] = v2.digest(task)
+
+    # 1. Direct Runner execution with conflicting/tampered direction & proxy -> raises ValueError fail-closed
+    spec_conflict = {
+        "schema_version": "research_lab.experiment.v2",
+        "hash_profile": "research-json-v1",
+        "spec_id": "spec-test-conflict",
+        "revision": "rev.1",
+        "task_id": task["task_id"],
+        "task_revision": task["revision"],
+        "task_content_hash": task["task_content_hash"],
+        "experiment_type": "statistical_factor",
+        "research_stage": "validation",
+        "screening_profile": "research_lab.statistical_screening.v1",
+        "dataset_requirements": data_req,
+        "methods": ["cost_sensitivity"],
+        "parameters": {"position_proxy": "-sign(feature_val)", "expected_direction": "positive"},
+    }
+    spec_conflict["spec_content_hash"] = v2.digest(spec_conflict)
 
     with tempfile.TemporaryDirectory() as td:
-        out2 = Path(td) / "run2"
-        res_dir = run_statistical_screening(task=task, spec=spec_conflict, snapshot_path=csv_path, output_dir=out2)
-        run_record = json.loads((res_dir / "run.json").read_text("utf-8"))
-        assert run_record["run_status"] == "FAILED"
-        assert "Direction/proxy mismatch" in run_record["resolved_computation_manifest"]["status_reason"]
+        out = Path(td) / "run_tampered"
+        with pytest.raises(ValueError, match="Tampered sealed proxy mismatch"):
+            run_statistical_screening(task=task, spec=spec_conflict, snapshot_path=csv_path, output_dir=out)
+        # Defense assertion: NO pseudo-evidence produced
+        assert not (out / "evidence.json").exists()
+
+    # 2. Pipeline execution with tampered plan parameters -> EXECUTION_FAILED with NO pseudo-evidence
+    planner = ScreeningPlanner()
+    hyp = _make_hypothesis("hypo-tamper-plan", direction="positive", methods=["cost_sensitivity"])
+    plan_dict = planner.plan(hyp, dataset_requirements=data_req).model_dump()
+    # Tamper the sealed proxy in method parameters and recompute hash
+    plan_dict["methods"][0]["parameters"]["position_proxy"] = "-sign(feature_val)"
+    from research_lab.alpha_discovery.screening_plan import compute_plan_content_hash
+    plan_dict["plan_content_hash"] = compute_plan_content_hash(plan_dict)
+
+    pipeline = ScreeningPipeline(planner=planner)
+    with tempfile.TemporaryDirectory() as td:
+        report = pipeline.execute_plan(plan_dict, csv_path, Path(td) / "staging_tampered")
+        m_tampered = report.method_results[0]
+        assert m_tampered.status == "EXECUTION_FAILED"
+        assert "Tampered sealed proxy mismatch" in (m_tampered.error_message or "")
+        # Defense assertion: NO pseudo-evidence produced
+        assert m_tampered.evidence_id is None
+        assert m_tampered.bundle_dir is None
 
 
 def test_p1_3_critic_multi_evidence_exact_binding_attacks():

@@ -107,6 +107,45 @@ def run_statistical_screening(
     # Check for missing required fields
     missing_fields = [f for f in required_fields if f not in fieldnames]
 
+    # Additional temporal metadata check for leakage_audit
+    leakage_missing_temporal: list[str] = []
+    avail_col = None
+    as_of_col = None
+    target_start_col = None
+    if "leakage_audit" in methods:
+        avail_col = "feature_availability_time" if "feature_availability_time" in fieldnames else ("availability_time" if "availability_time" in fieldnames else None)
+        as_of_col = "as_of_time" if "as_of_time" in fieldnames else ("decision_time" if "decision_time" in fieldnames else None)
+        target_start_col = "target_start_time" if "target_start_time" in fieldnames else ("target_window_start_time" if "target_window_start_time" in fieldnames else None)
+        if not avail_col:
+            leakage_missing_temporal.append("feature_availability_time")
+        if not as_of_col:
+            leakage_missing_temporal.append("as_of_time")
+        if not target_start_col:
+            leakage_missing_temporal.append("target_start_time")
+
+    # Additional parameter validation for cost_sensitivity
+    cost_insufficient = False
+    cost_reason = None
+    pos_proxy = None
+    expected_direction = None
+    if "cost_sensitivity" in methods:
+        spec_params = spec.get("parameters") or {}
+        cost_params = spec_params.get("cost_sensitivity") if "cost_sensitivity" in spec_params else spec_params
+        pos_proxy = cost_params.get("position_proxy") if isinstance(cost_params, dict) else None
+        expected_direction = cost_params.get("expected_direction") if isinstance(cost_params, dict) else None
+
+        # 1. Missing or unmappable proxy/direction => INSUFFICIENT_DATA (data/definition insufficient)
+        if not pos_proxy or not expected_direction or expected_direction not in ("positive", "negative"):
+            cost_insufficient = True
+            cost_reason = f"Unmappable cost proxy or missing expected_direction for cost_sensitivity: {cost_params}"
+        # 2. Tampered sealed proxy mismatch => Fail closed immediately (raise ValueError, producing NO pseudo-evidence)
+        elif (expected_direction == "positive" and pos_proxy != "sign(feature_val)") or (
+            expected_direction == "negative" and pos_proxy != "-sign(feature_val)"
+        ):
+            raise ValueError(
+                f"Tampered sealed proxy mismatch: expected_direction={expected_direction!r}, position_proxy={pos_proxy!r}"
+            )
+
     run_id = f"run-screening-{uuid4().hex[:16]}"
     manifest_id = f"manifest-{run_id}"
     evidence_id = f"evidence-{run_id}"
@@ -120,9 +159,34 @@ def run_statistical_screening(
     elif missing_fields or len(reader) == 0:
         run_status = "INSUFFICIENT_DATA"
         status_reason = f"Missing required fields: {missing_fields}" if missing_fields else "Empty snapshot sample"
+    elif leakage_missing_temporal:
+        run_status = "INSUFFICIENT_DATA"
+        status_reason = f"Missing mandatory temporal metadata fields for leakage_audit: {leakage_missing_temporal}"
+        for f in leakage_missing_temporal:
+            if f not in missing_fields:
+                missing_fields.append(f)
+    elif cost_insufficient:
+        run_status = "INSUFFICIENT_DATA"
+        status_reason = cost_reason
     else:
-        run_status = "COMPLETED"
-        status_reason = None
+        # Check if leakage_audit has unverifiable rows
+        if "leakage_audit" in methods:
+            unverifiable = 0
+            for row in reader:
+                t_avail = row.get(avail_col) if avail_col else None
+                t_as_of = row.get(as_of_col) if as_of_col else None
+                t_tgt = row.get(target_start_col) if target_start_col else None
+                if not t_avail or not t_as_of or not t_tgt:
+                    unverifiable += 1
+            if unverifiable > 0:
+                run_status = "INSUFFICIENT_DATA"
+                status_reason = f"Incomplete temporal metadata: {unverifiable} unverifiable rows in leakage_audit"
+            else:
+                run_status = "COMPLETED"
+                status_reason = None
+        else:
+            run_status = "COMPLETED"
+            status_reason = None
 
     computation_manifest = {
         "profile": ssd.PROFILE_NAME,
@@ -293,63 +357,29 @@ def run_statistical_screening(
 
             # 5. leakage_audit
             if "leakage_audit" in methods:
-                avail_col = "feature_availability_time" if "feature_availability_time" in fieldnames else ("availability_time" if "availability_time" in fieldnames else None)
-                as_of_col = "as_of_time" if "as_of_time" in fieldnames else ("decision_time" if "decision_time" in fieldnames else None)
-                target_start_col = "target_start_time" if "target_start_time" in fieldnames else ("target_window_start_time" if "target_window_start_time" in fieldnames else None)
-
                 total_rows = len(reader)
-                if not (avail_col and as_of_col and target_start_col) or total_rows == 0:
-                    facts["leakage_audit"] = {
-                        "audit_status": "INSUFFICIENT_DATA",
-                        "rows_checked": total_rows,
-                        "audited_fields": [f for f in [avail_col, as_of_col, target_start_col] if f],
-                        "audit_coverage_ratio": "0",
-                        "temporal_violation_count": None,
-                        "target_overlap_violation_count": None,
-                        "missing_availability_metadata": True,
-                        "unverifiable_rows": total_rows,
-                    }
-                else:
-                    temporal_violations = 0
-                    target_overlap_violations = 0
-                    unverifiable = 0
-                    valid_checked = 0
-                    for row in reader:
-                        t_avail = row.get(avail_col)
-                        t_as_of = row.get(as_of_col)
-                        t_tgt = row.get(target_start_col)
-                        if not t_avail or not t_as_of or not t_tgt:
-                            unverifiable += 1
-                            continue
-                        valid_checked += 1
-                        if t_avail > t_as_of:
-                            temporal_violations += 1
-                        if t_tgt <= t_as_of:
-                            target_overlap_violations += 1
+                temporal_violations = 0
+                target_overlap_violations = 0
+                for row in reader:
+                    t_avail = row.get(avail_col) if avail_col else None
+                    t_as_of = row.get(as_of_col) if as_of_col else None
+                    t_tgt = row.get(target_start_col) if target_start_col else None
+                    if t_avail and t_as_of and t_avail > t_as_of:
+                        temporal_violations += 1
+                    if t_tgt and t_as_of and t_tgt <= t_as_of:
+                        target_overlap_violations += 1
 
-                    cov_ratio = _format_decimal(valid_checked / total_rows if total_rows > 0 else 0.0, 4) or "0"
-                    if unverifiable > 0 or valid_checked < total_rows:
-                        facts["leakage_audit"] = {
-                            "audit_status": "INSUFFICIENT_DATA",
-                            "rows_checked": total_rows,
-                            "audited_fields": [avail_col, as_of_col, target_start_col],
-                            "audit_coverage_ratio": cov_ratio,
-                            "temporal_violation_count": None,
-                            "target_overlap_violation_count": None,
-                            "missing_availability_metadata": True,
-                            "unverifiable_rows": unverifiable,
-                        }
-                    else:
-                        facts["leakage_audit"] = {
-                            "audit_status": "COMPLETED",
-                            "rows_checked": total_rows,
-                            "audited_fields": [avail_col, as_of_col, target_start_col],
-                            "audit_coverage_ratio": cov_ratio,
-                            "temporal_violation_count": temporal_violations,
-                            "target_overlap_violation_count": target_overlap_violations,
-                            "missing_availability_metadata": False,
-                            "unverifiable_rows": 0,
-                        }
+                cov_ratio = _format_decimal(1.0 if total_rows > 0 else 0.0, 4) or "1.0000"
+                facts["leakage_audit"] = {
+                    "audit_status": "COMPLETED",
+                    "rows_checked": total_rows,
+                    "audited_fields": [f for f in [avail_col, as_of_col, target_start_col] if f],
+                    "audit_coverage_ratio": cov_ratio,
+                    "temporal_violation_count": temporal_violations,
+                    "target_overlap_violation_count": target_overlap_violations,
+                    "missing_availability_metadata": False,
+                    "unverifiable_rows": 0,
+                }
 
             # 6. outlier_sensitivity
             if "outlier_sensitivity" in methods:
@@ -427,16 +457,12 @@ def run_statistical_screening(
                     raise ValueError(
                         f"cost_sensitivity requires Spec parameters containing position_proxy and expected_direction, got {spec_params}"
                     )
-                if expected_direction == "positive" and pos_proxy != "sign(feature_val)":
+                if (expected_direction == "positive" and pos_proxy != "sign(feature_val)") or (
+                    expected_direction == "negative" and pos_proxy != "-sign(feature_val)"
+                ):
                     raise ValueError(
-                        f"Direction/proxy mismatch for positive alpha: expected 'sign(feature_val)', got {pos_proxy!r}"
+                        f"Tampered sealed proxy mismatch: expected_direction={expected_direction!r}, position_proxy={pos_proxy!r}"
                     )
-                if expected_direction == "negative" and pos_proxy != "-sign(feature_val)":
-                    raise ValueError(
-                        f"Direction/proxy mismatch for negative alpha: expected '-sign(feature_val)', got {pos_proxy!r}"
-                    )
-                if expected_direction not in ("positive", "negative"):
-                    raise ValueError(f"Invalid expected_direction: {expected_direction!r}")
 
                 feat_field = "feature_val" if "feature_val" in fieldnames else (required_fields[0] if required_fields else "")
                 tgt_field = "target_val" if "target_val" in fieldnames else (required_fields[1] if len(required_fields) > 1 else "")

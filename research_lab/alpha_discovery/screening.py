@@ -266,6 +266,28 @@ class SequentialScreeningExecutor:
                     ),
                 )
 
+        # Strict validation for cost_sensitivity sealed parameters:
+        # 1. Unmappable or missing proxy => INSUFFICIENT_DATA
+        # 2. Tampered sealed proxy => EXECUTION_FAILED fail-closed with NO pseudo-evidence
+        if method_name == "cost_sensitivity" and method_req.status == "PLANNED":
+            cost_p = method_req.parameters or {}
+            exp_dir = cost_p.get("expected_direction")
+            proxy = cost_p.get("position_proxy")
+            if not exp_dir or not proxy or exp_dir not in ("positive", "negative"):
+                return MethodExecutionResult(
+                    method=method_name,
+                    status="INSUFFICIENT_DATA",
+                    error_message=f"Unmappable or missing cost proxy/expected_direction: {cost_p}",
+                )
+            if (exp_dir == "positive" and proxy != "sign(feature_val)") or (
+                exp_dir == "negative" and proxy != "-sign(feature_val)"
+            ):
+                return MethodExecutionResult(
+                    method=method_name,
+                    status="EXECUTION_FAILED",
+                    error_message=f"Tampered sealed proxy mismatch: expected_direction={exp_dir!r}, position_proxy={proxy!r}",
+                )
+
         # PLANNED method: build Task & Spec, validate against Protocol v2, and execute runner
         try:
             task = build_protocol_v2_task(
