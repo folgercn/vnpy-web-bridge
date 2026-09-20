@@ -998,4 +998,3 @@ def test_p1_2_critic_opposite_direction_falsification_symmetry_and_fail_closed()
     hyp_invalid = dict(hyp_pos, expected_direction="neutral")
     with pytest.raises(ValueError, match="Hypothesis missing valid expected_direction"):
         critic.evaluate(hyp_invalid, _make_ev("0.150000"))
-
