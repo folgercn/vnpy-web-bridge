@@ -41,6 +41,7 @@ Verifies all 36 required criteria from attachment section 51:
 
 from __future__ import annotations
 
+import copy
 import json
 import unittest
 from typing import Any
@@ -967,20 +968,20 @@ class TestAntigravityLocalMCPAdapter(unittest.TestCase):
     # 37. Role and permission consistency enforced (P1-4)
     def test_37_role_and_permission_consistency_enforced(self) -> None:
         provider = AntigravityLocalMCPProvider()
-        task, route, _ = _make_test_fixtures()
+        task, route, prep = _make_test_fixtures()
         # Role mismatch
         object.__setattr__(route, "role", "research_synthesizer")
         object.__setattr__(route, "route_content_hash", compute_route_content_hash(route.to_dict()))
         with self.assertRaises(PermissionDeniedError) as cm:
-            provider.submit(task, route)
+            provider.submit(task, route, prep)
         self.assertIn("Role mismatch", str(cm.exception))
 
         # Permission mismatch
-        task2, route2, _ = _make_test_fixtures()
+        task2, route2, prep2 = _make_test_fixtures()
         object.__setattr__(route2, "authorized_permissions", ("read_research_memory",))
         object.__setattr__(route2, "route_content_hash", compute_route_content_hash(route2.to_dict()))
         with self.assertRaises(PermissionDeniedError) as cm2:
-            provider.submit(task2, route2)
+            provider.submit(task2, route2, prep2)
         self.assertIn("Authorized permissions mismatch", str(cm2.exception))
 
     # 38. Cancel audit completeness on reconnected handle (P1-3)
@@ -1045,6 +1046,160 @@ class TestAntigravityLocalMCPAdapter(unittest.TestCase):
         # 3. FastMCP content wrapper
         content_wrapper = {"content": [{"type": "text", "text": '{"hello": "world"}'}]}
         self.assertEqual(parse_mcp_response_content(content_wrapper), {"hello": "world"})
+
+    # 41. submit requires valid ExecutionPreparation (fail-closed, P1-2)
+    def test_41_submit_requires_valid_preparation_fail_closed(self) -> None:
+        provider = AntigravityLocalMCPProvider()
+        task, route, prep = _make_test_fixtures()
+
+        # 1. Missing / None preparation fails closed
+        with self.assertRaises(PermissionDeniedError) as cm:
+            provider.submit(task, route, None)  # type: ignore[arg-type]
+        self.assertIn("Valid ExecutionPreparation is required", str(cm.exception))
+
+        # 2. Task ID mismatch (preparation for another task)
+        _task_other, _, prep_other = _make_test_fixtures(prompt="Another task objective")
+        with self.assertRaises(PermissionDeniedError) as cm:
+            provider.submit(task, route, prep_other)
+        self.assertIn("Preparation task_id", str(cm.exception))
+
+        # 3. Route ID mismatch
+        route_other = copy.deepcopy(route)
+        object.__setattr__(route_other, "route_id", "route-other-123")
+        object.__setattr__(route_other, "route_content_hash", compute_route_content_hash(route_other.to_dict()))
+        with self.assertRaises(PermissionDeniedError) as cm:
+            provider.submit(task, route_other, prep)
+        self.assertIn("Preparation route_id", str(cm.exception))
+
+        # 4. Tampered preparation hash
+        tampered_prep = copy.deepcopy(prep)
+        object.__setattr__(tampered_prep, "preparation_hash", "tampered_hash_value_12345")
+        with self.assertRaises(TamperDetectionError) as cm:
+            provider.submit(task, route, tampered_prep)
+        self.assertIn("tampering detected", str(cm.exception))
+
+    # 42. Bare transport profile ref rejected; exact ref required (P1-3)
+    def test_42_bare_transport_profile_rejected(self) -> None:
+        provider = AntigravityLocalMCPProvider()
+        task, route, prep = _make_test_fixtures()
+
+        # 1. Bare profile ref (antigravity-local-desktop instead of local_mcp://antigravity-local-desktop)
+        object.__setattr__(route, "transport_ref", "antigravity-local-desktop")
+        object.__setattr__(route, "route_content_hash", compute_route_content_hash(route.to_dict()))
+        with self.assertRaises(ProviderError) as cm:
+            provider.submit(task, route, prep)
+        self.assertEqual(cm.exception.code, ProviderErrorCode.PROVIDER_UNAVAILABLE)
+        self.assertIn("does not exact match required provider transport", str(cm.exception))
+
+        # 2. Incompatible transport kind (e.g., stdio://...)
+        object.__setattr__(route, "transport_ref", "stdio://antigravity-local-desktop")
+        object.__setattr__(route, "route_content_hash", compute_route_content_hash(route.to_dict()))
+        with self.assertRaises(ProviderError) as cm:
+            provider.submit(task, route, prep)
+        self.assertEqual(cm.exception.code, ProviderErrorCode.PROVIDER_UNAVAILABLE)
+
+    # 43. Result closed mapping rejects review_required and unknown states (P1-4)
+    def test_43_result_closed_mapping_review_and_unknown_rejected(self) -> None:
+        handle = AgentExecutionHandle(
+            handle_id="handle-j1",
+            task_ref={"task_id": "task-test-1"},
+            route_ref={"route_id": "route-test-1"},
+            provider_job_ref="job-test-closed-map",
+            status="RUNNING",
+        )
+
+        test_cases = [
+            ("REVIEW_REQUIRED", TerminalStatus.REJECTED_BY_ACCEPTANCE, "REJECTED_BY_ACCEPTANCE"),
+            ("NEEDS_REVIEW", TerminalStatus.REJECTED_BY_ACCEPTANCE, "REJECTED_BY_ACCEPTANCE"),
+            ("UNKNOWN_STATE_XYZ", TerminalStatus.REJECTED_BY_ACCEPTANCE, "REJECTED_BY_ACCEPTANCE"),
+            (None, TerminalStatus.REJECTED_BY_ACCEPTANCE, "REJECTED_BY_ACCEPTANCE"),
+            ("", TerminalStatus.REJECTED_BY_ACCEPTANCE, "REJECTED_BY_ACCEPTANCE"),
+        ]
+
+        for raw_val, expected_term, expected_accept in test_cases:
+            def fake_caller(op: str, args: dict, val=raw_val) -> Any:
+                if op == "result":
+                    res: dict[str, Any] = {"job_id": "job-test-closed-map", "output": "some result"}
+                    if val is not None:
+                        res["status"] = val
+                    return res
+                return {}
+
+            transport = LocalMCPTransport(
+                tool_catalog=list(ALL_MCP_OPERATIONS),
+                tool_caller=fake_caller,
+            )
+            provider = AntigravityLocalMCPProvider(transport=transport)
+            res = provider.result(handle)
+            self.assertEqual(res.terminal_status, expected_term, f"Failed for raw_status={raw_val}")
+            self.assertEqual(res.acceptance_status, expected_accept, f"Failed for raw_status={raw_val}")
+
+        # White-listed statuses pass as SUCCESS
+        for white_status in ("SUCCESS", "COMPLETED", "TURN_COMPLETE"):
+            def fake_caller_ok(op: str, args: dict, ws=white_status) -> Any:
+                if op == "result":
+                    return {"job_id": "job-test-closed-map", "status": ws, "output": "ok"}
+                return {}
+
+            transport = LocalMCPTransport(
+                tool_catalog=list(ALL_MCP_OPERATIONS),
+                tool_caller=fake_caller_ok,
+            )
+            provider = AntigravityLocalMCPProvider(transport=transport)
+            res = provider.result(handle)
+            self.assertEqual(res.terminal_status, TerminalStatus.SUCCESS)
+            self.assertEqual(res.acceptance_status, "ACCEPTED")
+
+    # 44. Quota remaining fraction 0 and 0.0 preserved (P1-5)
+    def test_44_quota_fraction_zero_preserved(self) -> None:
+        # Case 1: In groups[].buckets with 0.0
+        def fake_caller_groups(op: str, args: dict) -> Any:
+            if op == "account_usage":
+                return {
+                    "quota": {
+                        "groups": [
+                            {
+                                "displayName": "Gemini Shared Group",
+                                "buckets": [
+                                    {"name": "5h", "remaining_fraction": 0.0, "reset_time": "2026-09-21T00:00:00Z"},
+                                    {"name": "weekly", "remaining_fraction": 0, "reset_time": "2026-09-28T00:00:00Z"},
+                                ],
+                            }
+                        ]
+                    }
+                }
+            return {}
+
+        transport = LocalMCPTransport(
+            tool_catalog=list(ALL_MCP_OPERATIONS),
+            tool_caller=fake_caller_groups,
+        )
+        provider = AntigravityLocalMCPProvider(transport=transport)
+        snap = provider.account_usage()
+        self.assertEqual(len(snap.quota_windows), 2)
+        self.assertIsNotNone(snap.quota_windows[0]["remaining_fraction"])
+        self.assertEqual(snap.quota_windows[0]["remaining_fraction"], 0)
+        self.assertEqual(snap.quota_windows[1]["remaining_fraction"], 0)
+
+        # Case 2: In legacy five_hour and weekly with 0.0
+        def fake_caller_legacy(op: str, args: dict) -> Any:
+            if op == "account_usage":
+                return {
+                    "five_hour": {"remaining_fraction": 0.0, "reset_time": "2026-09-21T00:00:00Z"},
+                    "weekly": {"remaining_fraction": 0, "reset_time": "2026-09-28T00:00:00Z"},
+                }
+            return {}
+
+        transport2 = LocalMCPTransport(
+            tool_catalog=list(ALL_MCP_OPERATIONS),
+            tool_caller=fake_caller_legacy,
+        )
+        provider2 = AntigravityLocalMCPProvider(transport=transport2)
+        snap2 = provider2.account_usage()
+        self.assertEqual(len(snap2.quota_windows), 2)
+        self.assertIsNotNone(snap2.quota_windows[0]["remaining_fraction"])
+        self.assertEqual(snap2.quota_windows[0]["remaining_fraction"], 0)
+        self.assertEqual(snap2.quota_windows[1]["remaining_fraction"], 0)
 
 
 if __name__ == "__main__":

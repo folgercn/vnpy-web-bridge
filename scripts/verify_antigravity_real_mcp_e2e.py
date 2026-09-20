@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 from research_lab.agent_control.audit import AppendOnlyAuditTrail
@@ -18,11 +19,14 @@ from research_lab.agent_control.contracts import (
     ProjectBinding,
     validate_result_hash,
 )
+from research_lab.agent_control.handoff import prepare_execution
 from research_lab.agent_control.providers.antigravity_local_mcp import (
     AntigravityLocalMCPProvider,
 )
+from research_lab.agent_control.registry import ProviderRegistry
 from research_lab.agent_control.roles import AgentRole
-from research_lab.agent_control.router import authorize
+from research_lab.agent_control.router import authorize, select_agent
+from research_lab.agent_control.routing_context import RoutingContext
 from research_lab.agent_control.transports.local_mcp import (
     CRITICAL_MCP_TOOLS,
     DEFAULT_MCP_SCRIPT,
@@ -111,7 +115,80 @@ def main() -> int:
         return 1
     print("[PASS] Exact ProjectBinding verified.")
 
-    # 7. Job Reconciliation for e9ce7b2d654f06f313b9fa733dc5e860
+    # 7. Real New MCP Task Submission & Execution (Gate 2 P1-1 fix)
+    now_ts = int(time.time())
+    new_req_id = f"req-e2e-live-{now_ts}"
+    new_prompt = "Read README.md first line. Do not modify files."
+    new_task = AgentTask.create(
+        role=AgentRole.CODE_RESEARCHER.value,
+        requested_permissions=perms,
+        authorized_permissions=perms,
+        authorized_scope=scope,
+        objective=new_prompt,
+        work_block=f"wb-m2-e2e-live-{now_ts}",
+        input_refs=[{"type": "spec", "ref": "spec-m2"}],
+        provider_policy_ref="policy-m2-v1",
+        project_binding=binding,
+        created_by="researcher",
+        created_at="2026-09-20T00:00:00Z",
+    )
+    reg = ProviderRegistry()
+    reg.register(provider, transport=transport.descriptor)
+    ctx = RoutingContext(role=AgentRole.CODE_RESEARCHER.value, authorized_scope=scope, project_binding=binding)
+    new_route = select_agent(registry=reg, routing_context=ctx)
+    new_prep = prepare_execution(task=new_task, route=new_route, registry=reg)
+
+    print(f"[*] Submitting new live read-only task: task_id={new_task.task_id}, req_id={new_req_id}")
+    live_handle = provider.submit(new_task, new_route, new_prep, request_id=new_req_id)
+    live_job_id = live_handle.provider_job_ref
+    print(f"[PASS] Successfully submitted live task! Returned durable job_id: {live_job_id}")
+
+    # Watch/Poll status until terminal
+    print(f"[*] Waiting for job {live_job_id} to reach terminal status...")
+    start_t = time.time()
+    term_status = None
+    while time.time() - start_t < 180:
+        st = provider.status(live_handle)
+        print(f"    - current status: {st} (elapsed: {int(time.time() - start_t)}s)")
+        if st in ("COMPLETED", "SUCCESS", "FAILED", "CANCELLED", "ERROR", "REJECTED_BY_ACCEPTANCE"):
+            term_status = st
+            break
+        time.sleep(3)
+    if not term_status:
+        print(f"[ERROR] Timed out waiting for job {live_job_id} completion!")
+        return 1
+
+    # Retrieve and validate live result
+    live_result = provider.result(live_handle)
+    print("[*] Retrieved live AgentResult:")
+    print(f"    - result_id: {live_result.result_id}")
+    print(f"    - provider_job_ref: {live_result.provider_job_ref}")
+    term_status_val = getattr(live_result.terminal_status, "value", live_result.terminal_status)
+    print(f"    - terminal_status: {term_status_val}")
+    print(f"    - acceptance_status: {live_result.acceptance_status}")
+    print(f"    - result_content_hash: {live_result.result_content_hash}")
+    print(f"    - tool_failures: {live_result.tool_failures}")
+    validate_result_hash(live_result.to_dict())
+    print("[PASS] Cryptographic validation for live AgentResult passed.")
+
+    # Live model response preview
+    live_out_str = json.dumps(live_result.structured_output or {}, ensure_ascii=False)
+    print(f"[*] Live model response preview:\n{live_out_str[:350]}...")
+    if "# VnPy Web Bridge" not in live_out_str:
+        print("[ERROR] Expected '# VnPy Web Bridge' in live result response!")
+        return 1
+    print("[PASS] Read-only verification confirmed on new live job: exact README.md title verified without side effects.")
+
+    # 8. Idempotency Re-submission Verification (Gate 2 P1-1)
+    print(f"[*] Verifying idempotency with identical request_id: {new_req_id}")
+    re_handle = provider.submit(new_task, new_route, new_prep, request_id=new_req_id)
+    print(f"    - re-submission returned job_id: {re_handle.provider_job_ref}")
+    if re_handle.provider_job_ref != live_job_id:
+        print(f"[ERROR] Idempotency violated: expected {live_job_id}, got {re_handle.provider_job_ref}")
+        return 1
+    print("[PASS] Idempotency confirmed: returned identical job_id, zero duplicate execution.")
+
+    # 9. Historical Job Reconciliation for e9ce7b2d654f06f313b9fa733dc5e860
     job_disk_dir = Path("/Users/fujun/.codex/skills/antigravity-delegate/.desktop/mcp/jobs") / RECONCILED_JOB_ID
     print(f"[*] Verifying durable job on disk: {job_disk_dir}")
     if not job_disk_dir.is_dir():

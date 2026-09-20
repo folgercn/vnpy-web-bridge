@@ -35,6 +35,7 @@ from research_lab.agent_control.contracts import (
     AgentUsageSnapshot,
     TerminalStatus,
     validate_route_hash,
+    validate_scope_hash,
     validate_task_hash,
 )
 from research_lab.agent_control.errors import (
@@ -67,6 +68,17 @@ SUPPORTED_MODELS = (
     "Gemini 3.8 Flash Medium",
     "Gemini 3.7 Flash High",
 )
+
+
+def _extract_fraction(d: dict[str, Any], *keys: str) -> float | None:
+    """Safely extract quota fraction without falsely discarding 0.0 or 0 values."""
+    for k in keys:
+        if k in d and d[k] is not None:
+            try:
+                return float(d[k])
+            except (ValueError, TypeError):
+                continue
+    return None
 
 
 class AntigravityLocalMCPProvider(AgentProvider):
@@ -206,9 +218,39 @@ class AntigravityLocalMCPProvider(AgentProvider):
                     if isinstance(buckets, list):
                         for b in buckets:
                             if isinstance(b, dict):
-                                rem = b.get("remaining_fraction")
-                                if rem is None and "remainingFraction" in b:
-                                    rem = b.get("remainingFraction")
+                                rem = _extract_fraction(b, "remaining_fraction", "remainingFraction")
+                                reset_time = b.get("reset_time") or b.get("resetTime")
+                                window_name = b.get("window") or b.get("name") or b.get("bucketId") or "unknown"
+                                windows.append(
+                                    {
+                                        "remaining_fraction": rem,
+                                        "reset_time": reset_time,
+                                        "window": str(window_name),
+                                    }
+                                )
+        elif "buckets" in raw and isinstance(raw["buckets"], list):
+            for b in raw["buckets"]:
+                if isinstance(b, dict):
+                    rem = _extract_fraction(b, "remaining_fraction", "remainingFraction")
+                    reset_time = b.get("reset_time") or b.get("resetTime")
+                    window_name = b.get("window") or b.get("name") or b.get("bucketId") or "unknown"
+                    windows.append(
+                        {
+                            "remaining_fraction": rem,
+                            "reset_time": reset_time,
+                            "window": str(window_name),
+                        }
+                    )
+        elif "model_groups" in raw and isinstance(raw["model_groups"], list):
+            for mg in raw["model_groups"]:
+                if isinstance(mg, dict):
+                    mg_name = mg.get("name") or mg.get("group_name") or model_group
+                    model_group = mg_name
+                    buckets = mg.get("buckets") or mg.get("quota_windows") or []
+                    if isinstance(buckets, list):
+                        for b in buckets:
+                            if isinstance(b, dict):
+                                rem = _extract_fraction(b, "remaining_fraction", "remainingFraction")
                                 reset_time = b.get("reset_time") or b.get("resetTime")
                                 window_name = b.get("window") or b.get("name") or b.get("bucketId") or "unknown"
                                 windows.append(
@@ -223,9 +265,7 @@ class AntigravityLocalMCPProvider(AgentProvider):
             if isinstance(raw_windows, list):
                 for w in raw_windows:
                     if isinstance(w, dict):
-                        rem = w.get("remaining_fraction")
-                        if rem is None and "remainingFraction" in w:
-                            rem = w.get("remainingFraction")
+                        rem = _extract_fraction(w, "remaining_fraction", "remainingFraction")
                         reset_time = w.get("reset_time") or w.get("resetTime")
                         window_name = w.get("window") or w.get("name") or "unknown"
                         windows.append(
@@ -238,20 +278,28 @@ class AntigravityLocalMCPProvider(AgentProvider):
 
             if not windows:
                 if "five_hour" in raw or "fiveHour" in raw:
-                    fh = raw.get("five_hour") or raw.get("fiveHour") or {}
+                    raw_fh = raw.get("five_hour")
+                    if raw_fh is None:
+                        raw_fh = raw.get("fiveHour")
+                    fh = raw_fh if isinstance(raw_fh, dict) else {}
+                    rem_fh = _extract_fraction(fh, "remaining_fraction", "remainingFraction")
+                    reset_fh = fh.get("reset_time") or fh.get("resetTime")
                     windows.append(
                         {
-                            "remaining_fraction": fh.get("remaining_fraction") or fh.get("remainingFraction"),
-                            "reset_time": fh.get("reset_time") or fh.get("resetTime"),
+                            "remaining_fraction": rem_fh,
+                            "reset_time": reset_fh,
                             "window": "5-hour",
                         }
                     )
                 if "weekly" in raw:
-                    wk = raw.get("weekly") or {}
+                    raw_wk = raw.get("weekly")
+                    wk = raw_wk if isinstance(raw_wk, dict) else {}
+                    rem_wk = _extract_fraction(wk, "remaining_fraction", "remainingFraction")
+                    reset_wk = wk.get("reset_time") or wk.get("resetTime")
                     windows.append(
                         {
-                            "remaining_fraction": wk.get("remaining_fraction") or wk.get("remainingFraction"),
-                            "reset_time": wk.get("reset_time") or wk.get("resetTime"),
+                            "remaining_fraction": rem_wk,
+                            "reset_time": reset_wk,
                             "window": "weekly",
                         }
                     )
@@ -343,28 +391,54 @@ class AntigravityLocalMCPProvider(AgentProvider):
         self,
         task: AgentTask,
         route: AgentRoute,
-        preparation: ExecutionPreparation | None = None,
+        preparation: ExecutionPreparation,
         request_id: str | None = None,
     ) -> AgentExecutionHandle:
         """Submit an authorized task along its route, enforcing strict idempotency and boundary checks."""
-        # 1. Independent boundary re-validation
+        # 1. Formal handoff boundary enforcement: ExecutionPreparation is mandatory
+        if preparation is None or not isinstance(preparation, ExecutionPreparation):
+            raise PermissionDeniedError(
+                "Valid ExecutionPreparation is required for submit; cannot bypass formal handoff boundary",
+                details={"preparation": type(preparation).__name__ if preparation is not None else None},
+            )
+
+        # 2. Independent boundary re-validation & tamper detection
         validate_task_hash(task.to_dict())
         validate_route_hash(route.to_dict())
-        if preparation is not None:
-            validate_preparation_hash(preparation.to_dict())
-            if preparation.task_id != task.task_id:
-                raise PermissionDeniedError("Preparation task_id does not match task.task_id")
-            if preparation.route_id != route.route_id:
-                raise PermissionDeniedError("Preparation route_id does not match route.route_id")
+        validate_preparation_hash(preparation.to_dict())
+        if task.authorization_scope_ref and isinstance(task.authorization_scope_ref, dict):
+            validate_scope_hash(task.authorization_scope_ref)
 
-        # 2. Hard Invariant checks first: no nested agent, no trading authority
+        # 3. Preparation reference exact consistency
+        if preparation.task_id != task.task_id:
+            raise PermissionDeniedError(
+                f"Preparation task_id '{preparation.task_id}' does not match task.task_id '{task.task_id}'"
+            )
+        if preparation.route_id != route.route_id:
+            raise PermissionDeniedError(
+                f"Preparation route_id '{preparation.route_id}' does not match route.route_id '{route.route_id}'"
+            )
+        if preparation.provider != "antigravity":
+            raise PermissionDeniedError(
+                f"Preparation provider '{preparation.provider}' does not match required provider 'antigravity'"
+            )
+        if preparation.model != route.resolved_model:
+            raise PermissionDeniedError(
+                f"Preparation model '{preparation.model}' does not match route model '{route.resolved_model}'"
+            )
+        if tuple(preparation.authorized_permissions) != tuple(task.authorized_permissions):
+            raise PermissionDeniedError("Preparation authorized_permissions mismatch with task authorized_permissions")
+        if dict(preparation.project_binding) != dict(task.project_binding):
+            raise PermissionDeniedError("Preparation project_binding mismatch with task project_binding")
+
+        # 4. Hard Invariant checks first: no nested agent, no trading authority
         for perm in list(task.authorized_permissions) + list(route.authorized_permissions):
             if "trading" in perm.lower() or "order" in perm.lower():
                 raise PermissionDeniedError("Hard invariant violation: trading permissions prohibited")
             if "nested" in perm.lower() or "delegate_child" in perm.lower():
                 raise PermissionDeniedError("Hard invariant violation: nested delegation prohibited")
 
-        # 3. Role and model validation & consistency
+        # 5. Role and model validation & consistency
         if task.role not in SUPPORTED_ROLES or route.role not in SUPPORTED_ROLES:
             raise PermissionDeniedError(f"Unsupported role for provider antigravity: {task.role}")
         if task.role != route.role:
@@ -374,18 +448,26 @@ class AntigravityLocalMCPProvider(AgentProvider):
         if route.resolved_model not in SUPPORTED_MODELS:
             raise ProviderUnavailableError(f"Unsupported model: {route.resolved_model}")
 
-        # 3. Transport exact identity validation
-        if (
-            route.transport_ref
-            and route.transport_ref != self._transport.exact_ref
-            and route.transport_ref != self._transport.descriptor.connection_profile_ref
-        ):
+        # 6. Transport exact identity validation (strict exact ref only: local_mcp://...)
+        expected_exact_ref = self._transport.exact_ref
+        if not route.transport_ref or route.transport_ref != expected_exact_ref:
             raise ProviderError(
                 ProviderErrorCode.PROVIDER_UNAVAILABLE,
-                f"Route transport_ref '{route.transport_ref}' does not match provider transport '{self._transport.exact_ref}'",
+                f"Route transport_ref '{route.transport_ref}' does not exact match required provider transport '{expected_exact_ref}' (fail closed)",
+                details={"expected_exact_ref": expected_exact_ref, "received_transport_ref": route.transport_ref},
+            )
+        prep_transport_ref = (
+            getattr(preparation.transport, "exact_ref", None)
+            or f"{preparation.transport.transport_kind}://{preparation.transport.connection_profile_ref}"
+        )
+        if prep_transport_ref != expected_exact_ref:
+            raise ProviderError(
+                ProviderErrorCode.PROVIDER_UNAVAILABLE,
+                f"Preparation transport '{prep_transport_ref}' does not exact match required provider transport '{expected_exact_ref}' (fail closed)",
+                details={"expected_exact_ref": expected_exact_ref, "preparation_transport": prep_transport_ref},
             )
 
-        # 4. ProjectBinding exact verification
+        # 7. ProjectBinding exact verification
         self.verify_project_binding(task)
 
         # 6. Request ID determination and Idempotency Enforcement
@@ -481,6 +563,7 @@ class AntigravityLocalMCPProvider(AgentProvider):
         self._job_statuses[job_id] = "SUBMITTED"
         self._job_metadata[job_id] = {
             "effective_req_id": effective_req_id,
+            "preparation": preparation,
             "project_binding": dict(task.project_binding),
             "route": route,
             "task": task,
@@ -603,30 +686,56 @@ class AntigravityLocalMCPProvider(AgentProvider):
         for err in error_history:
             tool_failures.append(f"Historical error: {err}")
 
-        # 3. Provider SUCCESS != Acceptance SUCCESS
-        raw_status = str(resp.get("status") or resp.get("terminal_status") or "COMPLETED").upper()
+        # 3. Provider SUCCESS != Acceptance SUCCESS: Closed Mapping
+        SUCCESS_STATUS_WHITELIST = frozenset({"SUCCESS", "COMPLETED", "TURN_COMPLETE"})
+        raw_status_val = resp.get("status") if resp.get("status") is not None else resp.get("terminal_status")
+        if raw_status_val is None or not str(raw_status_val).strip():
+            raw_status = "MISSING_STATUS"
+        else:
+            raw_status = str(raw_status_val).strip().upper()
+
         uncertainty: str | None = None
-        acceptance_status: str = "ACCEPTED"
-        terminal_status = TerminalStatus.SUCCESS
+        acceptance_status: str
+        terminal_status: TerminalStatus
 
         if raw_status in ("CANCELLED", "CANCELED"):
             terminal_status = TerminalStatus.CANCELLED
             acceptance_status = "CANCELLED"
-        elif raw_status in ("FAILED", "ERROR"):
+        elif raw_status in ("FAILED", "ERROR", "CRASHED"):
             terminal_status = TerminalStatus.FAILED
             acceptance_status = "REJECTED_BY_ACCEPTANCE"
-        elif raw_status in ("UNCERTAIN", "WORKER_LOST"):
+        elif raw_status in ("UNCERTAIN", "WORKER_LOST", "TIMEOUT", "TIMED_OUT", "UNKNOWN"):
             terminal_status = TerminalStatus.UNCERTAIN
             uncertainty = "Execution outcome uncertain"
             acceptance_status = "REJECTED_BY_ACCEPTANCE"
-        elif tool_failures:
-            # Model self SUCCESS with unresolved tool issues rejected by acceptance
+        elif raw_status in ("REVIEW_REQUIRED", "REJECTED", "NEEDS_REVIEW"):
             terminal_status = TerminalStatus.REJECTED_BY_ACCEPTANCE
             acceptance_status = "REJECTED_BY_ACCEPTANCE"
-            uncertainty = f"Execution contains {len(tool_failures)} tool failure(s)"
+            uncertainty = f"Execution status '{raw_status}' requires review or was rejected upstream"
+        elif raw_status in SUCCESS_STATUS_WHITELIST:
+            # Check inner result status if present
+            inner_res = resp.get("result")
+            inner_status = None
+            if isinstance(inner_res, dict) and inner_res.get("status") is not None:
+                inner_status = str(inner_res.get("status")).strip().upper()
+
+            if inner_status and inner_status not in SUCCESS_STATUS_WHITELIST:
+                terminal_status = TerminalStatus.REJECTED_BY_ACCEPTANCE
+                acceptance_status = "REJECTED_BY_ACCEPTANCE"
+                uncertainty = f"Inner result status '{inner_status}' is not in success whitelist"
+            elif tool_failures:
+                # Model self SUCCESS with unresolved tool issues rejected by acceptance
+                terminal_status = TerminalStatus.REJECTED_BY_ACCEPTANCE
+                acceptance_status = "REJECTED_BY_ACCEPTANCE"
+                uncertainty = f"Execution contains {len(tool_failures)} tool failure(s)"
+            else:
+                terminal_status = TerminalStatus.SUCCESS
+                acceptance_status = "ACCEPTED"
         else:
-            terminal_status = TerminalStatus.SUCCESS
-            acceptance_status = "ACCEPTED"
+            # Closed mapping: Any missing, unexpected, or unknown status fails closed
+            terminal_status = TerminalStatus.REJECTED_BY_ACCEPTANCE
+            acceptance_status = "REJECTED_BY_ACCEPTANCE"
+            uncertainty = f"Unrecognized or missing execution status '{raw_status}' rejected by acceptance (fail closed)"
 
         # 4. Actual model provenance
         actual_model = resp.get("actual_model") or resp.get("model") or (route.resolved_model if route else "unknown")
