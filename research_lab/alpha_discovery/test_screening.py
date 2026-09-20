@@ -716,3 +716,139 @@ def test_p1_3_byte_length_mismatch_fails_closed_no_output_dir(
     assert res.status == "EXECUTION_FAILED"
     assert "byte_length mismatch" in res.error_message.lower()
     assert not method_out.exists()
+
+
+# =========================================================================
+# Additional P1-1 & P1-2 Tests (Revision & Methods Binding + Plan Hash Revalidation)
+# =========================================================================
+def test_p1_1_methods_change_yields_different_plan_id(
+    base_hypothesis_data: dict[str, Any],
+    dataset_requirements: dict[str, Any],
+):
+    """P1-1: Same hypothesis and dataset, but changing proposed methods yields different plan_id."""
+    planner = ScreeningPlanner()
+
+    h1 = copy.deepcopy(base_hypothesis_data)
+    h1["proposed_screening_methods"] = ["coverage"]
+    h1["hypothesis_content_hash"] = compute_hypothesis_content_hash(h1)
+
+    h2 = copy.deepcopy(base_hypothesis_data)
+    h2["proposed_screening_methods"] = ["coverage", "simple_correlation"]
+    h2["hypothesis_content_hash"] = compute_hypothesis_content_hash(h2)
+
+    plan1 = planner.plan(h1, dataset_requirements=dataset_requirements)
+    plan2 = planner.plan(h2, dataset_requirements=dataset_requirements)
+
+    assert plan1.plan_id != plan2.plan_id
+    assert plan1.plan_content_hash != plan2.plan_content_hash
+
+
+def test_p1_1_hypothesis_revision_change_yields_different_plan_id(
+    base_hypothesis_data: dict[str, Any],
+    dataset_requirements: dict[str, Any],
+):
+    """P1-1: Same scientific hypothesis and dataset, but updating hypothesis revision yields different plan_id."""
+    planner = ScreeningPlanner()
+
+    h_rev1 = copy.deepcopy(base_hypothesis_data)
+
+    h_rev2 = copy.deepcopy(base_hypothesis_data)
+    h_rev2["revision"] = "rev.2"
+    h_rev2["parent_hypothesis_ref"] = {
+        "hypothesis_id": base_hypothesis_data["hypothesis_id"],
+        "revision": "rev.1",
+        "content_hash": base_hypothesis_data["hypothesis_content_hash"],
+    }
+    h_rev2["hypothesis_content_hash"] = compute_hypothesis_content_hash(h_rev2)
+
+    plan1 = planner.plan(h_rev1, dataset_requirements=dataset_requirements)
+    plan2 = planner.plan(h_rev2, dataset_requirements=dataset_requirements)
+
+    assert plan1.plan_id != plan2.plan_id
+    assert "rev.1" in plan1.plan_id
+    assert "rev.2" in plan2.plan_id
+    assert plan1.plan_content_hash != plan2.plan_content_hash
+
+
+def test_p1_1_methods_order_normalized_yields_same_plan_id(
+    base_hypothesis_data: dict[str, Any],
+    dataset_requirements: dict[str, Any],
+):
+    """P1-1: Changing order of proposed methods normalizes to identical plan_id."""
+    planner = ScreeningPlanner()
+
+    h1 = copy.deepcopy(base_hypothesis_data)
+    h1["proposed_screening_methods"] = ["simple_correlation", "coverage"]
+    h1["hypothesis_content_hash"] = compute_hypothesis_content_hash(h1)
+
+    h2 = copy.deepcopy(base_hypothesis_data)
+    h2["proposed_screening_methods"] = ["coverage", "simple_correlation"]
+    h2["hypothesis_content_hash"] = compute_hypothesis_content_hash(h2)
+
+    plan1 = planner.plan(h1, dataset_requirements=dataset_requirements)
+    plan2 = planner.plan(h2, dataset_requirements=dataset_requirements)
+
+    assert [m.method for m in plan1.methods] == ["coverage", "simple_correlation"]
+    assert [m.method for m in plan2.methods] == ["coverage", "simple_correlation"]
+
+
+def test_p1_1_unknown_methods_participate_in_plan_identity(
+    base_hypothesis_data: dict[str, Any],
+    dataset_requirements: dict[str, Any],
+):
+    """P1-1: Unknown methods are normalized and participate in plan_id without collision."""
+    planner = ScreeningPlanner()
+
+    h_known = copy.deepcopy(base_hypothesis_data)
+    h_known["proposed_screening_methods"] = ["coverage"]
+    h_known["hypothesis_content_hash"] = compute_hypothesis_content_hash(h_known)
+
+    h_unknown = copy.deepcopy(base_hypothesis_data)
+    h_unknown["proposed_screening_methods"] = ["coverage", "unsupported_magic_screening"]
+    h_unknown["hypothesis_content_hash"] = compute_hypothesis_content_hash(h_unknown)
+
+    plan_known = planner.plan(h_known, dataset_requirements=dataset_requirements)
+    plan_unknown = planner.plan(h_unknown, dataset_requirements=dataset_requirements)
+
+    assert plan_known.plan_id != plan_unknown.plan_id
+    assert plan_known.plan_content_hash != plan_unknown.plan_content_hash
+    assert any(m.method == "unsupported_magic_screening" and m.status == "UNSUPPORTED" for m in plan_unknown.methods)
+
+
+def test_p1_2_execute_plan_rejects_model_construct_plan(
+    base_hypothesis_data: dict[str, Any],
+    dataset_requirements: dict[str, Any],
+    tmp_path: Path,
+):
+    """P1-2: execute_plan rejects fake plan created via model_construct with invalid hash."""
+    planner = ScreeningPlanner()
+    valid_plan = planner.plan(base_hypothesis_data, dataset_requirements=dataset_requirements)
+
+    plan_data = valid_plan.model_dump()
+    plan_data["plan_content_hash"] = "f" * 64  # invalid tampered hash
+    fake_plan = ScreeningPlan.model_construct(**plan_data)
+
+    pipeline = ScreeningPipeline()
+    out_dir = tmp_path / "fake_plan_out"
+    with pytest.raises(ValueError, match="plan_content_hash mismatch"):
+        pipeline.execute_plan(fake_plan, FIXTURE_PATH, out_dir)
+    assert not out_dir.exists()
+
+
+def test_p1_2_execute_plan_rejects_mutated_plan_instance(
+    base_hypothesis_data: dict[str, Any],
+    dataset_requirements: dict[str, Any],
+    tmp_path: Path,
+):
+    """P1-2: execute_plan rejects plan instance mutated after creation without recomputing hash."""
+    planner = ScreeningPlanner()
+    valid_plan = planner.plan(base_hypothesis_data, dataset_requirements=dataset_requirements)
+
+    # Mutate plan_id on valid_plan instance
+    object.__setattr__(valid_plan, "plan_id", "plan-tampered-id")
+
+    pipeline = ScreeningPipeline()
+    out_dir = tmp_path / "mutated_plan_out"
+    with pytest.raises(ValueError, match="plan_content_hash mismatch"):
+        pipeline.execute_plan(valid_plan, FIXTURE_PATH, out_dir)
+    assert not out_dir.exists()

@@ -147,13 +147,23 @@ class ScreeningPlanner:
                         )
                     )
 
-        # Plan ID is deterministic based on hypothesis_id, full scientific identity hash, and full dataset canonical digest
+        # Plan ID is deterministic based on hypothesis exact ref, full dataset canonical digest, and normalized methods
         if ds_req_model is not None:
             ds_exact_digest = v2.digest(ds_req_model.model_dump(exclude_none=True))
-            identity_token = v2.digest({"scientific_hash": scientific_hash, "dataset_digest": ds_exact_digest})[:16]
         else:
-            identity_token = v2.digest({"scientific_hash": scientific_hash, "dataset_digest": "none"})[:16]
-        plan_id = f"plan-{hyp_id}-{identity_token}"
+            ds_exact_digest = "none"
+
+        plan_identity_payload = {
+            "schema_version": "research_lab.screening_plan.v1",
+            "hypothesis_id": hyp_id,
+            "hypothesis_revision": hyp_rev,
+            "hypothesis_content_hash": hyp_hash,
+            "scientific_identity_hash": scientific_hash,
+            "dataset_digest": ds_exact_digest,
+            "methods": unique_methods,
+        }
+        identity_token = v2.digest(plan_identity_payload)[:16]
+        plan_id = f"plan-{hyp_id}-{hyp_rev}-{identity_token}"
 
         provenance = PlanProvenance(
             created_by=created_by,

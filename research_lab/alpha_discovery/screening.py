@@ -379,12 +379,15 @@ class ScreeningPipeline:
         snapshot_path: Path | str,
         output_base_dir: Path | str,
     ) -> ScreeningPipelineReport:
-        """Execute all methods declared in a ScreeningPlan in deterministic order."""
         if isinstance(plan, ScreeningPlan):
-            plan_obj = plan
+            raw_dict = plan.model_dump(exclude_none=True)
+        elif isinstance(plan, dict):
+            raw_dict = plan
         else:
-            plan_dict = validate_screening_plan(plan)
-            plan_obj = ScreeningPlan.model_validate(plan_dict)
+            raise TypeError(f"plan must be ScreeningPlan or dict, got {type(plan)}")
+
+        plan_dict = validate_screening_plan(raw_dict)
+        plan_obj = ScreeningPlan.model_validate(plan_dict)
 
         snap_p = Path(snapshot_path).resolve()
         base_dir = Path(output_base_dir).resolve()
