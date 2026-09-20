@@ -1143,3 +1143,13 @@ def test_negative_26_deep_immutability_mapping_proxy_blocks_mutation() -> None:
     validate_scope_hash(scope_copy.to_dict())
     validate_task_hash(task_copy.to_dict())
     validate_route_hash(route_copy.to_dict())
+
+    # 7. Zero global monkeypatch: copy._deepcopy_dispatch is NOT polluted
+    from types import MappingProxyType
+    assert MappingProxyType not in copy._deepcopy_dispatch, (
+        "copy._deepcopy_dispatch was polluted with MappingProxyType! Must remain unpatched."
+    )
+    raw_external_proxy = MappingProxyType({"foo": "bar"})
+    with pytest.raises(TypeError) as exc_proxy:
+        copy.deepcopy(raw_external_proxy)
+    assert "cannot pickle 'mappingproxy' object" in str(exc_proxy.value)

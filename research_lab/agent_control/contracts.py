@@ -41,23 +41,6 @@ def _freeze_mapping(obj: Any) -> Any:
     return obj
 
 
-def _deepcopy_mappingproxy(x: Any, memo: dict[int, Any] | None = None) -> MappingProxyType[Any, Any]:
-    """Support copy.deepcopy for MappingProxyType without raising TypeError."""
-    if memo is None:
-        memo = {}
-    d = id(x)
-    if d in memo:
-        return memo[d]
-    copied_dict = copy.deepcopy(dict(x), memo)
-    proxy = MappingProxyType(copied_dict)
-    memo[d] = proxy
-    return proxy
-
-
-# Register MappingProxyType with copy.deepcopy dispatch table to enable deepcopy compatibility
-copy._deepcopy_dispatch[MappingProxyType] = _deepcopy_mappingproxy
-
-
 def _unfreeze_to_dict(obj: Any) -> Any:
     """Recursively convert mappingproxy and frozen containers to plain, independent mutable dicts/lists."""
     if isinstance(obj, Mapping):
@@ -397,6 +380,30 @@ class AgentPermissionScope:
             "scope_id": self.scope_id,
         }
 
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> AgentPermissionScope:
+        if memo is None:
+            memo = {}
+        d = id(self)
+        if d in memo:
+            return memo[d]
+        copied = copy.deepcopy(_unfreeze_to_dict(self.to_dict()), memo)
+        instance = self.__class__(
+            scope_id=copied["scope_id"],
+            role=copied["role"],
+            requested_permissions=tuple(copied["requested_permissions"]),
+            authorized_permissions=tuple(copied["authorized_permissions"]),
+            denied_permissions=tuple(copied["denied_permissions"]),
+            is_authorized=copied["is_authorized"],
+            policy_version=copied["policy_version"],
+            project_binding=copied["project_binding"],
+            scope_content_hash=copied["scope_content_hash"],
+            context=copied["context"],
+            schema_version=copied["schema_version"],
+            hash_profile=copied["hash_profile"],
+        )
+        memo[d] = instance
+        return instance
+
 
 @dataclass(frozen=True)
 class AgentProviderDescriptor:
@@ -734,6 +741,35 @@ class AgentTask:
             "work_block": self.work_block,
         }
 
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> AgentTask:
+        if memo is None:
+            memo = {}
+        d = id(self)
+        if d in memo:
+            return memo[d]
+        copied = copy.deepcopy(_unfreeze_to_dict(self.to_dict()), memo)
+        instance = self.__class__(
+            task_id=copied["task_id"],
+            authorization_scope_ref=copied["authorization_scope_ref"],
+            role=copied["role"],
+            requested_permissions=tuple(copied["requested_permissions"]),
+            authorized_permissions=tuple(copied["authorized_permissions"]),
+            objective=copied["objective"],
+            work_block=copied["work_block"],
+            input_refs=tuple(copied["input_refs"]),
+            provider_policy_ref=copied["provider_policy_ref"],
+            project_binding=copied["project_binding"],
+            created_by=copied["created_by"],
+            created_at=copied["created_at"],
+            task_content_hash=copied["task_content_hash"],
+            schema_version=copied["schema_version"],
+            hash_profile=copied["hash_profile"],
+            delegation_depth=copied["delegation_depth"],
+            parent_task_ref=copied["parent_task_ref"],
+        )
+        memo[d] = instance
+        return instance
+
 
 # --- AgentRoute Contract ---
 
@@ -978,6 +1014,31 @@ class AgentRoute:
             "schema_version": self.schema_version,
             "usage_snapshot_ref": self.usage_snapshot_ref,
         }
+
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> AgentRoute:
+        if memo is None:
+            memo = {}
+        d = id(self)
+        if d in memo:
+            return memo[d]
+        copied = copy.deepcopy(_unfreeze_to_dict(self.to_dict()), memo)
+        instance = self.__class__(
+            route_id=copied["route_id"],
+            authorization_scope_ref=copied["authorization_scope_ref"],
+            role=copied["role"],
+            provider=copied["provider"],
+            resolved_model=copied["resolved_model"],
+            policy_version=copied["policy_version"],
+            route_reason=copied["route_reason"],
+            usage_snapshot_ref=copied["usage_snapshot_ref"],
+            project_binding=copied["project_binding"],
+            authorized_permissions=tuple(copied["authorized_permissions"]),
+            route_content_hash=copied["route_content_hash"],
+            schema_version=copied["schema_version"],
+            hash_profile=copied["hash_profile"],
+        )
+        memo[d] = instance
+        return instance
 
 
 # --- AgentExecutionHandle Contract ---
