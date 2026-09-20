@@ -41,6 +41,23 @@ def _freeze_mapping(obj: Any) -> Any:
     return obj
 
 
+def _deepcopy_mappingproxy(x: Any, memo: dict[int, Any] | None = None) -> MappingProxyType[Any, Any]:
+    """Support copy.deepcopy for MappingProxyType without raising TypeError."""
+    if memo is None:
+        memo = {}
+    d = id(x)
+    if d in memo:
+        return memo[d]
+    copied_dict = copy.deepcopy(dict(x), memo)
+    proxy = MappingProxyType(copied_dict)
+    memo[d] = proxy
+    return proxy
+
+
+# Register MappingProxyType with copy.deepcopy dispatch table to enable deepcopy compatibility
+copy._deepcopy_dispatch[MappingProxyType] = _deepcopy_mappingproxy
+
+
 def _unfreeze_to_dict(obj: Any) -> Any:
     """Recursively convert mappingproxy and frozen containers to plain, independent mutable dicts/lists."""
     if isinstance(obj, Mapping):

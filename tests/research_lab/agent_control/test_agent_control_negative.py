@@ -29,6 +29,7 @@ Covers all 14 baseline negative scenarios plus strict Contract Freeze tests:
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping
 
 import pytest
 
@@ -1116,3 +1117,29 @@ def test_negative_26_deep_immutability_mapping_proxy_blocks_mutation() -> None:
     route_dict["authorization_scope_ref"]["role"] = "tampered"
     assert route.project_binding["project_id"] == "vnpy-p1"
     assert route.authorization_scope_ref["role"] == AgentRole.ALPHA_GENERATOR.value
+
+    # 5. Full compatibility with copy.deepcopy (no TypeError on mappingproxy)
+    scope_copy = copy.deepcopy(scope)
+    assert scope_copy == scope
+    assert isinstance(scope_copy.project_binding, Mapping)
+    with pytest.raises(TypeError):
+        scope_copy.project_binding["project_id"] = "tampered"  # type: ignore[index]
+
+    task_copy = copy.deepcopy(task)
+    assert task_copy == task
+    assert isinstance(task_copy.project_binding, Mapping)
+    assert isinstance(task_copy.authorization_scope_ref, Mapping)
+    with pytest.raises(TypeError):
+        task_copy.authorization_scope_ref["role"] = "tampered"  # type: ignore[index]
+
+    route_copy = copy.deepcopy(route)
+    assert route_copy == route
+    assert isinstance(route_copy.project_binding, Mapping)
+    assert isinstance(route_copy.authorization_scope_ref, Mapping)
+    with pytest.raises(TypeError):
+        route_copy.authorization_scope_ref["role"] = "tampered"  # type: ignore[index]
+
+    # 6. Full compatibility with canonical hash and tamper validation
+    validate_scope_hash(scope_copy.to_dict())
+    validate_task_hash(task_copy.to_dict())
+    validate_route_hash(route_copy.to_dict())
