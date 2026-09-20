@@ -17,6 +17,9 @@ from research_lab.agent_control.contracts import (
     AgentRoute,
     AgentTask,
 )
+from research_lab.agent_control.errors import ProviderError, ProviderErrorCode
+
+VALID_AVAILABILITY_STATUSES = frozenset({"AVAILABLE", "UNAVAILABLE", "RATE_LIMITED", "UNKNOWN"})
 
 
 @dataclass(frozen=True)
@@ -27,6 +30,29 @@ class ProviderAvailability:
     status: str  # "AVAILABLE", "UNAVAILABLE", "RATE_LIMITED", "UNKNOWN"
     reason: str = ""
     details: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if self.status not in VALID_AVAILABILITY_STATUSES:
+            raise ProviderError(
+                ProviderErrorCode.PROVIDER_UNAVAILABLE,
+                f"Invalid availability status '{self.status}'. Must be one of {sorted(VALID_AVAILABILITY_STATUSES)}",
+                details={"status": self.status},
+            )
+        # Consistency enforcement:
+        # AVAILABLE -> must be is_available=True
+        # UNAVAILABLE / RATE_LIMITED / UNKNOWN -> must be is_available=False
+        if self.status == "AVAILABLE" and not self.is_available:
+            raise ProviderError(
+                ProviderErrorCode.PROVIDER_UNAVAILABLE,
+                "Inconsistent ProviderAvailability: status is 'AVAILABLE' but is_available is False",
+                details={"status": self.status, "is_available": self.is_available},
+            )
+        if self.status in {"UNAVAILABLE", "RATE_LIMITED", "UNKNOWN"} and self.is_available:
+            raise ProviderError(
+                ProviderErrorCode.PROVIDER_UNAVAILABLE,
+                f"Inconsistent ProviderAvailability: status is '{self.status}' but is_available is True (conflict fails closed)",
+                details={"status": self.status, "is_available": self.is_available},
+            )
 
 
 @runtime_checkable

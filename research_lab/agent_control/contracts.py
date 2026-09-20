@@ -8,7 +8,7 @@ timestamps (e.g. now()) or random UUIDs.
 from __future__ import annotations
 
 import copy
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from types import MappingProxyType
@@ -583,6 +583,10 @@ class AgentTask:
         # Validate parent / delegation depth rules
         if self.delegation_depth < 0:
             raise PermissionDeniedError(f"delegation_depth cannot be negative: {self.delegation_depth}")
+        if self.delegation_depth > 1:
+            raise PermissionDeniedError(
+                f"Nested agent delegation prohibited: delegation_depth={self.delegation_depth} exceeds maximum allowable depth 1"
+            )
         if self.delegation_depth > 0:
             if not self.parent_task_ref or not isinstance(self.parent_task_ref, (dict, Mapping)) or not self.parent_task_ref.get("task_id"):
                 raise PermissionDeniedError(
@@ -595,6 +599,15 @@ class AgentTask:
                     "AgentTask with delegation_depth=0 cannot have parent_task_ref (cannot forge worker-parent relationship)",
                     details={"delegation_depth": self.delegation_depth, "parent_task_ref": self.parent_task_ref},
                 )
+
+        if not self.task_id or not self.task_id.startswith("task-"):
+            raise TamperDetectionError("Invalid or missing task_id")
+
+        expected_task_id = compute_task_deterministic_id(self.to_dict())
+        if self.task_id != expected_task_id:
+            raise TamperDetectionError(
+                f"AgentTask task_id mismatch: expected {expected_task_id}, got {self.task_id}"
+            )
 
         # Validate tamper detection
         validate_task_hash(self.to_dict())
@@ -774,7 +787,11 @@ class AgentTask:
 # --- AgentRoute Contract ---
 
 def compute_route_deterministic_id(payload: dict[str, Any]) -> str:
-    """Compute deterministic route ID from role, provider, resolved model, policy version, and scope ref."""
+    """Compute deterministic route ID from role, provider, resolved model, policy version, scope ref, transport, usage, and stable reason code.
+
+    NOTE (P1-3): route_reason free text is deliberately EXCLUDED from route deterministic identity,
+    and preserved strictly in route_content_hash and audit records.
+    """
     core = {
         "authorization_scope_ref": payload.get("authorization_scope_ref"),
         "authorized_permissions": _clean_for_canonical(payload.get("authorized_permissions")),
@@ -783,8 +800,13 @@ def compute_route_deterministic_id(payload: dict[str, Any]) -> str:
         "provider": payload.get("provider"),
         "resolved_model": payload.get("resolved_model"),
         "role": payload.get("role"),
-        "route_reason": payload.get("route_reason"),
     }
+    if payload.get("route_reason_code"):
+        core["route_reason_code"] = str(payload.get("route_reason_code"))
+    if payload.get("transport_ref"):
+        core["transport_ref"] = str(payload.get("transport_ref"))
+    if payload.get("usage_snapshot_ref"):
+        core["usage_snapshot_ref"] = str(payload.get("usage_snapshot_ref"))
     digest = v2.digest(core)
     return f"route-{digest[:32]}"
 
@@ -823,6 +845,9 @@ class AgentRoute:
     project_binding: dict[str, str] | Mapping[str, str]
     authorized_permissions: tuple[str, ...]
     route_content_hash: str
+    route_reason_code: str = ""
+    transport_ref: str = ""
+    candidate_trace: tuple[dict[str, Any], ...] = ()
     schema_version: str = "research_lab.agent_route.v1"
     hash_profile: str = HASH_PROFILE
 
@@ -899,11 +924,21 @@ class AgentRoute:
                     details={"role": self.role, "unauthorized_permissions": unauthorized},
                 )
 
+        if not self.route_id or not self.route_id.startswith("route-"):
+            raise TamperDetectionError("Invalid or missing route_id")
+
+        expected_route_id = compute_route_deterministic_id(self.to_dict())
+        if self.route_id != expected_route_id:
+            raise TamperDetectionError(
+                f"AgentRoute route_id mismatch: expected {expected_route_id}, got {self.route_id}"
+            )
+
         validate_route_hash(self.to_dict())
 
         # Deep freeze internal mapping containers into immutable types (tamper prevention)
         object.__setattr__(self, "project_binding", _freeze_mapping(self.project_binding))
         object.__setattr__(self, "authorization_scope_ref", _freeze_mapping(self.authorization_scope_ref))
+        object.__setattr__(self, "candidate_trace", _freeze_mapping(self.candidate_trace))
 
     @classmethod
     def create(
@@ -919,6 +954,9 @@ class AgentRoute:
         authorized_permissions: list[str],
         authorized_scope: AgentPermissionScope | None = None,
         authorization_scope_ref: dict[str, Any] | None = None,
+        route_reason_code: str = "",
+        transport_ref: str = "",
+        candidate_trace: Sequence[dict[str, Any]] = (),
     ) -> AgentRoute:
         validate_role(role)
         val_auth = validate_permissions(authorized_permissions)
@@ -978,6 +1016,13 @@ class AgentRoute:
             "schema_version": "research_lab.agent_route.v1",
             "usage_snapshot_ref": usage_snapshot_ref,
         }
+        if route_reason_code:
+            raw["route_reason_code"] = str(route_reason_code)
+        if transport_ref:
+            raw["transport_ref"] = str(transport_ref)
+        if candidate_trace:
+            raw["candidate_trace"] = [_clean_for_canonical(x) for x in candidate_trace]
+
         route_id = compute_route_deterministic_id(raw)
         raw["route_id"] = route_id
         content_hash = compute_route_content_hash(raw)
@@ -994,12 +1039,15 @@ class AgentRoute:
             project_binding=binding_dict,
             authorized_permissions=tuple(val_auth),
             route_content_hash=content_hash,
+            route_reason_code=route_reason_code,
+            transport_ref=transport_ref,
+            candidate_trace=tuple(_clean_for_canonical(x) for x in candidate_trace),
             schema_version="research_lab.agent_route.v1",
             hash_profile=HASH_PROFILE,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d = {
             "authorization_scope_ref": _unfreeze_to_dict(self.authorization_scope_ref),
             "authorized_permissions": list(self.authorized_permissions),
             "hash_profile": self.hash_profile,
@@ -1014,6 +1062,13 @@ class AgentRoute:
             "schema_version": self.schema_version,
             "usage_snapshot_ref": self.usage_snapshot_ref,
         }
+        if self.route_reason_code:
+            d["route_reason_code"] = self.route_reason_code
+        if self.transport_ref:
+            d["transport_ref"] = self.transport_ref
+        if self.candidate_trace:
+            d["candidate_trace"] = [_unfreeze_to_dict(x) for x in self.candidate_trace]
+        return d
 
     def __deepcopy__(self, memo: dict[int, Any] | None = None) -> AgentRoute:
         if memo is None:
@@ -1034,6 +1089,9 @@ class AgentRoute:
             project_binding=copied["project_binding"],
             authorized_permissions=tuple(copied["authorized_permissions"]),
             route_content_hash=copied["route_content_hash"],
+            route_reason_code=copied.get("route_reason_code", ""),
+            transport_ref=copied.get("transport_ref", ""),
+            candidate_trace=tuple(copied.get("candidate_trace") or ()),
             schema_version=copied["schema_version"],
             hash_profile=copied["hash_profile"],
         )
@@ -1214,6 +1272,19 @@ def compute_usage_deterministic_id(payload: dict[str, Any]) -> str:
     return f"usage-{digest[:32]}"
 
 
+def validate_usage_hash(payload: dict[str, Any]) -> None:
+    """Tamper-detection validation for AgentUsageSnapshot content hash."""
+    expected = payload.get("usage_content_hash")
+    if not expected:
+        raise TamperDetectionError("Missing usage_content_hash in payload")
+    actual = compute_usage_content_hash(payload)
+    if expected != actual:
+        raise TamperDetectionError(
+            f"AgentUsageSnapshot content hash tampering detected: expected {expected}, computed {actual}",
+            details={"expected_hash": expected, "computed_hash": actual},
+        )
+
+
 @dataclass(frozen=True)
 class AgentUsageSnapshot:
     """Snapshot of provider quota windows. Explicitly preserves 'unknown' states."""
@@ -1226,6 +1297,10 @@ class AgentUsageSnapshot:
     usage_content_hash: str
     schema_version: str = "research_lab.agent_usage_snapshot.v1"
     hash_profile: str = HASH_PROFILE
+
+    def __post_init__(self) -> None:
+        validate_usage_hash(self.to_dict())
+        object.__setattr__(self, "quota_windows", _freeze_mapping(self.quota_windows))
 
     @classmethod
     def create(
