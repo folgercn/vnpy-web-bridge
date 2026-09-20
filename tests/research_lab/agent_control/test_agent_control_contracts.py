@@ -117,6 +117,7 @@ def test_complete_agent_lifecycle_contract_flow() -> None:
         role=AgentRole.ALPHA_GENERATOR.value,
         requested_permissions=list(auth_scope.requested_permissions),
         authorized_permissions=list(auth_scope.authorized_permissions),
+        authorized_scope=auth_scope,
         objective="Draft exploratory momentum alpha candidate on IF contracts",
         work_block="WB-DISCOVERY-001",
         input_refs=[{"kind": "dataset", "locator": "market_data/IF_continuous.parquet"}],
@@ -126,18 +127,22 @@ def test_complete_agent_lifecycle_contract_flow() -> None:
         created_at="2026-09-20T12:00:00Z",
     )
     validate_task_hash(task.to_dict())
+    assert task.authorization_scope_ref == auth_scope.scope_id
 
     # 3. Router selects provider and model (Provider-neutral routing)
     provider = MockLifecycleProvider()
     route = select_agent(
         role=AgentRole.ALPHA_GENERATOR.value,
         providers=[provider],
+        authorized_scope=auth_scope,
         project_binding=binding,
     )
     validate_route_hash(route.to_dict())
     assert route.provider == "antigravity_stub"
     assert route.resolved_model == "gemini-3.8-flash-high"
     assert route.role == AgentRole.ALPHA_GENERATOR.value
+    assert route.authorization_scope_ref == auth_scope.scope_id
+    assert route.authorized_permissions == auth_scope.authorized_permissions
 
     # 4. Provider execution
     handle = provider.submit(task, route)
@@ -179,18 +184,40 @@ def test_complete_agent_lifecycle_contract_flow() -> None:
 def test_role_provider_model_decoupling() -> None:
     """Verify that any single role can be routed to distinct providers and models."""
     role = AgentRole.RESEARCH_SYNTHESIZER.value
+    binding = ProjectBinding(
+        project_id="vnpy-core",
+        workspace_identity="/Users/fujun/node/vnpy",
+    )
+    auth_scope = authorize(
+        role=role,
+        requested_permissions=[AgentPermission.READ_RESEARCH_MEMORY.value],
+    )
 
     provider1 = MockLifecycleProvider(name="provider_alpha", default_model="model-fast")
     provider2 = MockLifecycleProvider(name="provider_beta", default_model="model-deep")
 
-    route1 = select_agent(role=role, providers=[provider1])
-    route2 = select_agent(role=role, providers=[provider2])
+    route1 = select_agent(
+        role=role,
+        providers=[provider1],
+        authorized_scope=auth_scope,
+        project_binding=binding,
+    )
+    route2 = select_agent(
+        role=role,
+        providers=[provider2],
+        authorized_scope=auth_scope,
+        project_binding=binding,
+    )
 
     assert route1.role == role and route2.role == role
     assert route1.provider == "provider_alpha"
     assert route1.resolved_model == "model-fast"
     assert route2.provider == "provider_beta"
     assert route2.resolved_model == "model-deep"
+    assert route1.authorization_scope_ref == auth_scope.scope_id
+    assert route2.authorization_scope_ref == auth_scope.scope_id
+    assert route1.authorized_permissions == (AgentPermission.READ_RESEARCH_MEMORY.value,)
+    assert route2.authorized_permissions == (AgentPermission.READ_RESEARCH_MEMORY.value,)
 
 
 def test_provider_error_cannot_pollute_scientific_decision() -> None:

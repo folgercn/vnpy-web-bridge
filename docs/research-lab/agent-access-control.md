@@ -65,31 +65,38 @@ class AgentProvider(Protocol):
 
 ---
 
-## 4. 路由契约 (Route)
+## 4. 路由契约与最小权限 (Route & Least Privilege)
 
 `AgentRoute` 记录将抽象 `role` 解析为具体 `provider` + `resolved_model` 的可审计决策事实：
 
 - `route_id`: 确定性摘要 `route-{sha256[:32]}`
+- `authorization_scope_ref`: 必须严格绑定对应的 `AgentPermissionScope.scope_id`
 - `role`: 业务角色
 - `provider`: 选定的后端名称
 - `resolved_model`: 具体的模型版本（如 `gemini-3.8-flash-high`）
 - `policy_version`: 策略版本（如 `2026-09-m0`）
 - `route_reason`: 路由成因文本说明
 - `usage_snapshot_ref`: 配额快照引用（若有）
-- `project_binding`: 严格绑定的工作区与项目 ID
-- `authorized_permissions`: 该路线承载的已授权权限列表
+- `project_binding`: 严格绑定的工作区与项目 ID（必须显式有效，禁止 placeholder/unspecified）
+- `authorized_permissions`: **最小权限原则（Least Privilege）**。仅携带本次实际授权的最小权限集合，**绝对禁止**扩大为角色策略（Role Policy）的全部权限全集
 - `route_content_hash`: 符合 `research-json-v1` 标准的 SHA-256 载荷摘要
 
 路由选择采用**固定优先级与可用性驱动**的纯净骨架逻辑，严禁引入 ML 评分、竞价或成本黑盒优化。
 
 ---
 
-## 5. 任务契约与确定性身份 (Task)
+## 5. 任务契约与不可伪造授权 (Task & Authorization Provenance)
 
 `AgentTask` 代表一次自包含的研究工作任务：
 
-- `task_id`: **确定性身份**。由核心科学业务字段（`role`, `objective`, `work_block`, `input_refs`, `project_binding`, `requested_permissions`, `authorized_permissions`, `delegation_depth`, `parent_task_ref`, `provider_policy_ref`）通过 `v2.digest` 确定性计算，绝对不依赖系统时间 `now()` 或随机 UUID。
-- `delegation_depth`: 委派层级（0 为编排器，>=1 为执行 Worker）。
+- `task_id`: **确定性身份**。由核心科学业务字段（`authorization_scope_ref`, `role`, `objective`, `work_block`, `input_refs`, `project_binding`, `requested_permissions`, `authorized_permissions`, `delegation_depth`, `parent_task_ref`, `provider_policy_ref`）通过 `v2.digest` 确定性计算，绝对不依赖系统时间 `now()` 或随机 UUID。
+- `authorization_scope_ref`: 必须绑定不可变、可验真的 `AgentPermissionScope.scope_id`。
+- **直接构造与提权防御**：
+  - `authorized_permissions ⊆ requested_permissions ⊆ role_policy.allowed_permissions`
+  - 任何试图直接调用构造函数或 `create()` 塞入未经授权权限（如 `invoke_critic`, `execute_screening`）的直构绕过均被无条件拦截并抛出 `PermissionDeniedError`。
+- **Parent/Depth 约束校验**：
+  - `delegation_depth == 0`: 根任务禁止携带 `parent_task_ref`（防止伪造 worker-parent 关系）。
+  - `delegation_depth > 0`: 子任务必须提供合法的非空 `parent_task_ref`。
 - `created_at`: 仅作为审计记录字段，不参与 `task_id` 生成。
 - `task_content_hash`: 整个任务规范的防篡改哈希，去除 `task_content_hash` 自身后计算。
 
@@ -136,7 +143,7 @@ Provider 自报的执行成功不等于系统的业务验收成功。`AgentResul
 
 1. `PROVIDER_UNAVAILABLE`: 提供商离线、未注册或接口不可达
 2. `QUOTA_UNAVAILABLE`: 配额耗尽或触发严格限流
-3. `PROJECT_BINDING_FAILED`: 项目 ID 或工作区目录与绑定声明不符
+3. `PROJECT_BINDING_FAILED`: 项目 ID 或工作区目录与绑定声明不符，或使用 placeholder/unspecified 占位符
 4. `SUBMISSION_FAILED`: 任务向提供商提交时被拒绝
 5. `EXECUTION_FAILED`: 执行过程中遭遇致命错误
 6. `EXECUTION_UNCERTAIN`: 连接中断，无法断定后端任务实际完成状态
@@ -149,15 +156,27 @@ Provider 自报的执行成功不等于系统的业务验收成功。`AgentResul
 
 ---
 
-## 10. No Nested Agent 规则
+## 10. No Nested Agent 与委派双重门禁
 
-为杜绝无限递归委派、不可控成本放大与权限泄漏：
+为杜绝无限递归委派、不可控成本放大与权限泄漏，委派行为必须同时满足双重门禁：
 
 ```text
-delegation_depth = 0: Orchestrator 级别，允许调用 router 委派 worker 任务。
-delegation_depth >= 1: Worker 级别，禁止再次调用 router 委派或创建子智能体。
+1. 深度门禁：delegation_depth == 0 只是必要条件；delegation_depth >= 1 的 Worker 级别绝对禁止再次委派。
+2. 角色策略门禁：必须显式配置 role_policy.can_delegate = True 才允许委派。
 ```
-任何 `delegation_depth >= 1` 的 Worker 尝试委派子任务，立即触发 `PermissionDeniedError(PERMISSION_DENIED)`。
+
+当前所有 5 个默认 Worker 业务角色（`alpha_generator`, `research_synthesizer`, `data_researcher`, `code_researcher`, `external_researcher`）的 `can_delegate` 均为 `False`。因此：
+- 任何当前 Worker 角色即使处于 `delegation_depth == 0`，依然禁止委派。
+- 仅当未来显式定义了具有 `can_delegate=True` 的编排器角色（Orchestrator），且处于 `delegation_depth == 0` 时，才允许派发子智能体任务。
+
+---
+
+## 11. 项目绑定严格 Fail-Closed (ProjectBinding)
+
+`ProjectBinding` 构成了桌面与外部智能体调用的安全围栏：
+- `project_id` 与 `workspace_identity` 必须为非空有效字符串。
+- 严禁使用 `"unspecified"`, `"default"`, `"placeholder"` 等占位符或默认值。
+- `select_agent()` 必须显式传入有效的 `ProjectBinding`，缺失或不匹配一律抛出 `ProjectBindingError(PROJECT_BINDING_FAILED)`，严禁静默兜底。
 
 ---
 

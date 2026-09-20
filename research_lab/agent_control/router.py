@@ -26,10 +26,11 @@ from research_lab.agent_control.contracts import (
     AgentRoute,
     AgentUsageSnapshot,
     ProjectBinding,
+    validate_project_binding,
+    validate_scope_hash,
 )
 from research_lab.agent_control.errors import (
     PermissionDeniedError,
-    ProjectBindingError,
     ProviderUnavailableError,
 )
 from research_lab.agent_control.permissions import (
@@ -93,94 +94,92 @@ def authorize(
             },
         )
 
-    return AgentPermissionScope(
+    return AgentPermissionScope.create(
         role=validated_role,
-        requested_permissions=tuple(val_requested),
-        authorized_permissions=tuple(authorized),
-        denied_permissions=tuple(denied),
+        requested_permissions=val_requested,
+        authorized_permissions=authorized,
+        denied_permissions=denied,
         is_authorized=True,
+        policy_version=POLICY_VERSION,
         context=context or {},
     )
 
 
 def enforce_no_nested_delegation(
+    role: str,
     delegation_depth: int,
     parent_task_ref: dict[str, str] | None = None,
+    policy: AgentRolePolicy | None = None,
 ) -> None:
-    """Enforce the strict No Nested Agent rule.
+    """Enforce strict No Nested Agent rule and delegation authorization.
 
-    depth = 0: orchestrator level; can submit worker tasks.
-    depth >= 1: worker level; cannot delegate or invoke any further subagents.
+    Rules:
+    1. depth >= 1: worker level; CANNOT delegate under any circumstances.
+    2. role policy: must have can_delegate=True to delegate subagents.
+       depth=0 is a necessary condition, but NOT a sufficient condition.
+       Currently all default worker roles have can_delegate=False and cannot delegate.
     """
+    # 1. Depth check
     if delegation_depth >= 1:
         raise PermissionDeniedError(
             f"Nested agent delegation prohibited: worker task at delegation_depth={delegation_depth} "
             f"cannot spawn or delegate subagents",
             details={
+                "role": role,
                 "delegation_depth": delegation_depth,
                 "parent_task_ref": parent_task_ref,
             },
         )
 
-
-def validate_project_binding(
-    task_binding: ProjectBinding | dict[str, str],
-    expected_binding: ProjectBinding | dict[str, str],
-) -> None:
-    """Validate project and workspace binding fail-closed.
-
-    Rejects any mismatched project_id or workspace_identity without silent fallback.
-    """
-    tb = task_binding.to_dict() if isinstance(task_binding, ProjectBinding) else dict(task_binding)
-    eb = expected_binding.to_dict() if isinstance(expected_binding, ProjectBinding) else dict(expected_binding)
-
-    if tb.get("project_id") != eb.get("project_id"):
-        raise ProjectBindingError(
-            f"Project ID mismatch: expected '{eb.get('project_id')}', got '{tb.get('project_id')}'",
-            details={"expected_project_id": eb.get("project_id"), "actual_project_id": tb.get("project_id")},
-        )
-
-    if tb.get("workspace_identity") != eb.get("workspace_identity"):
-        raise ProjectBindingError(
-            f"Workspace identity mismatch: expected '{eb.get('workspace_identity')}', got '{tb.get('workspace_identity')}'",
-            details={
-                "expected_workspace_identity": eb.get("workspace_identity"),
-                "actual_workspace_identity": tb.get("workspace_identity"),
-            },
+    # 2. Role policy can_delegate check
+    validated_role = validate_role(role)
+    active_policy = policy or DEFAULT_ROLE_POLICIES.get(validated_role)
+    if not active_policy or not active_policy.can_delegate:
+        raise PermissionDeniedError(
+            f"Role '{validated_role}' is not permitted to delegate subagents (can_delegate=False)",
+            details={"role": validated_role, "delegation_depth": delegation_depth},
         )
 
 
 def select_agent(
     role: str,
     providers: Sequence[AgentProvider],
+    authorized_scope: AgentPermissionScope,
+    project_binding: ProjectBinding | dict[str, str],
     usage_snapshots: dict[str, AgentUsageSnapshot] | None = None,
     policy: AgentRolePolicy | None = None,
-    project_binding: ProjectBinding | dict[str, str] | None = None,
     context: dict[str, Any] | None = None,
 ) -> AgentRoute:
     """Router skeleton: selects an execution backend according to fixed-priority criteria.
 
     Order:
-    1. Validate role & policy
+    1. Validate role, policy, project_binding, and authorized_scope (fail-closed)
     2. Filter providers that declare support for this role
     3. Check provider availability
     4. Check quota window states (skip exhausted, preserve unknown)
     5. Choose candidate by fixed list order
-    6. Construct auditable AgentRoute
+    6. Construct auditable AgentRoute with LEAST PRIVILEGE authorized_permissions
     """
     validated_role = validate_role(role)
     active_policy = policy or DEFAULT_ROLE_POLICIES.get(validated_role)
     if not active_policy:
         raise PermissionDeniedError(f"No policy configured for role '{validated_role}'")
 
+    # Validate project_binding fail-closed (strictly no placeholder/unspecified fallback)
+    validated_binding = validate_project_binding(project_binding)
+
+    # Validate authorized_scope provenance
+    if not isinstance(authorized_scope, AgentPermissionScope):
+        raise PermissionDeniedError("select_agent() requires an authorized_scope of type AgentPermissionScope")
+    validate_scope_hash(authorized_scope.to_dict())
+    if authorized_scope.role != validated_role:
+        raise PermissionDeniedError(
+            f"authorized_scope role mismatch: expected '{validated_role}', got '{authorized_scope.role}'",
+            details={"role": validated_role, "scope_role": authorized_scope.role},
+        )
+
     if not providers:
         raise ProviderUnavailableError("No providers registered with router")
-
-    binding = project_binding or {
-        "project_id": "unspecified",
-        "workspace_identity": "unspecified",
-        "binding_mode": "strict",
-    }
 
     # 1. Filter by role support
     candidates: list[AgentProvider] = []
@@ -233,6 +232,8 @@ def select_agent(
             details={"role": validated_role},
         )
 
+    # LEAST PRIVILEGE: Carry only the exact authorized_permissions from the scope,
+    # NEVER expand to the entire role policy!
     return AgentRoute.create(
         role=validated_role,
         provider=selected_provider.describe().provider,
@@ -240,6 +241,7 @@ def select_agent(
         policy_version=POLICY_VERSION,
         route_reason=route_reason,
         usage_snapshot_ref=selected_snapshot_ref,
-        project_binding=binding,
-        authorized_permissions=sorted(active_policy.allowed_permissions),
+        project_binding=validated_binding,
+        authorized_permissions=list(authorized_scope.authorized_permissions),
+        authorized_scope=authorized_scope,
     )

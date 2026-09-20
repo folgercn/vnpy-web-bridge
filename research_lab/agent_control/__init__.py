@@ -19,12 +19,15 @@ from research_lab.agent_control.contracts import (
     compute_audit_content_hash,
     compute_result_content_hash,
     compute_route_content_hash,
+    compute_scope_content_hash,
+    compute_scope_deterministic_id,
     compute_task_content_hash,
     compute_task_deterministic_id,
     compute_usage_content_hash,
     validate_audit_hash,
     validate_result_hash,
     validate_route_hash,
+    validate_scope_hash,
     validate_task_hash,
 )
 from research_lab.agent_control.errors import (
@@ -101,6 +104,8 @@ __all__ = [
     "compute_audit_content_hash",
     "compute_result_content_hash",
     "compute_route_content_hash",
+    "compute_scope_content_hash",
+    "compute_scope_deterministic_id",
     "compute_task_content_hash",
     "compute_task_deterministic_id",
     "compute_usage_content_hash",
@@ -114,5 +119,6 @@ __all__ = [
     "validate_result_hash",
     "validate_role",
     "validate_route_hash",
+    "validate_scope_hash",
     "validate_task_hash",
 ]
