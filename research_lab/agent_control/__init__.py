@@ -1,6 +1,7 @@
-"""Agent Access Control and Provider-Neutral Router Architecture (#573 Milestone 0).
+"""Agent Access Control and Provider-Neutral Router Architecture (#573 Milestone 1).
 
-Exports core contracts, permissions, roles, error taxonomy, and interfaces.
+Exports core contracts, permissions, roles, error taxonomy, transport abstractions,
+registry, routing policy/context, and execution preparation handoff boundary.
 """
 
 from research_lab.agent_control.audit import AppendOnlyAuditTrail
@@ -19,16 +20,19 @@ from research_lab.agent_control.contracts import (
     compute_audit_content_hash,
     compute_result_content_hash,
     compute_route_content_hash,
+    compute_route_deterministic_id,
     compute_scope_content_hash,
     compute_scope_deterministic_id,
     compute_task_content_hash,
     compute_task_deterministic_id,
     compute_usage_content_hash,
+    compute_usage_deterministic_id,
     validate_audit_hash,
     validate_result_hash,
     validate_route_hash,
     validate_scope_hash,
     validate_task_hash,
+    validate_usage_hash,
 )
 from research_lab.agent_control.errors import (
     PermissionDeniedError,
@@ -40,6 +44,13 @@ from research_lab.agent_control.errors import (
     ResultAcceptanceError,
     TamperDetectionError,
     assert_provider_error_does_not_pollute_scientific_decision,
+)
+from research_lab.agent_control.handoff import (
+    ExecutionPreparation,
+    compute_preparation_content_hash,
+    compute_preparation_deterministic_id,
+    prepare_execution,
+    validate_preparation_hash,
 )
 from research_lab.agent_control.permissions import (
     ALL_PERMISSIONS,
@@ -53,6 +64,7 @@ from research_lab.agent_control.provider import (
     AgentProvider,
     ProviderAvailability,
 )
+from research_lab.agent_control.registry import ProviderRegistry
 from research_lab.agent_control.roles import (
     ALL_ROLES,
     DEFAULT_ROLE_POLICIES,
@@ -66,6 +78,15 @@ from research_lab.agent_control.router import (
     enforce_no_nested_delegation,
     select_agent,
     validate_project_binding,
+)
+from research_lab.agent_control.routing_context import RoutingContext
+from research_lab.agent_control.routing_policy import (
+    RouteReasonCode,
+    RoutingPolicy,
+)
+from research_lab.agent_control.transport import (
+    ProviderConnectionDescriptor,
+    ProviderTransportKind,
 )
 
 __all__ = [
@@ -88,37 +109,51 @@ __all__ = [
     "AgentTask",
     "AgentUsageSnapshot",
     "AppendOnlyAuditTrail",
+    "ExecutionPreparation",
     "PermissionDeniedError",
     "ProjectBinding",
     "ProjectBindingError",
     "ProviderAvailability",
+    "ProviderConnectionDescriptor",
     "ProviderError",
     "ProviderErrorCode",
+    "ProviderRegistry",
+    "ProviderTransportKind",
     "ProviderUnavailableError",
     "QuotaUnavailableError",
     "ResultAcceptanceError",
+    "RouteReasonCode",
+    "RoutingContext",
+    "RoutingPolicy",
     "TamperDetectionError",
     "TerminalStatus",
     "assert_provider_error_does_not_pollute_scientific_decision",
     "authorize",
     "compute_audit_content_hash",
+    "compute_preparation_content_hash",
+    "compute_preparation_deterministic_id",
     "compute_result_content_hash",
     "compute_route_content_hash",
+    "compute_route_deterministic_id",
     "compute_scope_content_hash",
     "compute_scope_deterministic_id",
     "compute_task_content_hash",
     "compute_task_deterministic_id",
     "compute_usage_content_hash",
+    "compute_usage_deterministic_id",
     "enforce_hard_invariants",
     "enforce_no_nested_delegation",
+    "prepare_execution",
     "select_agent",
     "validate_audit_hash",
     "validate_permission",
     "validate_permissions",
+    "validate_preparation_hash",
     "validate_project_binding",
     "validate_result_hash",
     "validate_role",
     "validate_route_hash",
     "validate_scope_hash",
     "validate_task_hash",
+    "validate_usage_hash",
 ]

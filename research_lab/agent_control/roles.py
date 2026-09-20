@@ -1,7 +1,7 @@
 """Role definitions and baseline role policies (#573 Milestone 0).
 
 Roles represent business research responsibilities, strictly decoupled from
-providers (e.g., Antigravity, OpenAI) and models (e.g., gemini-3.8-flash-high).
+providers (e.g., neutral execution backends) and models (e.g., neutral model identifiers).
 - Unknown role: DENY / raise PermissionDeniedError
 - Worker roles: delegation_depth = 0 only (cannot delegate to nested subagents)
 """
