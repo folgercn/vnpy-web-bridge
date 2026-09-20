@@ -1116,4 +1116,3 @@ def test_negative_26_deep_immutability_mapping_proxy_blocks_mutation() -> None:
     route_dict["authorization_scope_ref"]["role"] = "tampered"
     assert route.project_binding["project_id"] == "vnpy-p1"
     assert route.authorization_scope_ref["role"] == AgentRole.ALPHA_GENERATOR.value
-
