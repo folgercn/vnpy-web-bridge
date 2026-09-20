@@ -82,7 +82,10 @@
               "coverage",
               "simple_correlation",
               "direction_consistency",
-              "stability_split"
+              "stability_split",
+              "leakage_audit",
+              "outlier_sensitivity",
+              "cost_sensitivity"
             ]
           },
           "minItems": 1
@@ -171,7 +174,10 @@
               "coverage",
               "simple_correlation",
               "direction_consistency",
-              "stability_split"
+              "stability_split",
+              "leakage_audit",
+              "outlier_sensitivity",
+              "cost_sensitivity"
             ]
           },
           "minItems": 1
@@ -242,6 +248,83 @@
                 "first_half_correlation": { "type": ["string", "null"] },
                 "second_half_correlation": { "type": ["string", "null"] },
                 "correlation_difference": { "type": ["string", "null"] }
+              }
+            },
+            "leakage_audit": {
+              "type": "object",
+              "required": [
+                "rows_checked",
+                "audited_fields",
+                "audit_coverage_ratio",
+                "temporal_violation_count",
+                "target_overlap_violation_count",
+                "missing_availability_metadata",
+                "unverifiable_rows"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "rows_checked": { "type": "integer", "minimum": 0 },
+                "audited_fields": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "audit_coverage_ratio": { "type": "string" },
+                "temporal_violation_count": { "type": "integer", "minimum": 0 },
+                "target_overlap_violation_count": { "type": "integer", "minimum": 0 },
+                "missing_availability_metadata": { "type": "boolean" },
+                "unverifiable_rows": { "type": "integer", "minimum": 0 }
+              }
+            },
+            "outlier_sensitivity": {
+              "type": "object",
+              "required": [
+                "baseline_ic",
+                "trimmed_ic",
+                "removed_count",
+                "removed_ratio",
+                "ic_delta",
+                "baseline_direction",
+                "trimmed_direction",
+                "direction_preserved"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "baseline_ic": { "type": ["string", "null"] },
+                "trimmed_ic": { "type": ["string", "null"] },
+                "removed_count": { "type": "integer", "minimum": 0 },
+                "removed_ratio": { "type": "string" },
+                "ic_delta": { "type": ["string", "null"] },
+                "baseline_direction": { "type": "string" },
+                "trimmed_direction": { "type": "string" },
+                "direction_preserved": { "type": "boolean" }
+              }
+            },
+            "cost_sensitivity": {
+              "type": "object",
+              "required": [
+                "position_rule",
+                "observations",
+                "turnover",
+                "gross_screening_return",
+                "net_return_0bps",
+                "net_return_1bps",
+                "net_return_3bps",
+                "net_return_5bps",
+                "net_return_10bps",
+                "breakeven_cost_bps"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "position_rule": { "type": "string" },
+                "observations": { "type": "integer", "minimum": 0 },
+                "turnover": { "type": "string" },
+                "gross_screening_return": { "type": "string" },
+                "net_return_0bps": { "type": "string" },
+                "net_return_1bps": { "type": "string" },
+                "net_return_3bps": { "type": "string" },
+                "net_return_5bps": { "type": "string" },
+                "net_return_10bps": { "type": "string" },
+                "breakeven_cost_bps": { "type": ["string", "null"] }
               }
             }
           }

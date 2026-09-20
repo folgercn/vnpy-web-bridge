@@ -253,6 +253,11 @@ class AlphaHypothesis(BaseModel):
                 raise ValueError(f"Result or evidence claim forbidden in hypothesis: {text!r}")
         return text
 
+    @property
+    def scientific_identity_hash(self) -> str:
+        """Compute stable content hash for the core scientific proposition."""
+        return compute_scientific_identity_hash(self.model_dump())
+
 
 def compute_hypothesis_content_hash(data: dict[str, Any]) -> str:
     """Compute repository-pinned research-json-v1 SHA-256 digest of hypothesis revision record."""

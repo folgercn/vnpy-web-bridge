@@ -289,6 +289,182 @@ def run_statistical_screening(
                     "correlation_difference": _format_decimal(diff, 6),
                 }
 
+            # 5. leakage_audit
+            if "leakage_audit" in methods:
+                avail_col = "feature_availability_time" if "feature_availability_time" in fieldnames else ("availability_time" if "availability_time" in fieldnames else None)
+                as_of_col = "as_of_time" if "as_of_time" in fieldnames else ("decision_time" if "decision_time" in fieldnames else ("timestamp" if "timestamp" in fieldnames else None))
+                target_start_col = "target_start_time" if "target_start_time" in fieldnames else ("target_window_start_time" if "target_window_start_time" in fieldnames else None)
+
+                total_rows = len(reader)
+                if not (avail_col and as_of_col and target_start_col):
+                    facts["leakage_audit"] = {
+                        "rows_checked": total_rows,
+                        "audited_fields": [f for f in [avail_col, as_of_col, target_start_col] if f],
+                        "audit_coverage_ratio": "0",
+                        "temporal_violation_count": 0,
+                        "target_overlap_violation_count": 0,
+                        "missing_availability_metadata": True,
+                        "unverifiable_rows": total_rows,
+                    }
+                else:
+                    temporal_violations = 0
+                    target_overlap_violations = 0
+                    unverifiable = 0
+                    valid_checked = 0
+                    for row in reader:
+                        t_avail = row.get(avail_col)
+                        t_as_of = row.get(as_of_col)
+                        t_tgt = row.get(target_start_col)
+                        if not t_avail or not t_as_of or not t_tgt:
+                            unverifiable += 1
+                            continue
+                        valid_checked += 1
+                        if t_avail > t_as_of:
+                            temporal_violations += 1
+                        if t_tgt <= t_as_of:
+                            target_overlap_violations += 1
+
+                    cov_ratio = _format_decimal(valid_checked / total_rows if total_rows > 0 else 0.0, 4) or "0"
+                    facts["leakage_audit"] = {
+                        "rows_checked": total_rows,
+                        "audited_fields": [avail_col, as_of_col, target_start_col],
+                        "audit_coverage_ratio": cov_ratio,
+                        "temporal_violation_count": temporal_violations,
+                        "target_overlap_violation_count": target_overlap_violations,
+                        "missing_availability_metadata": False,
+                        "unverifiable_rows": unverifiable,
+                    }
+
+            # 6. outlier_sensitivity
+            if "outlier_sensitivity" in methods:
+                feat_field = "feature_val" if "feature_val" in fieldnames else (required_fields[0] if required_fields else "")
+                tgt_field = "target_val" if "target_val" in fieldnames else (required_fields[1] if len(required_fields) > 1 else "")
+                pairs = []
+                for row in reader:
+                    try:
+                        xv = float(row[feat_field])
+                        yv = float(row[tgt_field])
+                        pairs.append((xv, yv))
+                    except (ValueError, KeyError):
+                        continue
+
+                total_samples = len(pairs)
+                if total_samples < 2:
+                    facts["outlier_sensitivity"] = {
+                        "baseline_ic": None,
+                        "trimmed_ic": None,
+                        "removed_count": 0,
+                        "removed_ratio": "0",
+                        "ic_delta": None,
+                        "baseline_direction": "neutral",
+                        "trimmed_direction": "neutral",
+                        "direction_preserved": False,
+                    }
+                else:
+                    x_all = [p[0] for p in pairs]
+                    y_all = [p[1] for p in pairs]
+                    base_r = _compute_pearson(x_all, y_all)
+
+                    cut_n = max(1, math.floor(total_samples * 0.01)) if total_samples >= 10 else 0
+                    sorted_x = sorted(x_all)
+                    sorted_y = sorted(y_all)
+
+                    low_x, high_x = (sorted_x[cut_n], sorted_x[-(cut_n + 1)]) if cut_n > 0 else (sorted_x[0], sorted_x[-1])
+                    low_y, high_y = (sorted_y[cut_n], sorted_y[-(cut_n + 1)]) if cut_n > 0 else (sorted_y[0], sorted_y[-1])
+
+                    trimmed_pairs = [
+                        (xv, yv) for xv, yv in pairs
+                        if low_x <= xv <= high_x and low_y <= yv <= high_y
+                    ]
+
+                    removed_count = total_samples - len(trimmed_pairs)
+                    rem_ratio = _format_decimal(removed_count / total_samples if total_samples > 0 else 0.0, 4) or "0"
+                    trimmed_r = _compute_pearson([p[0] for p in trimmed_pairs], [p[1] for p in trimmed_pairs]) if len(trimmed_pairs) >= 2 else None
+
+                    ic_delta = None
+                    if base_r is not None and trimmed_r is not None:
+                        ic_delta = _format_decimal(trimmed_r - base_r, 6)
+
+                    base_dir = "positive" if (base_r is not None and base_r > 0) else ("negative" if (base_r is not None and base_r < 0) else "neutral")
+                    trim_dir = "positive" if (trimmed_r is not None and trimmed_r > 0) else ("negative" if (trimmed_r is not None and trimmed_r < 0) else "neutral")
+                    dir_preserved = (base_dir == trim_dir and base_dir != "neutral")
+
+                    facts["outlier_sensitivity"] = {
+                        "baseline_ic": _format_decimal(base_r, 6),
+                        "trimmed_ic": _format_decimal(trimmed_r, 6),
+                        "removed_count": removed_count,
+                        "removed_ratio": rem_ratio,
+                        "ic_delta": ic_delta,
+                        "baseline_direction": base_dir,
+                        "trimmed_direction": trim_dir,
+                        "direction_preserved": dir_preserved,
+                    }
+
+            # 7. cost_sensitivity
+            if "cost_sensitivity" in methods:
+                feat_field = "feature_val" if "feature_val" in fieldnames else (required_fields[0] if required_fields else "")
+                tgt_field = "target_val" if "target_val" in fieldnames else (required_fields[1] if len(required_fields) > 1 else "")
+
+                pos_series = []
+                ret_series = []
+                for row in reader:
+                    try:
+                        fv = float(row[feat_field])
+                        tv = float(row[tgt_field])
+                        pos = 1.0 if fv > 0 else (-1.0 if fv < 0 else 0.0)
+                        pos_series.append(pos)
+                        ret_series.append(tv)
+                    except (ValueError, KeyError):
+                        continue
+
+                n_obs = len(pos_series)
+                if n_obs < 2:
+                    facts["cost_sensitivity"] = {
+                        "position_rule": "sign(feature_val)",
+                        "observations": n_obs,
+                        "turnover": "0",
+                        "gross_screening_return": "0",
+                        "net_return_0bps": "0",
+                        "net_return_1bps": "0",
+                        "net_return_3bps": "0",
+                        "net_return_5bps": "0",
+                        "net_return_10bps": "0",
+                        "breakeven_cost_bps": None,
+                    }
+                else:
+                    turnover_deltas = [abs(pos_series[0])]
+                    gross_returns = []
+                    for t in range(1, n_obs):
+                        turnover_deltas.append(abs(pos_series[t] - pos_series[t - 1]))
+                        gross_returns.append(pos_series[t - 1] * ret_series[t])
+
+                    tot_turnover = sum(turnover_deltas)
+                    tot_gross_ret = sum(gross_returns)
+
+                    net_0 = tot_gross_ret - tot_turnover * 0.0000
+                    net_1 = tot_gross_ret - tot_turnover * 0.0001
+                    net_3 = tot_gross_ret - tot_turnover * 0.0003
+                    net_5 = tot_gross_ret - tot_turnover * 0.0005
+                    net_10 = tot_gross_ret - tot_turnover * 0.0010
+
+                    breakeven = None
+                    if tot_turnover > 1e-9:
+                        be = (tot_gross_ret / tot_turnover) / 0.0001
+                        breakeven = _format_decimal(be, 2)
+
+                    facts["cost_sensitivity"] = {
+                        "position_rule": "sign(feature_val)",
+                        "observations": n_obs,
+                        "turnover": _format_decimal(tot_turnover, 4) or "0",
+                        "gross_screening_return": _format_decimal(tot_gross_ret, 6) or "0",
+                        "net_return_0bps": _format_decimal(net_0, 6) or "0",
+                        "net_return_1bps": _format_decimal(net_1, 6) or "0",
+                        "net_return_3bps": _format_decimal(net_3, 6) or "0",
+                        "net_return_5bps": _format_decimal(net_5, 6) or "0",
+                        "net_return_10bps": _format_decimal(net_10, 6) or "0",
+                        "breakeven_cost_bps": breakeven,
+                    }
+
             statistical_summary = {
                 "profile": ssd.PROFILE_NAME,
                 "sample_count": len(reader),

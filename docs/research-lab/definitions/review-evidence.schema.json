@@ -536,7 +536,10 @@
                   "coverage",
                   "simple_correlation",
                   "direction_consistency",
-                  "stability_split"
+                  "stability_split",
+                  "leakage_audit",
+                  "outlier_sensitivity",
+                  "cost_sensitivity"
                 ]
               }
             },

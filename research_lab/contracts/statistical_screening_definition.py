@@ -13,6 +13,9 @@ ALLOWED_METHODS = frozenset({
     "simple_correlation",
     "direction_consistency",
     "stability_split",
+    "leakage_audit",
+    "outlier_sensitivity",
+    "cost_sensitivity",
 })
 
 ALLOWED_STATUSES = frozenset({
