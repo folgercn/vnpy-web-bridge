@@ -434,6 +434,194 @@
           }
         }
       ]
+    },
+    "statistical_screening_result_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "hash_profile",
+        "evidence_id",
+        "revision",
+        "run_id",
+        "run_status_snapshot",
+        "run_content_hash",
+        "execution_status",
+        "manifest_id",
+        "manifest_revision",
+        "manifest_content_hash",
+        "missing_reason",
+        "supporting_artifacts",
+        "evidence_content_hash",
+        "typed_metrics"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "research_lab.evidence.v2"
+        },
+        "hash_profile": {
+          "const": "research-json-v1"
+        },
+        "evidence_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "const": "rev.1"
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "run_status_snapshot": {
+          "enum": [
+            "COMPLETED",
+            "INSUFFICIENT_DATA",
+            "FAILED"
+          ]
+        },
+        "run_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "execution_status": {
+          "enum": [
+            "COMPLETED",
+            "INSUFFICIENT_DATA",
+            "FAILED"
+          ]
+        },
+        "manifest_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "manifest_revision": {
+          "const": "rev.1"
+        },
+        "manifest_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "missing_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "supporting_artifacts": {
+          "type": "array"
+        },
+        "evidence_content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "typed_metrics": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "profile": {
+              "const": "research_lab.statistical_screening.v1"
+            },
+            "sample_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "methods_applied": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "coverage",
+                  "simple_correlation",
+                  "direction_consistency",
+                  "stability_split"
+                ]
+              }
+            },
+            "facts": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "run_status_snapshot": {
+                "const": "COMPLETED"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "execution_status": {
+                "const": "COMPLETED"
+              },
+              "missing_reason": {
+                "type": "null"
+              },
+              "typed_metrics": {
+                "type": "object",
+                "required": [
+                  "profile",
+                  "sample_count",
+                  "methods_applied",
+                  "facts"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "run_status_snapshot": {
+                "const": "INSUFFICIENT_DATA"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "execution_status": {
+                "const": "INSUFFICIENT_DATA"
+              },
+              "missing_reason": {
+                "type": "string",
+                "minLength": 1
+              },
+              "typed_metrics": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "run_status_snapshot": {
+                "const": "FAILED"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "execution_status": {
+                "const": "FAILED"
+              },
+              "missing_reason": {
+                "type": "string",
+                "minLength": 1
+              },
+              "typed_metrics": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }

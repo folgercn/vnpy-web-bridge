@@ -457,6 +457,93 @@
       "locator": "single-contract-review-criteria.json",
       "file": "single-contract-review-criteria.json",
       "pointer": []
+    },
+    {
+      "kind": "payload",
+      "name": "research_lab.statistical_screening.dataset_metadata",
+      "revision": "rev.1",
+      "content_hash": "5605e99530e2322481b7a1a5f70f548c6684a6639e2b1038a51f9915b13a7fe2",
+      "locator": "statistical-screening-payload.schema.json#/$defs/dataset_metadata",
+      "file": "statistical-screening-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "dataset_metadata"
+      ],
+      "role": "dataset_metadata"
+    },
+    {
+      "kind": "payload",
+      "name": "research_lab.statistical_screening.method_definition",
+      "revision": "rev.1",
+      "content_hash": "456acc0cd64debd939cbd3518a446bac2d75b3c12e6b0e0a44bc346540c79eae",
+      "locator": "statistical-screening-payload.schema.json#/$defs/method_definition",
+      "file": "statistical-screening-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "method_definition"
+      ],
+      "role": "method_definition"
+    },
+    {
+      "kind": "payload",
+      "name": "research_lab.statistical_screening.environment_lock",
+      "revision": "rev.1",
+      "content_hash": "a37a3caab58b4f35b0266ec12178c71a34e79f3baeca330d0a276da1dd65ef2c",
+      "locator": "statistical-screening-payload.schema.json#/$defs/environment_lock",
+      "file": "statistical-screening-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "environment_lock"
+      ],
+      "role": "environment_lock"
+    },
+    {
+      "kind": "payload",
+      "name": "research_lab.statistical_screening.replay_instructions",
+      "revision": "rev.1",
+      "content_hash": "b58952cca705a7a6661ba62a618523e882980b9fe22ed7fdbde0295da49ba2d4",
+      "locator": "statistical-screening-payload.schema.json#/$defs/replay_instructions",
+      "file": "statistical-screening-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "replay_instructions"
+      ],
+      "role": "replay_instructions"
+    },
+    {
+      "kind": "payload",
+      "name": "research_lab.statistical_screening.statistical_summary",
+      "revision": "rev.1",
+      "content_hash": "77de93345340d32758d5f31f3859c8ef539ccc2ac07968ce5fc961e8962b0b5b",
+      "locator": "statistical-screening-payload.schema.json#/$defs/statistical_summary",
+      "file": "statistical-screening-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "statistical_summary"
+      ],
+      "role": "statistical_summary"
+    },
+    {
+      "kind": "payload",
+      "name": "research_lab.statistical_screening.failure_diagnostics",
+      "revision": "rev.1",
+      "content_hash": "9bb23c07c3ce3a8a39d1c98d5918d92eabc4e82b808fe03b5481eba8db5541e2",
+      "locator": "statistical-screening-payload.schema.json#/$defs/failure_diagnostics",
+      "file": "statistical-screening-payload.schema.json",
+      "pointer": [
+        "$defs",
+        "failure_diagnostics"
+      ],
+      "role": "failure_diagnostics"
+    },
+    {
+      "kind": "criteria",
+      "name": "research_lab.statistical_screening.review_evidence.criteria",
+      "revision": "rev.1",
+      "content_hash": "0138ff07cd440c7c7ccdd6d7b8e1b3e43e500c86658dc689f4ab660b986e41b6",
+      "locator": "statistical-screening-review-criteria.json",
+      "file": "statistical-screening-review-criteria.json",
+      "pointer": []
     }
   ]
 }
