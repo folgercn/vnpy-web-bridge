@@ -93,10 +93,21 @@ class ProviderConnectionDescriptor:
         caps = tuple(str(c).strip() for c in self.capabilities if str(c).strip())
         object.__setattr__(self, "capabilities", caps)
 
+    @property
+    def exact_ref(self) -> str:
+        """Stable, verifiable exact transport identity binding transport kind and profile ref."""
+        kind_val = (
+            self.transport_kind.value
+            if isinstance(self.transport_kind, ProviderTransportKind)
+            else str(self.transport_kind)
+        )
+        return f"{kind_val}://{self.connection_profile_ref}"
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "capabilities": list(self.capabilities),
             "connection_profile_ref": self.connection_profile_ref,
+            "exact_ref": self.exact_ref,
             "transport_kind": (
                 self.transport_kind.value
                 if isinstance(self.transport_kind, ProviderTransportKind)

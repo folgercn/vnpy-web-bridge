@@ -787,7 +787,11 @@ class AgentTask:
 # --- AgentRoute Contract ---
 
 def compute_route_deterministic_id(payload: dict[str, Any]) -> str:
-    """Compute deterministic route ID from role, provider, resolved model, policy version, scope ref, transport, usage, and reason code."""
+    """Compute deterministic route ID from role, provider, resolved model, policy version, scope ref, transport, usage, and stable reason code.
+
+    NOTE (P1-3): route_reason free text is deliberately EXCLUDED from route deterministic identity,
+    and preserved strictly in route_content_hash and audit records.
+    """
     core = {
         "authorization_scope_ref": payload.get("authorization_scope_ref"),
         "authorized_permissions": _clean_for_canonical(payload.get("authorized_permissions")),
@@ -796,7 +800,6 @@ def compute_route_deterministic_id(payload: dict[str, Any]) -> str:
         "provider": payload.get("provider"),
         "resolved_model": payload.get("resolved_model"),
         "role": payload.get("role"),
-        "route_reason": payload.get("route_reason"),
     }
     if payload.get("route_reason_code"):
         core["route_reason_code"] = str(payload.get("route_reason_code"))

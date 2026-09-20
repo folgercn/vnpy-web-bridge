@@ -34,7 +34,10 @@ from research_lab.agent_control.errors import (
     TamperDetectionError,
 )
 from research_lab.agent_control.registry import ProviderRegistry
-from research_lab.agent_control.transport import ProviderConnectionDescriptor
+from research_lab.agent_control.transport import (
+    ProviderConnectionDescriptor,
+    ProviderTransportKind,
+)
 from research_lab.contracts import v2
 
 
@@ -240,17 +243,44 @@ def prepare_execution(
 
     # 8. Transport verification
     transport_desc = registry.get_transport(route.provider)
-    if route.transport_ref and route.transport_ref != transport_desc.connection_profile_ref:
+    if not isinstance(transport_desc, ProviderConnectionDescriptor):
         raise ProviderError(
             ProviderErrorCode.PROVIDER_UNAVAILABLE,
-            f"Route transport_ref '{route.transport_ref}' does not match registered transport "
-            f"profile '{transport_desc.connection_profile_ref}' for provider '{route.provider}'",
-            details={
-                "provider": route.provider,
-                "registered_profile": transport_desc.connection_profile_ref,
-                "route_transport_ref": route.transport_ref,
-            },
+            f"Provider '{route.provider}' has invalid registered transport descriptor: expected ProviderConnectionDescriptor, got {type(transport_desc).__name__ if transport_desc is not None else 'None'}",
+            details={"provider": route.provider},
         )
+    if route.transport_ref:
+        if (
+            route.transport_ref != transport_desc.exact_ref
+            and route.transport_ref != transport_desc.connection_profile_ref
+        ):
+            raise ProviderError(
+                ProviderErrorCode.PROVIDER_UNAVAILABLE,
+                f"Route transport_ref '{route.transport_ref}' does not match registered transport "
+                f"exact ref '{transport_desc.exact_ref}' for provider '{route.provider}'",
+                details={
+                    "provider": route.provider,
+                    "registered_exact_ref": transport_desc.exact_ref,
+                    "route_transport_ref": route.transport_ref,
+                },
+            )
+        if "://" in route.transport_ref:
+            route_kind = route.transport_ref.split("://", 1)[0]
+            expected_kind = (
+                transport_desc.transport_kind.value
+                if isinstance(transport_desc.transport_kind, ProviderTransportKind)
+                else str(transport_desc.transport_kind)
+            )
+            if route_kind != expected_kind:
+                raise ProviderError(
+                    ProviderErrorCode.PROVIDER_UNAVAILABLE,
+                    f"Route transport kind '{route_kind}' does not match registered transport kind '{expected_kind}' for provider '{route.provider}'",
+                    details={
+                        "provider": route.provider,
+                        "registered_kind": expected_kind,
+                        "route_kind": route_kind,
+                    },
+                )
 
     # 9. Build immutable execution preparation
     raw = {

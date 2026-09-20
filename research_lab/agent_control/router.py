@@ -36,6 +36,8 @@ from research_lab.agent_control.contracts import (
 from research_lab.agent_control.errors import (
     PermissionDeniedError,
     ProjectBindingError,
+    ProviderError,
+    ProviderErrorCode,
     ProviderUnavailableError,
     QuotaUnavailableError,
 )
@@ -238,9 +240,15 @@ def select_agent(
     for snap in snapshots.values():
         validate_usage_hash(snap.to_dict())
 
+    is_m1_mode = (
+        routing_policy is not None
+        or routing_context is not None
+        or registry is not None
+    )
+
     # 3. Resolve candidate providers and their transport descriptors
     prov_map: dict[str, AgentProvider] = {}
-    trans_map: dict[str, ProviderConnectionDescriptor] = {}
+    trans_map: dict[str, ProviderConnectionDescriptor | None] = {}
 
     if registry is not None:
         for prov in registry.list():
@@ -252,13 +260,23 @@ def select_agent(
             p_name = prov.describe().provider
             prov_map[p_name] = prov
             if hasattr(prov, "describe_transport") and callable(prov.describe_transport):
-                trans_map[p_name] = prov.describe_transport()
-            else:
-                trans_map[p_name] = ProviderConnectionDescriptor(
-                    transport_kind=ProviderTransportKind.LOCAL_MCP,
-                    connection_profile_ref=f"{p_name}-default-profile",
-                    capabilities=prov.describe().capabilities,
+                t = prov.describe_transport()
+                if not isinstance(t, ProviderConnectionDescriptor):
+                    raise ProviderError(
+                        ProviderErrorCode.PROVIDER_UNAVAILABLE,
+                        f"describe_transport() must return ProviderConnectionDescriptor, got {type(t).__name__ if t is not None else 'None'}",
+                    )
+                trans_map[p_name] = t
+            elif hasattr(prov, "transport_descriptor") and isinstance(prov.transport_descriptor, ProviderConnectionDescriptor):
+                trans_map[p_name] = prov.transport_descriptor
+            elif is_m1_mode:
+                raise ProviderError(
+                    ProviderErrorCode.PROVIDER_UNAVAILABLE,
+                    f"Missing transport descriptor for provider '{p_name}' in Milestone 1 router mode (cannot assume or default to local_mcp)",
+                    details={"provider": p_name},
                 )
+            else:
+                trans_map[p_name] = None
     else:
         raise ProviderUnavailableError("No providers registered with router")
 
@@ -322,12 +340,17 @@ def select_agent(
 
         prov = prov_map[prov_name]
         desc = prov.describe()
-        transport_desc = trans_map[prov_name]
-        transport_kind = (
-            transport_desc.transport_kind.value
-            if isinstance(transport_desc.transport_kind, ProviderTransportKind)
-            else str(transport_desc.transport_kind)
-        )
+        transport_desc = trans_map.get(prov_name)
+        if transport_desc is not None:
+            transport_kind = (
+                transport_desc.transport_kind.value
+                if isinstance(transport_desc.transport_kind, ProviderTransportKind)
+                else str(transport_desc.transport_kind)
+            )
+            transport_ref_candidate = transport_desc.exact_ref
+        else:
+            transport_kind = "none"
+            transport_ref_candidate = ""
 
         role_supported = validated_role in desc.supported_roles
         if role_supported:
@@ -344,10 +367,14 @@ def select_agent(
             set(routing_policy.allowed_transports) if routing_policy else None
         )
         transport_allowed = True
-        if policy_allowed_trans is not None and transport_kind not in policy_allowed_trans:
-            transport_allowed = False
-        if allowed_trans is not None and transport_kind not in allowed_trans:
-            transport_allowed = False
+        if transport_desc is not None:
+            if policy_allowed_trans is not None and transport_kind not in policy_allowed_trans:
+                transport_allowed = False
+            if allowed_trans is not None and transport_kind not in allowed_trans:
+                transport_allowed = False
+        else:
+            if is_m1_mode:
+                transport_allowed = False
 
         # Availability check
         avail = prov.availability(validated_role, ctx_dict)
@@ -460,7 +487,7 @@ def select_agent(
         if decision == "selected":
             selected_provider = prov
             selected_model = resolved_model_candidate or desc.default_model
-            selected_transport_ref = transport_desc.connection_profile_ref
+            selected_transport_ref = transport_ref_candidate
 
             if snapshot:
                 # Exact bind snapshot_id and usage_content_hash

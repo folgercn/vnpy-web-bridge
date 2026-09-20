@@ -24,7 +24,6 @@ from research_lab.agent_control.provider import AgentProvider
 from research_lab.agent_control.roles import validate_role
 from research_lab.agent_control.transport import (
     ProviderConnectionDescriptor,
-    ProviderTransportKind,
 )
 
 
@@ -96,7 +95,7 @@ class ProviderRegistry:
             # validate_role will raise PermissionDeniedError on unknown roles
             validate_role(role)
 
-        # Validate transport descriptor
+        # Validate transport descriptor fail-closed: never infer or default to local_mcp
         resolved_transport: ProviderConnectionDescriptor
         if transport is not None:
             if not isinstance(transport, ProviderConnectionDescriptor):
@@ -110,15 +109,16 @@ class ProviderRegistry:
             if not isinstance(t, ProviderConnectionDescriptor):
                 raise ProviderError(
                     ProviderErrorCode.PROVIDER_UNAVAILABLE,
-                    f"describe_transport() must return ProviderConnectionDescriptor, got {type(t).__name__}",
+                    f"describe_transport() must return ProviderConnectionDescriptor, got {type(t).__name__ if t is not None else 'None'}",
                 )
             resolved_transport = t
+        elif hasattr(provider, "transport_descriptor") and isinstance(provider.transport_descriptor, ProviderConnectionDescriptor):
+            resolved_transport = provider.transport_descriptor
         else:
-            # Default safe standard local_mcp profile reference if not explicitly declared
-            resolved_transport = ProviderConnectionDescriptor(
-                transport_kind=ProviderTransportKind.LOCAL_MCP,
-                connection_profile_ref=f"{name}-default-profile",
-                capabilities=desc.capabilities,
+            raise ProviderError(
+                ProviderErrorCode.PROVIDER_UNAVAILABLE,
+                f"Missing transport descriptor for provider '{name}': Provider must explicitly declare or register a valid ProviderConnectionDescriptor (cannot assume or default to local_mcp)",
+                details={"provider": name},
             )
 
         self._providers[name] = provider

@@ -1160,3 +1160,269 @@ def test_38_review_remediation_task_delegation_depth_hard_bound() -> None:
         )
     assert "Nested agent delegation prohibited" in str(exc_depth.value)
     assert "exceeds maximum allowable depth 1" in str(exc_depth.value)
+
+
+# 39. [Gate 1 Remediation - P1-1] Missing or invalid transport descriptor strictly fails closed
+def test_39_gate1_remediation_p1_1_missing_transport_fails_closed() -> None:
+    class BareProvider:
+        def __init__(self, name: str = "bare_prov") -> None:
+            self.name = name
+
+        def describe(self) -> AgentProviderDescriptor:
+            return AgentProviderDescriptor(
+                provider=self.name,
+                supported_roles=(AgentRole.ALPHA_GENERATOR.value,),
+                supported_models=("mock-model-v1",),
+                capabilities=("text_generation",),
+                default_model="mock-model-v1",
+            )
+
+        def availability(self, role: str, context: dict[str, Any] | None = None) -> ProviderAvailability:
+            return ProviderAvailability(status="AVAILABLE", is_available=True)
+
+        def execute(self, prep: Any, payload: Any) -> Any:
+            return {}
+
+    class BadTransportProvider(BareProvider):
+        def describe_transport(self) -> Any:
+            return "not-a-descriptor"
+
+    class NoneTransportProvider(BareProvider):
+        def describe_transport(self) -> Any:
+            return None
+
+    # (a) Registry entrance: bare provider without transport rejected (no infer/default to local_mcp)
+    registry = ProviderRegistry()
+    with pytest.raises(ProviderError) as exc_bare:
+        registry.register(BareProvider("bare1"))
+    assert "Missing transport descriptor for provider 'bare1'" in str(exc_bare.value)
+    assert "cannot assume or default to local_mcp" in str(exc_bare.value)
+
+    # Explicit transport=None rejected
+    with pytest.raises(ProviderError) as exc_none_arg:
+        registry.register(BareProvider("bare_none"), transport=None)
+    assert "Missing transport descriptor for provider 'bare_none'" in str(exc_none_arg.value)
+
+    # Invalid descriptor string rejected
+    with pytest.raises(ProviderError) as exc_str_arg:
+        registry.register(BareProvider("bare_str"), transport="invalid_descriptor")  # type: ignore[arg-type]
+    assert "transport must be ProviderConnectionDescriptor" in str(exc_str_arg.value)
+
+    # describe_transport() returning non-descriptor rejected
+    with pytest.raises(ProviderError) as exc_bad_t:
+        registry.register(BadTransportProvider("bad_t"))
+    assert "describe_transport() must return ProviderConnectionDescriptor" in str(exc_bad_t.value)
+
+    # describe_transport() returning None rejected
+    with pytest.raises(ProviderError) as exc_none_t:
+        registry.register(NoneTransportProvider("none_t"))
+    assert "describe_transport() must return ProviderConnectionDescriptor, got None" in str(exc_none_t.value)
+
+    # (b) Router entrance: M1 mode with bare provider strictly fails closed
+    scope_router = _create_test_scope()
+    binding = ProjectBinding(project_id="vnpy-p1", workspace_identity="/workspace/vnpy")
+    policy = RoutingPolicy(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        provider_priority=("bare_router",),
+    )
+    with pytest.raises(ProviderError) as exc_router:
+        select_agent(
+            role=AgentRole.ALPHA_GENERATOR.value,
+            providers=[BareProvider("bare_router")],
+            project_binding=binding,
+            authorized_scope=scope_router,
+            routing_policy=policy,
+        )
+    assert "Missing transport descriptor for provider 'bare_router'" in str(exc_router.value)
+
+    # Router entrance: M1 mode with None return from describe_transport()
+    with pytest.raises(ProviderError) as exc_router_none:
+        select_agent(
+            role=AgentRole.ALPHA_GENERATOR.value,
+            providers=[NoneTransportProvider("none_router")],
+            project_binding=binding,
+            authorized_scope=scope_router,
+            routing_policy=policy,
+        )
+    assert "describe_transport() must return ProviderConnectionDescriptor, got None" in str(exc_router_none.value)
+
+    # (c) Handoff entrance: handoff fails closed if transport is missing or invalid in registry
+    valid_prov = MockProvider(name="valid_p")
+    reg_handoff = ProviderRegistry()
+    reg_handoff.register(valid_prov)
+    scope = _create_test_scope()
+    task = _create_test_task(scope)
+    route = select_agent(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        registry=reg_handoff,
+        project_binding=binding,
+        authorized_scope=scope,
+    )
+    # Tamper registry to remove transport descriptor
+    del reg_handoff._transports[valid_prov.name]
+    with pytest.raises(ProviderError) as exc_handoff_missing:
+        prepare_execution(task=task, route=route, registry=reg_handoff)
+    assert "Transport for provider 'valid_p' is not found" in str(exc_handoff_missing.value)
+
+    # Tamper registry to put invalid transport object
+    reg_handoff._transports[valid_prov.name] = "corrupted_descriptor"  # type: ignore[assignment]
+    with pytest.raises(ProviderError) as exc_handoff_corrupt:
+        prepare_execution(task=task, route=route, registry=reg_handoff)
+    assert "invalid registered transport descriptor" in str(exc_handoff_corrupt.value)
+
+
+# 40. [Gate 1 Remediation - P1-2] Route exact bind transport kind; local_mcp -> remote_mcp changes route_id and handoff rejects
+def test_40_gate1_remediation_p1_2_route_exact_bind_transport_kind() -> None:
+    profile_ref = "shared-profile-ref-001"
+    desc_local = ProviderConnectionDescriptor(
+        transport_kind=ProviderTransportKind.LOCAL_MCP,
+        connection_profile_ref=profile_ref,
+        capabilities=("text_generation",),
+    )
+    desc_remote = ProviderConnectionDescriptor(
+        transport_kind=ProviderTransportKind.REMOTE_MCP,
+        connection_profile_ref=profile_ref,
+        capabilities=("text_generation",),
+    )
+
+    # 1. exact_ref binds transport kind and profile ref stably
+    assert desc_local.exact_ref == f"local_mcp://{profile_ref}"
+    assert desc_remote.exact_ref == f"remote_mcp://{profile_ref}"
+    assert desc_local.exact_ref != desc_remote.exact_ref
+
+    # 2. When same provider changes transport_kind from local_mcp to remote_mcp (with same connection_profile_ref),
+    # route_id MUST change
+    binding = ProjectBinding(project_id="vnpy-p1", workspace_identity="/workspace/vnpy")
+    policy = RoutingPolicy(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        provider_priority=("prov_kind_test",),
+        allowed_transports=("local_mcp", "remote_mcp"),
+    )
+
+    prov_local = MockProvider(name="prov_kind_test", transport_descriptor=desc_local)
+    reg_local = ProviderRegistry()
+    reg_local.register(prov_local)
+
+    prov_remote = MockProvider(name="prov_kind_test", transport_descriptor=desc_remote)
+    reg_remote = ProviderRegistry()
+    reg_remote.register(prov_remote)
+
+    scope = _create_test_scope()
+    route_local = select_agent(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        registry=reg_local,
+        project_binding=binding,
+        authorized_scope=scope,
+        routing_policy=policy,
+    )
+    route_remote = select_agent(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        registry=reg_remote,
+        project_binding=binding,
+        authorized_scope=scope,
+        routing_policy=policy,
+    )
+
+    assert route_local.transport_ref == f"local_mcp://{profile_ref}"
+    assert route_remote.transport_ref == f"remote_mcp://{profile_ref}"
+    assert route_local.route_id != route_remote.route_id
+    assert route_local.route_content_hash != route_remote.route_content_hash
+
+    # 3. Handoff verification: handoff must reject route with mismatched transport kind
+    task = _create_test_task(scope)
+
+    # Attempting to execute route_local (local_mcp) on reg_remote (remote_mcp) -> MUST be rejected
+    with pytest.raises(ProviderError) as exc_local_on_remote:
+        prepare_execution(task=task, route=route_local, registry=reg_remote)
+    assert "does not match registered transport exact ref" in str(exc_local_on_remote.value)
+
+    # Attempting to execute route_remote (remote_mcp) on reg_local (local_mcp) -> MUST be rejected
+    with pytest.raises(ProviderError) as exc_remote_on_local:
+        prepare_execution(task=task, route=route_remote, registry=reg_local)
+    assert "does not match registered transport exact ref" in str(exc_remote_on_local.value)
+
+    # Matching pairs succeed
+    prep_local = prepare_execution(task=task, route=route_local, registry=reg_local)
+    assert prep_local.transport.exact_ref == f"local_mcp://{profile_ref}"
+
+    prep_remote = prepare_execution(task=task, route=route_remote, registry=reg_remote)
+    assert prep_remote.transport.exact_ref == f"remote_mcp://{profile_ref}"
+
+
+# 41. [Gate 1 Remediation - P1-3] Free text route_reason decoupled from route_id; reason_code and facts dictate route_id
+def test_41_gate1_remediation_p1_3_route_reason_decoupled_from_route_id() -> None:
+    binding = ProjectBinding(project_id="vnpy-p1", workspace_identity="/workspace/vnpy")
+    scope = _create_test_scope()
+
+    # (a) Changing only human-facing route_reason free text MUST keep route_id identical,
+    # but route_content_hash MUST differ.
+    base_kwargs: dict[str, Any] = {
+        "role": AgentRole.ALPHA_GENERATOR.value,
+        "provider": "primary_test_provider",
+        "resolved_model": "mock-model-v1",
+        "transport_ref": "local_mcp://prof-01",
+        "authorized_scope": scope,
+        "authorized_permissions": list(scope.authorized_permissions),
+        "project_binding": binding,
+        "policy_version": "v1.0",
+        "route_reason_code": RouteReasonCode.PRIMARY_AVAILABLE.value,
+        "usage_snapshot_ref": None,
+    }
+
+    route_text_a = AgentRoute.create(
+        route_reason="Selected primary provider due to lowest latency and active healthy status.",
+        **base_kwargs,
+    )
+    route_text_b = AgentRoute.create(
+        route_reason="Different human explanation: picked primary because secondary has higher cost.",
+        **base_kwargs,
+    )
+
+    # Same deterministic identity
+    assert route_text_a.route_id == route_text_b.route_id
+    # Different audit content hash
+    assert route_text_a.route_content_hash != route_text_b.route_content_hash
+
+    # Both validate successfully with their respective content hashes
+    from research_lab.agent_control.contracts import validate_route_hash
+    validate_route_hash(route_text_a.to_dict())
+    validate_route_hash(route_text_b.to_dict())
+
+    # Swapping content hashes triggers TamperDetectionError
+    raw_tampered = route_text_a.to_dict()
+    raw_tampered["route_content_hash"] = route_text_b.route_content_hash
+    with pytest.raises(TamperDetectionError):
+        validate_route_hash(raw_tampered)
+
+    # (b) Changing route_reason_code or ANY factual input MUST change route_id
+    route_diff_code = AgentRoute.create(
+        route_reason=route_text_a.route_reason,
+        route_reason_code=RouteReasonCode.PRIMARY_QUOTA_EXHAUSTED.value,
+        **{k: v for k, v in base_kwargs.items() if k != "route_reason_code"},
+    )
+    assert route_diff_code.route_id != route_text_a.route_id
+
+    route_diff_model = AgentRoute.create(
+        route_reason=route_text_a.route_reason,
+        **{**base_kwargs, "resolved_model": "mock-model-v2"},
+    )
+    assert route_diff_model.route_id != route_text_a.route_id
+
+    route_diff_transport = AgentRoute.create(
+        route_reason=route_text_a.route_reason,
+        **{**base_kwargs, "transport_ref": "remote_mcp://prof-01"},
+    )
+    assert route_diff_transport.route_id != route_text_a.route_id
+
+    scope_diff = _create_test_scope(
+        permissions=[AgentPermission.CREATE_HYPOTHESIS.value, AgentPermission.READ_RESEARCH_MEMORY.value]
+    )
+    route_diff_scope = AgentRoute.create(
+        route_reason=route_text_a.route_reason,
+        **{
+            **base_kwargs,
+            "authorized_scope": scope_diff,
+            "authorized_permissions": list(scope_diff.authorized_permissions),
+        },
+    )
+    assert route_diff_scope.route_id != route_text_a.route_id
