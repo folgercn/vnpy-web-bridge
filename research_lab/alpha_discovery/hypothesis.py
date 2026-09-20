@@ -112,6 +112,7 @@ CORE_SCIENTIFIC_FIELDS = (
     "universe",
     "frequency",
     "economic_rationale",
+    "signal_type",
 )
 
 # Textual patterns in descriptions that attempt to inject results/evidence

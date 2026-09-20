@@ -90,6 +90,7 @@
     * `universe` 核心语义改变
     * `frequency` 改变
     * `economic_rationale` 改变
+    * `signal_type` 改变（属于 frozen scientific identity，决定是否可合法映射 cost proxy，严禁伪装为 revision）
   * Scientific Identity Hash 改变，必须分配新的 `hypothesis_id`，绝对不允许伪装成原有假设的 Revision。
 
 ### 4.3 去重规则 (Dedup)
