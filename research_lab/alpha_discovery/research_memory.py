@@ -217,7 +217,12 @@ class ResearchMemory:
             for m in manifest_records
         ]
         evidence_refs = [
-            {"evidence_id": e["evidence_id"], "revision": e.get("revision", "rev.1"), "content_hash": e["evidence_content_hash"], "execution_status": e.get("execution_status", "")}
+            {
+                "evidence_id": e["evidence_id"],
+                "revision": e.get("revision", "rev.1"),
+                "content_hash": e["evidence_content_hash"],
+                "execution_status": e.get("execution_status") or e.get("run_status_snapshot", ""),
+            }
             for e in evidence_records
         ]
         critic_ref = {

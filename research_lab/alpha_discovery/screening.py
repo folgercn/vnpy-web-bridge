@@ -91,6 +91,7 @@ def build_protocol_v2_task(
     plan: ScreeningPlan,
     method: str,
     snapshot_path: Path,
+    parameters: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Generate isolated Protocol v2 Task for a single screening method."""
     raw_bytes = snapshot_path.read_bytes()
@@ -140,6 +141,8 @@ def build_protocol_v2_task(
         "data_requirements": task_data_req,
         "methods": [method],
     }
+    if parameters:
+        task["parameters"] = parameters
     task["task_content_hash"] = v2.digest({k: v for k, v in task.items() if k != "task_content_hash"})
     return task
 
@@ -148,6 +151,7 @@ def build_protocol_v2_spec(
     task: dict[str, Any],
     plan: ScreeningPlan,
     method: str,
+    parameters: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Generate isolated Protocol v2 ExperimentSpec corresponding to Task."""
     task_token = v2.digest({
@@ -169,6 +173,8 @@ def build_protocol_v2_spec(
         "dataset_requirements": dict(task["data_requirements"]),
         "methods": [method],
     }
+    if parameters:
+        spec["parameters"] = parameters
     spec["spec_content_hash"] = v2.digest({k: v for k, v in spec.items() if k != "spec_content_hash"})
     return spec
 
@@ -262,8 +268,18 @@ class SequentialScreeningExecutor:
 
         # PLANNED method: build Task & Spec, validate against Protocol v2, and execute runner
         try:
-            task = build_protocol_v2_task(plan, method_name, snapshot_path)
-            spec = build_protocol_v2_spec(task, plan, method_name)
+            task = build_protocol_v2_task(
+                plan,
+                method_name,
+                snapshot_path,
+                parameters=method_req.parameters if method_req.parameters else None,
+            )
+            spec = build_protocol_v2_spec(
+                task,
+                plan,
+                method_name,
+                parameters=method_req.parameters if method_req.parameters else None,
+            )
             # Contract admission check
             v2.validate_spec(spec, task, self.definitions)
         except Exception as exc:  # noqa: BLE001

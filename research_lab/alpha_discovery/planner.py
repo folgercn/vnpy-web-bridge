@@ -140,6 +140,33 @@ class ScreeningPlanner:
                         )
                     )
                 else:
+                    params: dict[str, Any] = {}
+                    if m == "cost_sensitivity":
+                        exp_dir = hyp_dict.get("expected_direction")
+                        if exp_dir == "positive":
+                            proxy = "sign(feature_val)"
+                        elif exp_dir == "negative":
+                            proxy = "-sign(feature_val)"
+                        else:
+                            proxy = None
+
+                        if proxy is None:
+                            method_requests.append(
+                                ScreeningMethodRequest(
+                                    method=m,
+                                    status="INSUFFICIENT_DATA",
+                                    reason="unsupported_or_missing_expected_direction",
+                                    missing_fields=None,
+                                    required_fields=expected_fields,
+                                    parameters={},
+                                )
+                            )
+                            continue
+                        params = {
+                            "position_proxy": proxy,
+                            "expected_direction": exp_dir,
+                        }
+
                     method_requests.append(
                         ScreeningMethodRequest(
                             method=m,
@@ -147,7 +174,7 @@ class ScreeningPlanner:
                             reason=None,
                             missing_fields=None,
                             required_fields=expected_fields,
-                            parameters={},
+                            parameters=params,
                         )
                     )
 

@@ -514,7 +514,7 @@
       "kind": "payload",
       "name": "research_lab.statistical_screening.statistical_summary",
       "revision": "rev.1",
-      "content_hash": "bdc1e9c97fa980e2b93f9946d6460dcb78b2af8d5d689631df7d00b6fe80dbee",
+      "content_hash": "e51143e9732c8bd109ea48cac3178d7e38e4a69e37862e19ca0a1abe4282f153",
       "locator": "statistical-screening-payload.schema.json#/$defs/statistical_summary",
       "file": "statistical-screening-payload.schema.json",
       "pointer": [

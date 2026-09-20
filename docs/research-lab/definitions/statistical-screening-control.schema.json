@@ -98,6 +98,9 @@
           },
           "minItems": 1
         },
+        "parameters": {
+          "type": "object"
+        },
         "task_content_hash": {
           "type": "string",
           "pattern": "^[a-f0-9]{64}$"
@@ -215,6 +218,9 @@
             "provenance": {
               "type": "string",
               "minLength": 1
+            },
+            "parameters": {
+              "type": "object"
             },
             "status_reason": {
               "type": ["string", "null"]

@@ -15,6 +15,7 @@ Covers all 25 Final Acceptance criteria from Section 30:
 from __future__ import annotations
 
 import csv
+import json
 import shutil
 import tempfile
 from pathlib import Path
@@ -36,6 +37,7 @@ from research_lab.alpha_discovery import (
 from research_lab.config import ResearchLabConfig
 from research_lab.contracts import v2
 from research_lab.database import ResultStore
+from research_lab.runners.v2_statistical_screening import run_statistical_screening
 
 
 def _create_synthetic_csv(
@@ -497,3 +499,269 @@ def test_evidence_facts_contain_zero_decision_words(test_env):
             if m_res.facts:
                 for forbidden in ("score", "rank", "decision", "promote", "reject", "recommendation"):
                     assert forbidden not in m_res.facts
+
+
+def test_p1_1_leakage_audit_missing_metadata_cannot_be_completed(tmp_path: Path):
+    """P1-1: leakage_audit with missing temporal metadata outputs INSUFFICIENT_DATA and Critic NME."""
+    csv_path = tmp_path / "missing_meta.csv"
+    # Rows with empty temporal fields represent unrecorded or missing metadata
+    rows = [
+        {
+            "timestamp": f"2026-01-01T{i:02d}:00:00.000000Z",
+            "symbol": "RB2405",
+            "feature_val": str(i),
+            "target_val": str(i * 0.1),
+            "feature_availability_time": "",
+            "as_of_time": "",
+            "target_start_time": "",
+        }
+        for i in range(1, 25)
+    ]
+    all_fields = ["timestamp", "symbol", "feature_val", "target_val", "feature_availability_time", "as_of_time", "target_start_time"]
+    c_sha, c_len = _create_synthetic_csv(csv_path, rows, all_fields)
+    binding = {
+        "snapshot_locator": str(csv_path),
+        "snapshot_sha256": c_sha,
+        "snapshot_byte_length": c_len,
+        "required_fields": all_fields,
+        "provenance": "test",
+    }
+    planner = ScreeningPlanner()
+    hyp = _make_hypothesis("hypo-p1-1-meta", methods=["leakage_audit"])
+    plan = planner.plan(hyp, dataset_requirements=binding)
+    pipeline = ScreeningPipeline(planner=planner)
+
+    with tempfile.TemporaryDirectory() as td:
+        report = pipeline.execute_plan(plan, csv_path, Path(td) / "staging")
+        m_res = report.method_results[0]
+        assert m_res.method == "leakage_audit"
+        assert m_res.status == "COMPLETED"
+        facts = m_res.facts
+        assert facts["audit_status"] == "INSUFFICIENT_DATA"
+        assert facts["missing_availability_metadata"] is True
+        assert facts["temporal_violation_count"] is None  # FORBIDDEN to output 0!
+        assert facts["target_overlap_violation_count"] is None  # FORBIDDEN to output 0!
+        assert facts["unverifiable_rows"] == 24
+
+        # Critic evaluation must yield NEED_MORE_EVIDENCE, never pass or REJECT
+        evidence_dict = json.loads((Path(m_res.bundle_dir) / "evidence.json").read_text("utf-8"))
+        critic = CriticGate()
+        dec = critic.evaluate(hyp, evidence_dict)
+        assert dec.decision == "NEED_MORE_EVIDENCE"
+        assert "leakage_audit_verifiable_metadata" in dec.missing_evidence
+
+
+def test_p1_1_leakage_audit_partial_unverifiable_rows(tmp_path: Path):
+    """P1-1: Partial unverifiable rows in leakage_audit output INSUFFICIENT_DATA."""
+    csv_path = tmp_path / "partial_meta.csv"
+    rows = []
+    for i in range(1, 25):
+        # Even rows have missing target_start_time
+        tgt_start = f"2026-01-01T{i:02d}:00:02.000000Z" if i % 2 != 0 else ""
+        rows.append({
+            "timestamp": f"2026-01-01T{i:02d}:00:00.000000Z",
+            "symbol": "RB2405",
+            "feature_val": str(i),
+            "target_val": str(i * 0.1),
+            "feature_availability_time": f"2026-01-01T{i:02d}:00:00.000000Z",
+            "as_of_time": f"2026-01-01T{i:02d}:00:01.000000Z",
+            "target_start_time": tgt_start,
+        })
+    fields = ["timestamp", "symbol", "feature_val", "target_val", "feature_availability_time", "as_of_time", "target_start_time"]
+    c_sha, c_len = _create_synthetic_csv(csv_path, rows, fields)
+    binding = {
+        "snapshot_locator": str(csv_path),
+        "snapshot_sha256": c_sha,
+        "snapshot_byte_length": c_len,
+        "required_fields": fields,
+        "provenance": "test",
+    }
+    planner = ScreeningPlanner()
+    hyp = _make_hypothesis("hypo-p1-1-partial", methods=["leakage_audit"])
+    plan = planner.plan(hyp, dataset_requirements=binding)
+    pipeline = ScreeningPipeline(planner=planner)
+
+    with tempfile.TemporaryDirectory() as td:
+        report = pipeline.execute_plan(plan, csv_path, Path(td) / "staging")
+        m_res = report.method_results[0]
+        facts = m_res.facts
+        assert facts["audit_status"] == "INSUFFICIENT_DATA"
+        assert facts["unverifiable_rows"] == 12
+        assert facts["temporal_violation_count"] is None
+        assert facts["target_overlap_violation_count"] is None
+
+
+def test_p1_2_negative_alpha_cost_sensitivity_proxy_binding(tmp_path: Path):
+    """P1-2: Negative Alpha binds -sign(feature_val) proxy deterministically into Spec and executes inverse position."""
+    csv_path = tmp_path / "negative_alpha.csv"
+    rows = []
+    for i in range(1, 31):
+        fv = float(i)
+        tv = -0.05 * fv  # Negative target return
+        rows.append({
+            "timestamp": f"2026-01-01T{i:02d}:00:00.000000Z",
+            "symbol": "RB2405",
+            "feature_val": str(fv),
+            "target_val": str(tv),
+        })
+    fields = ["timestamp", "symbol", "feature_val", "target_val"]
+    c_sha, c_len = _create_synthetic_csv(csv_path, rows, fields)
+    binding = {
+        "snapshot_locator": str(csv_path),
+        "snapshot_sha256": c_sha,
+        "snapshot_byte_length": c_len,
+        "required_fields": fields,
+        "provenance": "test",
+    }
+    planner = ScreeningPlanner()
+    hyp = _make_hypothesis("hypo-p1-2-neg", direction="negative", methods=["cost_sensitivity"])
+    plan = planner.plan(hyp, dataset_requirements=binding)
+
+    # 1. Planner sealed -sign(feature_val) in parameters
+    cost_req = next(m for m in plan.methods if m.method == "cost_sensitivity")
+    assert cost_req.parameters == {
+        "position_proxy": "-sign(feature_val)",
+        "expected_direction": "negative",
+    }
+
+    # 2. Pipeline executes with inverse position proxy
+    pipeline = ScreeningPipeline(planner=planner)
+    with tempfile.TemporaryDirectory() as td:
+        report = pipeline.execute_plan(plan, csv_path, Path(td) / "staging")
+        m_res = report.method_results[0]
+        assert m_res.status == "COMPLETED"
+        facts = m_res.facts
+        assert facts["position_rule"] == "-sign(feature_val)"
+        assert facts["expected_direction"] == "negative"
+        # Since feature > 0, pos = -1, ret < 0, product pos * ret > 0 (positive screening return)
+        assert float(facts["gross_screening_return"]) > 0
+
+
+def test_p1_2_cost_sensitivity_tampered_or_missing_proxy_fails_closed(tmp_path: Path):
+    """P1-2: Missing or conflicting position_proxy in Spec fails closed."""
+    csv_path = tmp_path / "data.csv"
+    rows = [{"timestamp": "2026-01-01T00:00:00.000000Z", "symbol": "RB", "feature_val": "1.0", "target_val": "0.1"}]
+    c_sha, c_len = _create_synthetic_csv(csv_path, rows, ["timestamp", "symbol", "feature_val", "target_val"])
+
+    task = {
+        "schema_version": "research_lab.task.v2",
+        "hash_profile": "research-json-v1",
+        "task_id": "task-test-p12",
+        "revision": "rev.1",
+        "research_type": "statistical_factor",
+        "task_profile": "research_lab.statistical_screening.v1",
+        "objective": "test",
+        "data_requirements": {
+            "snapshot_sha256": c_sha,
+            "snapshot_locator": str(csv_path),
+            "snapshot_byte_length": c_len,
+            "required_fields": ["timestamp", "symbol", "feature_val", "target_val"],
+            "provenance": "test",
+        },
+        "methods": ["cost_sensitivity"],
+    }
+    task["task_content_hash"] = v2.digest(task)
+
+    # Case 1: missing parameters
+    spec_missing = {
+        "schema_version": "research_lab.experiment.v2",
+        "hash_profile": "research-json-v1",
+        "spec_id": "spec-test-missing",
+        "revision": "rev.1",
+        "task_id": task["task_id"],
+        "task_revision": task["revision"],
+        "task_content_hash": task["task_content_hash"],
+        "experiment_type": "statistical_factor",
+        "research_stage": "validation",
+        "screening_profile": "research_lab.statistical_screening.v1",
+        "dataset_requirements": task["data_requirements"],
+        "methods": ["cost_sensitivity"],
+    }
+    spec_missing["spec_content_hash"] = v2.digest(spec_missing)
+
+    with tempfile.TemporaryDirectory() as td:
+        out1 = Path(td) / "run1"
+        res_dir = run_statistical_screening(task=task, spec=spec_missing, snapshot_path=csv_path, output_dir=out1)
+        run_record = json.loads((res_dir / "run.json").read_text("utf-8"))
+        assert run_record["run_status"] == "FAILED"
+        assert "requires Spec parameters" in run_record["resolved_computation_manifest"]["status_reason"]
+
+    # Case 2: conflicting direction and proxy
+    spec_conflict = dict(spec_missing)
+    spec_conflict["parameters"] = {"position_proxy": "-sign(feature_val)", "expected_direction": "positive"}
+    spec_conflict["spec_content_hash"] = v2.digest({k: v for k, v in spec_conflict.items() if k != "spec_content_hash"})
+
+    with tempfile.TemporaryDirectory() as td:
+        out2 = Path(td) / "run2"
+        res_dir = run_statistical_screening(task=task, spec=spec_conflict, snapshot_path=csv_path, output_dir=out2)
+        run_record = json.loads((res_dir / "run.json").read_text("utf-8"))
+        assert run_record["run_status"] == "FAILED"
+        assert "Direction/proxy mismatch" in run_record["resolved_computation_manifest"]["status_reason"]
+
+
+def test_p1_3_critic_multi_evidence_exact_binding_attacks():
+    """P1-3: Rigorous attack defense for multi-Evidence exact binding in validate_critic_decision."""
+    critic = CriticGate()
+    hyp_dict = _make_hypothesis("hypo-p1-3")
+
+    ev1 = {
+        "evidence_id": "evidence-run-1",
+        "revision": "rev.1",
+        "evidence_content_hash": "1" * 64,
+        "execution_status": "COMPLETED",
+        "typed_metrics": {
+            "methods_applied": ["coverage"],
+            "facts": {"coverage": {"total_rows": 100, "valid_rows": 98, "missing_rows": 2, "coverage_ratio": "0.98"}},
+        },
+    }
+    ev2 = {
+        "evidence_id": "evidence-run-2",
+        "revision": "rev.1",
+        "evidence_content_hash": "2" * 64,
+        "execution_status": "COMPLETED",
+        "typed_metrics": {
+            "methods_applied": ["simple_correlation"],
+            "facts": {"simple_correlation": {"sample_size": 100, "pearson_ic": "0.150000"}},
+        },
+    }
+
+    # Legitimate multi-evidence decision
+    decision = critic.evaluate(hyp_dict, [ev1, ev2])
+    assert decision.evidence_count == 2
+    assert len(decision.evidence_refs) == 2
+
+    # Legitimate decision validates cleanly
+    validated = validate_critic_decision(decision, hyp_dict, [ev1, ev2])
+    assert validated["decision_id"] == decision.decision_id
+
+    # Order normalization: passing [ev2, ev1] still validates cleanly because of deterministic sorting
+    validated_reordered = validate_critic_decision(decision, hyp_dict, [ev2, ev1])
+    assert validated_reordered["decision_id"] == decision.decision_id
+
+    # Attack 1: Extra unreferenced evidence provided
+    ev3_extra = dict(ev1, evidence_id="evidence-run-3", evidence_content_hash="3" * 64)
+    with pytest.raises(ValueError, match="Evidence set cardinality mismatch"):
+        validate_critic_decision(decision, hyp_dict, [ev1, ev2, ev3_extra])
+
+    # Attack 2: Missing one of the declared evidences
+    with pytest.raises(ValueError, match="Evidence set cardinality mismatch"):
+        validate_critic_decision(decision, hyp_dict, [ev1])
+
+    # Attack 3: Same evidence_id but revision tampered
+    ev1_tampered_rev = dict(ev1, revision="rev.2")
+    with pytest.raises(ValueError, match="Evidence revision mismatch"):
+        validate_critic_decision(decision, hyp_dict, [ev1_tampered_rev, ev2])
+
+    # Attack 4: Same evidence_id but content_hash tampered
+    ev1_tampered_hash = dict(ev1, evidence_content_hash="f" * 64)
+    with pytest.raises(ValueError, match="Evidence content_hash mismatch"):
+        validate_critic_decision(decision, hyp_dict, [ev1_tampered_hash, ev2])
+
+    # Attack 5: Same evidence_id but execution_status tampered
+    ev1_tampered_status = dict(ev1, execution_status="FAILED")
+    with pytest.raises(ValueError, match="Evidence execution_status mismatch"):
+        validate_critic_decision(decision, hyp_dict, [ev1_tampered_status, ev2])
+
+    # Attack 6: Duplicate evidence items in input
+    with pytest.raises(ValueError, match="Duplicate evidence items"):
+        validate_critic_decision(decision, hyp_dict, [ev1, ev1])

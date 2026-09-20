@@ -253,6 +253,7 @@
             "leakage_audit": {
               "type": "object",
               "required": [
+                "audit_status",
                 "rows_checked",
                 "audited_fields",
                 "audit_coverage_ratio",
@@ -263,14 +264,18 @@
               ],
               "additionalProperties": false,
               "properties": {
+                "audit_status": {
+                  "type": "string",
+                  "enum": ["COMPLETED", "INSUFFICIENT_DATA"]
+                },
                 "rows_checked": { "type": "integer", "minimum": 0 },
                 "audited_fields": {
                   "type": "array",
                   "items": { "type": "string" }
                 },
                 "audit_coverage_ratio": { "type": "string" },
-                "temporal_violation_count": { "type": "integer", "minimum": 0 },
-                "target_overlap_violation_count": { "type": "integer", "minimum": 0 },
+                "temporal_violation_count": { "type": ["integer", "null"] },
+                "target_overlap_violation_count": { "type": ["integer", "null"] },
                 "missing_availability_metadata": { "type": "boolean" },
                 "unverifiable_rows": { "type": "integer", "minimum": 0 }
               }
@@ -303,6 +308,7 @@
               "type": "object",
               "required": [
                 "position_rule",
+                "expected_direction",
                 "observations",
                 "turnover",
                 "gross_screening_return",
@@ -316,6 +322,10 @@
               "additionalProperties": false,
               "properties": {
                 "position_rule": { "type": "string" },
+                "expected_direction": {
+                  "type": "string",
+                  "enum": ["positive", "negative"]
+                },
                 "observations": { "type": "integer", "minimum": 0 },
                 "turnover": { "type": "string" },
                 "gross_screening_return": { "type": "string" },

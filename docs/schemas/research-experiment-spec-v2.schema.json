@@ -2141,6 +2141,9 @@
           },
           "minItems": 1
         },
+        "parameters": {
+          "type": "object"
+        },
         "candidate_decision_criteria": {
           "type": "object"
         },

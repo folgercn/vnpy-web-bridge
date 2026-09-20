@@ -75,6 +75,7 @@ class CriticDecision(BaseModel):
     criteria: dict[str, Any]
     hypothesis_ref: dict[str, str]
     evidence_ref: dict[str, str]
+    evidence_count: int = Field(ge=0, description="Sealed exact cardinality of referenced evidence items.")
     evidence_refs: list[dict[str, str]] = Field(default_factory=list)
     decision: Literal["REJECT", "NEED_MORE_EVIDENCE", "PROMOTE"]
     findings: list[CriticFinding]
@@ -124,7 +125,7 @@ def validate_critic_decision(
 ) -> dict[str, Any]:
     """Fail-closed validation verifying review hash integrity and exact Hypothesis/Evidence binding.
 
-    Rejects tampered hashes, altered criteria, or mismatched references.
+    Rejects tampered hashes, altered criteria, extra/missing/replaced/duplicated evidence references.
     """
     if isinstance(decision, CriticDecision):
         dec_dict = decision.model_dump()
@@ -161,25 +162,64 @@ def validate_critic_decision(
             f"Hypothesis reference mismatch: decision has {hyp_ref}, expected {expected_hyp_id}@{expected_hyp_rev}:{expected_hyp_hash}"
         )
 
-    # 3. Strict Evidence reference binding
+    # 3. Strict Evidence exact multi-binding (P1-3)
     if isinstance(evidence, dict):
-        ev_list = [evidence]
+        actual_ev_list = [evidence]
     elif isinstance(evidence, list):
-        ev_list = evidence
+        actual_ev_list = list(evidence)
     else:
         raise TypeError(f"evidence must be dict or list of dicts, got {type(evidence)}")
 
-    expected_ids = {e.get("evidence_id") for e in ev_list if e.get("evidence_id")}
+    actual_ids = [str(e.get("evidence_id", "")) for e in actual_ev_list]
+    if len(actual_ids) != len(set(actual_ids)):
+        raise ValueError(f"Duplicate evidence items in provided evidence list: {actual_ids}")
+
+    # Sort actual evidence by evidence_id
+    sorted_actual = sorted(actual_ev_list, key=lambda e: str(e.get("evidence_id", "")))
     stored_ev_refs = dec_dict.get("evidence_refs", [])
-    if stored_ev_refs:
-        stored_ids = {r.get("evidence_id") for r in stored_ev_refs if r.get("evidence_id")}
-        if not expected_ids.issubset(stored_ids):
-            raise ValueError(f"Evidence reference mismatch: missing {expected_ids - stored_ids}")
-    else:
-        # Fallback to single evidence_ref check
-        stored_ev_ref = dec_dict.get("evidence_ref", {})
-        if ev_list and stored_ev_ref.get("evidence_id") != ev_list[0].get("evidence_id"):
-            raise ValueError("Evidence reference mismatch on single evidence_ref")
+    if not stored_ev_refs and dec_dict.get("evidence_ref"):
+        # Single evidence fallback
+        stored_ev_refs = [dec_dict["evidence_ref"]]
+
+    stored_ids = [str(r.get("evidence_id", "")) for r in stored_ev_refs]
+    if len(stored_ids) != len(set(stored_ids)):
+        raise ValueError(f"Duplicate evidence refs declared in decision: {stored_ids}")
+
+    sorted_refs = sorted(stored_ev_refs, key=lambda r: str(r.get("evidence_id", "")))
+
+    sealed_count = dec_dict.get("evidence_count")
+    if sealed_count is not None and sealed_count != len(sorted_refs):
+        raise ValueError(
+            f"Evidence cardinality mismatch: sealed evidence_count={sealed_count}, but declared refs count={len(sorted_refs)}"
+        )
+
+    if len(sorted_actual) != len(sorted_refs):
+        raise ValueError(
+            f"Evidence set cardinality mismatch: actual evidence count {len(sorted_actual)} != decision declared {len(sorted_refs)}"
+        )
+
+    for i, (act, ref) in enumerate(zip(sorted_actual, sorted_refs)):
+        act_id = str(act.get("evidence_id", ""))
+        ref_id = str(ref.get("evidence_id", ""))
+        if act_id != ref_id:
+            raise ValueError(f"Evidence ID mismatch at index {i}: actual {act_id} != declared {ref_id}")
+
+        act_rev = str(act.get("revision", "rev.1"))
+        ref_rev = str(ref.get("revision", "rev.1"))
+        if act_rev != ref_rev:
+            raise ValueError(f"Evidence revision mismatch for {act_id}: actual {act_rev} != declared {ref_rev}")
+
+        act_hash = str(act.get("evidence_content_hash", ""))
+        ref_hash = str(ref.get("content_hash", ""))
+        if act_hash != ref_hash:
+            raise ValueError(f"Evidence content_hash mismatch for {act_id}: actual {act_hash} != declared {ref_hash}")
+
+        act_status = str(act.get("execution_status") or act.get("run_status_snapshot") or "")
+        ref_status = str(ref.get("execution_status", ""))
+        if ref_status and act_status and act_status != ref_status:
+            raise ValueError(
+                f"Evidence execution_status mismatch for {act_id}: actual {act_status} != declared {ref_status}"
+            )
 
     # 4. Schema validation
     return CriticDecision.model_validate(dec_dict).model_dump()
@@ -289,14 +329,14 @@ class CriticGate:
                 "evidence_id": str(primary_ev.get("evidence_id", "")),
                 "revision": str(primary_ev.get("revision", "rev.1")),
                 "content_hash": str(primary_ev.get("evidence_content_hash", "")),
-                "execution_status": str(primary_ev.get("execution_status", "")),
+                "execution_status": str(primary_ev.get("execution_status") or primary_ev.get("run_status_snapshot", "")),
             }
             ev_refs = [
                 {
                     "evidence_id": str(e.get("evidence_id", "")),
                     "revision": str(e.get("revision", "rev.1")),
                     "content_hash": str(e.get("evidence_content_hash", "")),
-                    "execution_status": str(e.get("execution_status", "")),
+                    "execution_status": str(e.get("execution_status") or e.get("run_status_snapshot", "")),
                 }
                 for e in ev_list
             ]
@@ -617,31 +657,48 @@ class CriticGate:
             )
             missing_evidence.append("leakage_audit")
         else:
+            audit_status = leak_fact.get("audit_status")
             missing_meta = leak_fact.get("missing_availability_metadata", True)
-            temp_violations = int(leak_fact.get("temporal_violation_count", 0))
-            overlap_violations = int(leak_fact.get("target_overlap_violation_count", 0))
+            cov_ratio = float(leak_fact.get("audit_coverage_ratio", 0.0))
             unverifiable = int(leak_fact.get("unverifiable_rows", 0))
+            temp_violations = leak_fact.get("temporal_violation_count")
+            overlap_violations = leak_fact.get("target_overlap_violation_count")
 
-            if temp_violations > 0 or overlap_violations > 0:
+            if (temp_violations is not None and temp_violations > 0) or (
+                overlap_violations is not None and overlap_violations > 0
+            ):
                 findings.append(
                     CriticFinding(
                         category="leakage_lookahead_risk",
                         assessment="risk",
                         severity="critical",
-                        summary=f"Lookahead / temporal causality violation detected (temporal={temp_violations}, overlap={overlap_violations}).",
+                        summary=(
+                            f"Lookahead / temporal causality violation detected "
+                            f"(temporal={temp_violations}, overlap={overlap_violations})."
+                        ),
                         evidence_details=leak_fact,
                     )
                 )
                 reject_reasons.append(
                     f"Lookahead leakage violation (temporal={temp_violations}, overlap={overlap_violations})"
                 )
-            elif missing_meta or unverifiable > 0:
+            elif (
+                audit_status != "COMPLETED"
+                or missing_meta
+                or unverifiable > 0
+                or cov_ratio < 1.0
+                or temp_violations is None
+                or overlap_violations is None
+            ):
                 findings.append(
                     CriticFinding(
                         category="leakage_lookahead_risk",
                         assessment="insufficient_evidence",
                         severity="warning",
-                        summary="Leakage audit unverifiable due to missing availability or target-window metadata.",
+                        summary=(
+                            "Leakage audit unverifiable or incomplete due to missing availability "
+                            "or target-window metadata (audit_status!=COMPLETED or unverifiable_rows>0)."
+                        ),
                         evidence_details=leak_fact,
                     )
                 )
@@ -652,7 +709,7 @@ class CriticGate:
                         category="leakage_lookahead_risk",
                         assessment="pass",
                         severity="info",
-                        summary="Audit confirmed feature availability <= decision time and target start > decision time across all rows.",
+                        summary="Audit confirmed feature availability <= decision time and target start > decision time across 100% verified rows.",
                         evidence_details=leak_fact,
                     )
                 )
@@ -848,6 +905,9 @@ class CriticGate:
         promoted_reasons: list[str],
     ) -> CriticDecision:
         """Construct sealed CriticDecision with canonical review_content_hash and deterministic ID."""
+        sorted_ev_refs = sorted(ev_refs, key=lambda r: str(r.get("evidence_id", "")))
+        evidence_count = len(sorted_ev_refs)
+
         pre_seal = {
             "schema_version": "research_lab.critic_decision.v1",
             "hash_profile": HASH_PROFILE,
@@ -857,7 +917,8 @@ class CriticGate:
             "criteria": criteria,
             "hypothesis_ref": hyp_ref,
             "evidence_ref": ev_ref,
-            "evidence_refs": ev_refs,
+            "evidence_count": evidence_count,
+            "evidence_refs": sorted_ev_refs,
             "decision": decision,
             "findings": [f.model_dump() for f in findings],
             "reject_reasons": list(reject_reasons),
@@ -880,7 +941,8 @@ class CriticGate:
             criteria=pre_seal["criteria"],
             hypothesis_ref=hyp_ref,
             evidence_ref=ev_ref,
-            evidence_refs=ev_refs,
+            evidence_count=evidence_count,
+            evidence_refs=sorted_ev_refs,
             decision=decision,
             findings=sanitized_findings,
             reject_reasons=reject_reasons,
