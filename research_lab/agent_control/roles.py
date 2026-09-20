@@ -8,9 +8,8 @@ providers (e.g., Antigravity, OpenAI) and models (e.g., gemini-3.8-flash-high).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any
 
 from research_lab.agent_control.errors import PermissionDeniedError
 from research_lab.agent_control.permissions import (

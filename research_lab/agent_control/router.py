@@ -18,12 +18,12 @@ Rules:
 
 from __future__ import annotations
 
-from typing import Any, Iterable, Sequence
+from collections.abc import Iterable, Sequence
+from typing import Any
 
 from research_lab.agent_control.contracts import (
     AgentPermissionScope,
     AgentRoute,
-    AgentTask,
     AgentUsageSnapshot,
     ProjectBinding,
 )
@@ -31,11 +31,9 @@ from research_lab.agent_control.errors import (
     PermissionDeniedError,
     ProjectBindingError,
     ProviderUnavailableError,
-    QuotaUnavailableError,
 )
 from research_lab.agent_control.permissions import (
     enforce_hard_invariants,
-    validate_permission,
     validate_permissions,
 )
 from research_lab.agent_control.provider import AgentProvider

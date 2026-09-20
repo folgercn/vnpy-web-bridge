@@ -10,32 +10,18 @@ Verifies:
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-REPO_ROOT = Path(__file__).resolve().parents[3]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
 import pytest
 
 from research_lab.agent_control import (
-    ALL_PERMISSIONS,
-    ALL_ROLES,
-    DEFAULT_ROLE_POLICIES,
     AgentAuditRecord,
     AgentExecutionHandle,
     AgentPermission,
-    AgentPermissionScope,
-    AgentProvider,
     AgentProviderDescriptor,
     AgentResult,
     AgentRole,
     AgentRoute,
     AgentTask,
-    AgentUsageSnapshot,
     AppendOnlyAuditTrail,
-    PermissionDeniedError,
     ProjectBinding,
     ProviderAvailability,
     ProviderError,
@@ -43,7 +29,6 @@ from research_lab.agent_control import (
     TerminalStatus,
     assert_provider_error_does_not_pollute_scientific_decision,
     authorize,
-    compute_task_deterministic_id,
     select_agent,
     validate_audit_hash,
     validate_result_hash,

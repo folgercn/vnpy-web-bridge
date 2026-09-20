@@ -485,7 +485,7 @@ class AgentResult:
         acceptance_status: str | None = None,
     ) -> AgentResult:
         status_val = terminal_status.value if isinstance(terminal_status, TerminalStatus) else str(terminal_status)
-        if status_val not in set(s.value for s in TerminalStatus):
+        if status_val not in {s.value for s in TerminalStatus}:
             raise ResultAcceptanceError(f"Invalid terminal_status: {status_val}")
 
         failures = tuple(tool_failures or [])

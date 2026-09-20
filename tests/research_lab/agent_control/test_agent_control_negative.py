@@ -20,19 +20,12 @@ Covers all 14 fail-closed negative scenarios listed in specification:
 from __future__ import annotations
 
 import copy
-import sys
-from pathlib import Path
-
-REPO_ROOT = Path(__file__).resolve().parents[3]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
 
 import pytest
 
 from research_lab.agent_control import (
     AgentAuditRecord,
     AgentPermission,
-    AgentProvider,
     AgentProviderDescriptor,
     AgentResult,
     AgentRole,
@@ -45,15 +38,12 @@ from research_lab.agent_control import (
     ProjectBinding,
     ProjectBindingError,
     ProviderAvailability,
-    ProviderError,
     ProviderErrorCode,
     ProviderUnavailableError,
     ResultAcceptanceError,
     TamperDetectionError,
     TerminalStatus,
-    assert_provider_error_does_not_pollute_scientific_decision,
     authorize,
-    compute_task_deterministic_id,
     enforce_no_nested_delegation,
     select_agent,
     validate_audit_hash,
@@ -61,6 +51,8 @@ from research_lab.agent_control import (
     validate_project_binding,
     validate_result_hash,
     validate_role,
+    validate_route_hash,
+    validate_task_hash,
 )
 
 
@@ -415,7 +407,6 @@ def test_task_content_hash_tampering() -> None:
         created_by="researcher_a",
         created_at="2026-09-20T00:00:00Z",
     )
-    from research_lab.agent_control import validate_task_hash, validate_route_hash, QuotaUnavailableError
     raw = task.to_dict()
     validate_task_hash(raw)
 
@@ -427,7 +418,6 @@ def test_task_content_hash_tampering() -> None:
 
 
 def test_route_content_hash_tampering() -> None:
-    from research_lab.agent_control import validate_route_hash
     binding = ProjectBinding(project_id="p1", workspace_identity="/workspace/vnpy")
     route = AgentRoute.create(
         role=AgentRole.ALPHA_GENERATOR.value,
@@ -450,7 +440,6 @@ def test_route_content_hash_tampering() -> None:
 
 
 def test_quota_exhausted_router_rejection() -> None:
-    from research_lab.agent_control import QuotaUnavailableError
     provider = DummyMockProvider(
         name="antigravity_limited",
         supported_roles=(AgentRole.ALPHA_GENERATOR.value,),

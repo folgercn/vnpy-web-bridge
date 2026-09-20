@@ -8,8 +8,8 @@ Strict fail-closed permission evaluation.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from enum import Enum
-from typing import Iterable
 
 from research_lab.agent_control.errors import PermissionDeniedError
 

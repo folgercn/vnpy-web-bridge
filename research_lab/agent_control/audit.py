@@ -8,14 +8,12 @@ Rules:
 
 from __future__ import annotations
 
-import copy
-from typing import Sequence
+from collections.abc import Sequence
 
 from research_lab.agent_control.contracts import (
     AgentAuditRecord,
     validate_audit_hash,
 )
-from research_lab.agent_control.errors import TamperDetectionError
 
 
 class AppendOnlyAuditTrail:
