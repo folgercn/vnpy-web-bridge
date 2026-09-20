@@ -128,7 +128,7 @@ def test_complete_agent_lifecycle_contract_flow() -> None:
         created_at="2026-09-20T12:00:00Z",
     )
     validate_task_hash(task.to_dict())
-    assert task.authorization_scope_ref == auth_scope.to_dict()
+    assert task.to_dict()["authorization_scope_ref"] == auth_scope.to_dict()
 
     # 3. Router selects provider and model (Provider-neutral routing)
     provider = MockLifecycleProvider()
@@ -142,7 +142,7 @@ def test_complete_agent_lifecycle_contract_flow() -> None:
     assert route.provider == "antigravity_stub"
     assert route.resolved_model == "gemini-3.8-flash-high"
     assert route.role == AgentRole.ALPHA_GENERATOR.value
-    assert route.authorization_scope_ref == auth_scope.to_dict()
+    assert route.to_dict()["authorization_scope_ref"] == auth_scope.to_dict()
     assert route.authorized_permissions == auth_scope.authorized_permissions
 
     # 4. Provider execution
@@ -216,8 +216,8 @@ def test_role_provider_model_decoupling() -> None:
     assert route1.resolved_model == "model-fast"
     assert route2.provider == "provider_beta"
     assert route2.resolved_model == "model-deep"
-    assert route1.authorization_scope_ref == auth_scope.to_dict()
-    assert route2.authorization_scope_ref == auth_scope.to_dict()
+    assert route1.to_dict()["authorization_scope_ref"] == auth_scope.to_dict()
+    assert route2.to_dict()["authorization_scope_ref"] == auth_scope.to_dict()
     assert route1.authorized_permissions == (AgentPermission.READ_RESEARCH_MEMORY.value,)
     assert route2.authorized_permissions == (AgentPermission.READ_RESEARCH_MEMORY.value,)
 

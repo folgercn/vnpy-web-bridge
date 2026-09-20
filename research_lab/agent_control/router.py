@@ -177,6 +177,11 @@ def select_agent(
     # Validate authorized_scope provenance
     if not isinstance(authorized_scope, AgentPermissionScope):
         raise PermissionDeniedError("select_agent() requires an authorized_scope of type AgentPermissionScope")
+    if not authorized_scope.is_authorized:
+        raise PermissionDeniedError(
+            "select_agent() requires an authorized_scope with is_authorized=True",
+            details={"role": validated_role, "is_authorized": authorized_scope.is_authorized},
+        )
     validate_scope_hash(authorized_scope.to_dict())
     if authorized_scope.role != validated_role:
         raise PermissionDeniedError(

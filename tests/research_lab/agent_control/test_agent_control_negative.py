@@ -898,3 +898,222 @@ def test_quota_exhausted_router_rejection() -> None:
             usage_snapshots={"antigravity_limited": exhausted_snapshot},
         )
     assert "unavailable or quota exhausted" in str(exc_info.value)
+
+
+# 25. [P1-1] Unauthorized scope (is_authorized=False) bypass strictly rejected
+def test_negative_25_unauthorized_scope_bypass_strictly_rejected() -> None:
+    binding = ProjectBinding(project_id="vnpy-p1", workspace_identity="/workspace/vnpy")
+
+    # 1. AgentPermissionScope.create cannot carry authorized_permissions when is_authorized=False
+    with pytest.raises(PermissionDeniedError) as exc_scope_create:
+        AgentPermissionScope.create(
+            role=AgentRole.ALPHA_GENERATOR.value,
+            requested_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
+            authorized_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
+            project_binding=binding,
+            is_authorized=False,
+        )
+    assert "is_authorized=False and non-empty authorized_permissions" in str(exc_scope_create.value)
+
+    # 2. Direct constructor of AgentPermissionScope cannot carry authorized permissions when is_authorized=False
+    with pytest.raises(PermissionDeniedError) as exc_scope_direct:
+        AgentPermissionScope(
+            scope_id="scope-mock-unauthorized",
+            role=AgentRole.ALPHA_GENERATOR.value,
+            requested_permissions=(AgentPermission.CREATE_HYPOTHESIS.value,),
+            authorized_permissions=(AgentPermission.CREATE_HYPOTHESIS.value,),
+            denied_permissions=(),
+            is_authorized=False,
+            policy_version="2026-09-m0",
+            project_binding=binding.to_dict(),
+            scope_content_hash="mock-hash",
+        )
+    assert "cannot carry authorized permissions" in str(exc_scope_direct.value)
+
+    # Create a legitimate unauthorized scope (all requested permissions denied)
+    unauthorized_scope = AgentPermissionScope.create(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        requested_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
+        authorized_permissions=[],
+        project_binding=binding,
+        is_authorized=False,
+    )
+    assert unauthorized_scope.is_authorized is False
+    assert len(unauthorized_scope.authorized_permissions) == 0
+
+    # 3. AgentTask.create rejects unauthorized scope (both instance and dict)
+    with pytest.raises(PermissionDeniedError) as exc_task_scope:
+        AgentTask.create(
+            role=AgentRole.ALPHA_GENERATOR.value,
+            requested_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
+            authorized_permissions=[],
+            authorized_scope=unauthorized_scope,
+            objective="Analyze IC factors",
+            work_block="WB-001",
+            input_refs=[],
+            provider_policy_ref="policy-v1",
+            project_binding=binding,
+            created_by="researcher_a",
+            created_at="2026-09-20T00:00:00Z",
+        )
+    assert "unauthorized scope (is_authorized=False)" in str(exc_task_scope.value)
+
+    with pytest.raises(PermissionDeniedError) as exc_task_ref:
+        AgentTask.create(
+            role=AgentRole.ALPHA_GENERATOR.value,
+            requested_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
+            authorized_permissions=[],
+            authorization_scope_ref=unauthorized_scope.to_dict(),
+            objective="Analyze IC factors",
+            work_block="WB-001",
+            input_refs=[],
+            provider_policy_ref="policy-v1",
+            project_binding=binding,
+            created_by="researcher_a",
+            created_at="2026-09-20T00:00:00Z",
+        )
+    assert "unauthorized scope (is_authorized is not True)" in str(exc_task_ref.value)
+
+    # 4. AgentRoute.create rejects unauthorized scope (both instance and dict)
+    with pytest.raises(PermissionDeniedError) as exc_route_scope:
+        AgentRoute.create(
+            role=AgentRole.ALPHA_GENERATOR.value,
+            provider="mock_p",
+            resolved_model="m1",
+            policy_version="2026-09-m0",
+            route_reason="reason",
+            usage_snapshot_ref=None,
+            project_binding=binding,
+            authorized_permissions=[],
+            authorized_scope=unauthorized_scope,
+        )
+    assert "unauthorized scope (is_authorized=False)" in str(exc_route_scope.value)
+
+    with pytest.raises(PermissionDeniedError) as exc_route_ref:
+        AgentRoute.create(
+            role=AgentRole.ALPHA_GENERATOR.value,
+            provider="mock_p",
+            resolved_model="m1",
+            policy_version="2026-09-m0",
+            route_reason="reason",
+            usage_snapshot_ref=None,
+            project_binding=binding,
+            authorized_permissions=[],
+            authorization_scope_ref=unauthorized_scope.to_dict(),
+        )
+    assert "unauthorized scope (is_authorized is not True)" in str(exc_route_ref.value)
+
+    # 5. select_agent rejects unauthorized scope
+    provider = DummyMockProvider(supported_roles=(AgentRole.ALPHA_GENERATOR.value,))
+    with pytest.raises(PermissionDeniedError) as exc_select:
+        select_agent(
+            role=AgentRole.ALPHA_GENERATOR.value,
+            providers=[provider],
+            authorized_scope=unauthorized_scope,
+            project_binding=binding,
+        )
+    assert "requires an authorized_scope with is_authorized=True" in str(exc_select.value)
+
+    # 6. Direct constructor of AgentTask and AgentRoute enforces is_authorized=True
+    with pytest.raises(PermissionDeniedError) as exc_task_direct:
+        AgentTask(
+            task_id="task-mock",
+            authorization_scope_ref=unauthorized_scope.to_dict(),
+            role=AgentRole.ALPHA_GENERATOR.value,
+            requested_permissions=(AgentPermission.CREATE_HYPOTHESIS.value,),
+            authorized_permissions=(),
+            objective="Analyze factors",
+            work_block="WB-001",
+            input_refs=(),
+            provider_policy_ref="policy-v1",
+            project_binding=binding.to_dict(),
+            created_by="researcher_a",
+            created_at="2026-09-20T00:00:00Z",
+            task_content_hash="mock-hash",
+        )
+    assert "requires authorization_scope_ref with is_authorized=True" in str(exc_task_direct.value)
+
+    with pytest.raises(PermissionDeniedError) as exc_route_direct:
+        AgentRoute(
+            route_id="route-mock",
+            authorization_scope_ref=unauthorized_scope.to_dict(),
+            role=AgentRole.ALPHA_GENERATOR.value,
+            provider="mock_p",
+            resolved_model="m1",
+            policy_version="2026-09-m0",
+            route_reason="reason",
+            usage_snapshot_ref=None,
+            project_binding=binding.to_dict(),
+            authorized_permissions=(),
+            route_content_hash="mock-hash",
+        )
+    assert "requires authorization_scope_ref with is_authorized=True" in str(exc_route_direct.value)
+
+
+# 26. [P1-1] Deep immutability via MappingProxyType blocks in-place container mutation
+def test_negative_26_deep_immutability_mapping_proxy_blocks_mutation() -> None:
+    binding = ProjectBinding(project_id="vnpy-p1", workspace_identity="/workspace/vnpy")
+    scope = authorize(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        requested_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
+        project_binding=binding,
+        context={"experiment_tag": "exp-1"},
+    )
+    task = AgentTask.create(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        requested_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
+        authorized_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
+        authorized_scope=scope,
+        objective="Analyze factors",
+        work_block="WB-001",
+        input_refs=[{"type": "spec", "id": "spec-1"}],
+        provider_policy_ref="policy-v1",
+        project_binding=binding,
+        created_by="researcher_a",
+        created_at="2026-09-20T00:00:00Z",
+    )
+    provider = DummyMockProvider(supported_roles=(AgentRole.ALPHA_GENERATOR.value,))
+    route = select_agent(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        providers=[provider],
+        authorized_scope=scope,
+        project_binding=binding,
+    )
+
+    # 1. In-place modification of Scope internal containers raises TypeError
+    with pytest.raises(TypeError):
+        scope.project_binding["project_id"] = "hacked"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        scope.context["experiment_tag"] = "hacked"  # type: ignore[index]
+
+    # 2. In-place modification of Task internal containers raises TypeError
+    with pytest.raises(TypeError):
+        task.project_binding["project_id"] = "hacked"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        task.authorization_scope_ref["role"] = "hacked"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        task.input_refs[0]["id"] = "hacked"  # type: ignore[index]
+
+    # 3. In-place modification of Route internal containers raises TypeError
+    with pytest.raises(TypeError):
+        route.project_binding["project_id"] = "hacked"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        route.authorization_scope_ref["role"] = "hacked"  # type: ignore[index]
+
+    # 4. Modifying the dictionary returned by to_dict() does not affect the contract instance
+    scope_dict = scope.to_dict()
+    scope_dict["project_binding"]["project_id"] = "tampered"
+    assert scope.project_binding["project_id"] == "vnpy-p1"
+
+    task_dict = task.to_dict()
+    task_dict["project_binding"]["project_id"] = "tampered"
+    task_dict["authorization_scope_ref"]["role"] = "tampered"
+    assert task.project_binding["project_id"] == "vnpy-p1"
+    assert task.authorization_scope_ref["role"] == AgentRole.ALPHA_GENERATOR.value
+
+    route_dict = route.to_dict()
+    route_dict["project_binding"]["project_id"] = "tampered"
+    route_dict["authorization_scope_ref"]["role"] = "tampered"
+    assert route.project_binding["project_id"] == "vnpy-p1"
+    assert route.authorization_scope_ref["role"] == AgentRole.ALPHA_GENERATOR.value
+
