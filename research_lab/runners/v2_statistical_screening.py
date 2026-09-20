@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import csv
 import math
-import shutil
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -59,6 +58,9 @@ def run_statistical_screening(
     out_dir = Path(output_dir).resolve()
     snap_p = Path(snapshot_path).resolve()
 
+    if out_dir.exists():
+        raise FileExistsError(f"Output directory already exists and is immutable: {out_dir}")
+
     if not snap_p.is_file() or snap_p.is_symlink():
         raise FileNotFoundError(f"Snapshot file missing or is symlink: {snap_p}")
 
@@ -76,11 +78,9 @@ def run_statistical_screening(
     v2.require(spec_req["snapshot_sha256"] == raw_sha == task_req["snapshot_sha256"], "Snapshot sha256 mismatch")
     v2.require(spec_req["snapshot_byte_length"] == raw_len == task_req["snapshot_byte_length"], "Snapshot byte length mismatch")
 
-    # Clean and recreate staging output_dir
-    if out_dir.exists():
-        shutil.rmtree(out_dir)
+    # Create immutable staging output_dir
     materials_dir = out_dir / "materials"
-    materials_dir.mkdir(parents=True, exist_ok=True)
+    materials_dir.mkdir(parents=True, exist_ok=False)
 
     # Copy snapshot into materials if requested
     captured_snap = materials_dir / "snapshot.csv"
@@ -171,11 +171,18 @@ def run_statistical_screening(
     (out_dir / "environment_lock.json").write_bytes(v2.canonical(environment_lock).encode("utf-8"))
 
     # replay_instructions
+    captured_snap_path = materials_dir / "snapshot.csv" if copy_snapshot else snap_p
     replay_instructions = {
         "profile": ssd.PROFILE_NAME,
-        "command": f"python -m research_lab.runners.v2_statistical_screening --spec {spec['spec_id']}",
-        "entry_point": "research_lab.runners.v2_statistical_screening:run_statistical_screening",
-        "limitations": "Local one-shot runner.",
+        "command": (
+            f"python -m research_lab.runners.v2_statistical_screening "
+            f"--task {materials_dir / 'task.json'} "
+            f"--spec {materials_dir / 'spec.json'} "
+            f"--snapshot {captured_snap_path} "
+            f"--output <replayed_output_dir>"
+        ),
+        "entry_point": "research_lab.runners.v2_statistical_screening:main",
+        "limitations": "Deterministic one-shot CLI execution from captured materials.",
     }
     (out_dir / "replay_instructions.json").write_bytes(v2.canonical(replay_instructions).encode("utf-8"))
 
@@ -427,3 +434,48 @@ def run_statistical_screening(
     # 6. Verify bundle self-consistency against Protocol v2
     v2.validate_manifest(out_dir, manifest_record, run_record, definitions, task=task, spec=spec)
     return out_dir
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point for deterministic statistical screening runner."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m research_lab.runners.v2_statistical_screening",
+        description="Deterministic statistical screening execution bridge for Protocol v2.",
+    )
+    parser.add_argument("--task", required=True, help="Path to Task JSON file")
+    parser.add_argument("--spec", required=True, help="Path to Spec JSON file")
+    parser.add_argument("--snapshot", required=True, help="Path to physical snapshot CSV file")
+    parser.add_argument("--output", required=True, help="Path to output bundle directory")
+
+    args = parser.parse_args(argv)
+
+    task_p = Path(args.task).resolve()
+    spec_p = Path(args.spec).resolve()
+    snap_p = Path(args.snapshot).resolve()
+    out_p = Path(args.output).resolve()
+
+    if not task_p.is_file():
+        raise FileNotFoundError(f"Task file not found: {task_p}")
+    if not spec_p.is_file():
+        raise FileNotFoundError(f"Spec file not found: {spec_p}")
+    if not snap_p.is_file():
+        raise FileNotFoundError(f"Snapshot file not found: {snap_p}")
+
+    task = v2.parse(task_p.read_bytes())
+    spec = v2.parse(spec_p.read_bytes())
+
+    run_statistical_screening(
+        task=task,
+        spec=spec,
+        snapshot_path=snap_p,
+        output_dir=out_p,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main())

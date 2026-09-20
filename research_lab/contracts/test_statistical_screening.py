@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import copy
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +27,10 @@ from research_lab.config import ResearchLabConfig
 from research_lab.contracts import statistical_screening_definition as ssd
 from research_lab.contracts import v2
 from research_lab.database import ResultStore
-from research_lab.runners.v2_statistical_screening import run_statistical_screening
+from research_lab.runners.v2_statistical_screening import (
+    main,
+    run_statistical_screening,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_PATH = ROOT / ssd.SYNTHETIC_FIXTURE_PATH
@@ -346,3 +351,193 @@ def test_09_failed_status_handling_and_persistence(base_task: dict[str, Any], ba
     bad_manifest["manifest_content_hash"] = v2.digest(bad_manifest)
     with pytest.raises(ValueError, match="missing required role|FAILED run missing failure_diagnostics"):
         v2.validate_manifest(bundle_failed, bad_manifest, run, definitions, task=task_failed, spec=spec_failed)
+
+
+def test_10_append_only_immutable_output_dir(base_task: dict[str, Any], base_spec: dict[str, Any], tmp_path: Path):
+    """P1-1: Output directory is append-only/immutable. Overwriting or deleting existing bundle fails closed."""
+    # Scenario A: Existing directory with custom marker file
+    existing_dir = tmp_path / "existing_dir"
+    existing_dir.mkdir(parents=True)
+    marker = existing_dir / "marker.txt"
+    marker_content = "important existing research data - do not touch"
+    marker.write_text(marker_content, encoding="utf-8")
+
+    # Attempting to run into existing_dir must raise FileExistsError
+    with pytest.raises(FileExistsError, match="already exists and is immutable"):
+        run_statistical_screening(base_task, base_spec, FIXTURE_PATH, existing_dir)
+
+    # Verify marker is completely untouched and no materials were created
+    assert marker.is_file()
+    assert marker.read_text(encoding="utf-8") == marker_content
+    assert not (existing_dir / "materials").exists()
+    assert not (existing_dir / "run.json").exists()
+
+    # Scenario B: Existing valid completed bundle cannot be overwritten
+    completed_bundle = tmp_path / "completed_bundle"
+    run_statistical_screening(base_task, base_spec, FIXTURE_PATH, completed_bundle)
+    assert (completed_bundle / "run.json").is_file()
+
+    # Record all file contents and hashes
+    files_before = {}
+    for f in completed_bundle.rglob("*"):
+        if f.is_file():
+            files_before[f.relative_to(completed_bundle)] = f.read_bytes()
+
+    # Re-running into completed_bundle must raise FileExistsError
+    with pytest.raises(FileExistsError, match="already exists and is immutable"):
+        run_statistical_screening(base_task, base_spec, FIXTURE_PATH, completed_bundle)
+
+    # Re-running with FAILED status (_inject_failure) must also fail closed and NOT delete or overwrite bundle
+    with pytest.raises(FileExistsError, match="already exists and is immutable"):
+        run_statistical_screening(
+            base_task,
+            base_spec,
+            FIXTURE_PATH,
+            completed_bundle,
+            _inject_failure="attempted overwrite on failure",
+        )
+
+    # Verify byte-for-byte identity of all files in completed_bundle
+    files_after = {}
+    for f in completed_bundle.rglob("*"):
+        if f.is_file():
+            files_after[f.relative_to(completed_bundle)] = f.read_bytes()
+
+    assert set(files_before.keys()) == set(files_after.keys())
+    for rel_path, content in files_before.items():
+        assert files_after[rel_path] == content, f"File {rel_path} was modified!"
+
+
+def test_11_replay_instructions_match_real_cli_and_e2e(base_task: dict[str, Any], base_spec: dict[str, Any], tmp_path: Path):
+    """P1-2: Replay instructions must match real module CLI, and CLI executes deterministically to COMPLETED."""
+    # 1. Run Python API to create base bundle
+    bundle_fn = tmp_path / "bundle_fn"
+    run_statistical_screening(base_task, base_spec, FIXTURE_PATH, bundle_fn)
+
+    replay_payload = v2.parse((bundle_fn / "replay_instructions.json").read_bytes())
+    cmd = replay_payload["command"]
+
+    # Verify command structure
+    assert cmd.startswith("python -m research_lab.runners.v2_statistical_screening ")
+    assert "--task " in cmd
+    assert "--spec " in cmd
+    assert "--snapshot " in cmd
+    assert "--output <replayed_output_dir>" in cmd
+    assert replay_payload["entry_point"] == "research_lab.runners.v2_statistical_screening:main"
+
+    task_file = bundle_fn / "materials" / "task.json"
+    spec_file = bundle_fn / "materials" / "spec.json"
+    snapshot_file = bundle_fn / "materials" / "snapshot.csv"
+    assert task_file.is_file()
+    assert spec_file.is_file()
+    assert snapshot_file.is_file()
+
+    # 2. E2E CLI replay execution
+    bundle_cli = tmp_path / "bundle_cli"
+    cli_cmd = [
+        sys.executable,
+        "-m",
+        "research_lab.runners.v2_statistical_screening",
+        "--task",
+        str(task_file),
+        "--spec",
+        str(spec_file),
+        "--snapshot",
+        str(snapshot_file),
+        "--output",
+        str(bundle_cli),
+    ]
+    res = subprocess.run(cli_cmd, capture_output=True, text=True, cwd=str(ROOT), check=False)
+    assert res.returncode == 0, f"CLI failed: {res.stderr}"
+
+    # Verify CLI bundle generated and COMPLETED
+    run_fn = v2.parse((bundle_fn / "run.json").read_bytes())
+    run_cli = v2.parse((bundle_cli / "run.json").read_bytes())
+    assert run_cli["run_status"] == "COMPLETED"
+
+    # E2E test requirement: scientific fingerprint must be identical between API and CLI replay
+    assert run_cli["scientific_fingerprint"] == run_fn["scientific_fingerprint"]
+
+    # Also test main() directly with argv
+    bundle_cli_direct = tmp_path / "bundle_cli_direct"
+    ret = main([
+        "--task", str(task_file),
+        "--spec", str(spec_file),
+        "--snapshot", str(snapshot_file),
+        "--output", str(bundle_cli_direct),
+    ])
+    assert ret == 0
+    run_direct = v2.parse((bundle_cli_direct / "run.json").read_bytes())
+    assert run_direct["scientific_fingerprint"] == run_fn["scientific_fingerprint"]
+
+    # 3. CLI fail-closed on tampered snapshot hash
+    tampered_snap = tmp_path / "tampered_snap.csv"
+    tampered_snap.write_bytes(FIXTURE_PATH.read_bytes() + b"\n9999,tampered,0,0\n")
+
+    cli_tampered = tmp_path / "cli_tampered"
+    res_tampered = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "research_lab.runners.v2_statistical_screening",
+            "--task",
+            str(task_file),
+            "--spec",
+            str(spec_file),
+            "--snapshot",
+            str(tampered_snap),
+            "--output",
+            str(cli_tampered),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=str(ROOT),
+        check=False,
+    )
+    assert res_tampered.returncode != 0
+    assert "Snapshot sha256 mismatch" in res_tampered.stderr
+    assert not cli_tampered.exists()
+
+    # 4. CLI fail-closed on missing required argument
+    res_missing = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "research_lab.runners.v2_statistical_screening",
+            "--task",
+            str(task_file),
+            "--spec",
+            str(spec_file),
+            # missing --snapshot and --output
+        ],
+        capture_output=True,
+        text=True,
+        cwd=str(ROOT),
+        check=False,
+    )
+    assert res_missing.returncode != 0
+    assert "the following arguments are required" in res_missing.stderr
+
+    # 5. CLI fail-closed on non-existent input file
+    res_nofile = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "research_lab.runners.v2_statistical_screening",
+            "--task",
+            str(tmp_path / "nonexistent_task.json"),
+            "--spec",
+            str(spec_file),
+            "--snapshot",
+            str(snapshot_file),
+            "--output",
+            str(tmp_path / "cli_nofile"),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=str(ROOT),
+        check=False,
+    )
+    assert res_nofile.returncode != 0
+    assert "Task file not found" in res_nofile.stderr
+    assert not (tmp_path / "cli_nofile").exists()
