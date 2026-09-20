@@ -1160,4 +1160,3 @@ def test_38_review_remediation_task_delegation_depth_hard_bound() -> None:
         )
     assert "Nested agent delegation prohibited" in str(exc_depth.value)
     assert "exceeds maximum allowable depth 1" in str(exc_depth.value)
-
