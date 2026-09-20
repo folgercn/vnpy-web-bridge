@@ -475,4 +475,3 @@ def test_quota_exhausted_router_rejection() -> None:
             usage_snapshots={"antigravity_limited": exhausted_snapshot},
         )
     assert "unavailable or quota exhausted" in str(exc_info.value)
-

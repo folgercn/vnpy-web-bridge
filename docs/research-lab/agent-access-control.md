@@ -1,6 +1,6 @@
 # Agent Access Control and Provider-Neutral Router Architecture
 
-> **Milestone 0 Contract Specification (#573)**  
+> **Milestone 0 Contract Specification (#573)**
 > 状态：**FROZEN** | 模式：`research-json-v1` SHA-256 Canonical Digest | Fail-Closed
 
 本文档定义 SIMNOW_LAB 下 Agent 系统的访问控制（Access Control）、执行路由（Provider-Neutral Router）、不可变数据契约与安全/科学边界。为 Milestone 1（Antigravity MCP Adapter 实现）及后续阶段提供直接、可执行的指导依据。
