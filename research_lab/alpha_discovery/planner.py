@@ -27,6 +27,7 @@ from research_lab.alpha_discovery.screening_plan import (
     compute_plan_content_hash,
     validate_screening_plan,
 )
+from research_lab.contracts import v2
 
 METHOD_REQUIRED_FIELDS: dict[str, list[str]] = {
     "coverage": ["timestamp", "symbol"],
@@ -56,9 +57,12 @@ class ScreeningPlanner:
         and never executes screening experiments.
         """
         if isinstance(hypothesis, AlphaHypothesis):
-            hyp_dict = hypothesis.model_dump(exclude_none=True)
+            raw_dict = hypothesis.model_dump(exclude_none=True)
+        elif isinstance(hypothesis, dict):
+            raw_dict = hypothesis
         else:
-            hyp_dict = validate_hypothesis(hypothesis)
+            raise TypeError(f"hypothesis must be AlphaHypothesis or dict, got {type(hypothesis)}")
+        hyp_dict = validate_hypothesis(raw_dict)
 
         hyp_id = hyp_dict["hypothesis_id"]
         hyp_rev = hyp_dict["revision"]
@@ -143,8 +147,13 @@ class ScreeningPlanner:
                         )
                     )
 
-        # Plan ID is deterministic based on hypothesis_id and scientific identity hash
-        plan_id = f"plan-{hyp_id}-{scientific_hash[:12]}"
+        # Plan ID is deterministic based on hypothesis_id, full scientific identity hash, and full dataset canonical digest
+        if ds_req_model is not None:
+            ds_exact_digest = v2.digest(ds_req_model.model_dump(exclude_none=True))
+            identity_token = v2.digest({"scientific_hash": scientific_hash, "dataset_digest": ds_exact_digest})[:16]
+        else:
+            identity_token = v2.digest({"scientific_hash": scientific_hash, "dataset_digest": "none"})[:16]
+        plan_id = f"plan-{hyp_id}-{identity_token}"
 
         provenance = PlanProvenance(
             created_by=created_by,

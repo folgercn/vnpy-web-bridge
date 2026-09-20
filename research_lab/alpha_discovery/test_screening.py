@@ -280,7 +280,7 @@ def test_07_one_hypothesis_generates_multiple_experiment_specs(
     assert len(set(spec_ids)) == 4
     for m, spec in zip(plan.methods, specs):
         assert spec["methods"] == [m.method]
-        assert spec["spec_id"].endswith(f"-{m.method}")
+        assert f"-{m.method}-" in spec["spec_id"]
 
 
 # =========================================================================
@@ -369,7 +369,7 @@ def test_10_execution_failure_is_preserved(
 
     assert res.status == "EXECUTION_FAILED"
     assert res.error_message is not None
-    assert "failed" in res.error_message.lower()
+    assert "mismatch" in res.error_message.lower() or "failed" in res.error_message.lower()
 
 
 # =========================================================================
@@ -580,3 +580,139 @@ def test_18_alpha_hypothesis_regression(base_hypothesis_data: dict[str, Any]):
     invalid["hypothesis_content_hash"] = compute_hypothesis_content_hash(invalid)
     with pytest.raises(ValueError, match="Result or evidence claim forbidden"):
         validate_hypothesis(invalid)
+
+
+# =========================================================================
+# P1-1 Tests: Hypothesis instance cannot bypass validation or hash check
+# =========================================================================
+def test_p1_1_hypothesis_model_construct_bypass_rejected(
+    base_hypothesis_data: dict[str, Any],
+    dataset_requirements: dict[str, Any],
+):
+    """P1-1: AlphaHypothesis created via model_construct with invalid/tampered hash is rejected."""
+    planner = ScreeningPlanner()
+    pipeline = ScreeningPipeline()
+
+    # Tamper with content hash using model_construct to bypass initial pydantic validation
+    fake_data = copy.deepcopy(base_hypothesis_data)
+    fake_data["hypothesis_content_hash"] = "0" * 64  # invalid tampered hash
+    fake_hyp = AlphaHypothesis.model_construct(**fake_data)
+
+    # Must fail closed in planner.plan
+    with pytest.raises(ValueError, match="hypothesis_content_hash mismatch"):
+        planner.plan(fake_hyp, dataset_requirements=dataset_requirements)
+
+    # Must fail closed in pipeline.execute_hypothesis
+    with pytest.raises(ValueError, match="hypothesis_content_hash mismatch"):
+        pipeline.execute_hypothesis(fake_hyp, FIXTURE_PATH, "./tmp/dummy_out")
+
+
+def test_p1_1_hypothesis_mutated_after_creation_rejected(
+    base_hypothesis_data: dict[str, Any],
+    dataset_requirements: dict[str, Any],
+):
+    """P1-1: Mutating a field on a valid AlphaHypothesis without recomputing hash is rejected."""
+    planner = ScreeningPlanner()
+    valid_hyp = AlphaHypothesis.model_validate(base_hypothesis_data)
+
+    # Mutate field directly on instance
+    object.__setattr__(valid_hyp, "signal_family", "mean_reversion")
+
+    with pytest.raises(ValueError, match="hypothesis_content_hash mismatch"):
+        planner.plan(valid_hyp, dataset_requirements=dataset_requirements)
+
+
+# =========================================================================
+# P1-2 Tests: Plan/Task/Spec identity strictly binds full dataset identity
+# =========================================================================
+def test_p1_2_different_datasets_yield_different_plan_identity(
+    base_hypothesis_data: dict[str, Any],
+    dataset_requirements: dict[str, Any],
+):
+    """P1-2: Same hypothesis with different datasets yields different plan_id and plan_content_hash."""
+    planner = ScreeningPlanner()
+
+    ds1 = copy.deepcopy(dataset_requirements)
+    ds2 = copy.deepcopy(dataset_requirements)
+    ds2["snapshot_sha256"] = "b" * 64
+    ds2["snapshot_byte_length"] = 9999
+
+    plan1 = planner.plan(base_hypothesis_data, dataset_requirements=ds1)
+    plan2 = planner.plan(base_hypothesis_data, dataset_requirements=ds2)
+
+    assert plan1.plan_id != plan2.plan_id
+    assert plan1.plan_content_hash != plan2.plan_content_hash
+
+
+def test_p1_2_same_8char_prefix_different_full_hash_negative_test(
+    base_hypothesis_data: dict[str, Any],
+    dataset_requirements: dict[str, Any],
+):
+    """P1-2 Negative Test: Two datasets with identical 8-char prefix but different full 64-char sha256.
+
+    Proves system never relies on 8-char truncation; full canonical digest produces different plan_id and content hash.
+    """
+    planner = ScreeningPlanner()
+
+    prefix = "abcdef01"
+    # ds_a and ds_b share identical first 8 hex characters, but differ in the remaining 56 hex characters
+    ds_a = copy.deepcopy(dataset_requirements)
+    ds_a["snapshot_sha256"] = prefix + "1" * 56
+    ds_b = copy.deepcopy(dataset_requirements)
+    ds_b["snapshot_sha256"] = prefix + "2" * 56
+
+    plan_a = planner.plan(base_hypothesis_data, dataset_requirements=ds_a)
+    plan_b = planner.plan(base_hypothesis_data, dataset_requirements=ds_b)
+
+    # Must produce strictly different plan_id (no collision on prefix) and different plan_content_hash
+    assert plan_a.plan_id != plan_b.plan_id
+    assert plan_a.plan_content_hash != plan_b.plan_content_hash
+
+
+# =========================================================================
+# P1-3 Tests: Plan bound to Snapshot A cannot execute on Snapshot B
+# =========================================================================
+def test_p1_3_mismatched_runtime_snapshot_fails_closed_no_output_dir(
+    base_hypothesis_data: dict[str, Any],
+    dataset_requirements: dict[str, Any],
+    tmp_path: Path,
+):
+    """P1-3: Plan bound to Snapshot A fails immediately when executed with Snapshot B without creating output dir."""
+    planner = ScreeningPlanner()
+    plan = planner.plan(base_hypothesis_data, dataset_requirements=dataset_requirements)
+
+    # Snapshot B has valid CSV format but different content / hash from Snapshot A
+    snap_b = tmp_path / "snapshot_b.csv"
+    snap_b.write_bytes(b"timestamp,symbol,feature_val,target_val\n2024-01-02T09:00:00Z,rb2405,1.0,2.0\n")
+
+    executor = SequentialScreeningExecutor()
+    method_out = tmp_path / "should_not_be_created"
+
+    assert not method_out.exists()
+    res = executor.execute_method(plan.methods[0], plan, snap_b, method_out)
+
+    assert res.status == "EXECUTION_FAILED"
+    assert "snapshot sha256 mismatch with plan dataset_requirements" in res.error_message.lower()
+    # Critically: output directory must NOT have been created!
+    assert not method_out.exists()
+
+
+def test_p1_3_byte_length_mismatch_fails_closed_no_output_dir(
+    base_hypothesis_data: dict[str, Any],
+    dataset_requirements: dict[str, Any],
+    tmp_path: Path,
+):
+    """P1-3: Tampered byte length triggers immediate failure before output dir creation."""
+    planner = ScreeningPlanner()
+    tampered_ds = copy.deepcopy(dataset_requirements)
+    tampered_ds["snapshot_byte_length"] += 10  # tampered length
+
+    plan = planner.plan(base_hypothesis_data, dataset_requirements=tampered_ds)
+
+    executor = SequentialScreeningExecutor()
+    method_out = tmp_path / "tampered_len_out"
+
+    res = executor.execute_method(plan.methods[0], plan, FIXTURE_PATH, method_out)
+    assert res.status == "EXECUTION_FAILED"
+    assert "byte_length mismatch" in res.error_message.lower()
+    assert not method_out.exists()

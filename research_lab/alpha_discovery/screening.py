@@ -103,25 +103,36 @@ def build_protocol_v2_task(
         req_fields = list(ds_req.required_fields)
         provenance = ds_req.provenance
         time_range = ds_req.time_range
+        snap_sha = ds_req.snapshot_sha256
+        snap_len = ds_req.snapshot_byte_length
+        snap_loc = ds_req.snapshot_locator
     else:
         req_fields = ["timestamp", "symbol", "feature_val", "target_val"]
         provenance = "screening_plan_inferred"
         time_range = None
+        snap_sha = raw_sha
+        snap_len = raw_len
+        snap_loc = str(snapshot_path)
 
     task_data_req: dict[str, Any] = {
-        "snapshot_sha256": raw_sha,
-        "snapshot_locator": str(snapshot_path),
-        "snapshot_byte_length": raw_len,
+        "snapshot_sha256": snap_sha,
+        "snapshot_locator": snap_loc,
+        "snapshot_byte_length": snap_len,
         "required_fields": req_fields,
         "provenance": provenance,
     }
     if time_range:
         task_data_req["time_range"] = time_range
 
+    task_token = v2.digest({
+        "plan_id": plan.plan_id,
+        "plan_content_hash": plan.plan_content_hash,
+        "method": method,
+    })[:12]
     task: dict[str, Any] = {
         "schema_version": "research_lab.task.v2",
         "hash_profile": "research-json-v1",
-        "task_id": f"task-{plan.plan_id}-{method}",
+        "task_id": f"task-{plan.plan_id}-{method}-{task_token}",
         "revision": "rev.1",
         "research_type": "statistical_factor",
         "task_profile": ssd.PROFILE_NAME,
@@ -139,10 +150,15 @@ def build_protocol_v2_spec(
     method: str,
 ) -> dict[str, Any]:
     """Generate isolated Protocol v2 ExperimentSpec corresponding to Task."""
+    task_token = v2.digest({
+        "plan_id": plan.plan_id,
+        "plan_content_hash": plan.plan_content_hash,
+        "method": method,
+    })[:12]
     spec: dict[str, Any] = {
         "schema_version": "research_lab.experiment.v2",
         "hash_profile": "research-json-v1",
-        "spec_id": f"spec-{plan.plan_id}-{method}",
+        "spec_id": f"spec-{plan.plan_id}-{method}-{task_token}",
         "revision": "rev.1",
         "task_id": task["task_id"],
         "task_revision": task["revision"],
@@ -187,6 +203,62 @@ class SequentialScreeningExecutor:
                 missing_fields=method_req.missing_fields,
                 error_message=method_req.reason or "insufficient_data",
             )
+
+        # P1-3: Strict physical snapshot verification before any execution
+        # Verify physical properties match plan.dataset_requirements 100%
+        # Fail closed immediately BEFORE creating output directory!
+        snap_p = snapshot_path.resolve()
+        if not snap_p.exists() or not snap_p.is_file() or snap_p.is_symlink():
+            return MethodExecutionResult(
+                method=method_name,
+                status="EXECUTION_FAILED",
+                error_message=f"Snapshot path does not exist, is not a regular file, or is symlink: {snapshot_path}",
+            )
+
+        try:
+            raw_bytes = snap_p.read_bytes()
+            raw_sha = v2.sha(raw_bytes)
+            raw_len = len(raw_bytes)
+        except OSError as exc:
+            return MethodExecutionResult(
+                method=method_name,
+                status="EXECUTION_FAILED",
+                error_message=f"Failed reading snapshot file: {exc}",
+            )
+
+        if plan.dataset_requirements is not None:
+            ds_req = plan.dataset_requirements
+            # 1. 100% full 64-character SHA-256 exact match
+            if raw_sha != ds_req.snapshot_sha256:
+                return MethodExecutionResult(
+                    method=method_name,
+                    status="EXECUTION_FAILED",
+                    error_message=(
+                        f"Runtime snapshot sha256 mismatch with plan dataset_requirements: "
+                        f"expected {ds_req.snapshot_sha256}, got {raw_sha}"
+                    ),
+                )
+            # 2. Exact byte length match
+            if raw_len != ds_req.snapshot_byte_length:
+                return MethodExecutionResult(
+                    method=method_name,
+                    status="EXECUTION_FAILED",
+                    error_message=(
+                        f"Runtime snapshot byte_length mismatch with plan dataset_requirements: "
+                        f"expected {ds_req.snapshot_byte_length}, got {raw_len}"
+                    ),
+                )
+            # 3. Check locator alignment
+            expected_locator = Path(ds_req.snapshot_locator)
+            if expected_locator.is_absolute() and snap_p != expected_locator.resolve():
+                return MethodExecutionResult(
+                    method=method_name,
+                    status="EXECUTION_FAILED",
+                    error_message=(
+                        f"Runtime snapshot locator mismatch: "
+                        f"expected {expected_locator.resolve()}, got {snap_p}"
+                    ),
+                )
 
         # PLANNED method: build Task & Spec, validate against Protocol v2, and execute runner
         try:
@@ -362,11 +434,14 @@ class ScreeningPipeline:
         dataset_requirements: dict[str, Any] | None = None,
     ) -> tuple[ScreeningPlan, ScreeningPipelineReport]:
         """Convenience method: plan hypothesis and execute pipeline in one step."""
-        if isinstance(hypothesis, dict):
-            hyp_validated = validate_hypothesis(hypothesis)
-            hyp_obj = AlphaHypothesis.model_validate(hyp_validated)
+        if isinstance(hypothesis, AlphaHypothesis):
+            raw_dict = hypothesis.model_dump(exclude_none=True)
+        elif isinstance(hypothesis, dict):
+            raw_dict = hypothesis
         else:
-            hyp_obj = hypothesis
+            raise TypeError(f"hypothesis must be AlphaHypothesis or dict, got {type(hypothesis)}")
+        hyp_validated = validate_hypothesis(raw_dict)
+        hyp_obj = AlphaHypothesis.model_validate(hyp_validated)
 
         snap_p = Path(snapshot_path).resolve()
         # If dataset_requirements not passed, build default from snapshot
