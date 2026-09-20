@@ -46,6 +46,16 @@ from research_lab.agent_control.permissions import (
     validate_permissions,
 )
 from research_lab.agent_control.provider import AgentProvider
+from research_lab.agent_control.quota import (
+    AntigravityQuotaNormalizer,
+    ModelQuotaBinding,
+    ProviderQuotaFacts,
+    QuotaGroupSnapshot,
+    QuotaStatus,
+    QuotaWindowSnapshot,
+    evaluate_group_status,
+    evaluate_window_status,
+)
 from research_lab.agent_control.registry import ProviderRegistry
 from research_lab.agent_control.roles import (
     DEFAULT_ROLE_POLICIES,
@@ -314,12 +324,31 @@ def select_agent(
     selected_model: str = ""
     selected_snapshot_ref: str | None = None
     selected_transport_ref: str = ""
+    selected_quota_group: str = ""
     route_reason_code: RouteReasonCode = RouteReasonCode.PRIMARY_AVAILABLE
     route_reason: str = ""
+
+    # Quota policy parameters
+    current_time = routing_context.current_time if routing_context else None
+    context_quota_facts = routing_context.quota_facts if routing_context else {}
+    healthy_threshold = routing_policy.healthy_threshold if routing_policy else 0.30
+    active_policy_version = routing_policy.policy_version if routing_policy else POLICY_VERSION
+    if routing_policy and routing_policy.max_usage_snapshot_age is not None:
+        max_usage_snapshot_age = routing_policy.max_usage_snapshot_age
+    elif active_policy_version.endswith("-m3") or active_policy_version == "2026-09-m3":
+        max_usage_snapshot_age = 300.0
+    else:
+        max_usage_snapshot_age = None
+    is_m3_mode = active_policy_version.endswith("-m3") or active_policy_version == "2026-09-m3"
 
     # Tracking reasons for fine-grained error taxonomy
     quota_exhausted_candidates: list[str] = []
     all_role_supporting_candidates: list[str] = []
+    stale_snapshot_candidates: list[str] = []
+    missing_snapshot_candidates: list[str] = []
+    provider_mismatch_candidates: list[str] = []
+    all_unknown_quota_candidates: list[str] = []
+    exhausted_group_ids_by_provider: dict[str, set[str]] = {}
 
     for prov_name in ordered_provider_names:
         if prov_name not in prov_map:
@@ -328,8 +357,12 @@ def select_agent(
                     "availability": "UNAVAILABLE",
                     "capability_supported": False,
                     "decision": "skipped",
+                    "model": "unknown",
                     "provider": prov_name,
                     "quota": "unknown",
+                    "quota_group": "unknown",
+                    "quota_status": "unknown",
+                    "quota_windows": [],
                     "role_supported": False,
                     "skip_reason": "unregistered provider",
                     "transport": "unknown",
@@ -355,6 +388,17 @@ def select_agent(
         role_supported = validated_role in desc.supported_roles
         if role_supported:
             all_role_supporting_candidates.append(prov_name)
+
+        # Pre-resolve candidate models
+        candidate_models: list[str] = []
+        if preferred_model:
+            candidate_models = [preferred_model]
+        elif routing_policy and routing_policy.model_preference.get(prov_name):
+            candidate_models = list(routing_policy.model_preference.get(prov_name))
+        elif desc.supported_models:
+            candidate_models = [desc.default_model]
+        else:
+            candidate_models = ["default"]
 
         # Capabilities check: role capability + policy required capabilities + context capabilities
         policy_caps = set(routing_policy.required_capabilities) if routing_policy else set()
@@ -383,47 +427,103 @@ def select_agent(
 
         # Quota check
         snapshot = snapshots.get(prov_name)
-        quota_status = "healthy"
+        facts: ProviderQuotaFacts | None = None
+        quota_windows_trace: list[dict[str, Any]] = []
+        quota_status_str = "healthy"
         quota_viable = True
+        skip_reason: str | None = None
 
-        if snapshot:
-            # Check windows
-            has_exhausted = any(
-                w.get("status") == "exhausted" or w.get("remaining_fraction") == 0
-                for w in snapshot.quota_windows
-            )
-            has_unknown = any(
-                w.get("status") == "unknown" or w.get("remaining_fraction") is None
-                for w in snapshot.quota_windows
-            )
-
-            if has_exhausted:
-                quota_status = "exhausted"
+        if snapshot is not None:
+            if snapshot.provider != prov_name:
+                quota_status_str = "provider_mismatch"
                 quota_viable = False
-            elif has_unknown:
-                allow_unknown = (
-                    routing_policy.allow_unknown_quota_fallback
-                    if routing_policy
-                    else False
-                )
-                if not allow_unknown:
-                    quota_status = "unknown"
-                    quota_viable = False
+                skip_reason = f"Usage snapshot provider '{snapshot.provider}' does not match candidate '{prov_name}'"
+                provider_mismatch_candidates.append(prov_name)
+            else:
+                effective_max_age = max_usage_snapshot_age if max_usage_snapshot_age is not None else float("inf")
+                if prov_name in context_quota_facts:
+                    facts = context_quota_facts[prov_name]
+                elif prov_name == "antigravity" or snapshot.provider == "antigravity":
+                    custom_bindings = []
+                    if routing_policy and prov_name in routing_policy.model_quota_bindings:
+                        for m_k, g_v in routing_policy.model_quota_bindings[prov_name].items():
+                            custom_bindings.append(
+                                ModelQuotaBinding(provider=prov_name, model=m_k, quota_group_id=g_v)
+                            )
+                    facts = AntigravityQuotaNormalizer.normalize(
+                        snapshot,
+                        healthy_threshold=healthy_threshold,
+                        max_age_seconds=effective_max_age,
+                        current_time=current_time,
+                        custom_model_bindings=custom_bindings,
+                    )
                 else:
-                    quota_status = "unknown_fallback_allowed"
+                    is_stale = False
+                    if max_usage_snapshot_age is not None:
+                        is_stale = AntigravityQuotaNormalizer.is_snapshot_stale(
+                            snapshot.captured_at,
+                            max_age_seconds=max_usage_snapshot_age,
+                            current_time=current_time,
+                        )
+                    parsed_windows = []
+                    for w in snapshot.quota_windows:
+                        rem = w.get("remaining_fraction")
+                        rem_val = float(rem) if rem is not None else None
+                        parsed_windows.append(
+                            QuotaWindowSnapshot(
+                                window=str(w.get("window", "unknown")),
+                                remaining_fraction=rem_val,
+                                reset_time=str(w.get("reset_time")) if w.get("reset_time") is not None else None,
+                                status=evaluate_window_status(rem_val, healthy_threshold=healthy_threshold),
+                            )
+                        )
+                    grp_status = evaluate_group_status(parsed_windows)
+                    grp = QuotaGroupSnapshot(
+                        group_id=snapshot.model_group or "default-group",
+                        display_name=snapshot.model_group or "Default Group",
+                        status=grp_status,
+                        windows=tuple(parsed_windows),
+                        bound_models=tuple(desc.supported_models),
+                    )
+                    bindings = [
+                        ModelQuotaBinding(provider=prov_name, model=m, quota_group_id=grp.group_id)
+                        for m in desc.supported_models
+                    ]
+                    snapshot_ref = f"{snapshot.snapshot_id}@{snapshot.usage_content_hash}"
+                    facts = ProviderQuotaFacts(
+                        provider=prov_name,
+                        snapshot_ref=snapshot_ref,
+                        captured_at=snapshot.captured_at,
+                        groups=(grp,),
+                        model_bindings=tuple(bindings),
+                        is_stale=is_stale,
+                    )
+
+                if facts.is_stale:
+                    quota_status_str = "stale"
+                    quota_viable = False
+                    skip_reason = "usage snapshot is stale"
+                    stale_snapshot_candidates.append(prov_name)
+                else:
+                    quota_windows_trace = (
+                        [w.to_dict() for w in facts.groups[0].windows] if facts.groups else []
+                    )
         else:
             allow_missing = (
                 routing_policy.allow_missing_usage if routing_policy else True
             )
             if not allow_missing:
-                quota_status = "missing"
+                quota_status_str = "missing"
                 quota_viable = False
+                skip_reason = "missing required usage snapshot"
+                missing_snapshot_candidates.append(prov_name)
             else:
-                quota_status = "missing_allowed"
+                quota_status_str = "missing_allowed"
 
-        # Model resolution check
+        # Model evaluation & resolution
         resolved_model_candidate: str | None = None
-        skip_reason: str | None = None
+        resolved_group_id: str = ""
+        resolved_model_status: QuotaStatus | None = None
 
         if not role_supported:
             skip_reason = f"role '{validated_role}' not supported"
@@ -439,34 +539,68 @@ def select_agent(
             else:
                 skip_reason = f"provider unavailable ({avail_status}: {avail.reason})"
         elif not quota_viable:
-            skip_reason = f"quota not viable ({quota_status})"
-            if quota_status in ("exhausted", "rate_limited"):
-                quota_exhausted_candidates.append(prov_name)
+            # Skip reason already populated above (stale, missing, or provider_mismatch)
+            pass
         else:
-            # Model preference resolution
-            pref_model = preferred_model
-            policy_models = (
-                routing_policy.model_preference.get(prov_name)
-                if routing_policy
-                else None
-            )
+            exhausted_group_ids = exhausted_group_ids_by_provider.setdefault(prov_name, set())
+            candidate_unknown_models: list[tuple[str, str]] = []
 
-            if pref_model:
-                if pref_model in desc.supported_models:
-                    resolved_model_candidate = pref_model
+            for m in candidate_models:
+                if m not in desc.supported_models:
+                    if preferred_model and m == preferred_model:
+                        skip_reason = f"preferred model '{preferred_model}' unsupported by provider"
+                    continue
+
+                if facts is None:
+                    resolved_model_candidate = m
+                    resolved_group_id = ""
+                    resolved_model_status = QuotaStatus.HEALTHY
+                    break
+
+                grp = facts.get_group_for_model(m)
+                if grp is None:
+                    candidate_unknown_models.append((m, "unknown"))
+                    continue
+
+                if grp.group_id in exhausted_group_ids:
+                    continue
+
+                if grp.status == QuotaStatus.EXHAUSTED:
+                    exhausted_group_ids.add(grp.group_id)
+                    quota_exhausted_candidates.append(f"{prov_name}:{m}")
+                    continue
+
+                if grp.status == QuotaStatus.UNKNOWN:
+                    candidate_unknown_models.append((m, grp.group_id))
+                    continue
+
+                if grp.status in (QuotaStatus.HEALTHY, QuotaStatus.CONSTRAINED):
+                    resolved_model_candidate = m
+                    resolved_group_id = grp.group_id
+                    resolved_model_status = grp.status
+                    break
+
+            if not resolved_model_candidate and candidate_unknown_models:
+                allow_unknown = (
+                    routing_policy.allow_unknown_quota_fallback
+                    if routing_policy
+                    else False
+                )
+                if allow_unknown:
+                    resolved_model_candidate, resolved_group_id = candidate_unknown_models[0]
+                    resolved_model_status = QuotaStatus.UNKNOWN
                 else:
-                    # Preferred model unsupported
-                    skip_reason = f"preferred model '{pref_model}' unsupported by provider"
-            elif policy_models:
-                # Find first intersection
-                for m in policy_models:
-                    if m in desc.supported_models:
-                        resolved_model_candidate = m
-                        break
-                if not resolved_model_candidate:
-                    skip_reason = f"none of policy model preferences {policy_models} supported by provider"
-            else:
-                resolved_model_candidate = desc.default_model
+                    all_unknown_quota_candidates.append(prov_name)
+                    skip_reason = f"all candidate models for provider '{prov_name}' have unknown quota"
+
+            if not resolved_model_candidate and skip_reason is None:
+                if exhausted_group_ids:
+                    skip_reason = f"all candidate models for provider '{prov_name}' quota exhausted"
+                    quota_exhausted_candidates.append(prov_name)
+                elif preferred_model:
+                    skip_reason = f"preferred model '{preferred_model}' is not available due to quota or unsupported"
+                else:
+                    skip_reason = f"none of policy model preferences supported or viable for provider '{prov_name}'"
 
         decision = "selected" if (skip_reason is None and resolved_model_candidate) else "skipped"
 
@@ -475,8 +609,12 @@ def select_agent(
                 "availability": avail_status,
                 "capability_supported": capability_supported,
                 "decision": decision,
+                "model": resolved_model_candidate or (candidate_models[0] if candidate_models else "unknown"),
                 "provider": prov_name,
-                "quota": quota_status,
+                "quota": quota_status_str,
+                "quota_group": resolved_group_id or "unknown",
+                "quota_status": resolved_model_status.value if resolved_model_status else quota_status_str,
+                "quota_windows": quota_windows_trace,
                 "role_supported": role_supported,
                 "skip_reason": skip_reason,
                 "transport": transport_kind,
@@ -488,23 +626,32 @@ def select_agent(
             selected_provider = prov
             selected_model = resolved_model_candidate or desc.default_model
             selected_transport_ref = transport_ref_candidate
+            selected_quota_group = resolved_group_id
 
             if snapshot:
-                # Exact bind snapshot_id and usage_content_hash
                 selected_snapshot_ref = f"{snapshot.snapshot_id}@{snapshot.usage_content_hash}"
             else:
                 selected_snapshot_ref = None
 
-            # Determine reason code
+            # Determine auditable route reason code
             if preferred_provider and prov_name == preferred_provider:
                 route_reason_code = RouteReasonCode.PREFERRED_PROVIDER_SELECTED
                 route_reason = f"Selected caller preferred provider '{prov_name}' for role '{validated_role}'"
+            elif len(exhausted_group_ids) > 0 and resolved_model_status in (QuotaStatus.HEALTHY, QuotaStatus.CONSTRAINED):
+                route_reason_code = RouteReasonCode.FALLBACK_DIFFERENT_QUOTA_GROUP
+                route_reason = f"Selected fallback model '{selected_model}' in quota group '{selected_quota_group}' due to exhaustion of primary quota group"
             elif quota_exhausted_candidates:
                 route_reason_code = RouteReasonCode.PRIMARY_QUOTA_EXHAUSTED
                 route_reason = f"Selected fallback provider '{prov_name}' due to quota exhaustion of primary candidates"
             elif any(t["decision"] == "skipped" and t["role_supported"] for t in candidate_trace[:-1]):
                 route_reason_code = RouteReasonCode.PRIMARY_UNAVAILABLE_FALLBACK
                 route_reason = f"Selected fallback provider '{prov_name}' for role '{validated_role}'"
+            elif resolved_model_status == QuotaStatus.CONSTRAINED:
+                route_reason_code = RouteReasonCode.PRIMARY_CONSTRAINED
+                route_reason = f"Selected primary provider '{prov_name}' model '{selected_model}' under CONSTRAINED quota"
+            elif resolved_model_status == QuotaStatus.HEALTHY:
+                route_reason_code = RouteReasonCode.PRIMARY_HEALTHY
+                route_reason = f"Selected healthy primary provider '{prov_name}' model '{selected_model}'"
             else:
                 route_reason_code = RouteReasonCode.PRIMARY_AVAILABLE
                 route_reason = f"Selected primary provider '{prov_name}' for role '{validated_role}'"
@@ -512,33 +659,51 @@ def select_agent(
 
     # 6. Check if any provider was selected
     if not selected_provider:
-        # Fine-grained error classification (#573 Milestone 1):
-        # Under Milestone 1 invocation (routing_policy, routing_context, or registry):
-        # If all candidates that support the role failed SOLELY because of quota exhaustion or rate limit,
-        # raise QuotaUnavailableError (QUOTA_UNAVAILABLE), NOT ProviderUnavailableError!
-        is_m1_mode = (
-            routing_policy is not None
-            or routing_context is not None
-            or registry is not None
-        )
         viable_role_candidates = [
             t["provider"]
             for t in candidate_trace
             if t["role_supported"] and t["capability_supported"] and t["transport_allowed"]
         ]
-        if (
-            is_m1_mode
-            and viable_role_candidates
-            and all(prov in quota_exhausted_candidates for prov in viable_role_candidates)
-        ):
-            raise QuotaUnavailableError(
-                f"All providers supporting role '{validated_role}' are quota exhausted or rate limited",
-                details={
-                    "candidate_trace": candidate_trace,
-                    "exhausted_providers": quota_exhausted_candidates,
-                    "role": validated_role,
-                },
-            )
+
+        if viable_role_candidates:
+            if is_m3_mode:
+                if all(p in stale_snapshot_candidates for p in viable_role_candidates):
+                    raise QuotaUnavailableError(
+                        f"All providers supporting role '{validated_role}' failed due to stale usage snapshots",
+                        details={"candidate_trace": candidate_trace, "stale_providers": stale_snapshot_candidates, "role": validated_role},
+                    )
+                if all(p in missing_snapshot_candidates for p in viable_role_candidates):
+                    raise QuotaUnavailableError(
+                        f"All providers supporting role '{validated_role}' failed due to missing required usage snapshot",
+                        details={"candidate_trace": candidate_trace, "missing_providers": missing_snapshot_candidates, "role": validated_role},
+                    )
+                if all(p in provider_mismatch_candidates for p in viable_role_candidates):
+                    raise QuotaUnavailableError(
+                        f"All providers supporting role '{validated_role}' failed due to snapshot provider mismatch",
+                        details={"candidate_trace": candidate_trace, "mismatched_providers": provider_mismatch_candidates, "role": validated_role},
+                    )
+                if all(prov in all_unknown_quota_candidates for prov in viable_role_candidates):
+                    raise QuotaUnavailableError(
+                        f"All providers supporting role '{validated_role}' have unknown quota",
+                        details={
+                            "candidate_trace": candidate_trace,
+                            "unknown_providers": all_unknown_quota_candidates,
+                            "role": validated_role,
+                        },
+                    )
+            if is_m1_mode and all(
+                prov in quota_exhausted_candidates
+                or any(prov == q.split(":")[0] for q in quota_exhausted_candidates)
+                for prov in viable_role_candidates
+            ):
+                raise QuotaUnavailableError(
+                        f"All providers supporting role '{validated_role}' are quota exhausted or rate limited",
+                        details={
+                            "candidate_trace": candidate_trace,
+                            "exhausted_providers": quota_exhausted_candidates,
+                            "role": validated_role,
+                        },
+                    )
 
         if not all_role_supporting_candidates:
             raise ProviderUnavailableError(
@@ -556,7 +721,7 @@ def select_agent(
         role=validated_role,
         provider=selected_provider.describe().provider,
         resolved_model=selected_model,
-        policy_version=POLICY_VERSION,
+        policy_version=active_policy_version,
         route_reason=route_reason,
         usage_snapshot_ref=selected_snapshot_ref,
         project_binding=validated_binding,
@@ -565,4 +730,5 @@ def select_agent(
         route_reason_code=route_reason_code.value,
         transport_ref=selected_transport_ref,
         candidate_trace=candidate_trace,
+        quota_group=selected_quota_group,
     )
