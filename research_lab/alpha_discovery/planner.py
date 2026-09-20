@@ -16,6 +16,7 @@ from typing import Any
 from research_lab.alpha_discovery.hypothesis import (
     AlphaHypothesis,
     compute_scientific_identity_hash,
+    is_signed_scalar_feature_signal,
     validate_hypothesis,
 )
 from research_lab.alpha_discovery.screening_plan import (
@@ -142,6 +143,22 @@ class ScreeningPlanner:
                 else:
                     params: dict[str, Any] = {}
                     if m == "cost_sensitivity":
+                        # P1-1: Only permit generating/binding position proxy if hypothesis
+                        # is explicitly and machine-verifiably a signed feature_val scalar signal.
+                        # Complex, ambiguous, or non-signed-scalar signal_definition must NOT be guessed.
+                        if not is_signed_scalar_feature_signal(hyp_dict):
+                            method_requests.append(
+                                ScreeningMethodRequest(
+                                    method=m,
+                                    status="INSUFFICIENT_DATA",
+                                    reason="unmappable_cost_proxy_not_signed_scalar",
+                                    missing_fields=None,
+                                    required_fields=expected_fields,
+                                    parameters={},
+                                )
+                            )
+                            continue
+
                         exp_dir = hyp_dict.get("expected_direction")
                         if exp_dir == "positive":
                             proxy = "sign(feature_val)"

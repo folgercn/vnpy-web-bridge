@@ -96,6 +96,7 @@ ALLOWED_TOP_LEVEL_FIELDS = frozenset({
     "falsification_conditions",
     "proposed_screening_methods",
     "provenance",
+    "signal_type",
     "parent_hypothesis_ref",
     "related_hypothesis_refs",
     "duplicate_of",
@@ -220,6 +221,7 @@ class AlphaHypothesis(BaseModel):
     parent_hypothesis_ref: HypothesisRef | None = None
     related_hypothesis_refs: list[HypothesisRef] | None = None
     duplicate_of: HypothesisRef | None = None
+    signal_type: Literal["signed_scalar", "unspecified"] | None = None
 
     @field_validator("hypothesis_id")
     @classmethod
@@ -288,11 +290,47 @@ def compute_semantic_hash(data: dict[str, Any]) -> str:
         "target": str(data.get("target", "")).strip(),
         "universe": universe,
     }
+    if data.get("signal_type"):
+        semantic_payload["signal_type"] = str(data.get("signal_type")).strip()
     return v2.digest(semantic_payload)
 
 
 # Alias for explicit clarity between revision record content hash and scientific identity hash
 compute_scientific_identity_hash = compute_semantic_hash
+
+
+def is_signed_scalar_feature_signal(hypothesis: dict[str, Any] | AlphaHypothesis) -> bool:
+    """Determine deterministically whether hypothesis specifies a signed feature_val scalar signal.
+
+    Machine-verifiable conditions:
+    1. If explicit signal_type is specified, it must be 'signed_scalar' and feature_val must be among source_features.
+    2. Otherwise, signal_definition must explicitly be a signed scalar expression of feature_val
+       (e.g. 'feature_val', 'signed_scalar(feature_val)', 'signed(feature_val)', '+feature_val', '-feature_val')
+       and source_features must contain 'feature_val'.
+    Complex, ambiguous, non-scalar, or non-feature_val definitions (e.g. 'rolling_mean(close, 5) - close',
+    '(close - min) / max', 'ts_rank(volume, 20)', etc.) return False.
+    """
+    if isinstance(hypothesis, AlphaHypothesis):
+        data = hypothesis.model_dump()
+    elif isinstance(hypothesis, dict):
+        data = hypothesis
+    else:
+        return False
+
+    sig_type = data.get("signal_type")
+    source_features = [str(f).strip() for f in (data.get("source_features") or [])]
+    if sig_type == "signed_scalar":
+        return "feature_val" in source_features or str(data.get("signal_definition") or "").strip().lower() == "feature_val"
+
+    sig_def = str(data.get("signal_definition") or "").strip().lower()
+    canonical_signed_scalars = {
+        "feature_val",
+        "signed_scalar(feature_val)",
+        "signed(feature_val)",
+        "+feature_val",
+        "-feature_val",
+    }
+    return bool(sig_def in canonical_signed_scalars and "feature_val" in source_features)
 
 
 def compute_structured_key(data: dict[str, Any]) -> str:

@@ -850,19 +850,44 @@ class CriticGate:
                                 )
                             )
                             reject_reasons.append(f"Falsification triggered: |IC| {abs(actual_ic):.4f} < {thresh}")
-                if "opposite_direction" in cond or "negative_ic" in cond:
-                    expected_dir = hypothesis.get("direction", "positive")
-                    if expected_dir == "positive" and actual_ic < 0:
+                if "opposite_direction" in cond or "negative_ic" in cond or "positive_ic" in cond:
+                    # P1-2: Strictly read and validate expected_direction; NO silent fallback to 'direction' or 'positive'
+                    expected_dir = hypothesis.get("expected_direction")
+                    if not expected_dir or expected_dir not in ("positive", "negative"):
+                        raise ValueError(f"Hypothesis missing valid expected_direction, got {expected_dir!r}")
+
+                    is_opposite = False
+                    if "opposite_direction" in cond:
+                        if (expected_dir == "positive" and actual_ic < 0) or (
+                            expected_dir == "negative" and actual_ic > 0
+                        ):
+                            is_opposite = True
+                    elif (
+                        ("negative_ic" in cond and expected_dir == "positive" and actual_ic < 0)
+                        or ("positive_ic" in cond and expected_dir == "negative" and actual_ic > 0)
+                    ):
+                        is_opposite = True
+
+                    if is_opposite:
                         findings.append(
                             CriticFinding(
                                 category="falsification_conditions",
                                 assessment="risk",
                                 severity="critical",
-                                summary="Falsification condition triggered: actual IC is negative for positive hypothesis.",
-                                evidence_details={"condition": cond, "actual_ic": _format_decimal(actual_ic) or "0"},
+                                summary=(
+                                    f"Falsification condition triggered: actual IC {actual_ic:.4f} "
+                                    f"contradicts expected direction ({expected_dir})."
+                                ),
+                                evidence_details={
+                                    "condition": cond,
+                                    "actual_ic": _format_decimal(actual_ic) or "0",
+                                    "expected_direction": expected_dir,
+                                },
                             )
                         )
-                        reject_reasons.append("Falsification triggered: actual IC contradicts expected direction")
+                        reject_reasons.append(
+                            f"Falsification triggered: actual IC contradicts expected direction ({expected_dir})"
+                        )
 
         # Aggregate final decision strictly fail-closed per #565
         # 1. Any execution failure -> NEED_MORE_EVIDENCE (P1-B: never scientific REJECT)

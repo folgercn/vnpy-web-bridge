@@ -187,11 +187,25 @@ def _make_hypothesis(
     direction: str = "positive",
     methods: list[str] | None = None,
     falsification: list[str] | None = None,
+    signal_def: str | None = None,
+    signal_type: str | None = None,
+    source_features: list[str] | None = None,
 ) -> dict[str, Any]:
     """Helper to generate valid AlphaHypothesis dict."""
     methods_list = methods or ["coverage", "simple_correlation", "direction_consistency", "stability_split"]
     falsif = falsification or ["ic < 0.05", "negative_ic"]
-    raw = {
+
+    if signal_def is not None:
+        effective_sig_def = signal_def
+        effective_src = source_features or ["feature_val"]
+    elif "cost_sensitivity" in methods_list:
+        effective_sig_def = "feature_val"
+        effective_src = source_features or ["feature_val"]
+    else:
+        effective_sig_def = "rolling_mean(close, 5) - close"
+        effective_src = source_features or ["close"]
+
+    raw: dict[str, Any] = {
         "schema_version": "research_lab.alpha_hypothesis.v1",
         "hash_profile": "research-json-v1",
         "hypothesis_id": hyp_id,
@@ -199,8 +213,8 @@ def _make_hypothesis(
         "title": f"Momentum Factor on RB for {hyp_id}",
         "economic_rationale": "Informed trader flow causes short-term price continuation in commodity futures.",
         "signal_family": "momentum",
-        "signal_definition": "rolling_mean(close, 5) - close",
-        "source_features": ["close"],
+        "signal_definition": effective_sig_def,
+        "source_features": effective_src,
         "target": "future_return_1h",
         "expected_direction": direction,
         "holding_horizon": "1h",
@@ -216,6 +230,8 @@ def _make_hypothesis(
             "created_at": "2026-09-20T00:00:00.000000Z",
         },
     }
+    if signal_type:
+        raw["signal_type"] = signal_type
     raw["hypothesis_content_hash"] = compute_hypothesis_content_hash(raw)
     return validate_hypothesis(raw)
 
@@ -262,7 +278,7 @@ def test_case_b_initial_nme_supplemental_promotes(test_env):
 
     # Step 1: Initial screening only requests first 4 cheap methods (lacks leakage, outlier, cost)
     initial_methods = ["coverage", "simple_correlation", "direction_consistency", "stability_split"]
-    raw_hyp = _make_hypothesis("hypo-case-b", methods=initial_methods)
+    raw_hyp = _make_hypothesis("hypo-case-b", methods=initial_methods, signal_def="feature_val", source_features=["feature_val", "close"])
 
     initial_result = engine.run_single(
         hypothesis_input=raw_hyp,
@@ -855,3 +871,131 @@ def test_p1_3_critic_multi_evidence_exact_binding_attacks():
     # Attack 6: Duplicate evidence items in input
     with pytest.raises(ValueError, match="Duplicate evidence items"):
         validate_critic_decision(decision, hyp_dict, [ev1, ev1])
+
+
+def test_p1_1_cost_proxy_complex_signal_insufficient_data_vs_signed_scalar(tmp_path: Path):
+    """P1-1: Complex/unverifiable signals yield INSUFFICIENT_DATA for cost_sensitivity; signed scalars succeed."""
+    planner = ScreeningPlanner()
+    pipeline = ScreeningPipeline()
+
+    csv_path = tmp_path / "test_data.csv"
+    rows = [
+        {
+            "timestamp": f"2026-01-01T{i:02d}:00:00.000000Z",
+            "symbol": "RB2405",
+            "feature_val": str(i),
+            "target_val": str(i * 0.05),
+            "close": str(3500 + i),
+        }
+        for i in range(1, 25)
+    ]
+    fields = ["timestamp", "symbol", "feature_val", "target_val", "close"]
+    c_sha, c_len = _create_synthetic_csv(csv_path, rows, fields)
+    binding = {
+        "snapshot_locator": str(csv_path),
+        "snapshot_sha256": c_sha,
+        "snapshot_byte_length": c_len,
+        "required_fields": fields,
+        "provenance": "test",
+    }
+
+    # Case 1: Complex derived signal with NO machine-verifiable signed scalar property
+    hyp_complex = _make_hypothesis(
+        hyp_id="hyp-complex-1",
+        direction="positive",
+        methods=["cost_sensitivity"],
+        signal_def="rolling_mean(close, 5) - close",
+        source_features=["close"],
+    )
+    plan_complex = planner.plan(hyp_complex, dataset_requirements=binding)
+    req_complex = plan_complex.methods[0]
+    assert req_complex.method == "cost_sensitivity"
+    assert req_complex.status == "INSUFFICIENT_DATA"
+    assert req_complex.reason == "unmappable_cost_proxy_not_signed_scalar"
+
+    with tempfile.TemporaryDirectory() as td:
+        rep_complex = pipeline.execute_plan(plan_complex, csv_path, Path(td) / "staging")
+        assert rep_complex.overall_status == "INSUFFICIENT_DATA"
+        m_res_complex = rep_complex.method_results[0]
+        assert m_res_complex.status == "INSUFFICIENT_DATA"
+        assert m_res_complex.error_message == "unmappable_cost_proxy_not_signed_scalar"
+        # Defense assertion: NO bundle or pseudo-evidence produced
+        assert m_res_complex.bundle_dir is None
+        assert m_res_complex.evidence_id is None
+
+    # Case 2: Canonical signed scalar feature signal succeeds
+    hyp_scalar = _make_hypothesis(
+        hyp_id="hyp-scalar-1",
+        direction="positive",
+        methods=["cost_sensitivity"],
+        signal_def="feature_val",
+        source_features=["feature_val"],
+    )
+    plan_scalar = planner.plan(hyp_scalar, dataset_requirements=binding)
+    req_scalar = plan_scalar.methods[0]
+    assert req_scalar.method == "cost_sensitivity"
+    assert req_scalar.status == "PLANNED"
+    assert req_scalar.parameters["position_proxy"] == "sign(feature_val)"
+
+    with tempfile.TemporaryDirectory() as td:
+        rep_scalar = pipeline.execute_plan(plan_scalar, csv_path, Path(td) / "staging")
+        assert rep_scalar.overall_status == "COMPLETED"
+        m_res_scalar = rep_scalar.method_results[0]
+        assert m_res_scalar.status == "COMPLETED"
+        assert m_res_scalar.bundle_dir is not None
+        assert (Path(m_res_scalar.bundle_dir) / "evidence.json").exists()
+
+
+def test_p1_2_critic_opposite_direction_falsification_symmetry_and_fail_closed():
+    """P1-2: Symmetric falsification for positive and negative directions, and strict fail-closed."""
+    critic = CriticGate()
+
+    def _make_ev(ic_value: str) -> dict[str, Any]:
+        return {
+            "evidence_id": "evidence-run-ic",
+            "revision": "rev.1",
+            "evidence_content_hash": "a" * 64,
+            "execution_status": "COMPLETED",
+            "typed_metrics": {
+                "methods_applied": ["simple_correlation"],
+                "facts": {
+                    "simple_correlation": {
+                        "sample_size": 100,
+                        "pearson_ic": ic_value,
+                    }
+                },
+            },
+        }
+
+    # Case 1: Positive hypothesis
+    hyp_pos = _make_hypothesis("hyp-pos", direction="positive", falsification=["opposite_direction"])
+    # 1a. Positive IC (0.15) -> pass
+    dec_pos_pass = critic.evaluate(hyp_pos, _make_ev("0.150000"))
+    assert dec_pos_pass.decision in ("PASS", "NEED_MORE_EVIDENCE")  # Not falsified/rejected
+    assert not any("Falsification triggered" in r for r in dec_pos_pass.reject_reasons)
+    # 1b. Negative IC (-0.15) -> REJECT
+    dec_pos_fail = critic.evaluate(hyp_pos, _make_ev("-0.150000"))
+    assert dec_pos_fail.decision == "REJECT"
+    assert any("contradicts expected direction (positive)" in r for r in dec_pos_fail.reject_reasons)
+
+    # Case 2: Negative hypothesis
+    hyp_neg = _make_hypothesis("hyp-neg", direction="negative", falsification=["opposite_direction"])
+    # 2a. Negative IC (-0.15) -> pass (symmetric check: negative IC matches negative hypothesis)
+    dec_neg_pass = critic.evaluate(hyp_neg, _make_ev("-0.150000"))
+    assert dec_neg_pass.decision in ("PASS", "NEED_MORE_EVIDENCE")  # Not falsified/rejected
+    assert not any("Falsification triggered" in r for r in dec_neg_pass.reject_reasons)
+    # 2b. Positive IC (0.15) -> REJECT (symmetric check: positive IC contradicts negative hypothesis)
+    dec_neg_fail = critic.evaluate(hyp_neg, _make_ev("0.150000"))
+    assert dec_neg_fail.decision == "REJECT"
+    assert any("contradicts expected direction (negative)" in r for r in dec_neg_fail.reject_reasons)
+
+    # Case 3: Missing or invalid expected_direction fail-closed (no silent fallback to 'direction' or 'positive')
+    hyp_bad = dict(hyp_pos)
+    hyp_bad.pop("expected_direction", None)
+    with pytest.raises(ValueError, match="Hypothesis missing valid expected_direction"):
+        critic.evaluate(hyp_bad, _make_ev("0.150000"))
+
+    hyp_invalid = dict(hyp_pos, expected_direction="neutral")
+    with pytest.raises(ValueError, match="Hypothesis missing valid expected_direction"):
+        critic.evaluate(hyp_invalid, _make_ev("0.150000"))
+
