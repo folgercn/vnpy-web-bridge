@@ -81,6 +81,78 @@ def _extract_fraction(d: dict[str, Any], *keys: str) -> float | None:
     return None
 
 
+_STATUS_WORDS = frozenset(
+    {
+        "SUCCESS",
+        "COMPLETED",
+        "TURN_COMPLETE",
+        "FAILED",
+        "ERROR",
+        "CRASHED",
+        "CANCELLED",
+        "CANCELED",
+        "UNCERTAIN",
+        "REVIEW_REQUIRED",
+        "NEEDS_REVIEW",
+        "OK",
+        "{}",
+        "NONE",
+        "NULL",
+    }
+)
+
+_METADATA_AND_STATUS_KEYS = frozenset(
+    {
+        "status",
+        "terminal_status",
+        "job_id",
+        "provider_job_ref",
+        "task_id",
+        "request_id",
+        "outcome",
+        "model",
+        "actual_model",
+        "timestamp",
+        "project",
+        "cwd",
+        "mode",
+        "provider",
+        "role",
+        "recovery",
+        "issues",
+        "tool_issues",
+        "tool_failures",
+        "denied_actions",
+        "denials",
+    }
+)
+
+
+def _is_meaningful_content(val: Any) -> bool:
+    """Check whether a value represents non-empty, substantive deliverable content."""
+    if val is None:
+        return False
+    if isinstance(val, str):
+        cleaned = val.strip()
+        return bool(cleaned) and cleaned.upper() not in _STATUS_WORDS
+    if isinstance(val, (int, float)):
+        return True
+    if isinstance(val, (list, tuple)):
+        return any(_is_meaningful_content(item) for item in val)
+    if isinstance(val, dict):
+        substantive = {k: v for k, v in val.items() if str(k).lower() not in _METADATA_AND_STATUS_KEYS}
+        return any(_is_meaningful_content(v) for v in substantive.values())
+    return False
+
+
+def _has_verifiable_deliverable(resp: dict[str, Any]) -> bool:
+    """Determine whether the response contains a concrete, non-empty deliverable."""
+    for field in ("response", "structured_output", "output", "result"):
+        if field in resp and _is_meaningful_content(resp[field]):
+            return True
+    return False
+
+
 class AntigravityLocalMCPProvider(AgentProvider):
     """Local MCP provider adapter connecting Agent Control to local Antigravity FastMCP."""
 
@@ -673,26 +745,46 @@ class AntigravityLocalMCPProvider(AgentProvider):
                 details={"expected_task_id": expected_task_id, "received_task_id": resp_task_id},
             )
 
-        # 2. Extract tool issues and error history
+        # 2. Extract tool issues, denial actions, and recovery error history
         tool_failures: list[str] = []
         raw_issues = resp.get("tool_failures") or resp.get("tool_issues") or resp.get("issues") or []
         if isinstance(raw_issues, list):
-            tool_failures.extend([str(x) for x in raw_issues])
-        elif isinstance(raw_issues, str) and raw_issues.strip():
-            tool_failures.append(raw_issues)
+            tool_failures.extend([str(x) for x in raw_issues if x])
+        elif isinstance(raw_issues, (str, dict)) and bool(raw_issues):
+            tool_failures.append(str(raw_issues))
 
-        recovery = resp.get("recovery") or {}
+        denied_actions = resp.get("denied_actions") or resp.get("denials") or []
+        if isinstance(denied_actions, list):
+            tool_failures.extend([f"Denied action: {d}" for d in denied_actions if d])
+        elif isinstance(denied_actions, (str, dict)) and bool(denied_actions):
+            tool_failures.append(f"Denied action: {denied_actions}")
+
+        recovery = resp.get("recovery") if isinstance(resp.get("recovery"), dict) else {}
         error_history = recovery.get("error_history") or []
-        for err in error_history:
-            tool_failures.append(f"Historical error: {err}")
+        if isinstance(error_history, list):
+            for err in error_history:
+                if err:
+                    tool_failures.append(f"Historical error: {err}")
+        if (
+            recovery.get("unresolved")
+            or recovery.get("has_unresolved")
+            or str(recovery.get("status", "")).upper() in ("UNRESOLVED", "FAILED", "ERROR")
+        ):
+            tool_failures.append(f"Unresolved recovery state: {recovery}")
 
         # 3. Provider SUCCESS != Acceptance SUCCESS: Closed Mapping
-        SUCCESS_STATUS_WHITELIST = frozenset({"SUCCESS", "COMPLETED", "TURN_COMPLETE"})
         raw_status_val = resp.get("status") if resp.get("status") is not None else resp.get("terminal_status")
+        raw_outcome_val = resp.get("outcome")
         if raw_status_val is None or not str(raw_status_val).strip():
             raw_status = "MISSING_STATUS"
         else:
             raw_status = str(raw_status_val).strip().upper()
+
+        raw_outcome = str(raw_outcome_val).strip().upper() if raw_outcome_val else ""
+
+        is_turn_complete = (raw_status == "TURN_COMPLETE" or raw_outcome == "TURN_COMPLETE")
+        has_deliverable = _has_verifiable_deliverable(resp)
+        has_unresolved_issues = bool(tool_failures)
 
         uncertainty: str | None = None
         acceptance_status: str
@@ -712,18 +804,43 @@ class AntigravityLocalMCPProvider(AgentProvider):
             terminal_status = TerminalStatus.REJECTED_BY_ACCEPTANCE
             acceptance_status = "REJECTED_BY_ACCEPTANCE"
             uncertainty = f"Execution status '{raw_status}' requires review or was rejected upstream"
-        elif raw_status in SUCCESS_STATUS_WHITELIST:
-            # Check inner result status if present
+        elif is_turn_complete:
+            # TURN_COMPLETE only represents turn/protocol boundary completion, NOT acceptance.
+            # 1. TURN_COMPLETE + 有实际可验收 deliverable + recovery/issues 干净 -> SUCCESS
+            # 2. TURN_COMPLETE + 没有 deliverable -> REJECTED_BY_ACCEPTANCE
+            # 3. TURN_COMPLETE + 任意 unresolved tool/recovery/denial -> REJECTED_BY_ACCEPTANCE
             inner_res = resp.get("result")
             inner_status = None
             if isinstance(inner_res, dict) and inner_res.get("status") is not None:
                 inner_status = str(inner_res.get("status")).strip().upper()
 
-            if inner_status and inner_status not in SUCCESS_STATUS_WHITELIST:
+            if inner_status and inner_status not in ("SUCCESS", "COMPLETED", "TURN_COMPLETE"):
+                terminal_status = TerminalStatus.REJECTED_BY_ACCEPTANCE
+                acceptance_status = "REJECTED_BY_ACCEPTANCE"
+                uncertainty = f"TURN_COMPLETE inner result status '{inner_status}' is not in success whitelist"
+            elif has_unresolved_issues:
+                terminal_status = TerminalStatus.REJECTED_BY_ACCEPTANCE
+                acceptance_status = "REJECTED_BY_ACCEPTANCE"
+                uncertainty = f"TURN_COMPLETE contains {len(tool_failures)} unresolved tool/recovery/denial failure(s)"
+            elif not has_deliverable:
+                terminal_status = TerminalStatus.REJECTED_BY_ACCEPTANCE
+                acceptance_status = "REJECTED_BY_ACCEPTANCE"
+                uncertainty = "TURN_COMPLETE rejected: missing verifiable deliverable output (fail closed)"
+            else:
+                terminal_status = TerminalStatus.SUCCESS
+                acceptance_status = "ACCEPTED"
+        elif raw_status in ("SUCCESS", "COMPLETED"):
+            # Normal SUCCESS/COMPLETED
+            inner_res = resp.get("result")
+            inner_status = None
+            if isinstance(inner_res, dict) and inner_res.get("status") is not None:
+                inner_status = str(inner_res.get("status")).strip().upper()
+
+            if inner_status and inner_status not in ("SUCCESS", "COMPLETED", "TURN_COMPLETE"):
                 terminal_status = TerminalStatus.REJECTED_BY_ACCEPTANCE
                 acceptance_status = "REJECTED_BY_ACCEPTANCE"
                 uncertainty = f"Inner result status '{inner_status}' is not in success whitelist"
-            elif tool_failures:
+            elif has_unresolved_issues:
                 # Model self SUCCESS with unresolved tool issues rejected by acceptance
                 terminal_status = TerminalStatus.REJECTED_BY_ACCEPTANCE
                 acceptance_status = "REJECTED_BY_ACCEPTANCE"

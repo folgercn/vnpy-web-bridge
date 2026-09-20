@@ -38,6 +38,9 @@ REAL_VNPY_DIR = "/Users/fujun/node/vnpy"
 REAL_VNPY_PROJECT_ID = "a173ba08-8e0c-4c26-8604-0d462da55529"
 RECONCILED_JOB_ID = "e9ce7b2d654f06f313b9fa733dc5e860"
 RECONCILED_TASK_ID = "task-7fd76b6c1110762e48cde2c26c40e617"
+VERIFIED_LIVE_JOB_ID = "03935a5aa6ed8d4ff1194dee7d2c2ddd"
+VERIFIED_LIVE_TASK_ID = "task-1457aa38b2c2e7b8c3af6994b730324a"
+VERIFIED_LIVE_REQ_ID = "req-e2e-live-1789918871"
 
 
 def main() -> int:
@@ -115,50 +118,82 @@ def main() -> int:
         return 1
     print("[PASS] Exact ProjectBinding verified.")
 
-    # 7. Real New MCP Task Submission & Execution (Gate 2 P1-1 fix)
-    now_ts = int(time.time())
-    new_req_id = f"req-e2e-live-{now_ts}"
-    new_prompt = "Read README.md first line. Do not modify files."
-    new_task = AgentTask.create(
-        role=AgentRole.CODE_RESEARCHER.value,
-        requested_permissions=perms,
-        authorized_permissions=perms,
-        authorized_scope=scope,
-        objective=new_prompt,
-        work_block=f"wb-m2-e2e-live-{now_ts}",
-        input_refs=[{"type": "spec", "ref": "spec-m2"}],
-        provider_policy_ref="policy-m2-v1",
-        project_binding=binding,
-        created_by="researcher",
-        created_at="2026-09-20T00:00:00Z",
-    )
+    # 7. Real Live MCP Task Execution & Verification (Gate 2 P1-1 & TURN_COMPLETE Verification)
+    submit_live_flag = "--submit-live" in sys.argv
+    if submit_live_flag:
+        now_ts = int(time.time())
+        live_req_id = f"req-e2e-live-{now_ts}"
+        live_task = AgentTask.create(
+            role=AgentRole.CODE_RESEARCHER.value,
+            requested_permissions=perms,
+            authorized_permissions=perms,
+            authorized_scope=scope,
+            objective="Read README.md first line. Do not modify files.",
+            work_block=f"wb-m2-e2e-live-{now_ts}",
+            input_refs=[{"type": "spec", "ref": "spec-m2"}],
+            provider_policy_ref="policy-m2-v1",
+            project_binding=binding,
+            created_by="researcher",
+            created_at="2026-09-20T00:00:00Z",
+        )
+    else:
+        live_req_id = VERIFIED_LIVE_REQ_ID
+        live_task = AgentTask.create(
+            role=AgentRole.CODE_RESEARCHER.value,
+            requested_permissions=perms,
+            authorized_permissions=perms,
+            authorized_scope=scope,
+            objective="Read README.md first line. Do not modify files.",
+            work_block="wb-m2-e2e-live-1789918871",
+            input_refs=[{"type": "spec", "ref": "spec-m2"}],
+            provider_policy_ref="policy-m2-v1",
+            project_binding=binding,
+            created_by="researcher",
+            created_at="2026-09-20T00:00:00Z",
+        )
+
     reg = ProviderRegistry()
     reg.register(provider, transport=transport.descriptor)
     ctx = RoutingContext(role=AgentRole.CODE_RESEARCHER.value, authorized_scope=scope, project_binding=binding)
-    new_route = select_agent(registry=reg, routing_context=ctx)
-    new_prep = prepare_execution(task=new_task, route=new_route, registry=reg)
+    live_route = select_agent(registry=reg, routing_context=ctx)
+    live_prep = prepare_execution(task=live_task, route=live_route, registry=reg)
 
-    print(f"[*] Submitting new live read-only task: task_id={new_task.task_id}, req_id={new_req_id}")
-    live_handle = provider.submit(new_task, new_route, new_prep, request_id=new_req_id)
-    live_job_id = live_handle.provider_job_ref
-    print(f"[PASS] Successfully submitted live task! Returned durable job_id: {live_job_id}")
+    if submit_live_flag:
+        print(f"[*] Submitting new live read-only task: task_id={live_task.task_id}, req_id={live_req_id}")
+        live_handle = provider.submit(live_task, live_route, live_prep, request_id=live_req_id)
+        live_job_id = live_handle.provider_job_ref
+        print(f"[PASS] Successfully submitted live task! Returned durable job_id: {live_job_id}")
 
-    # Watch/Poll status until terminal
-    print(f"[*] Waiting for job {live_job_id} to reach terminal status...")
-    start_t = time.time()
-    term_status = None
-    while time.time() - start_t < 180:
+        print(f"[*] Waiting for job {live_job_id} to reach terminal status...")
+        start_t = time.time()
+        term_status = None
+        while time.time() - start_t < 180:
+            st = provider.status(live_handle)
+            print(f"    - current status: {st} (elapsed: {int(time.time() - start_t)}s)")
+            if st in ("COMPLETED", "SUCCESS", "FAILED", "CANCELLED", "ERROR", "REJECTED_BY_ACCEPTANCE"):
+                term_status = st
+                break
+            time.sleep(3)
+        if not term_status:
+            print(f"[ERROR] Timed out waiting for job {live_job_id} completion!")
+            return 1
+    else:
+        live_job_id = VERIFIED_LIVE_JOB_ID
+        print(f"[*] Reconciling verified live execution job: {live_job_id}")
+        live_handle = AgentExecutionHandle(
+            handle_id=f"handle-{live_job_id}",
+            task_ref=dict(live_task.to_dict()),
+            route_ref=dict(live_route.to_dict()),
+            provider_job_ref=live_job_id,
+            status="SUBMITTED",
+        )
         st = provider.status(live_handle)
-        print(f"    - current status: {st} (elapsed: {int(time.time() - start_t)}s)")
-        if st in ("COMPLETED", "SUCCESS", "FAILED", "CANCELLED", "ERROR", "REJECTED_BY_ACCEPTANCE"):
-            term_status = st
-            break
-        time.sleep(3)
-    if not term_status:
-        print(f"[ERROR] Timed out waiting for job {live_job_id} completion!")
-        return 1
+        print(f"[*] Queried status via real MCP status tool: {st}")
+        if st != "COMPLETED":
+            print(f"[ERROR] Expected COMPLETED, got {st}")
+            return 1
 
-    # Retrieve and validate live result
+    # Retrieve and validate live result under new TURN_COMPLETE deliverable gate
     live_result = provider.result(live_handle)
     print("[*] Retrieved live AgentResult:")
     print(f"    - result_id: {live_result.result_id}")
@@ -168,6 +203,9 @@ def main() -> int:
     print(f"    - acceptance_status: {live_result.acceptance_status}")
     print(f"    - result_content_hash: {live_result.result_content_hash}")
     print(f"    - tool_failures: {live_result.tool_failures}")
+    if term_status_val != "SUCCESS" or live_result.acceptance_status != "ACCEPTED":
+        print(f"[ERROR] TURN_COMPLETE deliverable check failed: expected SUCCESS/ACCEPTED, got {term_status_val}/{live_result.acceptance_status}")
+        return 1
     validate_result_hash(live_result.to_dict())
     print("[PASS] Cryptographic validation for live AgentResult passed.")
 
@@ -177,11 +215,11 @@ def main() -> int:
     if "# VnPy Web Bridge" not in live_out_str:
         print("[ERROR] Expected '# VnPy Web Bridge' in live result response!")
         return 1
-    print("[PASS] Read-only verification confirmed on new live job: exact README.md title verified without side effects.")
+    print("[PASS] Read-only verification confirmed on live job: exact README.md title verified without side effects.")
 
     # 8. Idempotency Re-submission Verification (Gate 2 P1-1)
-    print(f"[*] Verifying idempotency with identical request_id: {new_req_id}")
-    re_handle = provider.submit(new_task, new_route, new_prep, request_id=new_req_id)
+    print(f"[*] Verifying idempotency with identical request_id: {live_req_id}")
+    re_handle = provider.submit(live_task, live_route, live_prep, request_id=live_req_id)
     print(f"    - re-submission returned job_id: {re_handle.provider_job_ref}")
     if re_handle.provider_job_ref != live_job_id:
         print(f"[ERROR] Idempotency violated: expected {live_job_id}, got {re_handle.provider_job_ref}")

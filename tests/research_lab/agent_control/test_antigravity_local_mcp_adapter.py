@@ -1138,7 +1138,7 @@ class TestAntigravityLocalMCPAdapter(unittest.TestCase):
         for white_status in ("SUCCESS", "COMPLETED", "TURN_COMPLETE"):
             def fake_caller_ok(op: str, args: dict, ws=white_status) -> Any:
                 if op == "result":
-                    return {"job_id": "job-test-closed-map", "status": ws, "output": "ok"}
+                    return {"job_id": "job-test-closed-map", "status": ws, "output": "verified deliverable content"}
                 return {}
 
             transport = LocalMCPTransport(
@@ -1200,6 +1200,104 @@ class TestAntigravityLocalMCPAdapter(unittest.TestCase):
         self.assertIsNotNone(snap2.quota_windows[0]["remaining_fraction"])
         self.assertEqual(snap2.quota_windows[0]["remaining_fraction"], 0)
         self.assertEqual(snap2.quota_windows[1]["remaining_fraction"], 0)
+
+    # 45. TURN_COMPLETE requires verifiable deliverable and clean recovery (P1 fix)
+    def test_45_turn_complete_deliverable_and_recovery_acceptance(self) -> None:
+        handle = AgentExecutionHandle(
+            handle_id="handle-j45",
+            task_ref={"task_id": "task-test-45"},
+            route_ref={"route_id": "route-test-45"},
+            provider_job_ref="job-test-45",
+            status="RUNNING",
+        )
+
+        def make_provider(resp_payload: dict[str, Any]) -> AntigravityLocalMCPProvider:
+            def fake_caller(op: str, args: dict) -> Any:
+                if op == "result":
+                    payload = dict(resp_payload)
+                    payload.setdefault("job_id", "job-test-45")
+                    return payload
+                return {}
+
+            transport = LocalMCPTransport(
+                tool_catalog=list(ALL_MCP_OPERATIONS),
+                tool_caller=fake_caller,
+            )
+            return AntigravityLocalMCPProvider(transport=transport)
+
+        # 1. TURN_COMPLETE + meaningful deliverable + clean recovery -> SUCCESS
+        prov1 = make_provider({"status": "TURN_COMPLETE", "output": "Substantive research output"})
+        res1 = prov1.result(handle)
+        self.assertEqual(res1.terminal_status, TerminalStatus.SUCCESS)
+        self.assertEqual(res1.acceptance_status, "ACCEPTED")
+
+        # 2. TURN_COMPLETE + missing deliverable (status only) -> REJECTED_BY_ACCEPTANCE
+        prov2 = make_provider({"status": "TURN_COMPLETE"})
+        res2 = prov2.result(handle)
+        self.assertEqual(res2.terminal_status, TerminalStatus.REJECTED_BY_ACCEPTANCE)
+        self.assertEqual(res2.acceptance_status, "REJECTED_BY_ACCEPTANCE")
+
+        # 3. TURN_COMPLETE + empty string deliverable -> REJECTED_BY_ACCEPTANCE
+        prov3 = make_provider({"status": "TURN_COMPLETE", "output": "   "})
+        res3 = prov3.result(handle)
+        self.assertEqual(res3.terminal_status, TerminalStatus.REJECTED_BY_ACCEPTANCE)
+
+        # 4. TURN_COMPLETE + empty dict / list deliverable -> REJECTED_BY_ACCEPTANCE
+        prov4a = make_provider({"status": "TURN_COMPLETE", "output": {}})
+        self.assertEqual(prov4a.result(handle).terminal_status, TerminalStatus.REJECTED_BY_ACCEPTANCE)
+        prov4b = make_provider({"status": "TURN_COMPLETE", "output": []})
+        self.assertEqual(prov4b.result(handle).terminal_status, TerminalStatus.REJECTED_BY_ACCEPTANCE)
+        prov4c = make_provider({"status": "TURN_COMPLETE", "output": ["", "  "]})
+        self.assertEqual(prov4c.result(handle).terminal_status, TerminalStatus.REJECTED_BY_ACCEPTANCE)
+
+        # 5. TURN_COMPLETE + status word only (truthy shell / self-reported success) -> REJECTED_BY_ACCEPTANCE
+        prov5a = make_provider({"status": "TURN_COMPLETE", "output": "SUCCESS"})
+        self.assertEqual(prov5a.result(handle).terminal_status, TerminalStatus.REJECTED_BY_ACCEPTANCE)
+        prov5b = make_provider({"status": "TURN_COMPLETE", "result": {"status": "SUCCESS"}})
+        self.assertEqual(prov5b.result(handle).terminal_status, TerminalStatus.REJECTED_BY_ACCEPTANCE)
+
+        # 6. TURN_COMPLETE + deliverable present but has tool_failures -> REJECTED_BY_ACCEPTANCE
+        prov6 = make_provider({
+            "status": "TURN_COMPLETE",
+            "output": "Substantive output",
+            "tool_failures": ["Tool read_file failed"],
+        })
+        res6 = prov6.result(handle)
+        self.assertEqual(res6.terminal_status, TerminalStatus.REJECTED_BY_ACCEPTANCE)
+        self.assertEqual(len(res6.tool_failures), 1)
+
+        # 7. TURN_COMPLETE + deliverable present but has recovery.error_history -> REJECTED_BY_ACCEPTANCE
+        prov7 = make_provider({
+            "status": "TURN_COMPLETE",
+            "output": "Substantive output",
+            "recovery": {"error_history": ["Connection dropped once"]},
+        })
+        res7 = prov7.result(handle)
+        self.assertEqual(res7.terminal_status, TerminalStatus.REJECTED_BY_ACCEPTANCE)
+        self.assertIn("Historical error", res7.tool_failures[0])
+
+        # 8. TURN_COMPLETE + deliverable present but recovery.unresolved -> REJECTED_BY_ACCEPTANCE
+        prov8 = make_provider({
+            "status": "TURN_COMPLETE",
+            "output": "Substantive output",
+            "recovery": {"unresolved": True},
+        })
+        res8 = prov8.result(handle)
+        self.assertEqual(res8.terminal_status, TerminalStatus.REJECTED_BY_ACCEPTANCE)
+
+        # 9. TURN_COMPLETE + deliverable present but has denied_actions -> REJECTED_BY_ACCEPTANCE
+        prov9 = make_provider({
+            "status": "TURN_COMPLETE",
+            "output": "Substantive output",
+            "denied_actions": ["execute_shell"],
+        })
+        res9 = prov9.result(handle)
+        self.assertEqual(res9.terminal_status, TerminalStatus.REJECTED_BY_ACCEPTANCE)
+        self.assertIn("Denied action", res9.tool_failures[0])
+
+        # 10. Outcome is turn_complete with no deliverable -> REJECTED_BY_ACCEPTANCE
+        prov10 = make_provider({"status": "COMPLETED", "outcome": "turn_complete"})
+        self.assertEqual(prov10.result(handle).terminal_status, TerminalStatus.REJECTED_BY_ACCEPTANCE)
 
 
 if __name__ == "__main__":
