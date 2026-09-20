@@ -1,4 +1,4 @@
-"""Alpha Discovery MVP: AlphaHypothesis Contract, Normalization and Dedup."""
+"""Alpha Discovery MVP: AlphaHypothesis and Cheap Screening Pipeline."""
 
 from research_lab.alpha_discovery.hypothesis import (
     AlphaHypothesis,
@@ -11,10 +11,39 @@ from research_lab.alpha_discovery.hypothesis import (
     is_valid_revision,
     validate_hypothesis,
 )
+from research_lab.alpha_discovery.planner import ScreeningPlanner
+from research_lab.alpha_discovery.screening import (
+    MethodExecutionResult,
+    ScreeningPipeline,
+    ScreeningPipelineReport,
+    SequentialScreeningExecutor,
+    build_protocol_v2_spec,
+    build_protocol_v2_task,
+)
+from research_lab.alpha_discovery.screening_plan import (
+    DatasetRequirements,
+    PlanProvenance,
+    ScreeningMethodRequest,
+    ScreeningPlan,
+    compute_plan_content_hash,
+    validate_screening_plan,
+)
 
 __all__ = [
     "AlphaHypothesis",
+    "DatasetRequirements",
+    "MethodExecutionResult",
+    "PlanProvenance",
+    "ScreeningMethodRequest",
+    "ScreeningPipeline",
+    "ScreeningPipelineReport",
+    "ScreeningPlan",
+    "ScreeningPlanner",
+    "SequentialScreeningExecutor",
+    "build_protocol_v2_spec",
+    "build_protocol_v2_task",
     "compute_hypothesis_content_hash",
+    "compute_plan_content_hash",
     "compute_scientific_identity_hash",
     "compute_semantic_hash",
     "compute_structured_key",
@@ -22,4 +51,5 @@ __all__ = [
     "is_potentially_related",
     "is_valid_revision",
     "validate_hypothesis",
+    "validate_screening_plan",
 ]
