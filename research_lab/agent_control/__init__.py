@@ -64,6 +64,7 @@ from research_lab.agent_control.provider import (
     AgentProvider,
     ProviderAvailability,
 )
+from research_lab.agent_control.providers import AntigravityLocalMCPProvider
 from research_lab.agent_control.registry import ProviderRegistry
 from research_lab.agent_control.roles import (
     ALL_ROLES,
@@ -88,10 +89,16 @@ from research_lab.agent_control.transport import (
     ProviderConnectionDescriptor,
     ProviderTransportKind,
 )
+from research_lab.agent_control.transports import (
+    CRITICAL_MCP_TOOLS,
+    LocalMCPTransport,
+    MCPToolResolver,
+)
 
 __all__ = [
     "ALL_PERMISSIONS",
     "ALL_ROLES",
+    "CRITICAL_MCP_TOOLS",
     "DEFAULT_ROLE_POLICIES",
     "HARD_INVARIANT_FORBIDDEN_PERMISSIONS",
     "HASH_PROFILE",
@@ -108,8 +115,11 @@ __all__ = [
     "AgentRoute",
     "AgentTask",
     "AgentUsageSnapshot",
+    "AntigravityLocalMCPProvider",
     "AppendOnlyAuditTrail",
     "ExecutionPreparation",
+    "LocalMCPTransport",
+    "MCPToolResolver",
     "PermissionDeniedError",
     "ProjectBinding",
     "ProjectBindingError",
