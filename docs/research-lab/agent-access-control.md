@@ -70,7 +70,7 @@ class AgentProvider(Protocol):
 `AgentRoute` 记录将抽象 `role` 解析为具体 `provider` + `resolved_model` 的可审计决策事实：
 
 - `route_id`: 确定性摘要 `route-{sha256[:32]}`
-- `authorization_scope_ref`: 必须严格绑定对应的 `AgentPermissionScope.scope_id`
+- `authorization_scope_ref`: 必须严格绑定可独立验真的 `AgentPermissionScope` 完整字典（包含 `scope_id`, `scope_content_hash`, `role`, `authorized_permissions`, `project_binding` 等），**绝对禁止**传入伪造字符串（如 `scope-mock-valid-001`）或占位符绕过
 - `role`: 业务角色
 - `provider`: 选定的后端名称
 - `resolved_model`: 具体的模型版本（如 `gemini-3.8-flash-high`）
@@ -90,7 +90,10 @@ class AgentProvider(Protocol):
 `AgentTask` 代表一次自包含的研究工作任务：
 
 - `task_id`: **确定性身份**。由核心科学业务字段（`authorization_scope_ref`, `role`, `objective`, `work_block`, `input_refs`, `project_binding`, `requested_permissions`, `authorized_permissions`, `delegation_depth`, `parent_task_ref`, `provider_policy_ref`）通过 `v2.digest` 确定性计算，绝对不依赖系统时间 `now()` 或随机 UUID。
-- `authorization_scope_ref`: 必须绑定不可变、可验真的 `AgentPermissionScope.scope_id`。
+- `authorization_scope_ref`: 必须绑定不可变、可独立验真的 `AgentPermissionScope` 字典（严禁伪造字符串）。在 `__post_init__` 与 `create()` 中强制校验：
+  - 独立验真 `validate_scope_hash(scope_ref)`
+  - 校验确定性 `scope_id`
+  - 校验 `role`、`authorized_permissions` 与 `project_binding` 严格一致
 - **直接构造与提权防御**：
   - `authorized_permissions ⊆ requested_permissions ⊆ role_policy.allowed_permissions`
   - 任何试图直接调用构造函数或 `create()` 塞入未经授权权限（如 `invoke_critic`, `execute_screening`）的直构绕过均被无条件拦截并抛出 `PermissionDeniedError`。

@@ -107,6 +107,7 @@ def test_complete_agent_lifecycle_contract_flow() -> None:
     auth_scope = authorize(
         role=AgentRole.ALPHA_GENERATOR.value,
         requested_permissions=requested_perms,
+        project_binding=binding,
     )
     assert auth_scope.is_authorized is True
     assert set(auth_scope.authorized_permissions) == set(requested_perms)
@@ -127,7 +128,7 @@ def test_complete_agent_lifecycle_contract_flow() -> None:
         created_at="2026-09-20T12:00:00Z",
     )
     validate_task_hash(task.to_dict())
-    assert task.authorization_scope_ref == auth_scope.scope_id
+    assert task.authorization_scope_ref == auth_scope.to_dict()
 
     # 3. Router selects provider and model (Provider-neutral routing)
     provider = MockLifecycleProvider()
@@ -141,7 +142,7 @@ def test_complete_agent_lifecycle_contract_flow() -> None:
     assert route.provider == "antigravity_stub"
     assert route.resolved_model == "gemini-3.8-flash-high"
     assert route.role == AgentRole.ALPHA_GENERATOR.value
-    assert route.authorization_scope_ref == auth_scope.scope_id
+    assert route.authorization_scope_ref == auth_scope.to_dict()
     assert route.authorized_permissions == auth_scope.authorized_permissions
 
     # 4. Provider execution
@@ -191,6 +192,7 @@ def test_role_provider_model_decoupling() -> None:
     auth_scope = authorize(
         role=role,
         requested_permissions=[AgentPermission.READ_RESEARCH_MEMORY.value],
+        project_binding=binding,
     )
 
     provider1 = MockLifecycleProvider(name="provider_alpha", default_model="model-fast")
@@ -214,8 +216,8 @@ def test_role_provider_model_decoupling() -> None:
     assert route1.resolved_model == "model-fast"
     assert route2.provider == "provider_beta"
     assert route2.resolved_model == "model-deep"
-    assert route1.authorization_scope_ref == auth_scope.scope_id
-    assert route2.authorization_scope_ref == auth_scope.scope_id
+    assert route1.authorization_scope_ref == auth_scope.to_dict()
+    assert route2.authorization_scope_ref == auth_scope.to_dict()
     assert route1.authorized_permissions == (AgentPermission.READ_RESEARCH_MEMORY.value,)
     assert route2.authorized_permissions == (AgentPermission.READ_RESEARCH_MEMORY.value,)
 

@@ -31,6 +31,7 @@ from research_lab.agent_control.contracts import (
 )
 from research_lab.agent_control.errors import (
     PermissionDeniedError,
+    ProjectBindingError,
     ProviderUnavailableError,
 )
 from research_lab.agent_control.permissions import (
@@ -50,6 +51,7 @@ POLICY_VERSION = "2026-09-m0"
 def authorize(
     role: str,
     requested_permissions: Iterable[str],
+    project_binding: ProjectBinding | dict[str, str],
     context: dict[str, Any] | None = None,
     policy: AgentRolePolicy | None = None,
 ) -> AgentPermissionScope:
@@ -60,9 +62,12 @@ def authorize(
     - Unknown permission
     - Hard invariant violation (production_trading, live_trading_authorized)
     - Permission elevation beyond policy allowance
+    Raises ProjectBindingError on:
+    - Missing or invalid project_binding (strict fail-closed)
     """
     validated_role = validate_role(role)
     val_requested = validate_permissions(requested_permissions)
+    validated_binding = validate_project_binding(project_binding)
 
     # Hard invariant check: never allow trading permissions
     enforce_hard_invariants(val_requested)
@@ -98,6 +103,7 @@ def authorize(
         role=validated_role,
         requested_permissions=val_requested,
         authorized_permissions=authorized,
+        project_binding=validated_binding,
         denied_permissions=denied,
         is_authorized=True,
         policy_version=POLICY_VERSION,
@@ -176,6 +182,11 @@ def select_agent(
         raise PermissionDeniedError(
             f"authorized_scope role mismatch: expected '{validated_role}', got '{authorized_scope.role}'",
             details={"role": validated_role, "scope_role": authorized_scope.role},
+        )
+    if dict(authorized_scope.project_binding) != validated_binding.to_dict():
+        raise ProjectBindingError(
+            f"authorized_scope project_binding mismatch: scope={authorized_scope.project_binding}, router={validated_binding.to_dict()}",
+            details={"scope_binding": authorized_scope.project_binding, "router_binding": validated_binding.to_dict()},
         )
 
     if not providers:

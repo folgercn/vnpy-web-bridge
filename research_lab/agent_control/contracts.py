@@ -151,6 +151,7 @@ CORE_SCOPE_IDENTITY_FIELDS = (
     "authorized_permissions",
     "denied_permissions",
     "policy_version",
+    "project_binding",
 )
 
 
@@ -194,6 +195,7 @@ class AgentPermissionScope:
     denied_permissions: tuple[str, ...]
     is_authorized: bool
     policy_version: str
+    project_binding: dict[str, str]
     scope_content_hash: str
     context: dict[str, Any] = field(default_factory=dict)
     schema_version: str = "research_lab.agent_scope.v1"
@@ -206,6 +208,9 @@ class AgentPermissionScope:
         den = validate_permissions(self.denied_permissions)
         enforce_hard_invariants(req)
         enforce_hard_invariants(auth)
+
+        # Validate project binding strictly (fail-closed)
+        validate_project_binding(self.project_binding)
 
         active_policy = DEFAULT_ROLE_POLICIES.get(self.role)
         if active_policy:
@@ -234,6 +239,12 @@ class AgentPermissionScope:
         if not self.scope_id or not self.scope_id.startswith("scope-"):
             raise TamperDetectionError("Invalid or missing scope_id")
 
+        expected_id = compute_scope_deterministic_id(self.to_dict())
+        if self.scope_id != expected_id:
+            raise TamperDetectionError(
+                f"AgentPermissionScope scope_id mismatch: expected {expected_id}, got {self.scope_id}"
+            )
+
         validate_scope_hash(self.to_dict())
 
     @classmethod
@@ -243,6 +254,7 @@ class AgentPermissionScope:
         role: str,
         requested_permissions: list[str],
         authorized_permissions: list[str],
+        project_binding: ProjectBinding | dict[str, str],
         denied_permissions: list[str] | None = None,
         is_authorized: bool = True,
         policy_version: str = "2026-09-m0",
@@ -253,6 +265,9 @@ class AgentPermissionScope:
         val_auth = validate_permissions(authorized_permissions)
         enforce_hard_invariants(val_req)
         enforce_hard_invariants(val_auth)
+
+        validated_binding = validate_project_binding(project_binding)
+        binding_dict = validated_binding.to_dict()
 
         active_policy = DEFAULT_ROLE_POLICIES.get(role)
         if active_policy:
@@ -288,6 +303,7 @@ class AgentPermissionScope:
             "hash_profile": HASH_PROFILE,
             "is_authorized": is_authorized,
             "policy_version": policy_version,
+            "project_binding": binding_dict,
             "requested_permissions": val_req,
             "role": role,
             "schema_version": "research_lab.agent_scope.v1",
@@ -304,6 +320,7 @@ class AgentPermissionScope:
             denied_permissions=tuple(val_den),
             is_authorized=is_authorized,
             policy_version=policy_version,
+            project_binding=binding_dict,
             scope_content_hash=content_hash,
             context=context or {},
             schema_version="research_lab.agent_scope.v1",
@@ -318,6 +335,7 @@ class AgentPermissionScope:
             "hash_profile": self.hash_profile,
             "is_authorized": self.is_authorized,
             "policy_version": self.policy_version,
+            "project_binding": dict(self.project_binding),
             "requested_permissions": list(self.requested_permissions),
             "role": self.role,
             "schema_version": self.schema_version,
@@ -400,7 +418,7 @@ class AgentTask:
     """Immutable Agent task definition with deterministic identity and tamper detection."""
 
     task_id: str
-    authorization_scope_ref: str
+    authorization_scope_ref: dict[str, Any]
     role: str
     requested_permissions: tuple[str, ...]
     authorized_permissions: tuple[str, ...]
@@ -424,9 +442,55 @@ class AgentTask:
         enforce_hard_invariants(req)
         enforce_hard_invariants(auth)
 
-        if not self.authorization_scope_ref or not isinstance(self.authorization_scope_ref, str) or not self.authorization_scope_ref.startswith("scope-"):
+        # Validate ProjectBinding fail-closed
+        validate_project_binding(self.project_binding)
+
+        # 1. Type validation: must be exact verifiable dictionary, string references or placeholders rejected
+        if not isinstance(self.authorization_scope_ref, dict):
             raise TamperDetectionError(
-                f"Invalid or missing authorization_scope_ref: '{self.authorization_scope_ref}'"
+                f"authorization_scope_ref must be an exact verifiable scope dictionary, got {type(self.authorization_scope_ref).__name__}; "
+                f"string references and mock placeholders are rejected: '{self.authorization_scope_ref}'"
+            )
+
+        # 2. Tamper-detection validation on scope content hash itself
+        validate_scope_hash(self.authorization_scope_ref)
+
+        # 3. Deterministic identity verification
+        expected_scope_id = compute_scope_deterministic_id(self.authorization_scope_ref)
+        if self.authorization_scope_ref.get("scope_id") != expected_scope_id:
+            raise TamperDetectionError(
+                f"authorization_scope_ref scope_id mismatch: expected {expected_scope_id}, got {self.authorization_scope_ref.get('scope_id')}"
+            )
+
+        # 4. Consistency: role
+        if self.authorization_scope_ref.get("role") != self.role:
+            raise PermissionDeniedError(
+                f"authorization_scope_ref role mismatch: scope={self.authorization_scope_ref.get('role')}, task={self.role}",
+                details={"scope_role": self.authorization_scope_ref.get("role"), "target_role": self.role},
+            )
+
+        # 5. Consistency: authorized_permissions exact match
+        scope_auth = tuple(self.authorization_scope_ref.get("authorized_permissions") or ())
+        if tuple(self.authorized_permissions) != scope_auth:
+            raise PermissionDeniedError(
+                f"AgentTask authorized_permissions mismatch with authorization_scope_ref: task={self.authorized_permissions}, scope={scope_auth}",
+                details={"task_authorized": self.authorized_permissions, "scope_authorized": scope_auth},
+            )
+
+        # 6. Consistency: requested_permissions superset
+        scope_req = set(self.authorization_scope_ref.get("requested_permissions") or ())
+        if not set(self.authorized_permissions).issubset(scope_req):
+            raise PermissionDeniedError(
+                "AgentTask authorized_permissions contains unrequested permissions according to authorization_scope_ref"
+            )
+
+        # 7. Consistency: project_binding match
+        scope_binding = self.authorization_scope_ref.get("project_binding")
+        if not scope_binding or dict(scope_binding) != dict(self.project_binding):
+            raise ProjectBindingError(
+                f"ProjectBinding mismatch between AgentTask and authorization_scope_ref: "
+                f"task={self.project_binding}, scope={scope_binding}",
+                details={"task_binding": self.project_binding, "scope_binding": scope_binding},
             )
 
         # Validate least privilege subset: authorized ⊆ requested
@@ -464,9 +528,6 @@ class AgentTask:
                     details={"delegation_depth": self.delegation_depth, "parent_task_ref": self.parent_task_ref},
                 )
 
-        # Validate ProjectBinding fail-closed
-        validate_project_binding(self.project_binding)
-
         # Validate tamper detection
         validate_task_hash(self.to_dict())
 
@@ -484,8 +545,8 @@ class AgentTask:
         project_binding: ProjectBinding | dict[str, str],
         created_by: str,
         created_at: str,
-        authorization_scope_ref: str | None = None,
         authorized_scope: AgentPermissionScope | None = None,
+        authorization_scope_ref: dict[str, Any] | None = None,
         delegation_depth: int = 0,
         parent_task_ref: dict[str, str] | None = None,
     ) -> AgentTask:
@@ -495,23 +556,26 @@ class AgentTask:
         enforce_hard_invariants(val_req)
         enforce_hard_invariants(val_auth)
 
+        validated_binding = validate_project_binding(project_binding)
+        binding_dict = validated_binding.to_dict()
+
         if authorized_scope is not None:
-            validate_scope_hash(authorized_scope.to_dict())
-            if authorized_scope.role != role:
+            if not isinstance(authorized_scope, AgentPermissionScope):
                 raise PermissionDeniedError(
-                    f"authorized_scope role mismatch: scope={authorized_scope.role}, task={role}"
+                    f"authorized_scope must be an instance of AgentPermissionScope, got {type(authorized_scope).__name__}"
                 )
-            if tuple(val_auth) != authorized_scope.authorized_permissions:
-                raise PermissionDeniedError(
-                    f"authorized_permissions mismatch with authorized_scope: task={val_auth}, scope={authorized_scope.authorized_permissions}"
+            scope_ref = authorized_scope.to_dict()
+        elif authorization_scope_ref is not None:
+            if not isinstance(authorization_scope_ref, dict):
+                raise TamperDetectionError(
+                    f"authorization_scope_ref must be an exact verifiable scope dictionary, got {type(authorization_scope_ref).__name__}; "
+                    f"string references and mock placeholders are rejected: '{authorization_scope_ref}'"
                 )
-            scope_ref = authorized_scope.scope_id
+            scope_ref = copy.deepcopy(authorization_scope_ref)
         else:
-            if not authorization_scope_ref:
-                raise PermissionDeniedError(
-                    "AgentTask requires authorization_scope_ref or authorized_scope; cannot be empty"
-                )
-            scope_ref = authorization_scope_ref
+            raise PermissionDeniedError(
+                "AgentTask requires authorized_scope (AgentPermissionScope) or authorization_scope_ref (dict); cannot be empty"
+            )
 
         active_policy = DEFAULT_ROLE_POLICIES.get(role)
         if active_policy:
@@ -530,11 +594,8 @@ class AgentTask:
                 details={"role": role, "unrequested_permissions": elevation},
             )
 
-        validated_binding = validate_project_binding(project_binding)
-        binding_dict = validated_binding.to_dict()
-
         raw = {
-            "authorization_scope_ref": scope_ref,
+            "authorization_scope_ref": _clean_for_canonical(scope_ref),
             "authorized_permissions": val_auth,
             "created_at": created_at,
             "created_by": created_by,
@@ -576,7 +637,7 @@ class AgentTask:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "authorization_scope_ref": self.authorization_scope_ref,
+            "authorization_scope_ref": dict(self.authorization_scope_ref),
             "authorized_permissions": list(self.authorized_permissions),
             "created_at": self.created_at,
             "created_by": self.created_by,
@@ -638,7 +699,7 @@ class AgentRoute:
     """Auditable routing decision resolving an abstract role to a neutral provider and model."""
 
     route_id: str
-    authorization_scope_ref: str
+    authorization_scope_ref: dict[str, Any]
     role: str
     provider: str
     resolved_model: str
@@ -656,9 +717,55 @@ class AgentRoute:
         auth = validate_permissions(self.authorized_permissions)
         enforce_hard_invariants(auth)
 
-        if not self.authorization_scope_ref or not isinstance(self.authorization_scope_ref, str) or not self.authorization_scope_ref.startswith("scope-"):
+        # Validate project binding fail-closed
+        validate_project_binding(self.project_binding)
+
+        # 1. Type validation: must be exact verifiable dictionary, string references or placeholders rejected
+        if not isinstance(self.authorization_scope_ref, dict):
             raise TamperDetectionError(
-                f"Invalid or missing authorization_scope_ref: '{self.authorization_scope_ref}'"
+                f"authorization_scope_ref must be an exact verifiable scope dictionary, got {type(self.authorization_scope_ref).__name__}; "
+                f"string references and mock placeholders are rejected: '{self.authorization_scope_ref}'"
+            )
+
+        # 2. Tamper-detection validation on scope content hash itself
+        validate_scope_hash(self.authorization_scope_ref)
+
+        # 3. Deterministic identity verification
+        expected_scope_id = compute_scope_deterministic_id(self.authorization_scope_ref)
+        if self.authorization_scope_ref.get("scope_id") != expected_scope_id:
+            raise TamperDetectionError(
+                f"authorization_scope_ref scope_id mismatch: expected {expected_scope_id}, got {self.authorization_scope_ref.get('scope_id')}"
+            )
+
+        # 4. Consistency: role
+        if self.authorization_scope_ref.get("role") != self.role:
+            raise PermissionDeniedError(
+                f"authorization_scope_ref role mismatch: scope={self.authorization_scope_ref.get('role')}, route={self.role}",
+                details={"scope_role": self.authorization_scope_ref.get("role"), "target_role": self.role},
+            )
+
+        # 5. Consistency: authorized_permissions exact match
+        scope_auth = tuple(self.authorization_scope_ref.get("authorized_permissions") or ())
+        if tuple(self.authorized_permissions) != scope_auth:
+            raise PermissionDeniedError(
+                f"AgentRoute authorized_permissions mismatch with authorization_scope_ref: route={self.authorized_permissions}, scope={scope_auth}",
+                details={"route_authorized": self.authorized_permissions, "scope_authorized": scope_auth},
+            )
+
+        # 6. Consistency: requested_permissions superset
+        scope_req = set(self.authorization_scope_ref.get("requested_permissions") or ())
+        if not set(self.authorized_permissions).issubset(scope_req):
+            raise PermissionDeniedError(
+                "AgentRoute authorized_permissions contains unrequested permissions according to authorization_scope_ref"
+            )
+
+        # 7. Consistency: project_binding match
+        scope_binding = self.authorization_scope_ref.get("project_binding")
+        if not scope_binding or dict(scope_binding) != dict(self.project_binding):
+            raise ProjectBindingError(
+                f"ProjectBinding mismatch between AgentRoute and authorization_scope_ref: "
+                f"route={self.project_binding}, scope={scope_binding}",
+                details={"route_binding": self.project_binding, "scope_binding": scope_binding},
             )
 
         active_policy = DEFAULT_ROLE_POLICIES.get(self.role)
@@ -671,7 +778,6 @@ class AgentRoute:
                     details={"role": self.role, "unauthorized_permissions": unauthorized},
                 )
 
-        validate_project_binding(self.project_binding)
         validate_route_hash(self.to_dict())
 
     @classmethod
@@ -686,30 +792,33 @@ class AgentRoute:
         usage_snapshot_ref: str | None,
         project_binding: ProjectBinding | dict[str, str],
         authorized_permissions: list[str],
-        authorization_scope_ref: str | None = None,
         authorized_scope: AgentPermissionScope | None = None,
+        authorization_scope_ref: dict[str, Any] | None = None,
     ) -> AgentRoute:
         validate_role(role)
         val_auth = validate_permissions(authorized_permissions)
         enforce_hard_invariants(val_auth)
 
+        validated_binding = validate_project_binding(project_binding)
+        binding_dict = validated_binding.to_dict()
+
         if authorized_scope is not None:
-            validate_scope_hash(authorized_scope.to_dict())
-            if authorized_scope.role != role:
+            if not isinstance(authorized_scope, AgentPermissionScope):
                 raise PermissionDeniedError(
-                    f"authorized_scope role mismatch: scope={authorized_scope.role}, route={role}"
+                    f"authorized_scope must be an instance of AgentPermissionScope, got {type(authorized_scope).__name__}"
                 )
-            if tuple(val_auth) != authorized_scope.authorized_permissions:
-                raise PermissionDeniedError(
-                    f"authorized_permissions mismatch with authorized_scope: route={val_auth}, scope={authorized_scope.authorized_permissions}"
+            scope_dict = authorized_scope.to_dict()
+        elif authorization_scope_ref is not None:
+            if not isinstance(authorization_scope_ref, dict):
+                raise TamperDetectionError(
+                    f"authorization_scope_ref must be an exact verifiable scope dictionary, got {type(authorization_scope_ref).__name__}; "
+                    f"string references and mock placeholders are rejected: '{authorization_scope_ref}'"
                 )
-            scope_ref = authorized_scope.scope_id
+            scope_dict = copy.deepcopy(authorization_scope_ref)
         else:
-            if not authorization_scope_ref:
-                raise PermissionDeniedError(
-                    "AgentRoute requires authorization_scope_ref or authorized_scope; cannot be empty"
-                )
-            scope_ref = authorization_scope_ref
+            raise PermissionDeniedError(
+                "AgentRoute requires authorized_scope (AgentPermissionScope) or authorization_scope_ref (dict); cannot be empty"
+            )
 
         active_policy = DEFAULT_ROLE_POLICIES.get(role)
         if active_policy:
@@ -721,11 +830,8 @@ class AgentRoute:
                     details={"role": role, "unauthorized_permissions": unauthorized},
                 )
 
-        validated_binding = validate_project_binding(project_binding)
-        binding_dict = validated_binding.to_dict()
-
         raw = {
-            "authorization_scope_ref": scope_ref,
+            "authorization_scope_ref": _clean_for_canonical(scope_dict),
             "authorized_permissions": val_auth,
             "hash_profile": HASH_PROFILE,
             "policy_version": policy_version,
@@ -743,7 +849,7 @@ class AgentRoute:
 
         return cls(
             route_id=route_id,
-            authorization_scope_ref=scope_ref,
+            authorization_scope_ref=scope_dict,
             role=role,
             provider=provider,
             resolved_model=resolved_model,
@@ -759,7 +865,7 @@ class AgentRoute:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "authorization_scope_ref": self.authorization_scope_ref,
+            "authorization_scope_ref": dict(self.authorization_scope_ref),
             "authorized_permissions": list(self.authorized_permissions),
             "hash_profile": self.hash_profile,
             "policy_version": self.policy_version,

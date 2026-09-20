@@ -114,6 +114,7 @@ class DummyMockProvider:
 
 # 1. Unknown role
 def test_negative_1_unknown_role() -> None:
+    binding = ProjectBinding(project_id="vnpy-core", workspace_identity="/workspace/vnpy")
     with pytest.raises(PermissionDeniedError) as exc_info:
         validate_role("super_autonomous_trader")
     assert "Unknown role" in str(exc_info.value)
@@ -123,11 +124,13 @@ def test_negative_1_unknown_role() -> None:
         authorize(
             role="unregistered_agent_role",
             requested_permissions=[AgentPermission.READ_RESEARCH_MEMORY.value],
+            project_binding=binding,
         )
 
 
 # 2. Unknown permission
 def test_negative_2_unknown_permission() -> None:
+    binding = ProjectBinding(project_id="vnpy-core", workspace_identity="/workspace/vnpy")
     with pytest.raises(PermissionDeniedError) as exc_info:
         validate_permission("arbitrary_system_root")
     assert "Unknown permission" in str(exc_info.value)
@@ -136,11 +139,13 @@ def test_negative_2_unknown_permission() -> None:
         authorize(
             role=AgentRole.ALPHA_GENERATOR.value,
             requested_permissions=[AgentPermission.READ_RESEARCH_MEMORY.value, "grant_all_access"],
+            project_binding=binding,
         )
 
 
 # 3. Role permission elevation (越权请求)
 def test_negative_3_role_permission_elevation() -> None:
+    binding = ProjectBinding(project_id="vnpy-core", workspace_identity="/workspace/vnpy")
     # alpha_generator attempts to invoke critic or write research memory
     with pytest.raises(PermissionDeniedError) as exc_info:
         authorize(
@@ -149,6 +154,7 @@ def test_negative_3_role_permission_elevation() -> None:
                 AgentPermission.READ_RESEARCH_MEMORY.value,
                 AgentPermission.INVOKE_CRITIC.value,  # Forbidden for alpha_generator
             ],
+            project_binding=binding,
         )
     assert "Permission denied" in str(exc_info.value)
     assert "invoke_critic" in str(exc_info.value)
@@ -156,11 +162,13 @@ def test_negative_3_role_permission_elevation() -> None:
 
 # 4. production_trading = true (Hard Invariant Violation)
 def test_negative_4_production_trading_hard_invariant() -> None:
+    binding = ProjectBinding(project_id="vnpy-core", workspace_identity="/workspace/vnpy")
     # Even if someone constructs a policy or requests production_trading, fail-closed
     with pytest.raises(PermissionDeniedError) as exc_info:
         authorize(
             role=AgentRole.ALPHA_GENERATOR.value,
             requested_permissions=[AgentPermission.PRODUCTION_TRADING.value],
+            project_binding=binding,
         )
     assert "Hard invariant violation" in str(exc_info.value)
 
@@ -175,10 +183,12 @@ def test_negative_4_production_trading_hard_invariant() -> None:
 
 # 5. live_trading_authorized = true (Hard Invariant Violation)
 def test_negative_5_live_trading_authorized_hard_invariant() -> None:
+    binding = ProjectBinding(project_id="vnpy-core", workspace_identity="/workspace/vnpy")
     with pytest.raises(PermissionDeniedError) as exc_info:
         authorize(
             role=AgentRole.CODE_RESEARCHER.value,
             requested_permissions=[AgentPermission.LIVE_TRADING_AUTHORIZED.value],
+            project_binding=binding,
         )
     assert "Hard invariant violation" in str(exc_info.value)
 
@@ -236,6 +246,7 @@ def test_negative_7_unknown_provider() -> None:
     scope = authorize(
         role=AgentRole.DATA_RESEARCHER.value,
         requested_permissions=[AgentPermission.READ_RESEARCH_MEMORY.value],
+        project_binding=binding,
     )
     providers = [DummyMockProvider(supported_roles=(AgentRole.ALPHA_GENERATOR.value,))]
     with pytest.raises(ProviderUnavailableError) as exc_info:
@@ -378,12 +389,16 @@ def test_negative_14_deterministic_task_identity_reproducible() -> None:
         project_id="vnpy-test",
         workspace_identity="/workspace/test",
     )
-    fixed_scope_ref = "scope-mock-fixed-scope-id-12345"
+    scope1 = authorize(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        requested_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
+        project_binding=binding,
+    )
     task1 = AgentTask.create(
         role=AgentRole.ALPHA_GENERATOR.value,
         requested_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
         authorized_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
-        authorization_scope_ref=fixed_scope_ref,
+        authorized_scope=scope1,
         objective="Analyze momentum factors on IF contracts",
         work_block="WB-001",
         input_refs=[{"type": "spec", "id": "spec-1"}],
@@ -397,7 +412,7 @@ def test_negative_14_deterministic_task_identity_reproducible() -> None:
         role=AgentRole.ALPHA_GENERATOR.value,
         requested_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
         authorized_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
-        authorization_scope_ref=fixed_scope_ref,
+        authorized_scope=scope1,
         objective="Analyze momentum factors on IF contracts",
         work_block="WB-001",
         input_refs=[{"type": "spec", "id": "spec-1"}],
@@ -413,7 +428,7 @@ def test_negative_14_deterministic_task_identity_reproducible() -> None:
         role=AgentRole.ALPHA_GENERATOR.value,
         requested_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
         authorized_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
-        authorization_scope_ref=fixed_scope_ref,
+        authorized_scope=scope1,
         objective="Analyze mean reversion factors on IC contracts",
         work_block="WB-001",
         input_refs=[{"type": "spec", "id": "spec-1"}],
@@ -428,7 +443,11 @@ def test_negative_14_deterministic_task_identity_reproducible() -> None:
 # 15. [P1-1] Task direct construction / create elevation fails closed
 def test_negative_15_task_direct_construction_elevation_fails_closed() -> None:
     binding = ProjectBinding(project_id="vnpy-p1", workspace_identity="/workspace/vnpy")
-    valid_scope = "scope-mock-valid-ref-12345"
+    valid_scope = authorize(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        requested_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
+        project_binding=binding,
+    )
 
     # alpha_generator attempts to construct a task with invoke_critic or execute_screening
     with pytest.raises(PermissionDeniedError) as exc_info1:
@@ -436,7 +455,7 @@ def test_negative_15_task_direct_construction_elevation_fails_closed() -> None:
             role=AgentRole.ALPHA_GENERATOR.value,
             requested_permissions=[AgentPermission.INVOKE_CRITIC.value],
             authorized_permissions=[AgentPermission.INVOKE_CRITIC.value],
-            authorization_scope_ref=valid_scope,
+            authorized_scope=valid_scope,
             objective="Malicious elevation",
             work_block="WB-001",
             input_refs=[],
@@ -447,9 +466,9 @@ def test_negative_15_task_direct_construction_elevation_fails_closed() -> None:
         )
     assert "unauthorized permissions" in str(exc_info1.value)
 
-    # Direct constructor bypass attempt
+    # Direct constructor bypass attempt with unauthorized permissions
     raw = {
-        "authorization_scope_ref": valid_scope,
+        "authorization_scope_ref": valid_scope.to_dict(),
         "authorized_permissions": [AgentPermission.EXECUTE_SCREENING.value],
         "created_at": "2026-09-20T00:00:00Z",
         "created_by": "attacker",
@@ -471,7 +490,7 @@ def test_negative_15_task_direct_construction_elevation_fails_closed() -> None:
     with pytest.raises(PermissionDeniedError) as exc_info2:
         AgentTask(
             task_id=raw["task_id"],
-            authorization_scope_ref=valid_scope,
+            authorization_scope_ref=valid_scope.to_dict(),
             role=AgentRole.ALPHA_GENERATOR.value,
             requested_permissions=(AgentPermission.EXECUTE_SCREENING.value,),
             authorized_permissions=(AgentPermission.EXECUTE_SCREENING.value,),
@@ -484,13 +503,17 @@ def test_negative_15_task_direct_construction_elevation_fails_closed() -> None:
             created_at="2026-09-20T00:00:00Z",
             task_content_hash=raw["task_content_hash"],
         )
-    assert "unauthorized permissions" in str(exc_info2.value)
+    assert "mismatch with authorization_scope_ref" in str(exc_info2.value)
 
 
 # 16. [P1-1] Route direct construction / create elevation fails closed
 def test_negative_16_route_direct_construction_elevation_fails_closed() -> None:
     binding = ProjectBinding(project_id="vnpy-p1", workspace_identity="/workspace/vnpy")
-    valid_scope = "scope-mock-valid-ref-12345"
+    valid_scope = authorize(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        requested_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
+        project_binding=binding,
+    )
 
     with pytest.raises(PermissionDeniedError) as exc_info1:
         AgentRoute.create(
@@ -502,13 +525,13 @@ def test_negative_16_route_direct_construction_elevation_fails_closed() -> None:
             usage_snapshot_ref=None,
             project_binding=binding,
             authorized_permissions=[AgentPermission.INVOKE_CRITIC.value],
-            authorization_scope_ref=valid_scope,
+            authorized_scope=valid_scope,
         )
     assert "unauthorized permissions" in str(exc_info1.value)
 
     # Direct constructor bypass attempt
     raw = {
-        "authorization_scope_ref": valid_scope,
+        "authorization_scope_ref": valid_scope.to_dict(),
         "authorized_permissions": [AgentPermission.INVOKE_CRITIC.value],
         "hash_profile": "research-json-v1",
         "policy_version": "v1",
@@ -526,7 +549,7 @@ def test_negative_16_route_direct_construction_elevation_fails_closed() -> None:
     with pytest.raises(PermissionDeniedError) as exc_info2:
         AgentRoute(
             route_id=raw["route_id"],
-            authorization_scope_ref=valid_scope,
+            authorization_scope_ref=valid_scope.to_dict(),
             role=AgentRole.ALPHA_GENERATOR.value,
             provider="mock_p",
             resolved_model="m1",
@@ -537,7 +560,7 @@ def test_negative_16_route_direct_construction_elevation_fails_closed() -> None:
             authorized_permissions=(AgentPermission.INVOKE_CRITIC.value,),
             route_content_hash=raw["route_content_hash"],
         )
-    assert "unauthorized permissions" in str(exc_info2.value)
+    assert "mismatch with authorization_scope_ref" in str(exc_info2.value)
 
 
 # 17. [P1-1] Route least privilege (never expands to full role policy permissions)
@@ -552,6 +575,7 @@ def test_negative_17_route_least_privilege_no_role_expansion() -> None:
     auth_scope = authorize(
         role=AgentRole.ALPHA_GENERATOR.value,
         requested_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
+        project_binding=binding,
     )
     assert auth_scope.authorized_permissions == (AgentPermission.CREATE_HYPOTHESIS.value,)
 
@@ -570,10 +594,12 @@ def test_negative_17_route_least_privilege_no_role_expansion() -> None:
 
 # 18. [P1-1] Scope hash tampering and mismatch detection
 def test_negative_18_scope_hash_tampering_and_mismatch_detected() -> None:
+    binding = ProjectBinding(project_id="vnpy-p1", workspace_identity="/workspace/vnpy")
     scope = AgentPermissionScope.create(
         role=AgentRole.ALPHA_GENERATOR.value,
         requested_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
         authorized_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
+        project_binding=binding,
     )
     raw = scope.to_dict()
     validate_scope_hash(raw)
@@ -584,7 +610,6 @@ def test_negative_18_scope_hash_tampering_and_mismatch_detected() -> None:
         validate_scope_hash(tampered)
 
     # Role mismatch between scope and select_agent
-    binding = ProjectBinding(project_id="vnpy-p1", workspace_identity="/workspace/vnpy")
     provider = DummyMockProvider(supported_roles=(AgentRole.DATA_RESEARCHER.value,))
     with pytest.raises(PermissionDeniedError) as exc_info:
         select_agent(
@@ -595,15 +620,32 @@ def test_negative_18_scope_hash_tampering_and_mismatch_detected() -> None:
         )
     assert "role mismatch" in str(exc_info.value)
 
+    # Project binding mismatch between scope and select_agent
+    other_binding = ProjectBinding(project_id="vnpy-other", workspace_identity="/workspace/other")
+    alpha_provider = DummyMockProvider(supported_roles=(AgentRole.ALPHA_GENERATOR.value,))
+    with pytest.raises(ProjectBindingError) as exc_binding:
+        select_agent(
+            role=AgentRole.ALPHA_GENERATOR.value,
+            providers=[alpha_provider],
+            authorized_scope=scope,  # binding is vnpy-p1
+            project_binding=other_binding,
+        )
+    assert "project_binding mismatch" in str(exc_binding.value)
+
 
 # 19. [P1-1] Task and Route authorization_scope_ref tampering detection
 def test_negative_19_task_and_route_scope_ref_tampering_detected() -> None:
     binding = ProjectBinding(project_id="vnpy-p1", workspace_identity="/workspace/vnpy")
+    scope = authorize(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        requested_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
+        project_binding=binding,
+    )
     task = AgentTask.create(
         role=AgentRole.ALPHA_GENERATOR.value,
         requested_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
         authorized_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
-        authorization_scope_ref="scope-legit-001",
+        authorized_scope=scope,
         objective="Analyze factors",
         work_block="WB-001",
         input_refs=[],
@@ -616,7 +658,7 @@ def test_negative_19_task_and_route_scope_ref_tampering_detected() -> None:
     validate_task_hash(raw_task)
 
     tampered_task = copy.deepcopy(raw_task)
-    tampered_task["authorization_scope_ref"] = "scope-forged-999"
+    tampered_task["authorization_scope_ref"]["scope_id"] = "scope-forged-999"
     with pytest.raises(TamperDetectionError):
         validate_task_hash(tampered_task)
 
@@ -629,13 +671,13 @@ def test_negative_19_task_and_route_scope_ref_tampering_detected() -> None:
         usage_snapshot_ref=None,
         project_binding=binding,
         authorized_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
-        authorization_scope_ref="scope-legit-001",
+        authorized_scope=scope,
     )
     raw_route = route.to_dict()
     validate_route_hash(raw_route)
 
     tampered_route = copy.deepcopy(raw_route)
-    tampered_route["authorization_scope_ref"] = "scope-forged-999"
+    tampered_route["authorization_scope_ref"]["scope_id"] = "scope-forged-999"
     with pytest.raises(TamperDetectionError):
         validate_route_hash(tampered_route)
 
@@ -643,7 +685,11 @@ def test_negative_19_task_and_route_scope_ref_tampering_detected() -> None:
 # 20. [P1-1] Task unrequested permission elevation fails closed
 def test_negative_20_task_unrequested_permission_elevation_fails_closed() -> None:
     binding = ProjectBinding(project_id="vnpy-p1", workspace_identity="/workspace/vnpy")
-    valid_scope = "scope-mock-valid-001"
+    valid_scope = authorize(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        requested_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
+        project_binding=binding,
+    )
 
     # authorized is NOT a subset of requested
     with pytest.raises(PermissionDeniedError) as exc_info:
@@ -654,7 +700,7 @@ def test_negative_20_task_unrequested_permission_elevation_fails_closed() -> Non
                 AgentPermission.CREATE_HYPOTHESIS.value,
                 AgentPermission.REVISE_HYPOTHESIS.value,  # unrequested!
             ],
-            authorization_scope_ref=valid_scope,
+            authorized_scope=valid_scope,
             objective="Analyze factors",
             work_block="WB-001",
             input_refs=[],
@@ -669,7 +715,11 @@ def test_negative_20_task_unrequested_permission_elevation_fails_closed() -> Non
 # 21. [P1-2] Task parent/depth relationship validation
 def test_negative_21_task_parent_depth_relationship_validation() -> None:
     binding = ProjectBinding(project_id="vnpy-p1", workspace_identity="/workspace/vnpy")
-    valid_scope = "scope-mock-valid-001"
+    valid_scope = authorize(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        requested_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
+        project_binding=binding,
+    )
 
     # depth=0 but specifies parent_task_ref -> FAIL (cannot forge worker-parent)
     with pytest.raises(PermissionDeniedError) as exc_info1:
@@ -677,7 +727,7 @@ def test_negative_21_task_parent_depth_relationship_validation() -> None:
             role=AgentRole.ALPHA_GENERATOR.value,
             requested_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
             authorized_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
-            authorization_scope_ref=valid_scope,
+            authorized_scope=valid_scope,
             objective="Analyze factors",
             work_block="WB-001",
             input_refs=[],
@@ -696,7 +746,7 @@ def test_negative_21_task_parent_depth_relationship_validation() -> None:
             role=AgentRole.ALPHA_GENERATOR.value,
             requested_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
             authorized_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
-            authorization_scope_ref=valid_scope,
+            authorized_scope=valid_scope,
             objective="Analyze factors",
             work_block="WB-001",
             input_refs=[],
@@ -712,10 +762,12 @@ def test_negative_21_task_parent_depth_relationship_validation() -> None:
 
 # 22. [P1-3] select_agent() missing project_binding fails closed
 def test_negative_22_select_agent_missing_project_binding_fails_closed() -> None:
+    binding = ProjectBinding(project_id="vnpy-p1", workspace_identity="/workspace/vnpy")
     provider = DummyMockProvider(supported_roles=(AgentRole.ALPHA_GENERATOR.value,))
     scope = authorize(
         role=AgentRole.ALPHA_GENERATOR.value,
         requested_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
+        project_binding=binding,
     )
 
     with pytest.raises(ProjectBindingError) as exc_info:
@@ -759,9 +811,11 @@ def test_negative_23_project_binding_placeholder_and_empty_values_rejected() -> 
 
     # 4. Dict with placeholder passed to select_agent
     provider = DummyMockProvider(supported_roles=(AgentRole.ALPHA_GENERATOR.value,))
+    binding = ProjectBinding(project_id="vnpy-p1", workspace_identity="/workspace/vnpy")
     scope = authorize(
         role=AgentRole.ALPHA_GENERATOR.value,
         requested_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
+        project_binding=binding,
     )
     with pytest.raises(ProjectBindingError):
         select_agent(
@@ -770,6 +824,44 @@ def test_negative_23_project_binding_placeholder_and_empty_values_rejected() -> 
             authorized_scope=scope,
             project_binding={"project_id": "unspecified", "workspace_identity": "unspecified"},
         )
+
+
+# 24. [P1-1] Scope mock string bypass strictly rejected with TamperDetectionError
+def test_negative_24_scope_mock_string_bypass_strictly_rejected() -> None:
+    binding = ProjectBinding(project_id="vnpy-p1", workspace_identity="/workspace/vnpy")
+    fake_scope_str = "scope-mock-valid-ref-12345"
+
+    # Attempting to pass a forged scope string to AgentTask.create
+    with pytest.raises(TamperDetectionError) as exc_task_create:
+        AgentTask.create(
+            role=AgentRole.ALPHA_GENERATOR.value,
+            requested_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
+            authorized_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
+            authorization_scope_ref=fake_scope_str,  # Forged string!
+            objective="Analyze factors",
+            work_block="WB-001",
+            input_refs=[],
+            provider_policy_ref="policy-v1",
+            project_binding=binding,
+            created_by="attacker",
+            created_at="2026-09-20T00:00:00Z",
+        )
+    assert "must be an exact verifiable scope dictionary" in str(exc_task_create.value)
+
+    # Attempting to pass a forged scope string to AgentRoute.create
+    with pytest.raises(TamperDetectionError) as exc_route_create:
+        AgentRoute.create(
+            role=AgentRole.ALPHA_GENERATOR.value,
+            provider="mock_p",
+            resolved_model="m1",
+            policy_version="v1",
+            route_reason="reason",
+            usage_snapshot_ref=None,
+            project_binding=binding,
+            authorized_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
+            authorization_scope_ref=fake_scope_str,  # Forged string!
+        )
+    assert "must be an exact verifiable scope dictionary" in str(exc_route_create.value)
 
 
 # Quota exhausted router rejection
@@ -782,6 +874,7 @@ def test_quota_exhausted_router_rejection() -> None:
     scope = authorize(
         role=AgentRole.ALPHA_GENERATOR.value,
         requested_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
+        project_binding=binding,
     )
     exhausted_snapshot = AgentUsageSnapshot.create(
         provider="antigravity_limited",
@@ -792,7 +885,7 @@ def test_quota_exhausted_router_rejection() -> None:
                 "remaining_fraction": 0,
                 "reset_time": "2026-09-20T19:00:00Z",
                 "status": "exhausted",
-            }
+            },
         ],
         captured_at="2026-09-20T18:00:00Z",
     )
