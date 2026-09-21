@@ -1,7 +1,7 @@
-"""Agent Access Control and Provider-Neutral Router Architecture (#573 Milestone 1).
+"""Agent Access Control and Provider-Neutral Router Architecture (#573 Milestone 1, Milestone 4).
 
 Exports core contracts, permissions, roles, error taxonomy, transport abstractions,
-registry, routing policy/context, and execution preparation handoff boundary.
+registry, routing policy/context, memory view layer, and execution preparation handoff boundary.
 """
 
 from research_lab.agent_control.audit import AppendOnlyAuditTrail
@@ -41,6 +41,11 @@ from research_lab.agent_control.errors import (
     ProviderErrorCode,
     ProviderUnavailableError,
     QuotaUnavailableError,
+    ResearchMemoryAccessError,
+    ResearchMemoryCategoryError,
+    ResearchMemoryLimitError,
+    ResearchMemoryPermissionError,
+    ResearchMemorySourceCorruptionError,
     ResultAcceptanceError,
     TamperDetectionError,
     assert_provider_error_does_not_pollute_scientific_decision,
@@ -51,6 +56,20 @@ from research_lab.agent_control.handoff import (
     compute_preparation_deterministic_id,
     prepare_execution,
     validate_preparation_hash,
+)
+from research_lab.agent_control.memory_view import (
+    ALL_CATEGORIES,
+    DEFAULT_ROLE_ALLOWED_CATEGORIES,
+    MemoryAccessReasonCode,
+    MemoryViewAuditRecord,
+    MemoryViewAuditTrail,
+    ResearchMemoryCategory,
+    ResearchMemoryEntryView,
+    ResearchMemoryQuery,
+    ResearchMemoryView,
+    ResearchMemoryViewPolicy,
+    build_research_memory_view,
+    validate_category,
 )
 from research_lab.agent_control.permissions import (
     ALL_PERMISSIONS,
@@ -96,9 +115,11 @@ from research_lab.agent_control.transports import (
 )
 
 __all__ = [
+    "ALL_CATEGORIES",
     "ALL_PERMISSIONS",
     "ALL_ROLES",
     "CRITICAL_MCP_TOOLS",
+    "DEFAULT_ROLE_ALLOWED_CATEGORIES",
     "DEFAULT_ROLE_POLICIES",
     "HARD_INVARIANT_FORBIDDEN_PERMISSIONS",
     "HASH_PROFILE",
@@ -120,6 +141,9 @@ __all__ = [
     "ExecutionPreparation",
     "LocalMCPTransport",
     "MCPToolResolver",
+    "MemoryAccessReasonCode",
+    "MemoryViewAuditRecord",
+    "MemoryViewAuditTrail",
     "PermissionDeniedError",
     "ProjectBinding",
     "ProjectBindingError",
@@ -131,6 +155,16 @@ __all__ = [
     "ProviderTransportKind",
     "ProviderUnavailableError",
     "QuotaUnavailableError",
+    "ResearchMemoryAccessError",
+    "ResearchMemoryCategory",
+    "ResearchMemoryCategoryError",
+    "ResearchMemoryEntryView",
+    "ResearchMemoryLimitError",
+    "ResearchMemoryPermissionError",
+    "ResearchMemoryQuery",
+    "ResearchMemorySourceCorruptionError",
+    "ResearchMemoryView",
+    "ResearchMemoryViewPolicy",
     "ResultAcceptanceError",
     "RouteReasonCode",
     "RoutingContext",
@@ -139,6 +173,7 @@ __all__ = [
     "TerminalStatus",
     "assert_provider_error_does_not_pollute_scientific_decision",
     "authorize",
+    "build_research_memory_view",
     "compute_audit_content_hash",
     "compute_preparation_content_hash",
     "compute_preparation_deterministic_id",
@@ -156,6 +191,7 @@ __all__ = [
     "prepare_execution",
     "select_agent",
     "validate_audit_hash",
+    "validate_category",
     "validate_permission",
     "validate_permissions",
     "validate_preparation_hash",
