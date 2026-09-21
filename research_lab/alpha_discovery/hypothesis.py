@@ -264,7 +264,7 @@ class AlphaHypothesis(BaseModel):
 
 def compute_hypothesis_content_hash(data: dict[str, Any]) -> str:
     """Compute repository-pinned research-json-v1 SHA-256 digest of hypothesis revision record."""
-    clean = {k: v for k, v in data.items() if k != "hypothesis_content_hash"}
+    clean = {k: v for k, v in data.items() if k != "hypothesis_content_hash" and v is not None}
     return v2.digest(clean)
 
 
