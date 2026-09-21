@@ -155,3 +155,71 @@ def test_quota_reader_missing_quota_is_unknown_and_sorted_last(tmp_path: Path):
     assert len(candidates) == 2
     assert candidates[0]["id"] == "acc-known"
     assert candidates[1]["id"] == "acc-unknown"
+
+
+def test_quota_reader_zero_model_quota_without_quota_groups_is_critical_low(tmp_path: Path):
+    """Ensure account with 0% model quota and missing quota_groups is CRITICAL_LOW, not HEALTHY."""
+    accounts_dir = tmp_path / "accounts"
+    accounts_dir.mkdir()
+
+    # 1. Exhausted account: models has gemini-3.1-pro-high: 0%, but quota_groups is omitted
+    zero_file = accounts_dir / "acc-zero.json"
+    zero_file.write_text(json.dumps({
+        "id": "acc-zero",
+        "email": "zero@example.com",
+        "name": "Zero Quota User",
+        "quota": {
+            "subscription_tier": "PRO",
+            "models": [
+                {"name": "gemini-3.1-pro-high", "percentage": 0, "reset_time": "2026-09-21T12:00:00Z"}
+            ]
+            # Notice: quota_groups is completely missing
+        }
+    }), encoding="utf-8")
+
+    # 2. Healthy account
+    healthy_file = accounts_dir / "acc-healthy.json"
+    healthy_file.write_text(json.dumps({
+        "id": "acc-healthy",
+        "email": "healthy@example.com",
+        "quota": {
+            "models": [{"name": "gemini-3.1-pro-high", "percentage": 100}],
+            "quota_groups": [{"display_name": "Gemini Models", "buckets": [{"window": "weekly", "remaining_fraction": 0.9}]}]
+        }
+    }), encoding="utf-8")
+
+    # 3. Unknown quota account
+    unknown_file = accounts_dir / "acc-unknown.json"
+    unknown_file.write_text(json.dumps({
+        "id": "acc-unknown",
+        "email": "unknown@example.com",
+        "quota": {"models": [], "quota_groups": []}
+    }), encoding="utf-8")
+
+    accounts_json = tmp_path / "accounts.json"
+    accounts_json.write_text(json.dumps({
+        "current_account_id": "acc-healthy",
+        "accounts": [{"id": "acc-healthy"}, {"id": "acc-zero"}, {"id": "acc-unknown"}]
+    }), encoding="utf-8")
+
+    reader = QuotaReader(
+        accounts_json=accounts_json,
+        accounts_dir=accounts_dir,
+    )
+
+    all_accounts = reader.list_all_accounts()
+    assert len(all_accounts) == 3
+
+    zero_acc = next(a for a in all_accounts if a["id"] == "acc-zero")
+    # P1 Critical assertion: MUST NOT be HEALTHY!
+    assert zero_acc["health_status"] == "CRITICAL_LOW"
+    assert zero_acc["quotas"]["gemini_3_1_pro"]["remaining_5h"] == "0%"
+    assert zero_acc["quotas"]["gemini_3_1_pro"]["remaining_fraction_5h"] == 0.0
+    assert any("额度已耗尽" in w for w in zero_acc["risk_warnings"])
+
+    # Sorting assertion: Among candidates (non-current),
+    # healthy comes first, UNKNOWN comes next, and CRITICAL_LOW exhausted comes LAST
+    candidates = [a for a in all_accounts if not a["is_current"]]
+    assert len(candidates) == 2
+    assert candidates[0]["id"] == "acc-unknown"
+    assert candidates[1]["id"] == "acc-zero"

@@ -120,18 +120,52 @@ class QuotaReader:
                     elif window == "5h":
                         claude_5h_frac = frac
 
+        # Effective Gemini 3.1 Pro 5h remaining fraction synthesis
+        # Merges models percentage (0..100) and quota_groups remaining_fraction (0.0..1.0)
+        pro_model_frac = (gemini_pro_pct / 100.0) if gemini_pro_pct is not None else None
+        effective_gemini_5h_frac: float | None = None
+        if pro_model_frac is not None and gemini_5h_frac is not None:
+            effective_gemini_5h_frac = min(pro_model_frac, gemini_5h_frac)
+        elif pro_model_frac is not None:
+            effective_gemini_5h_frac = pro_model_frac
+        elif gemini_5h_frac is not None:
+            effective_gemini_5h_frac = gemini_5h_frac
+
         # Risk assessment synthesis
         risk_warnings = []
         is_exhausted = False
-        is_unknown = (gemini_weekly_frac is None and gemini_pro_pct is None)
+        is_unknown = (gemini_weekly_frac is None and effective_gemini_5h_frac is None)
 
         if is_unknown:
             health_status = "UNKNOWN"
             recommendation = "未获取到该账号的配额信息或数据字段缺失，无法评估健康度，建议谨慎调度。"
             risk_warnings.append("【额度数据未知】未获取到该账号的真实配额信息，切换至此账号可能产生意外限流")
         else:
+            # 1. Short-term quota (5h / Model percentage) assessment
+            if effective_gemini_5h_frac is not None:
+                if effective_gemini_5h_frac <= 0.0:
+                    risk_warnings.append(
+                        "【Gemini 3.1 Pro 额度已耗尽】当前短期额度为 0%，无法执行任何请求，切勿分配任务"
+                    )
+                    is_exhausted = True
+                elif effective_gemini_5h_frac < 0.15:
+                    risk_warnings.append(
+                        f"【Gemini 3.1 Pro 额度见底】当前短期额度仅剩 {effective_gemini_5h_frac * 100:.1f}%，极度危险！切勿分配任务"
+                    )
+                    is_exhausted = True
+                elif effective_gemini_5h_frac < 0.35:
+                    risk_warnings.append(
+                        f"【Gemini 3.1 Pro 额度偏低】当前短期额度剩余 {effective_gemini_5h_frac * 100:.1f}%，建议优先分配短期或轻量任务"
+                    )
+
+            # 2. Weekly global limit assessment
             if gemini_weekly_frac is not None:
-                if gemini_weekly_frac < 0.15:
+                if gemini_weekly_frac <= 0.0:
+                    risk_warnings.append(
+                        "【严重警告】Gemini 周全局硬顶已耗尽（0.0%），极度危险！切勿分配任务"
+                    )
+                    is_exhausted = True
+                elif gemini_weekly_frac < 0.15:
                     risk_warnings.append(
                         f"【严重警告】Gemini 周全局硬顶仅剩 {gemini_weekly_frac * 100:.1f}%，极度危险！切勿分配大任务"
                     )
@@ -141,18 +175,12 @@ class QuotaReader:
                         f"【周额度吃紧】Gemini 周额度剩余 {gemini_weekly_frac * 100:.1f}%，建议优先分配短期或轻量任务"
                     )
 
-            if gemini_5h_frac is not None and gemini_5h_frac < 0.15:
-                risk_warnings.append(
-                    f"【5小时额度见底】Gemini 当前短期额度仅剩 {gemini_5h_frac * 100:.1f}%，建议切换账号或等待恢复"
-                )
-                is_exhausted = True
-
             if is_exhausted:
                 health_status = "CRITICAL_LOW"
-                recommendation = "建议立即切换至其他健康账号，避免产生 429 报错中断任务。"
+                recommendation = "当前账号额度已耗尽或见底，切勿分配任务，建议立即切换至其他健康账号。"
             elif risk_warnings:
                 health_status = "CAUTION"
-                recommendation = "周额度正在消耗中，建议审慎分配重型任务。"
+                recommendation = "额度偏低或正在消耗中，建议审慎分配重型任务。"
             else:
                 health_status = "HEALTHY"
                 recommendation = "额度充沛，适宜执行各类复杂或长期编码任务。"
@@ -166,8 +194,12 @@ class QuotaReader:
             "recommendation": recommendation,
             "quotas": {
                 "gemini_3_1_pro": {
-                    "remaining_5h": f"{gemini_pro_pct}%" if gemini_pro_pct is not None else "unknown",
-                    "remaining_fraction_5h": (gemini_pro_pct / 100.0) if gemini_pro_pct is not None else None,
+                    "remaining_5h": (
+                        f"{gemini_pro_pct}%"
+                        if gemini_pro_pct is not None
+                        else (f"{gemini_5h_frac * 100:.1f}%" if gemini_5h_frac is not None else "unknown")
+                    ),
+                    "remaining_fraction_5h": effective_gemini_5h_frac,
                     "reset_time_5h": gemini_pro_reset or gemini_5h_reset,
                 },
                 "gemini_weekly_limit": {
@@ -216,22 +248,30 @@ class QuotaReader:
 
         # Sort accounts:
         # 1. Current account first (0 vs 1)
-        # 2. Known weekly quota first (0) vs unknown quota (1)
-        # 3. Highest Gemini weekly remaining descending (-weekly_val)
-        def sort_key(acc: dict[str, Any]) -> tuple[int, int, float]:
+        # 2. Critical exhausted accounts last (0 for non-exhausted vs 1 for CRITICAL_LOW)
+        # 3. Known quota first (0) vs unknown quota (1)
+        # 4. Highest remaining fraction descending (-score)
+        def sort_key(acc: dict[str, Any]) -> tuple[int, int, int, float]:
             is_curr = 0 if acc.get("is_current") else 1
+            is_crit = 1 if acc.get("health_status") == "CRITICAL_LOW" else 0
+
             weekly_frac = acc.get("quotas", {}).get("gemini_weekly_limit", {}).get("remaining_fraction")
-            if weekly_frac is None:
-                has_known = 1
-                weekly_val = 0.0
+            short_frac = acc.get("quotas", {}).get("gemini_3_1_pro", {}).get("remaining_fraction_5h")
+
+            if weekly_frac is not None and short_frac is not None:
+                score = min(float(weekly_frac), float(short_frac))
+                has_known = 0
+            elif weekly_frac is not None:
+                score = float(weekly_frac)
+                has_known = 0
+            elif short_frac is not None:
+                score = float(short_frac)
+                has_known = 0
             else:
-                try:
-                    weekly_val = float(weekly_frac)
-                    has_known = 0
-                except (ValueError, TypeError):
-                    has_known = 1
-                    weekly_val = 0.0
-            return (is_curr, has_known, -weekly_val)
+                score = 0.0
+                has_known = 1
+
+            return (is_curr, is_crit, has_known, -score)
 
         results.sort(key=sort_key)
         return results
