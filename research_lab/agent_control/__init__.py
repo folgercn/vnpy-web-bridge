@@ -21,6 +21,14 @@ from research_lab.agent_control.alpha_generator import (
     parse_alpha_generation_output,
 )
 from research_lab.agent_control.audit import AppendOnlyAuditTrail
+from research_lab.agent_control.conformance import (
+    REQUIRED_CONFORMANCE_CONTRACTS,
+    AgentProviderConformanceSuite,
+    ContractCheckResult,
+    ProviderConformanceReport,
+    format_conformance_matrix_markdown,
+    generate_conformance_matrix,
+)
 from research_lab.agent_control.contracts import (
     HASH_PROFILE,
     AgentAuditRecord,
@@ -135,7 +143,13 @@ from research_lab.agent_control.provider import (
     AgentProvider,
     ProviderAvailability,
 )
-from research_lab.agent_control.providers import AntigravityLocalMCPProvider
+from research_lab.agent_control.providers import (
+    AntigravityLocalMCPProvider,
+    ContractTestProvider,
+)
+from research_lab.agent_control.quota import (
+    is_snapshot_stale,
+)
 from research_lab.agent_control.registry import ProviderRegistry
 from research_lab.agent_control.roles import (
     ALL_ROLES,
@@ -162,6 +176,7 @@ from research_lab.agent_control.transport import (
 )
 from research_lab.agent_control.transports import (
     CRITICAL_MCP_TOOLS,
+    DirectSDKTestTransport,
     LocalMCPTransport,
     MCPToolResolver,
 )
@@ -182,6 +197,7 @@ __all__ = [
     "MAX_WORK_BLOCKS",
     "ORCHESTRATION_SCHEMA_VERSION",
     "POLICY_VERSION",
+    "REQUIRED_CONFORMANCE_CONTRACTS",
     "SUPPORTED_WORKER_ROLES",
     "TRADABLE_AUTHORITY",
     "AgentAuditRecord",
@@ -189,6 +205,7 @@ __all__ = [
     "AgentPermission",
     "AgentPermissionScope",
     "AgentProvider",
+    "AgentProviderConformanceSuite",
     "AgentProviderDescriptor",
     "AgentResult",
     "AgentRole",
@@ -204,6 +221,9 @@ __all__ = [
     "AlphaGenerationResult",
     "AntigravityLocalMCPProvider",
     "AppendOnlyAuditTrail",
+    "ContractCheckResult",
+    "ContractTestProvider",
+    "DirectSDKTestTransport",
     "DiscoveryIntegrationAuditRecord",
     "DiscoveryIntegrationAuditTrail",
     "DiscoveryIntegrationOrchestrator",
@@ -227,6 +247,7 @@ __all__ = [
     "ProjectBinding",
     "ProjectBindingError",
     "ProviderAvailability",
+    "ProviderConformanceReport",
     "ProviderConnectionDescriptor",
     "ProviderError",
     "ProviderErrorCode",
@@ -280,6 +301,9 @@ __all__ = [
     "enforce_hard_invariants",
     "enforce_no_nested_delegation",
     "execute_alpha_generation",
+    "format_conformance_matrix_markdown",
+    "generate_conformance_matrix",
+    "is_snapshot_stale",
     "parse_alpha_generation_output",
     "prepare_execution",
     "select_agent",

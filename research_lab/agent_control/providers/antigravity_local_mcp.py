@@ -51,6 +51,10 @@ from research_lab.agent_control.handoff import (
     validate_preparation_hash,
 )
 from research_lab.agent_control.provider import AgentProvider, ProviderAvailability
+from research_lab.agent_control.transport import (
+    ProviderConnectionDescriptor,
+    ProviderTransportKind,
+)
 from research_lab.agent_control.transports.local_mcp import LocalMCPTransport
 
 SUPPORTED_ROLES = frozenset(
@@ -189,6 +193,18 @@ class AntigravityLocalMCPProvider(AgentProvider):
             supported_models=SUPPORTED_MODELS,
             capabilities=("text_generation", "code_exploration", "mcp_tool_execution"),
             default_model="Gemini 3.8 Flash High",
+        )
+
+    def describe_transport(self) -> ProviderConnectionDescriptor:
+        """Return transport connection descriptor of this provider."""
+        if hasattr(self._transport, "descriptor") and isinstance(
+            self._transport.descriptor, ProviderConnectionDescriptor
+        ):
+            return self._transport.descriptor
+        return ProviderConnectionDescriptor(
+            transport_kind=ProviderTransportKind.LOCAL_MCP,
+            connection_profile_ref="antigravity_local_mcp",
+            capabilities=("local_mcp", "fast_mcp", "uds"),
         )
 
     def availability(
