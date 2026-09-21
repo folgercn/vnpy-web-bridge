@@ -58,11 +58,12 @@ def test_cli_parser_socket_transport(tmp_path):
 
 def test_cli_auth_flags():
     """Verify --require-auth and --no-auth flags handling."""
-    # Test --require-auth with socket transport
+    # Test --require-auth with socket transport and configured key
     with (
         patch("sys.argv", ["server.py", "--transport", "socket", "--require-auth"]),
         patch("research_lab.agent_control.antigravity_mcp.server.create_mcp_server"),
         patch("research_lab.agent_control.antigravity_mcp.server.print_startup_banner"),
+        patch("research_lab.agent_control.antigravity_mcp.server.AGY_MCP_API_KEY", "valid_key"),
         patch("research_lab.agent_control.antigravity_mcp.server.run_socket_server") as mock_run_socket,
     ):
         main()
@@ -81,15 +82,114 @@ def test_cli_auth_flags():
         mock_run.assert_called_once_with(transport="sse")
 
 
-def test_run_socket_server_stale_file_cleanup_and_directory_creation():
-    """Verify run_socket_server cleans up stale socket files and ensures parent directory."""
-    repo_root = Path(__file__).resolve().parents[4]
-    sock_dir = repo_root / "tmp" / "nested" / "sockets"
-    sock_path = sock_dir / "test.sock"
+def test_cli_require_auth_missing_key_fails_fast():
+    """Verify --require-auth without configured API Key fails fast with sys.exit(1)."""
+    import pytest
 
-    # Pre-create directory and stale socket file
+    with (
+        patch("sys.argv", ["server.py", "--transport", "socket", "--require-auth"]),
+        patch("research_lab.agent_control.antigravity_mcp.server.create_mcp_server"),
+        patch("research_lab.agent_control.antigravity_mcp.server.print_startup_banner"),
+        patch("research_lab.agent_control.antigravity_mcp.server.AGY_MCP_API_KEY", ""),
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+
+
+def test_cli_mutually_exclusive_auth_flags():
+    """Verify --require-auth and --no-auth cannot be specified together."""
+    import pytest
+
+    with (
+        patch("sys.argv", ["server.py", "--require-auth", "--no-auth"]),
+        patch("research_lab.agent_control.antigravity_mcp.server.create_mcp_server"),
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        # argparse mutually exclusive group error exits with code 2
+        assert exc_info.value.code == 2
+
+
+def test_run_socket_server_refuses_regular_file():
+    """Verify run_socket_server refuses to overwrite regular files and raises RuntimeError."""
+    repo_root = Path(__file__).resolve().parents[4]
+    tmp_dir = repo_root / "tmp" / "test_refuse_file"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    reg_file = tmp_dir / "not_a_socket.txt"
+    reg_file.write_text("important user data")
+
+    mock_mcp = MagicMock()
+    try:
+        import pytest
+
+        with pytest.raises(RuntimeError, match="is not a socket"):
+            run_socket_server(
+                mcp_server=mock_mcp,
+                socket_path=reg_file,
+                api_key="",
+                require_auth=False,
+            )
+        # Verify file was NOT deleted
+        assert reg_file.exists()
+        assert reg_file.read_text() == "important user data"
+    finally:
+        if reg_file.exists():
+            reg_file.unlink()
+        try:
+            tmp_dir.rmdir()
+        except OSError:
+            pass
+
+
+def test_run_socket_server_refuses_active_listening_socket():
+    """Verify run_socket_server refuses to overwrite an active listening socket."""
+    import socket
+
+    import pytest
+
+    repo_root = Path(__file__).resolve().parents[4]
+    tmp_dir = repo_root / "tmp" / "test_active_sock"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    sock_path = tmp_dir / "active.sock"
+
+    active_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        active_listener.bind(str(sock_path))
+        active_listener.listen(1)
+
+        mock_mcp = MagicMock()
+        with pytest.raises(RuntimeError, match="actively listening"):
+            run_socket_server(
+                mcp_server=mock_mcp,
+                socket_path=sock_path,
+                api_key="",
+                require_auth=False,
+            )
+    finally:
+        active_listener.close()
+        if sock_path.exists():
+            sock_path.unlink()
+        try:
+            tmp_dir.rmdir()
+        except OSError:
+            pass
+
+
+def test_run_socket_server_cleans_up_stale_socket_and_enforces_permissions():
+    """Verify run_socket_server safely unlinks inactive stale socket and sets 0700 dir / 0600 socket."""
+    import socket
+    import stat
+
+    repo_root = Path(__file__).resolve().parents[4]
+    sock_dir = repo_root / "tmp" / "test_stale_sock"
+    sock_path = sock_dir / "stale.sock"
+
+    # Create a stale socket: bind then close socket without unlinking
     sock_dir.mkdir(parents=True, exist_ok=True)
-    sock_path.touch()
+    dummy = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    dummy.bind(str(sock_path))
+    dummy.close()
     assert sock_path.exists()
 
     mock_mcp = MagicMock()
@@ -102,7 +202,20 @@ def test_run_socket_server_stale_file_cleanup_and_directory_creation():
         patch("uvicorn.Config") as mock_config_cls,
     ):
         mock_server = MagicMock()
-        mock_server.serve = AsyncMock()
+
+        async def mock_serve():
+            # Simulate uvicorn binding socket
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.bind(str(sock_path))
+            import asyncio
+            await asyncio.sleep(0.15)
+            # Verify chmod 0600 has been applied
+            sock_mode = stat.S_IMODE(sock_path.stat().st_mode)
+            assert sock_mode == 0o600
+            s.close()
+
+        mock_server.serve = mock_serve
+        mock_server.should_exit = False
         mock_server_cls.return_value = mock_server
 
         try:
@@ -118,14 +231,15 @@ def test_run_socket_server_stale_file_cleanup_and_directory_creation():
                 uds=str(sock_path.resolve()),
                 log_level="info",
             )
-            mock_server.serve.assert_awaited_once()
+
+            # Verify parent directory permission is 0700
+            dir_mode = stat.S_IMODE(sock_dir.stat().st_mode)
+            assert dir_mode == 0o700
         finally:
             if sock_path.exists():
                 sock_path.unlink()
             try:
                 sock_dir.rmdir()
-                (repo_root / "tmp" / "nested").rmdir()
-                (repo_root / "tmp").rmdir()
             except OSError:
                 pass
 
@@ -231,3 +345,66 @@ def test_create_mcp_server_instructions_and_tools():
         "cancel",
     }
     assert expected_tools.issubset(tool_names)
+
+
+def test_cleanup_socket_preserves_new_instance_when_inode_changes():
+    """Verify _cleanup_socket does not delete a new socket created by another process when inode changes."""
+    import asyncio
+    import socket
+
+    repo_root = Path(__file__).resolve().parents[4]
+    tmp_dir = repo_root / "tmp" / "test_inode_safety"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    sock_path = tmp_dir / "safety.sock"
+
+    mock_mcp = MagicMock()
+    mock_app = MagicMock()
+    mock_mcp.sse_app.return_value = mock_app
+    mock_mcp.settings.log_level = "info"
+
+    with (
+        patch("uvicorn.Server") as mock_server_cls,
+        patch("uvicorn.Config"),
+    ):
+        mock_server = MagicMock()
+        initial_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+
+        async def mock_serve():
+            initial_sock.bind(str(sock_path))
+            await asyncio.sleep(0.15)
+            # Socket bound and inode recorded
+            initial_sock.close()
+
+        mock_server.serve = mock_serve
+        mock_server.should_exit = False
+        mock_server_cls.return_value = mock_server
+
+        try:
+            with patch("atexit.register") as mock_atexit:
+                run_socket_server(
+                    mcp_server=mock_mcp,
+                    socket_path=sock_path,
+                    api_key="",
+                    require_auth=False,
+                )
+                assert mock_atexit.called
+                cleanup_fn = mock_atexit.call_args[0][0]
+
+            # In normal flow, run_socket_server's finally called cleanup_fn on exit.
+            # Now simulate: A NEW process comes in and creates a new socket at the same path!
+            new_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            new_sock.bind(str(sock_path))
+
+            # Simulate old process's cleanup_fn (e.g. from delayed atexit or concurrent thread)
+            cleanup_fn()
+
+            # The new socket must STILL exist because inode did not match!
+            assert sock_path.exists()
+            new_sock.close()
+        finally:
+            if sock_path.exists():
+                sock_path.unlink()
+            try:
+                tmp_dir.rmdir()
+            except OSError:
+                pass

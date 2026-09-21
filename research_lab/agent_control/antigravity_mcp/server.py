@@ -12,6 +12,8 @@ import json
 import logging
 import os
 import signal
+import socket
+import stat
 import sys
 import tempfile
 import time
@@ -21,12 +23,6 @@ from typing import Any
 from urllib.parse import parse_qs
 
 import uvicorn
-
-CURRENT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = CURRENT_DIR.parents[2]
-for path_dir in (CURRENT_DIR, REPO_ROOT):
-    if str(path_dir) not in sys.path:
-        sys.path.insert(0, str(path_dir))
 
 from research_lab.agent_control.antigravity_mcp.config import (
     AGY_MCP_API_KEY,
@@ -48,6 +44,12 @@ from research_lab.agent_control.antigravity_mcp.quota_reader import (
 from research_lab.agent_control.antigravity_mcp.usage_tracker import (
     UsageTracker,
 )
+
+CURRENT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = CURRENT_DIR.parents[2]
+for path_dir in (CURRENT_DIR, REPO_ROOT):
+    if str(path_dir) not in sys.path:
+        sys.path.insert(0, str(path_dir))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -560,22 +562,70 @@ def run_socket_server(
             f"Unix domain socket path is too long ({len(str(socket_path))} chars, limit 104): '{socket_path}'. "
             "Please specify a shorter path via --socket or AGY_MCP_SOCKET_PATH."
         )
-    socket_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if socket_path.exists():
-        logger.info("Cleaning up stale socket file: %s", socket_path)
+    # Ensure parent directory exists with secure 0700 permissions (avoid relying on umask)
+    socket_path.parent.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        os.chmod(socket_path.parent, 0o700)
+
+    # 1. Probe existing path: refuse non-sockets and refuse active sockets
+    if socket_path.exists() or os.path.lexists(socket_path):
         try:
-            socket_path.unlink()
+            st = os.lstat(socket_path)
         except OSError as exc:
-            logger.warning("Failed to remove stale socket file %s: %s", socket_path, exc)
+            raise RuntimeError(f"Cannot inspect existing path '{socket_path}': {exc}") from exc
+
+        if not stat.S_ISSOCK(st.st_mode):
+            raise RuntimeError(
+                f"Cannot bind Unix Domain Socket: path '{socket_path}' exists and is not a socket."
+            )
+
+        # Path is a socket file; test if another process is actively listening
+        probe_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            probe_sock.connect(str(socket_path))
+            # If connect succeeds, an active server is listening; refuse to overwrite!
+            raise RuntimeError(
+                f"Cannot bind Unix Domain Socket: another process is actively listening on '{socket_path}' (Address in use)."
+            )
+        except ConnectionRefusedError:
+            # No listener is active (stale socket file from previous crash/exit); safe to unlink
+            logger.warning("Cleaning up stale socket file from inactive instance: %s", socket_path)
+            try:
+                socket_path.unlink()
+            except OSError as exc:
+                raise RuntimeError(f"Failed to remove stale socket '{socket_path}': {exc}") from exc
+        except FileNotFoundError:
+            pass
+        finally:
+            with contextlib.suppress(Exception):
+                probe_sock.close()
+
+    # 2. Track bound socket inode to prevent TOCTOU deletion race
+    bound_inode: list[tuple[int, int] | None] = [None]
 
     def _cleanup_socket() -> None:
         try:
-            if socket_path.exists():
-                socket_path.unlink()
-                logger.info("Cleaned up socket file: %s", socket_path)
-        except OSError:
-            pass
+            if not (socket_path.exists() or os.path.lexists(socket_path)):
+                return
+            st = os.lstat(socket_path)
+            if not stat.S_ISSOCK(st.st_mode):
+                logger.warning("Skipping cleanup: path '%s' is no longer a socket", socket_path)
+                return
+            if bound_inode[0] is not None:
+                curr_inode = (st.st_dev, st.st_ino)
+                if curr_inode != bound_inode[0]:
+                    logger.warning(
+                        "Skipping cleanup: socket '%s' inode changed (expected %s, got %s); owned by another process",
+                        socket_path,
+                        bound_inode[0],
+                        curr_inode,
+                    )
+                    return
+            socket_path.unlink(missing_ok=True)
+            logger.info("Cleaned up Unix Domain Socket: %s", socket_path)
+        except OSError as exc:
+            logger.debug("Failed to clean up socket %s: %s", socket_path, exc)
 
     atexit.register(_cleanup_socket)
 
@@ -586,7 +636,9 @@ def run_socket_server(
             mcp_server.settings.transport_security.allowed_hosts.extend(["localhost", "127.0.0.1", ""])
 
     app = mcp_server.sse_app()
-    if require_auth and api_key:
+    if require_auth:
+        if not (api_key and api_key.strip()):
+            raise ValueError("Cannot start socket server: authentication is required but API Key is missing or empty.")
         logger.info("Security: API Key authentication ENABLED on socket %s", socket_path)
         app = ApiKeyAuthMiddleware(app, api_key)
     else:
@@ -611,9 +663,38 @@ def run_socket_server(
         except (NotImplementedError, RuntimeError):
             signal.signal(sig, lambda *_: setattr(server, "should_exit", True))
 
+    async def _serve_and_secure() -> None:
+        serve_task = asyncio.create_task(server.serve())
+
+        async def _inspect_and_secure() -> None:
+            # Poll up to 5 seconds for uvicorn to bind the unix socket
+            for _ in range(50):
+                if server.should_exit or serve_task.done():
+                    break
+                if socket_path.exists() or os.path.lexists(socket_path):
+                    try:
+                        st = os.lstat(socket_path)
+                        if stat.S_ISSOCK(st.st_mode):
+                            bound_inode[0] = (st.st_dev, st.st_ino)
+                            with contextlib.suppress(OSError):
+                                os.chmod(socket_path, 0o600)
+                            logger.debug("Bound socket %s with inode %s and chmod 0600", socket_path, bound_inode[0])
+                            break
+                    except OSError:
+                        pass
+                await asyncio.sleep(0.1)
+
+        secure_task = asyncio.create_task(_inspect_and_secure())
+        try:
+            await serve_task
+        finally:
+            secure_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await secure_task
+
     try:
         logger.info("Starting Codex Antigravity MCP Server (Local Socket) at unix:%s", socket_path)
-        loop.run_until_complete(server.serve())
+        loop.run_until_complete(_serve_and_secure())
     finally:
         _cleanup_socket()
 
@@ -644,17 +725,18 @@ def main():
         default=str(DEFAULT_SOCKET_PATH),
         help=f"Path to Unix Domain Socket file for 'socket' transport (default: {DEFAULT_SOCKET_PATH})",
     )
-    parser.add_argument(
+    auth_group = parser.add_mutually_exclusive_group()
+    auth_group.add_argument(
         "--require-auth",
         action="store_true",
         default=False,
-        help="Explicitly require API Key authentication",
+        help="Explicitly require API Key authentication (fails if key is not configured)",
     )
-    parser.add_argument(
+    auth_group.add_argument(
         "--no-auth",
         action="store_true",
         default=False,
-        help="Explicitly disable API Key authentication",
+        help="Explicitly disable API Key authentication (open access)",
     )
 
     args = parser.parse_args()
@@ -669,9 +751,18 @@ def main():
         # - Socket transport: default exempt from token (AGY_MCP_SOCKET_AUTH is False by default)
         # - SSE transport: require token if AGY_MCP_API_KEY is configured
         if args.transport == "socket":
-            auth_required = AGY_MCP_SOCKET_AUTH and bool(AGY_MCP_API_KEY)
+            auth_required = AGY_MCP_SOCKET_AUTH
         else:
-            auth_required = bool(AGY_MCP_API_KEY)
+            auth_required = bool(AGY_MCP_API_KEY and AGY_MCP_API_KEY.strip())
+
+    # Fail fast: If auth is required but no valid key exists, refuse to start in open mode
+    has_valid_key = bool(AGY_MCP_API_KEY and AGY_MCP_API_KEY.strip())
+    if auth_required and not has_valid_key:
+        logger.error(
+            "Authentication required (--require-auth or configuration) but AGY_MCP_API_KEY is not set or empty! "
+            "Refusing to start in open mode."
+        )
+        sys.exit(1)
 
     socket_path = Path(args.socket_path) if args.transport == "socket" else None
     print_startup_banner(
@@ -679,7 +770,7 @@ def main():
         host=args.host,
         port=args.port,
         socket_path=socket_path,
-        auth_enabled=auth_required,
+        auth_enabled=auth_required and has_valid_key,
     )
     mcp = create_mcp_server()
 
@@ -695,7 +786,7 @@ def main():
         mcp.settings.host = args.host
         mcp.settings.port = args.port
 
-        if auth_required and AGY_MCP_API_KEY:
+        if auth_required and has_valid_key:
             logger.info("Security: API Key authentication ENABLED")
             app = mcp.sse_app()
             app = ApiKeyAuthMiddleware(app, AGY_MCP_API_KEY)
