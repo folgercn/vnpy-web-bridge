@@ -17,11 +17,12 @@ HOME_DIR = Path.home()
 ANTIGRAVITY_TOOLS_DIR = HOME_DIR / ".antigravity_tools"
 ANTIGRAVITY_TOOLS_ACCOUNTS_JSON = ANTIGRAVITY_TOOLS_DIR / "accounts.json"
 ANTIGRAVITY_TOOLS_ACCOUNTS_DIR = ANTIGRAVITY_TOOLS_DIR / "accounts"
+ANTIGRAVITY_TOOLS_GUI_CONFIG = ANTIGRAVITY_TOOLS_DIR / "gui_config.json"
 
-COCKPIT_DIR = HOME_DIR / ".antigravity_cockpit"
-COCKPIT_SERVER_JSON = COCKPIT_DIR / "server.json"
-COCKPIT_ACCOUNTS_JSON = COCKPIT_DIR / "accounts.json"
-COCKPIT_CURRENT_ACCOUNT_JSON = COCKPIT_DIR / "current_account.json"
+# Antigravity-Manager HTTP API configuration
+ANTIGRAVITY_MANAGER_HOST = os.environ.get("AGY_MANAGER_HOST", "127.0.0.1")
+ANTIGRAVITY_MANAGER_PORT = int(os.environ.get("AGY_MANAGER_PORT", "0"))  # 0: auto-detect from gui_config.json, default 8045
+ANTIGRAVITY_MANAGER_API_KEY = os.environ.get("AGY_MANAGER_API_KEY", "")  # empty: auto-detect from gui_config.json
 
 # Local Gemini / Antigravity credential paths
 GEMINI_OAUTH_CREDS_JSON = HOME_DIR / ".gemini" / "oauth_creds.json"
