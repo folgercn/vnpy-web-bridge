@@ -408,7 +408,11 @@ def validate_hypothesis(data: dict[str, Any]) -> dict[str, Any]:
     except Exception as err:
         raise ValueError(f"Hypothesis validation failed: {err}") from err
 
-    return model.model_dump(exclude_none=True)
+    canonical = model.model_dump(exclude_none=True)
+    for k, v in data.items():
+        if v is None and k in AlphaHypothesis.model_fields:
+            canonical[k] = None
+    return canonical
 
 
 def parse_revision_number(revision: str) -> int:

@@ -1,0 +1,72 @@
+{
+  "evidence_schema": "issue573.m6.real_e2e.v1",
+  "milestone": 6,
+  "milestone_title": "Alpha Discovery Engine Integration",
+  "project_binding": {
+    "binding_mode": "strict",
+    "project_id": "vnpy-web-bridge",
+    "workspace_identity": "/Users/fujun/node/vnpy"
+  },
+  "e2e_scenarios": {
+    "e2e_1_normal_reject": {
+      "status": "PASS",
+      "engineering_status": "COMPLETED",
+      "scientific_decision": "REJECT",
+      "critic_decision_id": "rev-94828be93520cb28",
+      "reject_reasons": [
+        "Direction consistency 0.0000 < 0.45",
+        "Falsification triggered: actual IC contradicts expected direction (positive)",
+        "Gross screening return non-positive (-1638.000000)"
+      ],
+      "hypothesis_id": "agent-alpha-bddd90b575bf3c76331bd28c",
+      "scientific_identity_hash": "bffb600d2f14b2ace99c73c245343177a395173ccb98d7a8cf2fa4e8f086dac6",
+      "memory_records_count": 1,
+      "memory_record_id": "rmrec-agent-alpha-bddd90b575bf3c76331bd28c-rev.1-1-edef55543284",
+      "candidate_immutable": true,
+      "is_tradable": false,
+      "evidence_refs_count": 7
+    },
+    "e2e_2_nme_to_supplemental_promote": {
+      "status": "PASS",
+      "engineering_status": "COMPLETED",
+      "scientific_decision": "PROMOTE",
+      "decision_evolution": [
+        "NEED_MORE_EVIDENCE",
+        "PROMOTE"
+      ],
+      "missing_evidence_in_first_review": [
+        "cost_sensitivity",
+        "leakage_audit",
+        "outlier_sensitivity"
+      ],
+      "final_critic_decision": "PROMOTE",
+      "memory_records_count": 2,
+      "memory_decisions_history": [
+        "NEED_MORE_EVIDENCE",
+        "PROMOTE"
+      ],
+      "is_tradable": false,
+      "total_evidence_facts": 7
+    },
+    "e2e_3_invalid_candidate_fail_closed": {
+      "status": "PASS",
+      "engineering_status": "PARSE_FAILED",
+      "scientific_decision": null,
+      "fail_closed_zero_screening": true,
+      "critic_decision_is_none": true,
+      "no_scientific_reject": true,
+      "error_code": "STRICT_PARSE_FAILED"
+    },
+    "e2e_4_provider_failure_uncertain": {
+      "status": "PASS",
+      "engineering_status": "PROVIDER_UNCERTAIN",
+      "scientific_decision": null,
+      "critic_decision_is_none": true,
+      "memory_before_rows": 3,
+      "memory_after_rows": 3,
+      "memory_zero_pollution": true,
+      "no_scientific_reject": true
+    }
+  },
+  "all_e2e_passed": true
+}
