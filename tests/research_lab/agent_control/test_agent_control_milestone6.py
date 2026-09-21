@@ -908,4 +908,3 @@ def test_supplemental_critic_exception_isolation(test_context, monkeypatch):
     assert last_audit.scientific_decision is None
     last_audit.verify()
     assert orchestrator.audit_trail.verify_all() is True
-
