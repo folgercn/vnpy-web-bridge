@@ -436,6 +436,14 @@ class ResearchMemory:
             conn.commit()
 
     # Query APIs
+    def get_all_records(self) -> list[ResearchMemoryRecord]:
+        """Domain read-only API returning all records in insertion order."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM research_memory_records ORDER BY rowid ASC"
+            ).fetchall()
+        return [self._row_to_record(r) for r in rows]
+
     def find_by_hypothesis_id(self, hypothesis_id: str) -> list[ResearchMemoryRecord]:
         with self._get_connection() as conn:
             rows = conn.execute(

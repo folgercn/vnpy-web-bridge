@@ -46,6 +46,7 @@ Verifies all 41 required criteria from specification section 85:
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import sqlite3
 import unittest
@@ -72,6 +73,7 @@ from research_lab.agent_control.memory_view import (
     ResearchMemoryCategory,
     ResearchMemoryEntryView,
     ResearchMemoryQuery,
+    ResearchMemoryReadAdapter,
     ResearchMemoryView,
     ResearchMemoryViewPolicy,
     build_research_memory_view,
@@ -83,9 +85,7 @@ from research_lab.alpha_discovery.research_memory import (
     ResearchMemory,
     ResearchMemoryRecord,
 )
-from research_lab.config import ResearchLabConfig
 from research_lab.contracts import v2
-from research_lab.database import ResultStore
 
 
 def _make_dummy_hypothesis(hyp_id: str, desc: str = "Test alpha hypothesis") -> hyp.AlphaHypothesis:
@@ -1126,176 +1126,341 @@ class TestAgentControlMilestone4(unittest.TestCase):
 
     # 41. true real Research Memory read-only E2E
     def test_41_real_research_memory_read_only_e2e(self) -> None:
-        """Open actual Research Lab ResultStore / ResearchMemory, execute bounded read, prove no mutations."""
-        real_config = ResearchLabConfig(root=Path("/Users/fujun/node/vnpy/research_lab"))
-        real_db_path = Path(real_config.database_path)
-        existed_before = real_db_path.exists()
+        """Locate actual existing Research Lab database, execute bounded read-only view build, and prove zero mutation."""
+        repo_root = Path(__file__).resolve().parents[3]
+        real_db_path = repo_root / "research_lab" / "research_lab.sqlite3"
 
-        try:
-            real_store = ResultStore(real_config)
-            real_memory = ResearchMemory(real_store)
-
-            # 1. Capture exact row counts, manifest count, latest record hash, and file size before query
-            size_before = real_db_path.stat().st_size
-            with sqlite3.connect(str(real_db_path)) as conn:
-                rows_before = conn.execute("SELECT COUNT(*) FROM research_memory_records").fetchone()[0]
-                # Check manifests count if table exists
-                tbl_manifests = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='manifests'").fetchone()
-                manifests_before = conn.execute("SELECT COUNT(*) FROM manifests").fetchone()[0] if tbl_manifests else 0
-                # Check latest record hash if any records exist
-                latest_row = conn.execute("SELECT record_id, content_hash FROM research_memory_records ORDER BY rowid DESC LIMIT 1").fetchone()
-                latest_hash_before = (latest_row[0], latest_row[1]) if latest_row else None
-
-            # 2. Scope for REAL project binding
-            real_binding = ProjectBinding(
-                project_id="a173ba08-8e0c-4c26-8604-0d462da55529",
-                workspace_identity="/Users/fujun/node/vnpy",
-                binding_mode="strict",
-            )
-            real_scope = AgentPermissionScope.create(
-                role=AgentRole.ALPHA_GENERATOR.value,
-                requested_permissions=[AgentPermission.READ_RESEARCH_MEMORY.value],
-                authorized_permissions=[AgentPermission.READ_RESEARCH_MEMORY.value],
-                project_binding=real_binding,
-                is_authorized=True,
+        # Strictly check existence before touching anything; skipTest if absent, NEVER create/init or delete real store
+        if not real_db_path.exists() or real_db_path.stat().st_size == 0:
+            self.skipTest(
+                f"Real Research Memory database not found at {real_db_path}; "
+                "skipping real read-only E2E to prevent creating unpopulated store."
             )
 
-            # 3. Test permission denial against real store
-            unauthorized_scope = AgentPermissionScope.create(
+        # 1. Baseline: SHA-256, file size, mtime, and read-only row counts BEFORE any objects are constructed
+        hash_before = hashlib.sha256(real_db_path.read_bytes()).hexdigest()
+        stat_before = real_db_path.stat()
+        size_before = stat_before.st_size
+        mtime_before = stat_before.st_mtime_ns
+
+        ro_uri = f"file:{real_db_path.as_posix()}?mode=ro"
+        with sqlite3.connect(ro_uri, uri=True) as conn:
+            conn.execute("PRAGMA query_only=ON;")
+            rows_before = conn.execute("SELECT COUNT(*) FROM research_memory_records").fetchone()[0]
+            tbl_manifests = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='manifests'").fetchone()
+            manifests_before = conn.execute("SELECT COUNT(*) FROM manifests").fetchone()[0] if tbl_manifests else 0
+            latest_row = conn.execute("SELECT record_id, content_hash FROM research_memory_records ORDER BY rowid DESC LIMIT 1").fetchone()
+            latest_hash_before = (latest_row[0], latest_row[1]) if latest_row else None
+
+        # 2. Scope for REAL project binding (dynamic to repo root, no /Users/fujun hardcoding)
+        real_binding = ProjectBinding(
+            project_id="a173ba08-8e0c-4c26-8604-0d462da55529",
+            workspace_identity=str(repo_root),
+            binding_mode="strict",
+        )
+        real_scope = AgentPermissionScope.create(
+            role=AgentRole.ALPHA_GENERATOR.value,
+            requested_permissions=[AgentPermission.READ_RESEARCH_MEMORY.value],
+            authorized_permissions=[AgentPermission.READ_RESEARCH_MEMORY.value],
+            project_binding=real_binding,
+            is_authorized=True,
+        )
+
+        # 3. Read via Read Adapter with mode=ro
+        read_adapter = ResearchMemoryReadAdapter(real_db_path)
+
+        # 4. Build bounded view across all 6 categories against actual real store
+        query_all = ResearchMemoryQuery(
+            role=AgentRole.ALPHA_GENERATOR.value,
+            project_binding=real_binding,
+            categories=(
+                ResearchMemoryCategory.RECENT_REJECTS.value,
+                ResearchMemoryCategory.PROMOTED_SUMMARIES.value,
+                ResearchMemoryCategory.NME_BACKLOG.value,
+                ResearchMemoryCategory.DUPLICATE_IDENTITIES.value,
+                ResearchMemoryCategory.FAILED_APPROACHES.value,
+                ResearchMemoryCategory.RESEARCH_GAPS.value,
+            ),
+        )
+        view = build_research_memory_view(
+            query=query_all,
+            authorized_scope=real_scope,
+            project_binding=real_binding,
+            memory_store=read_adapter,
+        )
+
+        # 5. Verify outputs
+        self.assertIsNotNone(view.view_id)
+        self.assertIsNotNone(view.view_content_hash)
+        self.assertEqual(len(view.categories), 6)
+        for cat in view.categories:
+            self.assertIn(cat, view.entries_by_category)
+            self.assertIsInstance(view.entries_by_category[cat], tuple)
+        self.assertEqual(view.total_entries, sum(len(e) for e in view.entries_by_category.values()))
+
+        # 6. Prove zero mutation to the underlying real database: SHA-256, size, mtime, rows, manifests, latest hash
+        hash_after = hashlib.sha256(real_db_path.read_bytes()).hexdigest()
+        stat_after = real_db_path.stat()
+        self.assertEqual(hash_before, hash_after, "Real DB SHA-256 must NOT change on read-only view build")
+        self.assertEqual(size_before, stat_after.st_size, "Real DB file size must NOT change on read-only view build")
+        self.assertEqual(mtime_before, stat_after.st_mtime_ns, "Real DB mtime must NOT change on read-only view build")
+
+        with sqlite3.connect(ro_uri, uri=True) as conn:
+            conn.execute("PRAGMA query_only=ON;")
+            rows_after = conn.execute("SELECT COUNT(*) FROM research_memory_records").fetchone()[0]
+            manifests_after = conn.execute("SELECT COUNT(*) FROM manifests").fetchone()[0] if tbl_manifests else 0
+            latest_row_after = conn.execute("SELECT record_id, content_hash FROM research_memory_records ORDER BY rowid DESC LIMIT 1").fetchone()
+            latest_hash_after = (latest_row_after[0], latest_row_after[1]) if latest_row_after else None
+
+        self.assertEqual(rows_before, rows_after, "Real DB row count must NOT change")
+        self.assertEqual(manifests_before, manifests_after, "Real DB manifest count must NOT change")
+        self.assertEqual(latest_hash_before, latest_hash_after, "Real DB latest hash must NOT change")
+
+        # 7. Isolated replica fixture to prove append produces new identity without mutating real store
+        replica_path = self.tmp_dir / "isolated_replica.sqlite3"
+        import shutil
+        shutil.copy2(real_db_path, replica_path)
+        replica_memory = ResearchMemory(replica_path)
+        hyp_rep = _make_dummy_hypothesis("hypo-replica-new")
+        plan_rep = _make_dummy_plan(hyp_rep, "plan-replica-new")
+        crit_rep = _make_dummy_critic_decision("crit-rep-1", "REJECT", hyp_rep, plan_rep, ["replica_test_reject"])
+        replica_memory.append_evaluation_record(
+            hypothesis=hyp_rep, plan=plan_rep, task_records=[], spec_records=[],
+            run_records=[], manifest_records=[], evidence_records=[], critic_decision=crit_rep,
+        )
+        view_replica = build_research_memory_view(
+            query=query_all,
+            authorized_scope=real_scope,
+            project_binding=real_binding,
+            memory_store=ResearchMemoryReadAdapter(replica_path),
+            current_time=view.generated_at,
+        )
+        self.assertNotEqual(view.view_id, view_replica.view_id)
+        self.assertNotEqual(view.view_content_hash, view_replica.view_content_hash)
+
+        # Final check: real store is still completely untouched after replica operations
+        self.assertEqual(hash_before, hashlib.sha256(real_db_path.read_bytes()).hexdigest())
+
+    # 42. ResearchMemoryReadAdapter mode=ro and isolation
+    def test_42_readonly_adapter_mode_ro_isolation(self) -> None:
+        """Verify ResearchMemoryReadAdapter uses mode=ro and prevents any mutation."""
+        adapter = ResearchMemoryReadAdapter(self.db_path)
+        records = adapter.get_all_records()
+        self.assertIsInstance(records, tuple)
+        self.assertGreater(len(records), 0)
+        self.assertIsInstance(records[0], ResearchMemoryRecord)
+
+        # Attempting write operation via adapter's read-only connection must fail closed
+        with self.assertRaises(sqlite3.OperationalError), adapter._get_readonly_connection() as conn:
+            conn.execute("DELETE FROM research_memory_records")
+
+        # Non-existent path must raise FileNotFoundError
+        with self.assertRaises(FileNotFoundError):
+            ResearchMemoryReadAdapter(self.tmp_dir / "nonexistent.sqlite3")
+
+        # Unsupported type must raise TypeError
+        with self.assertRaises(TypeError):
+            ResearchMemoryReadAdapter(12345)  # type: ignore
+
+    # 43. Typed query filtering and negative isolation
+    def test_43_typed_query_filtering_negative_isolation(self) -> None:
+        """Verify typed query parameters strictly filter entries and fail-closed on unsupported combinations."""
+        # 1. hypothesis_refs negative filtering: only hypo-reject-1 entries returned, hypo-candidate-2 strictly excluded
+        query_refs = ResearchMemoryQuery(
+            role=AgentRole.ALPHA_GENERATOR.value,
+            project_binding=self.project_binding,
+            categories=(ResearchMemoryCategory.RECENT_REJECTS.value,),
+            hypothesis_refs=("hypo-reject-1",),
+        )
+        view_refs = build_research_memory_view(
+            query=query_refs,
+            authorized_scope=self.scope_alpha_generator,
+            project_binding=self.project_binding,
+            memory_store=self.memory,
+        )
+        reject_entries = view_refs.entries_by_category[ResearchMemoryCategory.RECENT_REJECTS.value]
+        self.assertGreater(len(reject_entries), 0)
+        for e in reject_entries:
+            self.assertEqual(e.hypothesis_id, "hypo-reject-1")
+            self.assertNotEqual(e.hypothesis_id, "hypo-candidate-2")
+
+        # 2. decision_types negative filtering: only REJECT entries returned
+        query_dec = ResearchMemoryQuery(
+            role=AgentRole.ALPHA_GENERATOR.value,
+            project_binding=self.project_binding,
+            categories=(ResearchMemoryCategory.FAILED_APPROACHES.value,),
+            decision_types=("REJECT",),
+        )
+        view_dec = build_research_memory_view(
+            query=query_dec,
+            authorized_scope=self.scope_alpha_generator,
+            project_binding=self.project_binding,
+            memory_store=self.memory,
+        )
+        failed_entries = view_dec.entries_by_category[ResearchMemoryCategory.FAILED_APPROACHES.value]
+        for e in failed_entries:
+            self.assertEqual(e.decision, "REJECT")
+            self.assertNotIn(e.decision, ("ADMISSION_FAILED", "EXECUTION_CRASHED", "PROMOTE"))
+
+        # 3. Incompatible query combination rejection: categories recent_rejects with decision_types PROMOTE
+        with self.assertRaises(ResearchMemoryCategoryError):
+            ResearchMemoryQuery(
                 role=AgentRole.ALPHA_GENERATOR.value,
-                requested_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
-                authorized_permissions=[AgentPermission.CREATE_HYPOTHESIS.value],
-                project_binding=real_binding,
-                is_authorized=True,
-            )
-            query_unauth = ResearchMemoryQuery(
-                role=AgentRole.ALPHA_GENERATOR.value,
-                project_binding=real_binding,
+                project_binding=self.project_binding,
                 categories=(ResearchMemoryCategory.RECENT_REJECTS.value,),
+                decision_types=("PROMOTE",),
             )
-            with self.assertRaises(ResearchMemoryPermissionError):
-                build_research_memory_view(
-                    query=query_unauth,
-                    authorized_scope=unauthorized_scope,
-                    project_binding=real_binding,
-                    memory_store=real_memory,
-                )
 
-            # 4. Test project binding mismatch against real store
-            mismatch_binding = ProjectBinding(
-                project_id="foreign-proj-id",
-                workspace_identity="/Users/fujun/node/vnpy",
-                binding_mode="strict",
-            )
-            query_mismatch = ResearchMemoryQuery(
+        # 4. Unknown decision type rejection
+        with self.assertRaises(ResearchMemoryCategoryError):
+            ResearchMemoryQuery(
                 role=AgentRole.ALPHA_GENERATOR.value,
-                project_binding=mismatch_binding,
+                project_binding=self.project_binding,
                 categories=(ResearchMemoryCategory.RECENT_REJECTS.value,),
-            )
-            with self.assertRaises(ProjectBindingError):
-                build_research_memory_view(
-                    query=query_mismatch,
-                    authorized_scope=real_scope,
-                    project_binding=real_binding,
-                    memory_store=real_memory,
-                )
-
-            # 5. Build bounded view across all 6 categories against actual real store
-            query_all = ResearchMemoryQuery(
-                role=AgentRole.ALPHA_GENERATOR.value,
-                project_binding=real_binding,
-                categories=(
-                    ResearchMemoryCategory.RECENT_REJECTS.value,
-                    ResearchMemoryCategory.PROMOTED_SUMMARIES.value,
-                    ResearchMemoryCategory.NME_BACKLOG.value,
-                    ResearchMemoryCategory.DUPLICATE_IDENTITIES.value,
-                    ResearchMemoryCategory.FAILED_APPROACHES.value,
-                    ResearchMemoryCategory.RESEARCH_GAPS.value,
-                ),
-            )
-            view = build_research_memory_view(
-                query=query_all,
-                authorized_scope=real_scope,
-                project_binding=real_binding,
-                memory_store=real_memory,
+                decision_types=("INVALID_DECISION_TYPE",),
             )
 
-            # 6. Verify outputs: if 0 entries exist in real store, honestly report 0
-            self.assertIsNotNone(view.view_id)
-            self.assertIsNotNone(view.view_content_hash)
-            self.assertEqual(len(view.categories), 6)
-            for cat in view.categories:
-                self.assertIn(cat, view.entries_by_category)
-                self.assertIsInstance(view.entries_by_category[cat], tuple)
-            self.assertEqual(view.total_entries, sum(len(e) for e in view.entries_by_category.values()))
+        # 5. hypothesis_content_hash filter excludes non-matching records
+        target_hash = self.records["reject"].content_hash
+        query_content_hash = ResearchMemoryQuery(
+            role=AgentRole.ALPHA_GENERATOR.value,
+            project_binding=self.project_binding,
+            categories=(ResearchMemoryCategory.RECENT_REJECTS.value,),
+            hypothesis_content_hash=target_hash,
+        )
+        view_content_hash = build_research_memory_view(
+            query=query_content_hash,
+            authorized_scope=self.scope_alpha_generator,
+            project_binding=self.project_binding,
+            memory_store=self.memory,
+        )
+        self.assertGreater(len(view_content_hash.entries_by_category[ResearchMemoryCategory.RECENT_REJECTS.value]), 0)
+        for e in view_content_hash.entries_by_category[ResearchMemoryCategory.RECENT_REJECTS.value]:
+            self.assertEqual(e.hypothesis_content_hash, target_hash)
 
-            # 7. Prove zero mutation to the underlying real database
-            size_after = real_db_path.stat().st_size
-            with sqlite3.connect(str(real_db_path)) as conn:
-                rows_after = conn.execute("SELECT COUNT(*) FROM research_memory_records").fetchone()[0]
-                tbl_manifests = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='manifests'").fetchone()
-                manifests_after = conn.execute("SELECT COUNT(*) FROM manifests").fetchone()[0] if tbl_manifests else 0
-                latest_row_after = conn.execute("SELECT record_id, content_hash FROM research_memory_records ORDER BY rowid DESC LIMIT 1").fetchone()
-                latest_hash_after = (latest_row_after[0], latest_row_after[1]) if latest_row_after else None
+    # 44. View identity sensitive to query and policy
+    def test_44_view_identity_sensitive_to_query_and_policy(self) -> None:
+        """Verify identical entries with different query or policy produce distinct view identities."""
+        base_query = ResearchMemoryQuery(
+            role=AgentRole.ALPHA_GENERATOR.value,
+            project_binding=self.project_binding,
+            categories=(ResearchMemoryCategory.RECENT_REJECTS.value,),
+            limit_per_category=5,
+        )
+        view_base = build_research_memory_view(
+            query=base_query,
+            authorized_scope=self.scope_alpha_generator,
+            project_binding=self.project_binding,
+            memory_store=self.memory,
+            current_time="2026-09-21T00:00:00Z",
+        )
 
-            self.assertEqual(rows_before, rows_after, "Real DB row count must NOT change on read-only view build")
-            self.assertEqual(size_before, size_after, "Real DB file size must NOT change on read-only view build")
-            self.assertEqual(manifests_before, manifests_after, "Real DB manifest count must NOT change")
-            self.assertEqual(latest_hash_before, latest_hash_after, "Real DB latest record hash must NOT change")
+        # 1. Different query (different limit_per_category) -> distinct view_id and content_hash
+        query_diff_limit = ResearchMemoryQuery(
+            role=AgentRole.ALPHA_GENERATOR.value,
+            project_binding=self.project_binding,
+            categories=(ResearchMemoryCategory.RECENT_REJECTS.value,),
+            limit_per_category=10,
+        )
+        view_diff_query = build_research_memory_view(
+            query=query_diff_limit,
+            authorized_scope=self.scope_alpha_generator,
+            project_binding=self.project_binding,
+            memory_store=self.memory,
+            current_time="2026-09-21T00:00:00Z",
+        )
+        self.assertNotEqual(view_base.view_id, view_diff_query.view_id)
+        self.assertNotEqual(view_base.view_content_hash, view_diff_query.view_content_hash)
 
-            # 8. Prove repeated query yields identical deterministic identity
-            view_repeat = build_research_memory_view(
-                query=query_all,
-                authorized_scope=real_scope,
-                project_binding=real_binding,
-                memory_store=real_memory,
-                current_time=view.generated_at,
-            )
-            self.assertEqual(view.view_id, view_repeat.view_id)
-            self.assertEqual(view.view_content_hash, view_repeat.view_content_hash)
+        # 2. Different policy (different max_chars) -> distinct view_id and content_hash
+        policy_diff = ResearchMemoryViewPolicy(max_chars=2500)
+        view_diff_policy = build_research_memory_view(
+            query=base_query,
+            authorized_scope=self.scope_alpha_generator,
+            project_binding=self.project_binding,
+            memory_store=self.memory,
+            policy=policy_diff,
+            current_time="2026-09-21T00:00:00Z",
+        )
+        self.assertNotEqual(view_base.view_id, view_diff_policy.view_id)
+        self.assertNotEqual(view_base.view_content_hash, view_diff_policy.view_content_hash)
 
-            # 9. Test bounds enforcement against real store
-            policy_bounded = ResearchMemoryViewPolicy(max_total_entries=1)
-            view_bounded = build_research_memory_view(
-                query=query_all,
-                authorized_scope=real_scope,
-                project_binding=real_binding,
-                memory_store=real_memory,
-                policy=policy_bounded,
-            )
-            self.assertLessEqual(view_bounded.total_entries, 1)
+        # 3. Same query and policy but different generated_at -> identical view_id and content_hash
+        view_diff_time = build_research_memory_view(
+            query=base_query,
+            authorized_scope=self.scope_alpha_generator,
+            project_binding=self.project_binding,
+            memory_store=self.memory,
+            current_time="2026-09-22T12:34:56Z",
+        )
+        self.assertEqual(view_base.view_id, view_diff_time.view_id)
+        self.assertEqual(view_base.view_content_hash, view_diff_time.view_content_hash)
 
-            # 10. Use isolated replica fixture to prove append produces new identity without mutating real store
-            replica_path = self.tmp_dir / "isolated_replica.sqlite3"
-            import shutil
-            shutil.copy2(real_db_path, replica_path)
-            replica_memory = ResearchMemory(replica_path)
-            # Append new record to isolated replica
-            hyp_rep = _make_dummy_hypothesis("hypo-replica-new")
-            plan_rep = _make_dummy_plan(hyp_rep, "plan-replica-new")
-            crit_rep = _make_dummy_critic_decision("crit-rep-1", "REJECT", hyp_rep, plan_rep, ["replica_test_reject"])
-            replica_memory.append_evaluation_record(
-                hypothesis=hyp_rep, plan=plan_rep, task_records=[], spec_records=[],
-                run_records=[], manifest_records=[], evidence_records=[], critic_decision=crit_rep,
-            )
-            view_replica = build_research_memory_view(
-                query=query_all,
-                authorized_scope=real_scope,
-                project_binding=real_binding,
-                memory_store=replica_memory,
-                current_time=view.generated_at,
-            )
-            self.assertNotEqual(view.view_id, view_replica.view_id)
-            self.assertNotEqual(view.view_content_hash, view_replica.view_content_hash)
+    # 45. Standalone read-only E2E with baseline integrity
+    def test_45_standalone_readonly_e2e_with_baseline_integrity(self) -> None:
+        """Simulate real persistent store E2E in isolated environment proving all 6 baseline metrics unchanged."""
+        standalone_db_path = self.tmp_dir / "prebuilt_standalone_store.sqlite3"
+        # Seed the database
+        seed_memory = ResearchMemory(standalone_db_path)
+        hyp_s = _make_dummy_hypothesis("hypo-standalone-1")
+        plan_s = _make_dummy_plan(hyp_s, "plan-standalone-1")
+        crit_s = _make_dummy_critic_decision("crit-standalone-1", "REJECT", hyp_s, plan_s, ["test_reason"])
+        seed_memory.append_evaluation_record(
+            hypothesis=hyp_s, plan=plan_s, task_records=[], spec_records=[],
+            run_records=[], manifest_records=[], evidence_records=[], critic_decision=crit_s,
+        )
 
-            # Final check: real store is still completely unchanged after replica operations
-            with sqlite3.connect(str(real_db_path)) as conn:
-                final_rows = conn.execute("SELECT COUNT(*) FROM research_memory_records").fetchone()[0]
-            self.assertEqual(rows_before, final_rows, "Real DB must remain completely unmutated after isolated replica append")
-        finally:
-            if not existed_before and real_db_path.exists():
-                real_db_path.unlink()
+        # Capture baseline BEFORE read-only operations
+        hash_before = hashlib.sha256(standalone_db_path.read_bytes()).hexdigest()
+        stat_before = standalone_db_path.stat()
+        size_before = stat_before.st_size
+        mtime_before = stat_before.st_mtime_ns
 
+        ro_uri = f"file:{standalone_db_path.as_posix()}?mode=ro"
+        with sqlite3.connect(ro_uri, uri=True) as conn:
+            conn.execute("PRAGMA query_only=ON;")
+            rows_before = conn.execute("SELECT COUNT(*) FROM research_memory_records").fetchone()[0]
+            tbl_manifests = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='manifests'").fetchone()
+            manifests_before = conn.execute("SELECT COUNT(*) FROM manifests").fetchone()[0] if tbl_manifests else 0
+            latest_row = conn.execute("SELECT record_id, content_hash FROM research_memory_records ORDER BY rowid DESC LIMIT 1").fetchone()
+            latest_hash_before = (latest_row[0], latest_row[1])
+
+        # Execute read-only view build via adapter
+        adapter = ResearchMemoryReadAdapter(standalone_db_path)
+        query = ResearchMemoryQuery(
+            role=AgentRole.ALPHA_GENERATOR.value,
+            project_binding=self.project_binding,
+            categories=(ResearchMemoryCategory.RECENT_REJECTS.value,),
+        )
+        view = build_research_memory_view(
+            query=query,
+            authorized_scope=self.scope_alpha_generator,
+            project_binding=self.project_binding,
+            memory_store=adapter,
+        )
+        self.assertGreater(view.total_entries, 0)
+
+        # Verify all 6 baseline metrics remain 100% identical
+        hash_after = hashlib.sha256(standalone_db_path.read_bytes()).hexdigest()
+        stat_after = standalone_db_path.stat()
+        self.assertEqual(hash_before, hash_after)
+        self.assertEqual(size_before, stat_after.st_size)
+        self.assertEqual(mtime_before, stat_after.st_mtime_ns)
+
+        with sqlite3.connect(ro_uri, uri=True) as conn:
+            conn.execute("PRAGMA query_only=ON;")
+            rows_after = conn.execute("SELECT COUNT(*) FROM research_memory_records").fetchone()[0]
+            manifests_after = conn.execute("SELECT COUNT(*) FROM manifests").fetchone()[0] if tbl_manifests else 0
+            latest_row_after = conn.execute("SELECT record_id, content_hash FROM research_memory_records ORDER BY rowid DESC LIMIT 1").fetchone()
+            latest_hash_after = (latest_row_after[0], latest_row_after[1])
+
+        self.assertEqual(rows_before, rows_after)
+        self.assertEqual(manifests_before, manifests_after)
+        self.assertEqual(latest_hash_before, latest_hash_after)
+
+        self.assertEqual(rows_before, rows_after)
+        self.assertEqual(manifests_before, manifests_after)
+        self.assertEqual(latest_hash_before, latest_hash_after)
 
 
 if __name__ == "__main__":

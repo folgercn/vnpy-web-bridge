@@ -10,10 +10,13 @@ Zero LLM / MCP / provider dependency.
 
 from __future__ import annotations
 
+import json
 import re
+import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
@@ -55,6 +58,23 @@ class ResearchMemoryCategory(str, Enum):
 
 
 ALL_CATEGORIES: frozenset[str] = frozenset(c.value for c in ResearchMemoryCategory)
+
+ALLOWED_DECISION_TYPES: frozenset[str] = frozenset({
+    "PROMOTE",
+    "REJECT",
+    "NEED_MORE_EVIDENCE",
+    "ADMISSION_FAILED",
+    "EXECUTION_CRASHED",
+})
+
+CATEGORY_ALLOWED_DECISIONS: dict[str, frozenset[str]] = {
+    ResearchMemoryCategory.RECENT_REJECTS.value: frozenset({"REJECT"}),
+    ResearchMemoryCategory.PROMOTED_SUMMARIES.value: frozenset({"PROMOTE"}),
+    ResearchMemoryCategory.NME_BACKLOG.value: frozenset({"NEED_MORE_EVIDENCE"}),
+    ResearchMemoryCategory.DUPLICATE_IDENTITIES.value: ALLOWED_DECISION_TYPES,
+    ResearchMemoryCategory.FAILED_APPROACHES.value: frozenset({"REJECT", "ADMISSION_FAILED", "EXECUTION_CRASHED"}),
+    ResearchMemoryCategory.RESEARCH_GAPS.value: ALLOWED_DECISION_TYPES,
+}
 
 
 class MemoryAccessReasonCode(str, Enum):
@@ -172,6 +192,33 @@ class ResearchMemoryQuery:
         for cat in self.categories:
             validated_cats.append(validate_category(cat))
         object.__setattr__(self, "categories", tuple(validated_cats))
+        if self.hypothesis_refs:
+            object.__setattr__(self, "hypothesis_refs", tuple(self.hypothesis_refs))
+        if self.decision_types:
+            validated_decisions = []
+            for dt in self.decision_types:
+                if dt not in ALLOWED_DECISION_TYPES:
+                    raise ResearchMemoryCategoryError(
+                        f"Unknown decision_type '{dt}'; must be one of {sorted(ALLOWED_DECISION_TYPES)}",
+                        details={"requested_decision": dt, "known_decisions": sorted(ALLOWED_DECISION_TYPES)},
+                    )
+                validated_decisions.append(dt)
+            object.__setattr__(self, "decision_types", tuple(validated_decisions))
+
+            # Validate compatibility between categories and decision_types (fail-closed on unsupported combinations)
+            allowed_for_cats = set()
+            for c in self.categories:
+                allowed_for_cats.update(CATEGORY_ALLOWED_DECISIONS.get(c, ALLOWED_DECISION_TYPES))
+            if not set(self.decision_types).intersection(allowed_for_cats):
+                raise ResearchMemoryCategoryError(
+                    f"Unsupported query combination: requested decision_types {sorted(self.decision_types)} "
+                    f"cannot satisfy any requested categories {sorted(self.categories)}",
+                    details={
+                        "categories": sorted(self.categories),
+                        "decision_types": sorted(self.decision_types),
+                        "supported_decisions_for_categories": sorted(allowed_for_cats),
+                    },
+                )
 
         if self.limit_per_category is not None and self.limit_per_category <= 0:
             raise ResearchMemoryLimitError("limit_per_category must be positive if specified")
@@ -229,6 +276,76 @@ def _sanitize_dict(data: dict[str, Any]) -> dict[str, Any]:
         else:
             sanitized[k] = v
     return sanitized
+
+
+class ResearchMemoryReadAdapter:
+    """Minimal domain read adapter decoupling View Builder from raw SQLite storage.
+
+    Guarantees read-only connection mode (mode=ro and PRAGMA query_only=ON) at connection boundary.
+    Yields immutable domain ResearchMemoryRecord objects without leaking SQLite connections,
+    cursors, raw queries, or table schemas to the View Builder or calling Agent.
+    """
+
+    def __init__(self, source: ResearchMemory | Path | str) -> None:
+        if isinstance(source, ResearchMemory):
+            self._db_path = source.db_path
+        elif isinstance(source, (Path, str)):
+            self._db_path = Path(source).resolve()
+        else:
+            raise TypeError(f"Unsupported memory source type: {type(source).__name__}")
+
+        if not self._db_path.exists():
+            raise FileNotFoundError(f"Research Memory database does not exist: {self._db_path}")
+
+    @property
+    def db_path(self) -> Path:
+        return self._db_path
+
+    def _get_readonly_connection(self) -> sqlite3.Connection:
+        uri = f"file:{self._db_path.as_posix()}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON;")
+        return conn
+
+    def get_all_records(self) -> tuple[ResearchMemoryRecord, ...]:
+        """Fetch all records safely using read-only domain mapping."""
+        with self._get_readonly_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM research_memory_records ORDER BY rowid ASC"
+            ).fetchall()
+            return tuple(self._row_to_record(r) for r in rows)
+
+    @staticmethod
+    def _row_to_record(row: sqlite3.Row) -> ResearchMemoryRecord:
+        return ResearchMemoryRecord(
+            record_id=row["record_id"],
+            record_type=row["record_type"],
+            hypothesis_id=row["hypothesis_id"],
+            revision=row["revision"],
+            content_hash=row["content_hash"],
+            scientific_identity_hash=row["scientific_identity_hash"],
+            semantic_hash=row["semantic_hash"],
+            decision=row["decision"],
+            created_at=row["created_at"],
+            hypothesis_ref=json.loads(row["hypothesis_ref_json"]),
+            plan_ref=json.loads(row["plan_ref_json"]) if row["plan_ref_json"] else None,
+            task_refs=json.loads(row["task_refs_json"]),
+            spec_refs=json.loads(row["spec_refs_json"]),
+            run_refs=json.loads(row["run_refs_json"]),
+            manifest_refs=json.loads(row["manifest_refs_json"]),
+            evidence_refs=json.loads(row["evidence_refs_json"]),
+            critic_ref=json.loads(row["critic_ref_json"]) if row["critic_ref_json"] else None,
+            hypothesis_payload=json.loads(row["hypothesis_payload"]),
+            plan_payload=json.loads(row["plan_payload"]) if row["plan_payload"] else None,
+            critic_decision_payload=json.loads(row["critic_decision_payload"]) if row["critic_decision_payload"] else None,
+            methods_applied=json.loads(row["methods_applied_json"]),
+            missing_evidence=json.loads(row["missing_evidence_json"]),
+            reject_reasons=json.loads(row["reject_reasons_json"]),
+            promoted_reasons=json.loads(row["promoted_reasons_json"]),
+            error_message=row["error_message"],
+            provenance=json.loads(row["provenance_json"]),
+        )
 
 
 @dataclass(frozen=True)
@@ -617,6 +734,39 @@ def _create_entry_view(
     )
 
 
+def _canonical_policy_dict(policy: ResearchMemoryViewPolicy) -> dict[str, Any]:
+    """Canonical serializable representation of complete view policy."""
+    return {
+        "enforce_source_integrity": policy.enforce_source_integrity,
+        "max_chars": policy.max_chars,
+        "max_entries_per_category": policy.max_entries_per_category,
+        "max_summary_chars": policy.max_summary_chars,
+        "max_total_entries": policy.max_total_entries,
+        "policy_version": policy.policy_version,
+        "role_allowed_categories": {
+            role: sorted(cats)
+            for role, cats in sorted(policy.role_allowed_categories.items())
+        },
+    }
+
+
+def _canonical_query_dict(query: ResearchMemoryQuery) -> dict[str, Any]:
+    """Canonical serializable representation of complete typed query contract."""
+    pb = query.project_binding.to_dict() if isinstance(query.project_binding, ProjectBinding) else dict(query.project_binding)
+    return {
+        "categories": sorted(query.categories),
+        "decision_types": sorted(query.decision_types),
+        "hypothesis_content_hash": query.hypothesis_content_hash,
+        "hypothesis_refs": sorted(query.hypothesis_refs),
+        "limit_per_category": query.limit_per_category,
+        "project_binding": _clean_for_canonical(pb),
+        "role": query.role,
+        "scientific_identity_hash": query.scientific_identity_hash,
+        "time_window_since": query.time_window_since,
+        "total_limit": query.total_limit,
+    }
+
+
 def _record_sort_key(r: ResearchMemoryRecord) -> tuple[float, str]:
     """Deterministic, full-precision sort key: decision_time DESC, record_id ASC."""
     try:
@@ -720,32 +870,46 @@ def build_research_memory_view(
             )
         eff_total_limit = query.total_limit
 
-    # 6. Read from underlying memory store safely
-    # Query layer strictly avoids exposing raw SQLite connection, rows, or schemas
-    all_raw_records: list[ResearchMemoryRecord] = []
-    if isinstance(memory_store, ResearchMemory):
-        # Fetch all records via high-level method
-        with memory_store._get_connection() as conn:
-            rows = conn.execute("SELECT * FROM research_memory_records ORDER BY rowid ASC").fetchall()
-            for r in rows:
-                rec = memory_store._row_to_record(r)
-                if active_policy.enforce_source_integrity:
-                    _verify_record_integrity(rec)
-                all_raw_records.append(rec)
-    elif hasattr(memory_store, "get_all_records"):
-        for rec in memory_store.get_all_records():
-            if active_policy.enforce_source_integrity:
-                _verify_record_integrity(rec)
-            all_raw_records.append(rec)
-    elif hasattr(memory_store, "find_by_scientific_identity"):
-        pass
+    # 6. Read from underlying memory store safely via Read Adapter / domain get_all_records API
+    # View Builder strictly avoids raw SQLite connections, cursors, raw queries, or internal schemas
+    adapter_records: tuple[ResearchMemoryRecord, ...] | list[ResearchMemoryRecord]
+    if hasattr(memory_store, "get_all_records"):
+        adapter_records = memory_store.get_all_records()
+    elif isinstance(memory_store, (Path, str, ResearchMemory)):
+        adapter = ResearchMemoryReadAdapter(memory_store)
+        adapter_records = adapter.get_all_records()
+    else:
+        raise TypeError(f"Unsupported memory_store type for memory view: {type(memory_store).__name__}")
 
-    # Apply time window if specified
-    if query.time_window_since:
-        all_raw_records = [
-            r for r in all_raw_records
-            if r.created_at >= query.time_window_since
-        ]
+    all_raw_records: list[ResearchMemoryRecord] = []
+    for rec in adapter_records:
+        if active_policy.enforce_source_integrity:
+            _verify_record_integrity(rec)
+        all_raw_records.append(rec)
+
+    # Apply typed query deterministic filters (fail-closed)
+    target_hypo_refs = set(query.hypothesis_refs) if query.hypothesis_refs else None
+    target_decisions = set(query.decision_types) if query.decision_types else None
+
+    filtered_records: list[ResearchMemoryRecord] = []
+    for r in all_raw_records:
+        # Time window filter
+        if query.time_window_since and r.created_at < query.time_window_since:
+            continue
+        # Hypothesis refs filter
+        if target_hypo_refs is not None and r.hypothesis_id not in target_hypo_refs:
+            continue
+        # Decision types filter
+        if target_decisions is not None and r.decision not in target_decisions:
+            continue
+        # Hypothesis content hash / Scientific identity hash filter
+        if query.hypothesis_content_hash and query.scientific_identity_hash:
+            if r.content_hash != query.hypothesis_content_hash and r.scientific_identity_hash != query.scientific_identity_hash:
+                continue
+        elif query.hypothesis_content_hash and r.content_hash != query.hypothesis_content_hash or query.scientific_identity_hash and r.scientific_identity_hash != query.scientific_identity_hash:
+            continue
+
+        filtered_records.append(r)
 
     # Filter/group by category
     entries_by_category: dict[str, list[ResearchMemoryEntryView]] = {
@@ -755,7 +919,7 @@ def build_research_memory_view(
     # 7. Deterministic categorical extraction
     # 7a. RECENT_REJECTS
     if ResearchMemoryCategory.RECENT_REJECTS.value in entries_by_category:
-        candidates = [r for r in all_raw_records if r.decision == "REJECT"]
+        candidates = [r for r in filtered_records if r.decision == "REJECT"]
         # Stable sort: decision_time DESC, record_id ASC
         candidates.sort(key=_record_sort_key)
         for rec in candidates[:eff_per_category_limit]:
@@ -765,7 +929,7 @@ def build_research_memory_view(
 
     # 7b. PROMOTED_SUMMARIES
     if ResearchMemoryCategory.PROMOTED_SUMMARIES.value in entries_by_category:
-        candidates = [r for r in all_raw_records if r.decision == "PROMOTE"]
+        candidates = [r for r in filtered_records if r.decision == "PROMOTE"]
         candidates.sort(key=_record_sort_key)
         for rec in candidates[:eff_per_category_limit]:
             entries_by_category[ResearchMemoryCategory.PROMOTED_SUMMARIES.value].append(
@@ -774,7 +938,7 @@ def build_research_memory_view(
 
     # 7c. NME_BACKLOG
     if ResearchMemoryCategory.NME_BACKLOG.value in entries_by_category:
-        candidates = [r for r in all_raw_records if r.decision == "NEED_MORE_EVIDENCE"]
+        candidates = [r for r in filtered_records if r.decision == "NEED_MORE_EVIDENCE"]
         candidates.sort(key=_record_sort_key)
         for rec in candidates[:eff_per_category_limit]:
             entries_by_category[ResearchMemoryCategory.NME_BACKLOG.value].append(
@@ -788,7 +952,7 @@ def build_research_memory_view(
         target_sci_hash = query.scientific_identity_hash
         dup_candidates: list[tuple[ResearchMemoryRecord, str]] = []
 
-        for rec in all_raw_records:
+        for rec in filtered_records:
             dup_state = "none"
             if target_content_hash and rec.content_hash == target_content_hash:
                 dup_state = "exact"
@@ -796,7 +960,7 @@ def build_research_memory_view(
                 dup_state = "related"
             elif not target_content_hash and not target_sci_hash:
                 # General duplicate lookup: flag if multiple records share this scientific identity
-                matching_sci = [r for r in all_raw_records if r.scientific_identity_hash == rec.scientific_identity_hash]
+                matching_sci = [r for r in filtered_records if r.scientific_identity_hash == rec.scientific_identity_hash]
                 if len(matching_sci) > 1:
                     dup_state = "related"
 
@@ -819,7 +983,7 @@ def build_research_memory_view(
     if ResearchMemoryCategory.FAILED_APPROACHES.value in entries_by_category:
         # Both engineering failures and scientific falsifications
         candidates = [
-            r for r in all_raw_records
+            r for r in filtered_records
             if r.decision in ("REJECT", "ADMISSION_FAILED", "EXECUTION_CRASHED")
             or r.record_type in ("admission_failed", "execution_crashed")
         ]
@@ -833,7 +997,7 @@ def build_research_memory_view(
     if ResearchMemoryCategory.RESEARCH_GAPS.value in entries_by_category:
         # Derive gaps purely from structured facts: unresolved NME or unexecuted dimensions
         # NEVER invoke LLM to fabricate gaps
-        candidates = [r for r in all_raw_records if r.missing_evidence or r.decision == "NEED_MORE_EVIDENCE"]
+        candidates = [r for r in filtered_records if r.missing_evidence or r.decision == "NEED_MORE_EVIDENCE"]
         candidates.sort(key=_record_sort_key)
         for rec in candidates[:eff_per_category_limit]:
             gap_type = "unresolved_nme" if rec.decision == "NEED_MORE_EVIDENCE" else "missing_coverage"
@@ -886,20 +1050,28 @@ def build_research_memory_view(
     sorted_source_refs = tuple(sorted(source_refs_set))
 
     # 10. Deterministic View Content Hash & View ID Calculation
-    # generated_at is strictly EXCLUDED from identity
+    # Binds full typed query contract, canonical policy payload, entries, and source refs.
+    # generated_at is strictly EXCLUDED from identity.
+    canonical_policy = _canonical_policy_dict(active_policy)
+    canonical_query = _canonical_query_dict(query)
+
     core_view_payload = {
         "categories": list(effective_categories),
         "entries": [e.to_normalized_dict() for e in all_selected_entries],
+        "policy": canonical_policy,
         "policy_version": active_policy.policy_version,
         "project_binding": expected_binding.to_dict(),
+        "query": canonical_query,
         "role": query.role,
         "source_refs": list(sorted_source_refs),
     }
     view_content_hash = v2.digest(core_view_payload)
     view_token = v2.digest({
         "categories": list(effective_categories),
+        "policy": canonical_policy,
         "policy_version": active_policy.policy_version,
         "project_binding": expected_binding.to_dict(),
+        "query": canonical_query,
         "role": query.role,
         "view_content_hash": view_content_hash,
     })[:32]

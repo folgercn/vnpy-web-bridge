@@ -59,6 +59,8 @@ from research_lab.agent_control.handoff import (
 )
 from research_lab.agent_control.memory_view import (
     ALL_CATEGORIES,
+    ALLOWED_DECISION_TYPES,
+    CATEGORY_ALLOWED_DECISIONS,
     DEFAULT_ROLE_ALLOWED_CATEGORIES,
     MemoryAccessReasonCode,
     MemoryViewAuditRecord,
@@ -66,6 +68,7 @@ from research_lab.agent_control.memory_view import (
     ResearchMemoryCategory,
     ResearchMemoryEntryView,
     ResearchMemoryQuery,
+    ResearchMemoryReadAdapter,
     ResearchMemoryView,
     ResearchMemoryViewPolicy,
     build_research_memory_view,
@@ -115,9 +118,11 @@ from research_lab.agent_control.transports import (
 )
 
 __all__ = [
+    "ALLOWED_DECISION_TYPES",
     "ALL_CATEGORIES",
     "ALL_PERMISSIONS",
     "ALL_ROLES",
+    "CATEGORY_ALLOWED_DECISIONS",
     "CRITICAL_MCP_TOOLS",
     "DEFAULT_ROLE_ALLOWED_CATEGORIES",
     "DEFAULT_ROLE_POLICIES",
@@ -162,6 +167,7 @@ __all__ = [
     "ResearchMemoryLimitError",
     "ResearchMemoryPermissionError",
     "ResearchMemoryQuery",
+    "ResearchMemoryReadAdapter",
     "ResearchMemorySourceCorruptionError",
     "ResearchMemoryView",
     "ResearchMemoryViewPolicy",
