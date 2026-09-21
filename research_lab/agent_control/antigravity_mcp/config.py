@@ -3,6 +3,8 @@ import os
 from pathlib import Path
 
 CURRENT_DIR = Path(__file__).resolve().parent
+DATA_DIR = CURRENT_DIR / "data"
+STATS_FILE = DATA_DIR / "usage_stats.json"
 
 # MCP Server network listening configuration
 DEFAULT_HOST = os.environ.get("AGY_MCP_HOST", "127.0.0.1")
@@ -11,6 +13,11 @@ DEFAULT_TRANSPORT = os.environ.get("AGY_MCP_TRANSPORT", "sse")
 
 # Security access token (Bearer or ?api_key=)
 AGY_MCP_API_KEY = os.environ.get("AGY_MCP_API_KEY", "").strip()
+
+# Local Unix Domain Socket (UDS) configuration
+# Default to data/antigravity_mcp.sock; local socket communication is exempt from token by default
+DEFAULT_SOCKET_PATH = Path(os.environ.get("AGY_MCP_SOCKET_PATH", str(DATA_DIR / "antigravity_mcp.sock")))
+AGY_MCP_SOCKET_AUTH = os.environ.get("AGY_MCP_SOCKET_AUTH", "false").lower() in ("true", "1", "yes")
 
 # External multi-account tools local paths
 HOME_DIR = Path.home()
@@ -27,9 +34,7 @@ ANTIGRAVITY_MANAGER_API_KEY = os.environ.get("AGY_MANAGER_API_KEY", "")  # empty
 # Local Gemini / Antigravity credential paths
 GEMINI_OAUTH_CREDS_JSON = HOME_DIR / ".gemini" / "oauth_creds.json"
 
-# Usage statistics persistence
-DATA_DIR = CURRENT_DIR / "data"
-STATS_FILE = DATA_DIR / "usage_stats.json"
+# Usage statistics persistence (DATA_DIR and STATS_FILE defined above)
 
 # Waiting duration after switching account for credential reload (seconds)
 SWITCH_SETTLE_SECONDS = float(os.environ.get("AGY_SWITCH_SETTLE_SECONDS", "1.5"))

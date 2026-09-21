@@ -23,27 +23,34 @@
    - 暴露 `list_accounts` 供 Agent 查看额度，暴露 `switch_account(email_or_id)` 供 Agent 自主安全切号；
    - 暴露 `account_leaderboard` 查看账号用量统计与任务分布排行榜。
 
-4. **安全访问鉴权**：
-   - 支持通过环境变量 `AGY_MCP_API_KEY` 开启 Bearer Token / URL `?api_key=` 访问鉴权。
+4. **双通信模式（网络 SSE + 本地 Unix Domain Socket）**：
+   - **网络模式 (Network SSE)**：通过 TCP HTTP/SSE（默认 `127.0.0.1:8765/sse`）对外服务；
+   - **本地 Socket 模式 (Local UDS)**：通过本机 Unix Domain Socket（默认 `data/antigravity_mcp.sock`）进行零端口冲突、低开销通信；
+   - **安全策略**：本地 Socket 走操作系统文件权限隔离，**默认免 Token（开箱即用）**；网络模式支持 `AGY_MCP_API_KEY` 开启 Bearer Token / `?api_key=` 校验。
 
 ---
 
 ## 快速启动
 
 ```bash
-# 1. 默认 SSE 网络模式启动 (端口 8765)
+# 1. 网络模式启动 (默认 SSE, 端口 8765)
 ./research_lab/agent_control/antigravity_mcp/start_server.sh
 
-# 2. 自定义端口与安全鉴权启动
+# 2. 网络模式 (自定义端口与 Token 鉴权)
 AGY_MCP_PORT=9000 AGY_MCP_API_KEY=my_secret_token ./research_lab/agent_control/antigravity_mcp/start_server.sh
+
+# 3. 本地 Socket 模式启动 (默认免 Token, 生成 data/antigravity_mcp.sock)
+./research_lab/agent_control/antigravity_mcp/start_server.sh --transport socket
+
+# 4. 本地 Socket 模式 (自定义 socket 路径)
+./research_lab/agent_control/antigravity_mcp/start_server.sh --transport socket --socket /path/to/custom.sock
 ```
 
 ---
 
-## Codex MCP 配置接入
+## MCP 配置接入
 
-在 Codex 的 MCP 配置文件中添加：
-
+### 方式一：网络模式接入 (TCP SSE)
 ```json
 {
   "mcpServers": {
@@ -53,4 +60,9 @@ AGY_MCP_PORT=9000 AGY_MCP_API_KEY=my_secret_token ./research_lab/agent_control/a
   }
 }
 ```
-*(若配置了 `AGY_MCP_API_KEY=xxx`，url 可设为 `http://127.0.0.1:8765/sse?api_key=xxx`)*
+*(若配置了 `AGY_MCP_API_KEY=xxx`，url 设为 `http://127.0.0.1:8765/sse?api_key=xxx`)*
+
+### 方式二：本地 Socket 模式接入 (UDS)
+支持通过 Unix Domain Socket 客户端或代理直连：
+- Socket 路径：`research_lab/agent_control/antigravity_mcp/data/antigravity_mcp.sock`
+- 免 Token 开箱即用。

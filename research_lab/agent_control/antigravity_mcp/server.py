@@ -6,10 +6,12 @@ Designed for autonomous LLM agents (Codex) to inspect quotas and select accounts
 """
 import argparse
 import asyncio
+import atexit
 import contextlib
 import json
 import logging
 import os
+import signal
 import sys
 import tempfile
 import time
@@ -18,20 +20,34 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
 
-from research_lab.agent_control.antigravity_mcp.config import (
-    AGY_MCP_API_KEY,
-    DEFAULT_HOST,
-    DEFAULT_PORT,
-    DEFAULT_TRANSPORT,
-)
-from research_lab.agent_control.antigravity_mcp.inspectors import ToolInspector
-from research_lab.agent_control.antigravity_mcp.manager_client import ManagerClient
-from research_lab.agent_control.antigravity_mcp.quota_reader import QuotaReader
-from research_lab.agent_control.antigravity_mcp.usage_tracker import UsageTracker
+import uvicorn
 
 CURRENT_DIR = Path(__file__).resolve().parent
-if str(CURRENT_DIR) not in sys.path:
-    sys.path.insert(0, str(CURRENT_DIR))
+REPO_ROOT = CURRENT_DIR.parents[2]
+for path_dir in (CURRENT_DIR, REPO_ROOT):
+    if str(path_dir) not in sys.path:
+        sys.path.insert(0, str(path_dir))
+
+from research_lab.agent_control.antigravity_mcp.config import (
+    AGY_MCP_API_KEY,
+    AGY_MCP_SOCKET_AUTH,
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    DEFAULT_SOCKET_PATH,
+    DEFAULT_TRANSPORT,
+)
+from research_lab.agent_control.antigravity_mcp.inspectors import (
+    ToolInspector,
+)
+from research_lab.agent_control.antigravity_mcp.manager_client import (
+    ManagerClient,
+)
+from research_lab.agent_control.antigravity_mcp.quota_reader import (
+    QuotaReader,
+)
+from research_lab.agent_control.antigravity_mcp.usage_tracker import (
+    UsageTracker,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -444,8 +460,14 @@ def create_mcp_server():
     return mcp
 
 
-def print_startup_banner():
-    """Print clean diagnostic banner regarding external tools status."""
+def print_startup_banner(
+    transport: str = "sse",
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    socket_path: Path | None = None,
+    auth_enabled: bool = False,
+):
+    """Print clean diagnostic banner regarding external tools status and transport."""
     report = inspector.get_capabilities_report()
     mgr_avail = report["features"]["multi_account_quota_pool"]
     mgr_msg = report["antigravity_tools"]["message"]
@@ -453,19 +475,102 @@ def print_startup_banner():
     print("    🚀 Antigravity Network MCP Bridge (Powered by Antigravity-Manager)")
     print(f"    Mode: {report['mode']}")
     print("-" * 70)
+    if transport == "socket":
+        sock_str = str(socket_path or DEFAULT_SOCKET_PATH)
+        auth_str = "Token Auth ENABLED" if auth_enabled else "免密开箱即用 (Local UDS Open Access)"
+        print(f"  * Transport           : Local Unix Domain Socket (unix:{sock_str})")
+        print(f"  * Security Auth       : {auth_str}")
+    elif transport == "sse":
+        auth_str = "Token Auth ENABLED" if auth_enabled else "Open Access (No Token)"
+        print(f"  * Transport           : Network SSE (http://{host}:{port}/sse)")
+        print(f"  * Security Auth       : {auth_str}")
+    else:
+        print("  * Transport           : stdio")
     print(f"  * Antigravity-Manager : {'[ON] ' + mgr_msg if mgr_avail else '[OFF] ' + mgr_msg}")
     print("  * Account Switch Mode : Safe official restart (/Applications/Antigravity.app)")
     print(f"  * Status Summary      : {report['summary_message']}")
     print("=" * 70)
 
 
+def run_socket_server(
+    mcp_server: Any,
+    socket_path: Path,
+    api_key: str = "",
+    require_auth: bool = False,
+) -> None:
+    """Run FastMCP SSE server listening on a local Unix Domain Socket (UDS)."""
+    socket_path = Path(socket_path).resolve()
+    # Check AF_UNIX path length limitation (macOS limit is 104 characters, Linux is 108)
+    if len(str(socket_path).encode("utf-8")) >= 104:
+        raise ValueError(
+            f"Unix domain socket path is too long ({len(str(socket_path))} chars, limit 104): '{socket_path}'. "
+            "Please specify a shorter path via --socket or AGY_MCP_SOCKET_PATH."
+        )
+    socket_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if socket_path.exists():
+        logger.info("Cleaning up stale socket file: %s", socket_path)
+        try:
+            socket_path.unlink()
+        except OSError as exc:
+            logger.warning("Failed to remove stale socket file %s: %s", socket_path, exc)
+
+    def _cleanup_socket() -> None:
+        try:
+            if socket_path.exists():
+                socket_path.unlink()
+                logger.info("Cleaned up socket file: %s", socket_path)
+        except OSError:
+            pass
+
+    atexit.register(_cleanup_socket)
+
+    # Disable DNS rebinding protection for local socket transport as UDS does not use DNS
+    if hasattr(mcp_server.settings, "transport_security") and mcp_server.settings.transport_security:
+        mcp_server.settings.transport_security.enable_dns_rebinding_protection = False
+        if hasattr(mcp_server.settings.transport_security, "allowed_hosts"):
+            mcp_server.settings.transport_security.allowed_hosts.extend(["localhost", "127.0.0.1", ""])
+
+    app = mcp_server.sse_app()
+    if require_auth and api_key:
+        logger.info("Security: API Key authentication ENABLED on socket %s", socket_path)
+        app = ApiKeyAuthMiddleware(app, api_key)
+    else:
+        logger.info("Security: Open local access (no token required for local socket)")
+
+    config = uvicorn.Config(
+        app,
+        uds=str(socket_path),
+        log_level=mcp_server.settings.log_level.lower(),
+    )
+    server = uvicorn.Server(config)
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    def _handle_signal(*args: Any) -> None:
+        server.should_exit = True
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _handle_signal)
+        except (NotImplementedError, RuntimeError):
+            signal.signal(sig, lambda *_: setattr(server, "should_exit", True))
+
+    try:
+        logger.info("Starting Codex Antigravity MCP Server (Local Socket) at unix:%s", socket_path)
+        loop.run_until_complete(server.serve())
+    finally:
+        _cleanup_socket()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Codex Antigravity Network MCP Server")
     parser.add_argument(
         "--transport",
-        choices=["sse", "stdio"],
+        choices=["sse", "socket", "stdio"],
         default=DEFAULT_TRANSPORT,
-        help=f"Transport protocol (default: {DEFAULT_TRANSPORT})",
+        help=f"Transport protocol: 'sse' (network), 'socket' (local Unix Domain Socket), 'stdio' (default: {DEFAULT_TRANSPORT})",
     )
     parser.add_argument(
         "--host",
@@ -478,20 +583,66 @@ def main():
         default=DEFAULT_PORT,
         help=f"Port for SSE server (default: {DEFAULT_PORT})",
     )
+    parser.add_argument(
+        "--socket",
+        "--socket-path",
+        dest="socket_path",
+        default=str(DEFAULT_SOCKET_PATH),
+        help=f"Path to Unix Domain Socket file for 'socket' transport (default: {DEFAULT_SOCKET_PATH})",
+    )
+    parser.add_argument(
+        "--require-auth",
+        action="store_true",
+        default=False,
+        help="Explicitly require API Key authentication",
+    )
+    parser.add_argument(
+        "--no-auth",
+        action="store_true",
+        default=False,
+        help="Explicitly disable API Key authentication",
+    )
 
     args = parser.parse_args()
 
-    print_startup_banner()
+    # Determine authentication requirement
+    if args.no_auth:
+        auth_required = False
+    elif args.require_auth:
+        auth_required = True
+    else:
+        # Default behavior:
+        # - Socket transport: default exempt from token (AGY_MCP_SOCKET_AUTH is False by default)
+        # - SSE transport: require token if AGY_MCP_API_KEY is configured
+        if args.transport == "socket":
+            auth_required = AGY_MCP_SOCKET_AUTH and bool(AGY_MCP_API_KEY)
+        else:
+            auth_required = bool(AGY_MCP_API_KEY)
+
+    socket_path = Path(args.socket_path) if args.transport == "socket" else None
+    print_startup_banner(
+        transport=args.transport,
+        host=args.host,
+        port=args.port,
+        socket_path=socket_path,
+        auth_enabled=auth_required,
+    )
     mcp = create_mcp_server()
 
-    if args.transport == "sse":
+    if args.transport == "socket":
+        run_socket_server(
+            mcp_server=mcp,
+            socket_path=Path(args.socket_path),
+            api_key=AGY_MCP_API_KEY,
+            require_auth=auth_required,
+        )
+    elif args.transport == "sse":
         logger.info("Starting Codex Antigravity Network MCP Server (SSE) on http://%s:%d/sse", args.host, args.port)
         mcp.settings.host = args.host
         mcp.settings.port = args.port
 
-        if AGY_MCP_API_KEY:
+        if auth_required and AGY_MCP_API_KEY:
             logger.info("Security: API Key authentication ENABLED")
-            import uvicorn
             app = mcp.sse_app()
             app = ApiKeyAuthMiddleware(app, AGY_MCP_API_KEY)
             config = uvicorn.Config(
