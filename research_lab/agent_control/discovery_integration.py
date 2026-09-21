@@ -52,6 +52,7 @@ from research_lab.alpha_discovery import (
     CriticDecision,
     DiscoveryItemResult,
     ResearchMemoryRecord,
+    compute_hypothesis_content_hash,
 )
 from research_lab.contracts import v2
 
@@ -290,20 +291,54 @@ class DiscoveryIntegrationOrchestrator:
             if isinstance(candidate, AlphaGenerationCandidate)
             else candidate
         )
-        # Deep defensive copy to guarantee candidate immutability
-        hyp_dict = copy.deepcopy(hyp_obj.model_dump())
+        # Deep defensive copy to guarantee candidate immutability and exact hash profile
+        dump_with = hyp_obj.model_dump()
+        if compute_hypothesis_content_hash(dump_with) == hyp_obj.hypothesis_content_hash:
+            hyp_dict = copy.deepcopy(dump_with)
+        else:
+            hyp_dict = copy.deepcopy(hyp_obj.model_dump(exclude_none=True))
 
         hyp_id = hyp_dict["hypothesis_id"]
         hyp_hash = hyp_dict["hypothesis_content_hash"]
         sci_hash = hyp_obj.scientific_identity_hash
 
-        # Run through existing deterministic AlphaDiscoveryEngine
-        item_result: DiscoveryItemResult = self.engine.run_single(
-            hypothesis_input=hyp_dict,
-            snapshot_path=snapshot_path,
-            dataset_binding=dataset_binding,
-            auto_supplemental=auto_supplemental,
-        )
+        # Run through existing deterministic AlphaDiscoveryEngine with global exception boundary
+        try:
+            item_result: DiscoveryItemResult = self.engine.run_single(
+                hypothesis_input=hyp_dict,
+                snapshot_path=snapshot_path,
+                dataset_binding=dataset_binding,
+                auto_supplemental=auto_supplemental,
+            )
+        except Exception as exc:  # noqa: BLE001
+            err_text = str(exc)
+            eng_status = (
+                EngineeringStatus.CRITIC_FAILED.value
+                if "critic" in err_text.lower()
+                else EngineeringStatus.SCREENING_FAILED.value
+            )
+            res = DiscoveryIntegrationResult(
+                engineering_status=eng_status,
+                scientific_decision=None,
+                error_code=eng_status,
+                error_message=f"Screening execution crashed: {exc}",
+                request_id=request_id,
+                task_id=task_id,
+                route_id=route_id,
+                provider_job_ref=provider_job_ref,
+                provider=provider,
+                model=model,
+                agent_result_id=agent_result_id,
+                agent_result_hash=agent_result_hash,
+                hypothesis_id=hyp_id,
+                hypothesis_content_hash=hyp_hash,
+                scientific_identity_hash=sci_hash,
+                admitted_hypothesis=hyp_obj,
+                critic_decision=None,
+                project_binding=binding,
+            )
+            self.audit_trail.append(DiscoveryIntegrationAuditRecord.create(res))
+            return res
 
         dec_history: list[CriticDecision] = []
         mem_records: list[ResearchMemoryRecord] = []
@@ -335,18 +370,27 @@ class DiscoveryIntegrationOrchestrator:
                 if final_item.critic_decision
                 else None
             )
+            final_critic_decision = final_item.critic_decision
             err_msg = None
+        elif "critic" in str(final_item.status).lower() or (final_item.error_message and "critic" in str(final_item.error_message).lower()):
+            eng_status = EngineeringStatus.CRITIC_FAILED.value
+            sci_decision = None
+            final_critic_decision = None
+            err_msg = final_item.error_message
         elif final_item.status == "skipped_duplicate":
             eng_status = EngineeringStatus.SKIPPED_DUPLICATE.value
             sci_decision = None
+            final_critic_decision = None
             err_msg = final_item.error_message or "Duplicate screening skipped"
         elif final_item.status == "invalid_definition":
             eng_status = EngineeringStatus.ADMISSION_FAILED.value
             sci_decision = None
+            final_critic_decision = None
             err_msg = final_item.error_message
         else:
             eng_status = EngineeringStatus.SCREENING_FAILED.value
             sci_decision = None
+            final_critic_decision = None
             err_msg = final_item.error_message
 
         # Collect refs from receipts / memory_record
@@ -386,7 +430,7 @@ class DiscoveryIntegrationOrchestrator:
             plan_id=plan_id,
             plan_content_hash=plan_hash,
             admitted_hypothesis=hyp_obj,
-            critic_decision=final_item.critic_decision,
+            critic_decision=final_critic_decision,
             critic_decision_history=tuple(dec_history),
             memory_record_id=mem_records[-1].record_id if mem_records else None,
             memory_records=tuple(mem_records),

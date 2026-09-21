@@ -15,6 +15,7 @@ from typing import Any
 
 from research_lab.alpha_discovery.hypothesis import (
     AlphaHypothesis,
+    compute_hypothesis_content_hash,
     compute_scientific_identity_hash,
     is_signed_scalar_feature_signal,
     validate_hypothesis,
@@ -62,7 +63,11 @@ class ScreeningPlanner:
         and never executes screening experiments.
         """
         if isinstance(hypothesis, AlphaHypothesis):
-            raw_dict = hypothesis.model_dump(exclude_none=True)
+            dump_with = hypothesis.model_dump()
+            if compute_hypothesis_content_hash(dump_with) == hypothesis.hypothesis_content_hash:
+                raw_dict = dump_with
+            else:
+                raw_dict = hypothesis.model_dump(exclude_none=True)
         elif isinstance(hypothesis, dict):
             raw_dict = hypothesis
         else:

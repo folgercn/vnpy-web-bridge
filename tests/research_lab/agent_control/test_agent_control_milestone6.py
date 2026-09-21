@@ -686,3 +686,226 @@ def test_tradable_authority_permanently_false(test_context):
             scientific_decision="PROMOTE",
             is_tradable=True,  # Forbidden
         )
+
+
+# ==============================================================================
+# P1 Review Regressions: Hash Compatibility & Supplemental Exception Isolation
+# ==============================================================================
+def test_v1_legacy_hypothesis_with_explicit_nulls_compatibility_and_replay(test_context):
+    """P1-1 Regression: v1 hypothesis with explicit nulls remains fully compatible and replayable.
+
+    Verifies:
+    - Pre-PR v1 records containing explicit nulls (parent_hypothesis_ref, related_hypothesis_refs,
+      duplicate_of, signal_type) retain stable content hash under canonical rules.
+    - validate_hypothesis preserves verified explicit nulls, preventing silent hash divergence.
+    - Candidate can be seamlessly integrated and replayed in M6 pipeline without hash mismatch.
+    """
+    orchestrator = test_context["orchestrator"]
+    falsified_csv = test_context["falsified_csv"]
+    falsified_binding = test_context["falsified_binding"]
+
+    from research_lab.alpha_discovery.hypothesis import (
+        AlphaHypothesis,
+        compute_hypothesis_content_hash,
+        validate_hypothesis,
+    )
+
+    # Construct canonical v1 payload as generated prior to PR (with explicit None fields)
+    legacy_payload: dict[str, Any] = {
+        "schema_version": "research_lab.alpha_hypothesis.v1",
+        "hash_profile": "research-json-v1",
+        "hypothesis_id": "hypo-legacy-nulls-001",
+        "revision": "rev.1",
+        "title": "Legacy Momentum with Explicit Nulls",
+        "economic_rationale": "Liquidity continuation under order flow shocks.",
+        "signal_family": "momentum",
+        "signal_definition": "feature_val",
+        "source_features": ["feature_val"],
+        "target": "target_val",
+        "expected_direction": "positive",
+        "holding_horizon": "1h",
+        "universe": "commodity_active",
+        "frequency": "1h",
+        "known_risks": ["liquidity exhaustion"],
+        "falsification_conditions": ["ic < 0.05", "negative_ic"],
+        "proposed_screening_methods": [
+            "coverage",
+            "simple_correlation",
+            "direction_consistency",
+            "stability_split",
+        ],
+        "provenance": {
+            "origin_type": "observation",
+            "origin_ref": "research_notes/2026-09-legacy.md",
+            "created_by": "alpha_generator",
+            "created_at": NOW,
+        },
+        "parent_hypothesis_ref": None,
+        "related_hypothesis_refs": None,
+        "duplicate_of": None,
+        "signal_type": None,
+    }
+
+    # 1. Compute hash using canonical v1 rule (clean = {k: v for k, v in data.items() if k != 'hypothesis_content_hash'})
+    legacy_hash = compute_hypothesis_content_hash(legacy_payload)
+    legacy_payload["hypothesis_content_hash"] = legacy_hash
+
+    # 2. Assert validate_hypothesis passes and does not mutate canonical content hash
+    validated = validate_hypothesis(legacy_payload)
+    assert compute_hypothesis_content_hash(validated) == legacy_hash
+
+    # 3. Build AlphaHypothesis model and verify round-trip stability
+    hyp_model = AlphaHypothesis.model_validate(validated)
+    assert hyp_model.hypothesis_content_hash == legacy_hash
+
+    # 4. Replay through DiscoveryIntegrationOrchestrator without mismatch
+    res = orchestrator.integrate_candidate(
+        candidate=hyp_model,
+        snapshot_path=falsified_csv,
+        dataset_binding=falsified_binding,
+        project_binding=BINDING,
+        task_id="task-legacy-nulls",
+    )
+
+    assert res.engineering_status == EngineeringStatus.COMPLETED.value
+    assert res.scientific_decision == "REJECT"
+    assert res.hypothesis_content_hash == legacy_hash
+    assert len(res.memory_records) == 1
+    assert res.memory_records[0].content_hash == legacy_hash
+
+
+def test_supplemental_pipeline_exception_isolation(test_context, monkeypatch):
+    """P1-2 Regression: Exception in supplemental pipeline execution does not escape or pollute.
+
+    Verifies:
+    - Initial NME completes, but supplemental pipeline crashes (e.g. I/O or data error).
+    - Exception does NOT escape orchestrator.
+    - engineering_status is SCREENING_FAILED.
+    - scientific_decision is strictly None (NEVER NME/REJECT/PROMOTE).
+    - critic_decision is strictly None.
+    - Research Memory is NOT polluted by supplemental crash.
+    - Valid tamper-evident audit record is appended and verified.
+    """
+    orchestrator = test_context["orchestrator"]
+    clean_csv = test_context["clean_csv"]
+    clean_binding = test_context["clean_binding"]
+    engine = test_context["engine"]
+    memory = test_context["memory"]
+
+    req = _request()
+    view = _view()
+    # Envelope requesting only cheap methods -> triggers NEED_MORE_EVIDENCE on first evaluation
+    initial_methods = ["coverage", "simple_correlation", "direction_consistency", "stability_split"]
+    env = _valid_envelope(direction="positive", methods=initial_methods)
+    candidate = _create_admitted_candidate(env, req, view)
+
+    # Monkeypatch pipeline.execute_plan to succeed on initial run, but raise on supplemental
+    original_execute = engine.pipeline.execute_plan
+    call_count = 0
+
+    def mock_execute_plan(plan, snapshot_path, staging_dir):
+        nonlocal call_count
+        call_count += 1
+        if call_count > 1:
+            raise RuntimeError("Synthetic supplemental pipeline stream error")
+        return original_execute(plan, snapshot_path, staging_dir)
+
+    monkeypatch.setattr(engine.pipeline, "execute_plan", mock_execute_plan)
+
+    # Execute with auto_supplemental=True; must not escape
+    res = orchestrator.integrate_candidate(
+        candidate=candidate,
+        snapshot_path=clean_csv,
+        dataset_binding=clean_binding,
+        project_binding=BINDING,
+        auto_supplemental=True,
+    )
+
+    # 1. Engineering terminal state reflects screening failure
+    assert res.engineering_status == EngineeringStatus.SCREENING_FAILED.value
+    assert "Supplemental cycle failed" in (res.error_message or "")
+
+    # 2. Scientific decision MUST BE NONE
+    assert res.scientific_decision is None
+    assert res.critic_decision is None
+
+    # 3. Decision history records first round NME, but final outcome is not completed
+    assert len(res.critic_decision_history) == 1
+    assert res.critic_decision_history[0].decision == "NEED_MORE_EVIDENCE"
+
+    # 4. Research Memory is not polluted: contains only the initial valid NME record, no crash record
+    mem_records = memory.find_by_hypothesis_id(candidate.hypothesis.hypothesis_id)
+    assert len(mem_records) == 1
+    assert mem_records[0].decision == "NEED_MORE_EVIDENCE"
+
+    # 5. Audit trail records the failure and passes integrity verification
+    last_audit = orchestrator.audit_trail.get_records()[-1]
+    assert last_audit.engineering_status == EngineeringStatus.SCREENING_FAILED.value
+    assert last_audit.scientific_decision is None
+    last_audit.verify()
+    assert orchestrator.audit_trail.verify_all() is True
+
+
+def test_supplemental_critic_exception_isolation(test_context, monkeypatch):
+    """P1-2 Regression: Exception in supplemental Critic evaluation does not escape or pollute.
+
+    Verifies:
+    - Initial NME completes, supplemental pipeline succeeds, but Critic fails on re-evaluation.
+    - Exception does NOT escape orchestrator.
+    - engineering_status is CRITIC_FAILED.
+    - scientific_decision is strictly None.
+    - critic_decision is strictly None.
+    - Research Memory is NOT polluted.
+    - Valid audit record is appended and verified.
+    """
+    orchestrator = test_context["orchestrator"]
+    clean_csv = test_context["clean_csv"]
+    clean_binding = test_context["clean_binding"]
+    engine = test_context["engine"]
+    memory = test_context["memory"]
+
+    req = _request()
+    view = _view()
+    initial_methods = ["coverage", "simple_correlation", "direction_consistency", "stability_split"]
+    env = _valid_envelope(direction="positive", methods=initial_methods)
+    candidate = _create_admitted_candidate(env, req, view)
+
+    original_evaluate = engine.critic.evaluate
+    call_count = 0
+
+    def mock_evaluate(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count > 1:
+            raise RuntimeError("Synthetic supplemental Critic rule evaluation failed")
+        return original_evaluate(*args, **kwargs)
+
+    monkeypatch.setattr(engine.critic, "evaluate", mock_evaluate)
+
+    res = orchestrator.integrate_candidate(
+        candidate=candidate,
+        snapshot_path=clean_csv,
+        dataset_binding=clean_binding,
+        project_binding=BINDING,
+        auto_supplemental=True,
+    )
+
+    # 1. Engineering terminal state reflects critic failure
+    assert res.engineering_status == EngineeringStatus.CRITIC_FAILED.value
+    assert "critic" in (res.error_message or "").lower()
+
+    # 2. Scientific decision MUST BE NONE
+    assert res.scientific_decision is None
+    assert res.critic_decision is None
+
+    # 3. Memory contains only initial NME record
+    mem_records = memory.find_by_hypothesis_id(candidate.hypothesis.hypothesis_id)
+    assert len(mem_records) == 1
+
+    # 4. Audit trail verified
+    last_audit = orchestrator.audit_trail.get_records()[-1]
+    assert last_audit.engineering_status == EngineeringStatus.CRITIC_FAILED.value
+    assert last_audit.scientific_decision is None
+    last_audit.verify()
+    assert orchestrator.audit_trail.verify_all() is True
+

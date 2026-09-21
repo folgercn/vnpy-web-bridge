@@ -125,11 +125,14 @@ class AlphaDiscoveryEngine:
 
         # Step 1: Admission check
         try:
-            raw_dict = (
-                hypothesis_input.model_dump(exclude_none=True)
-                if isinstance(hypothesis_input, hyp.AlphaHypothesis)
-                else dict(hypothesis_input)
-            )
+            if isinstance(hypothesis_input, hyp.AlphaHypothesis):
+                dump_with = hypothesis_input.model_dump()
+                if hyp.compute_hypothesis_content_hash(dump_with) == hypothesis_input.hypothesis_content_hash:
+                    raw_dict = dump_with
+                else:
+                    raw_dict = hypothesis_input.model_dump(exclude_none=True)
+            else:
+                raw_dict = dict(hypothesis_input)
             validated_hyp = hyp.validate_hypothesis(raw_dict)
             hyp_obj = hyp.AlphaHypothesis.model_validate(validated_hyp)
         except Exception as exc:  # noqa: BLE001
@@ -279,12 +282,25 @@ class AlphaDiscoveryEngine:
 
         # Step 8: Dynamic NEED_MORE_EVIDENCE supplemental cycle if requested
         if auto_supplemental and critic_dec.decision == "NEED_MORE_EVIDENCE" and critic_dec.missing_evidence:
-            supp_result = self.execute_supplemental_cycle(
-                prior_item=result_item,
-                snapshot_path=snap_p,
-                dataset_binding=dataset_binding,
-            )
-            result_item.supplemental_results.append(supp_result)
+            try:
+                supp_result = self.execute_supplemental_cycle(
+                    prior_item=result_item,
+                    snapshot_path=snap_p,
+                    dataset_binding=dataset_binding,
+                )
+                result_item.supplemental_results.append(supp_result)
+            except Exception as exc:  # noqa: BLE001
+                err_text = str(exc)
+                fail_status = "critic_failed" if "critic" in err_text.lower() else "screening_failed"
+                supp_fail_item = DiscoveryItemResult(
+                    hypothesis_id=hyp_id,
+                    revision=hyp_rev,
+                    status=fail_status,
+                    hypothesis=validated_hyp,
+                    plan=plan,
+                    error_message=f"Supplemental cycle failed: {exc}",
+                )
+                result_item.supplemental_results.append(supp_fail_item)
 
         return result_item
 
