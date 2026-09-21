@@ -58,6 +58,7 @@ from research_lab.agent_control.quota import (
     QuotaWindowSnapshot,
     evaluate_group_status,
     evaluate_window_status,
+    is_snapshot_stale,
     verify_quota_facts_provenance,
 )
 from research_lab.agent_control.registry import ProviderRegistry
@@ -472,7 +473,7 @@ def select_agent(
                 else:
                     is_stale = False
                     if max_usage_snapshot_age is not None:
-                        is_stale = AntigravityQuotaNormalizer.is_snapshot_stale(
+                        is_stale = is_snapshot_stale(
                             snapshot.captured_at,
                             max_age_seconds=max_usage_snapshot_age,
                             current_time=current_time,

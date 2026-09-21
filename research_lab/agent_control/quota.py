@@ -520,3 +520,16 @@ class AntigravityQuotaNormalizer:
             return age > max_age_seconds or age < -60.0  # Also fail if timestamp is far in the future
         except (ValueError, TypeError, OverflowError):
             return True
+
+
+def is_snapshot_stale(
+    captured_at_iso: str,
+    max_age_seconds: float = 300.0,
+    current_time: str | datetime.datetime | None = None,
+) -> bool:
+    """Determine if snapshot captured_at exceeds max_age_seconds (provider-neutral)."""
+    return AntigravityQuotaNormalizer.is_snapshot_stale(
+        captured_at_iso,
+        max_age_seconds=max_age_seconds,
+        current_time=current_time,
+    )

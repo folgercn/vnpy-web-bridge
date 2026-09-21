@@ -1,0 +1,80 @@
+{
+  "generated_at": "2026-09-21T13:30:28.477099+00:00",
+  "matrix": [
+    {
+      "contract": "Standard AgentTask",
+      "required": true,
+      "antigravity_adapter": "PASS",
+      "contract_test_provider": "PASS",
+      "status": "PASS"
+    },
+    {
+      "contract": "Exact ProjectBinding",
+      "required": true,
+      "antigravity_adapter": "PASS",
+      "contract_test_provider": "PASS",
+      "status": "PASS"
+    },
+    {
+      "contract": "Durable job/ref",
+      "required": true,
+      "antigravity_adapter": "PASS",
+      "contract_test_provider": "PASS",
+      "status": "PASS"
+    },
+    {
+      "contract": "Recovery idempotency",
+      "required": true,
+      "antigravity_adapter": "PASS",
+      "contract_test_provider": "PASS",
+      "status": "PASS"
+    },
+    {
+      "contract": "Acceptance boundary",
+      "required": true,
+      "antigravity_adapter": "PASS",
+      "contract_test_provider": "PASS",
+      "status": "PASS"
+    },
+    {
+      "contract": "Unified error taxonomy",
+      "required": true,
+      "antigravity_adapter": "PASS",
+      "contract_test_provider": "PASS",
+      "status": "PASS"
+    },
+    {
+      "contract": "Result hash verification",
+      "required": true,
+      "antigravity_adapter": "PASS",
+      "contract_test_provider": "PASS",
+      "status": "PASS"
+    },
+    {
+      "contract": "Audit provenance",
+      "required": true,
+      "antigravity_adapter": "PASS",
+      "contract_test_provider": "PASS",
+      "status": "PASS"
+    },
+    {
+      "contract": "No nested agents",
+      "required": true,
+      "antigravity_adapter": "PASS",
+      "contract_test_provider": "PASS",
+      "status": "PASS"
+    },
+    {
+      "contract": "No scientific pollution",
+      "required": true,
+      "antigravity_adapter": "PASS",
+      "contract_test_provider": "PASS",
+      "status": "PASS"
+    }
+  ],
+  "overall_status": "PASS",
+  "providers_evaluated": [
+    "antigravity_adapter",
+    "contract_test_provider"
+  ]
+}

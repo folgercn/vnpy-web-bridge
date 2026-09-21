@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from research_lab.agent_control.transports.direct_sdk_test import (
+    DirectSDKTestTransport,
+)
 from research_lab.agent_control.transports.local_mcp import (
     CRITICAL_MCP_TOOLS,
     LocalMCPTransport,
@@ -10,6 +13,7 @@ from research_lab.agent_control.transports.local_mcp import (
 
 __all__ = [
     "CRITICAL_MCP_TOOLS",
+    "DirectSDKTestTransport",
     "LocalMCPTransport",
     "MCPToolResolver",
 ]

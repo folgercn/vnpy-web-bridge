@@ -75,6 +75,8 @@ class AgentProvider(Protocol):
         self,
         task: AgentTask,
         route: AgentRoute,
+        preparation: Any | None = None,
+        request_id: str | None = None,
     ) -> AgentExecutionHandle:
         """Submit an authorized task along its determined route for execution."""
         ...
@@ -89,6 +91,7 @@ class AgentProvider(Protocol):
     def result(
         self,
         handle: AgentExecutionHandle,
+        preparation: Any | None = None,
     ) -> AgentResult:
         """Retrieve the terminal execution result for a completed handle."""
         ...
