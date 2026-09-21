@@ -37,6 +37,8 @@ class RoutingContext:
     preferred_model: str | None = None
     allowed_transports: tuple[str, ...] | None = None
     caller_constraints: Mapping[str, Any] = field(default_factory=dict)
+    quota_facts: Mapping[str, Any] = field(default_factory=dict)
+    current_time: str | None = None
 
     def __post_init__(self) -> None:
         validated_role = validate_role(self.role)
@@ -89,6 +91,12 @@ class RoutingContext:
                 if isinstance(v, AgentUsageSnapshot):
                     frozen_snapshots[str(k)] = v
         object.__setattr__(self, "usage_snapshots", MappingProxyType(frozen_snapshots))
+
+        frozen_facts = {}
+        if isinstance(self.quota_facts, Mapping):
+            for k, v in self.quota_facts.items():
+                frozen_facts[str(k)] = v
+        object.__setattr__(self, "quota_facts", MappingProxyType(frozen_facts))
 
         frozen_constraints = {}
         if isinstance(self.caller_constraints, Mapping):
