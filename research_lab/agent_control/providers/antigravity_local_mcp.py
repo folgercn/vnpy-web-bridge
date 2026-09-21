@@ -550,7 +550,11 @@ class AntigravityLocalMCPProvider(AgentProvider):
             effective_req_id = f"req-{digest[:16]}"
 
         sub_key = (task.task_id, effective_req_id)
-        task_prompt = getattr(task, "prompt", None) or getattr(task, "objective", "")
+        # Alpha Generator's deterministic, versioned prompt is the work block.  Older
+        # task types retain the objective-based M2 submission contract.
+        task_prompt = task.work_block if task.role == "alpha_generator" else (
+            getattr(task, "prompt", None) or getattr(task, "objective", "")
+        )
         payload_signature = hashlib.sha256(
             json.dumps(
                 {
@@ -856,6 +860,13 @@ class AntigravityLocalMCPProvider(AgentProvider):
 
         # 4. Actual model provenance
         actual_model = resp.get("actual_model") or resp.get("model") or (route.resolved_model if route else "unknown")
+        if route is not None and actual_model != route.resolved_model:
+            terminal_status = TerminalStatus.REJECTED_BY_ACCEPTANCE
+            acceptance_status = "REJECTED_BY_ACCEPTANCE"
+            uncertainty = (
+                f"Actual model '{actual_model}' does not match routed model "
+                f"'{route.resolved_model}'"
+            )
 
         # 5. Build AgentResult
         structured_out = (
