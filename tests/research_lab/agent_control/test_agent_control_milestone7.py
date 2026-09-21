@@ -28,6 +28,7 @@ Covers all 5 mandatory formal E2E scenarios and all negative boundary conditions
 from __future__ import annotations
 
 import csv
+import dataclasses
 import json
 from pathlib import Path
 from typing import Any
@@ -52,6 +53,7 @@ from research_lab.agent_control.errors import (
     TamperDetectionError,
 )
 from research_lab.agent_control.orchestration import (
+    CANONICAL_PROVENANCE_TIMESTAMP,
     DEFAULT_AGGREGATION_POLICY,
     MAX_WORK_BLOCKS,
     MultiAgentAggregateResult,
@@ -861,7 +863,10 @@ def test_e2e_3_worker_uncertain_and_recovery(test_environment):
         == agg2.work_block_results[0].project_binding
     )
     assert agg2.m6_eligible_candidate is not None
-    assert agg2.m6_eligible_candidate.hypothesis.provenance.created_at == NOW
+    assert (
+        agg2.m6_eligible_candidate.hypothesis.provenance.created_at
+        == CANONICAL_PROVENANCE_TIMESTAMP
+    )
     assert agg2.m6_eligible_candidate.hypothesis.provenance.origin_ref == (
         f"agent_task:{agg2.work_block_results[0].task_id};provider:antigravity;model:Gemini 3.8 Flash High"
     )
@@ -1537,6 +1542,29 @@ def test_same_task_recovery_across_different_runtime_timestamps_and_canonical_re
         work_blocks=[wb],
     )
 
+    # Hook provider to return valid alpha candidate envelope
+    orig_caller = env["provider"].transport._tool_caller
+
+    def alpha_caller(tool_name: str, args: dict[str, Any]) -> Any:
+        if tool_name == "result":
+            job_id = args.get("job_id", "")
+            matching = next(
+                (j for j in env["submitted_jobs"] if j["job_id"] == job_id), None
+            )
+            task_id = matching["args"].get("task_id", "") if matching else ""
+            return {
+                "job_id": job_id,
+                "task_id": task_id,
+                "status": "COMPLETED",
+                "terminal_status": "SUCCESS",
+                "outcome": "TURN_COMPLETE",
+                "response": json.dumps(_valid_alpha_envelope()),
+                "issues": [],
+            }
+        return orig_caller(tool_name, args)
+
+    env["provider"].transport._tool_caller = alpha_caller
+
     # Execution 1: no runtime created_at
     agg1 = orchestrator.orchestrate(
         req1,
@@ -1594,3 +1622,88 @@ def test_same_task_recovery_across_different_runtime_timestamps_and_canonical_re
     assert (
         env["submit_call_count"]["count"] == submit_count_1
     )  # Reuses existing durable job!
+
+    # 1. Candidate presence & identical hypothesis_id
+    cand1 = agg1.m6_eligible_candidate
+    cand2 = agg2.m6_eligible_candidate
+    cand3 = agg3.m6_eligible_candidate
+    assert cand1 is not None and cand2 is not None and cand3 is not None
+    assert (
+        cand1.hypothesis.hypothesis_id
+        == cand2.hypothesis.hypothesis_id
+        == cand3.hypothesis.hypothesis_id
+    )
+
+    # 2. Identical immutable revision ("rev.1")
+    assert (
+        cand1.hypothesis.revision
+        == cand2.hypothesis.revision
+        == cand3.hypothesis.revision
+        == "rev.1"
+    )
+
+    # 3. Provenance is strictly identical across recovery and request reconstructions
+    assert (
+        cand1.hypothesis.provenance.model_dump()
+        == cand2.hypothesis.provenance.model_dump()
+        == cand3.hypothesis.provenance.model_dump()
+    )
+    assert cand1.hypothesis.provenance.created_at == CANONICAL_PROVENANCE_TIMESTAMP
+    assert cand2.hypothesis.provenance.created_at == CANONICAL_PROVENANCE_TIMESTAMP
+    assert cand3.hypothesis.provenance.created_at == CANONICAL_PROVENANCE_TIMESTAMP
+
+    # 4. hypothesis_content_hash is strictly identical across different runtimes & requests
+    assert (
+        cand1.hypothesis.hypothesis_content_hash
+        == cand2.hypothesis.hypothesis_content_hash
+        == cand3.hypothesis.hypothesis_content_hash
+    )
+
+    # 5. Full hypothesis canonical payload is strictly identical
+    assert (
+        cand1.hypothesis.model_dump()
+        == cand2.hypothesis.model_dump()
+        == cand3.hypothesis.model_dump()
+    )
+
+    # 6. Full candidate envelope payload is strictly identical
+    assert (
+        dataclasses.asdict(cand1)
+        == dataclasses.asdict(cand2)
+        == dataclasses.asdict(cand3)
+    )
+
+    # 7. M6 replay consistency: replaying same canonical hypothesis produces no content conflict
+    m6_res1 = orchestrator.handover_to_discovery(
+        agg1,
+        discovery_orchestrator=env["discovery_orchestrator"],
+        snapshot_path=env["snapshot_path"],
+        dataset_binding=env["dataset_binding"],
+    )
+    m6_res2 = orchestrator.handover_to_discovery(
+        agg2,
+        discovery_orchestrator=env["discovery_orchestrator"],
+        snapshot_path=env["snapshot_path"],
+        dataset_binding=env["dataset_binding"],
+    )
+    m6_res3 = orchestrator.handover_to_discovery(
+        agg3,
+        discovery_orchestrator=env["discovery_orchestrator"],
+        snapshot_path=env["snapshot_path"],
+        dataset_binding=env["dataset_binding"],
+    )
+    assert m6_res1.hypothesis_id == m6_res2.hypothesis_id == m6_res3.hypothesis_id
+    assert (
+        m6_res1.hypothesis_content_hash
+        == m6_res2.hypothesis_content_hash
+        == m6_res3.hypothesis_content_hash
+    )
+    assert (
+        m6_res1.scientific_identity_hash
+        == m6_res2.scientific_identity_hash
+        == m6_res3.scientific_identity_hash
+    )
+    assert m6_res1.engineering_status == EngineeringStatus.COMPLETED.value
+    # Replays safely recognize the identical immutable scientific proposition as a duplicate without collision
+    assert m6_res2.engineering_status == EngineeringStatus.SKIPPED_DUPLICATE.value
+    assert m6_res3.engineering_status == EngineeringStatus.SKIPPED_DUPLICATE.value

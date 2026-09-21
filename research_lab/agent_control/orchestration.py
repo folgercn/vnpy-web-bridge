@@ -90,6 +90,7 @@ ORCHESTRATION_SCHEMA_VERSION = "research_lab.multi_agent_orchestration.v1"
 MAX_WORK_BLOCKS = 8
 DEFAULT_AGGREGATION_POLICY = "deterministic_v1"
 DEFAULT_CONCURRENCY_POLICY = "bounded_v1"
+CANONICAL_PROVENANCE_TIMESTAMP: str = "2026-01-01T00:00:00.000000Z"
 
 # Supported Worker roles for Milestone 7
 SUPPORTED_WORKER_ROLES = frozenset(
@@ -1085,9 +1086,10 @@ class MultiAgentOrchestrator:
         runtime_recorded_at = (
             created_at or datetime.datetime.now(datetime.timezone.utc).isoformat()
         )
-        # Stable task identity decoupled from runtime execution timestamp:
-        # Worker tasks and provenance identity are strictly anchored to the frozen request specification.
-        worker_created_at = request.created_at or "2026-01-01T00:00:00.000000Z"
+        # Stable task identity and scientific hypothesis provenance are strictly anchored to canonical specification:
+        # Immutable hypothesis revision records and worker tasks cannot mutate based on transient request creation
+        # time or runtime observation timestamps. Runtime observation time strictly enters audit records only.
+        worker_created_at = CANONICAL_PROVENANCE_TIMESTAMP
 
         # 3. Execute each work block independently with complete failure isolation
         block_results: list[WorkBlockExecutionResult] = []
@@ -1127,7 +1129,7 @@ class MultiAgentOrchestrator:
         usage_snapshots: Mapping[str, AgentUsageSnapshot],
         routing_policy: RoutingPolicy | None = None,
         provider_lookup: Callable[[str], AgentProvider],
-        created_at: str,
+        created_at: str = CANONICAL_PROVENANCE_TIMESTAMP,
         duplicate_view_lookup: Callable[[AlphaGenerationCandidate], tuple[Any, Any]]
         | None = None,
     ) -> WorkBlockExecutionResult:
