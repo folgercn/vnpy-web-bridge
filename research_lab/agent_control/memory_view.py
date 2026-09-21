@@ -1,4 +1,4 @@
-"""Controlled Research Memory View and deterministic read adapter (#573 Milestone 4).
+"""Controlled Research Memory View (#573 Milestone 4).
 
 Strictly isolates:
 raw memory != controlled view != agent prompt context
@@ -10,13 +10,10 @@ Zero LLM / MCP / provider dependency.
 
 from __future__ import annotations
 
-import json
 import re
-import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
@@ -277,75 +274,6 @@ def _sanitize_dict(data: dict[str, Any]) -> dict[str, Any]:
             sanitized[k] = v
     return sanitized
 
-
-class ResearchMemoryReadAdapter:
-    """Minimal domain read adapter decoupling View Builder from raw SQLite storage.
-
-    Guarantees read-only connection mode (mode=ro and PRAGMA query_only=ON) at connection boundary.
-    Yields immutable domain ResearchMemoryRecord objects without leaking SQLite connections,
-    cursors, raw queries, or table schemas to the View Builder or calling Agent.
-    """
-
-    def __init__(self, source: ResearchMemory | Path | str) -> None:
-        if isinstance(source, ResearchMemory):
-            self._db_path = source.db_path
-        elif isinstance(source, (Path, str)):
-            self._db_path = Path(source).resolve()
-        else:
-            raise TypeError(f"Unsupported memory source type: {type(source).__name__}")
-
-        if not self._db_path.exists():
-            raise FileNotFoundError(f"Research Memory database does not exist: {self._db_path}")
-
-    @property
-    def db_path(self) -> Path:
-        return self._db_path
-
-    def _get_readonly_connection(self) -> sqlite3.Connection:
-        uri = f"file:{self._db_path.as_posix()}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA query_only=ON;")
-        return conn
-
-    def get_all_records(self) -> tuple[ResearchMemoryRecord, ...]:
-        """Fetch all records safely using read-only domain mapping."""
-        with self._get_readonly_connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM research_memory_records ORDER BY rowid ASC"
-            ).fetchall()
-            return tuple(self._row_to_record(r) for r in rows)
-
-    @staticmethod
-    def _row_to_record(row: sqlite3.Row) -> ResearchMemoryRecord:
-        return ResearchMemoryRecord(
-            record_id=row["record_id"],
-            record_type=row["record_type"],
-            hypothesis_id=row["hypothesis_id"],
-            revision=row["revision"],
-            content_hash=row["content_hash"],
-            scientific_identity_hash=row["scientific_identity_hash"],
-            semantic_hash=row["semantic_hash"],
-            decision=row["decision"],
-            created_at=row["created_at"],
-            hypothesis_ref=json.loads(row["hypothesis_ref_json"]),
-            plan_ref=json.loads(row["plan_ref_json"]) if row["plan_ref_json"] else None,
-            task_refs=json.loads(row["task_refs_json"]),
-            spec_refs=json.loads(row["spec_refs_json"]),
-            run_refs=json.loads(row["run_refs_json"]),
-            manifest_refs=json.loads(row["manifest_refs_json"]),
-            evidence_refs=json.loads(row["evidence_refs_json"]),
-            critic_ref=json.loads(row["critic_ref_json"]) if row["critic_ref_json"] else None,
-            hypothesis_payload=json.loads(row["hypothesis_payload"]),
-            plan_payload=json.loads(row["plan_payload"]) if row["plan_payload"] else None,
-            critic_decision_payload=json.loads(row["critic_decision_payload"]) if row["critic_decision_payload"] else None,
-            methods_applied=json.loads(row["methods_applied_json"]),
-            missing_evidence=json.loads(row["missing_evidence_json"]),
-            reject_reasons=json.loads(row["reject_reasons_json"]),
-            promoted_reasons=json.loads(row["promoted_reasons_json"]),
-            error_message=row["error_message"],
-            provenance=json.loads(row["provenance_json"]),
-        )
 
 
 @dataclass(frozen=True)
@@ -870,24 +798,23 @@ def build_research_memory_view(
             )
         eff_total_limit = query.total_limit
 
-    # 6. Read from underlying memory store safely via Read Adapter / domain get_all_records API
-    # View Builder strictly avoids raw SQLite connections, cursors, raw queries, or internal schemas
-    adapter_records: tuple[ResearchMemoryRecord, ...] | list[ResearchMemoryRecord]
-    if hasattr(memory_store, "get_all_records"):
-        adapter_records = memory_store.get_all_records()
-    elif isinstance(memory_store, (Path, str, ResearchMemory)):
-        adapter = ResearchMemoryReadAdapter(memory_store)
-        adapter_records = adapter.get_all_records()
+    # 6. Read from underlying domain memory store via domain get_all_records API
+    # View Builder strictly consumes domain objects; it never opens connections or executes queries.
+    if hasattr(memory_store, "get_all_records") and callable(memory_store.get_all_records):
+        raw_records = memory_store.get_all_records()
     else:
-        raise TypeError(f"Unsupported memory_store type for memory view: {type(memory_store).__name__}")
+        raise TypeError(
+            f"memory_store must provide a domain 'get_all_records()' API (e.g. ReadOnlyResearchMemoryReader), "
+            f"got {type(memory_store).__name__}"
+        )
 
     all_raw_records: list[ResearchMemoryRecord] = []
-    for rec in adapter_records:
+    for rec in raw_records:
         if active_policy.enforce_source_integrity:
             _verify_record_integrity(rec)
         all_raw_records.append(rec)
 
-    # Apply typed query deterministic filters (fail-closed)
+    # Apply typed query deterministic filters (fail-closed, strict conjunctive/AND semantics)
     target_hypo_refs = set(query.hypothesis_refs) if query.hypothesis_refs else None
     target_decisions = set(query.decision_types) if query.decision_types else None
 
@@ -902,11 +829,11 @@ def build_research_memory_view(
         # Decision types filter
         if target_decisions is not None and r.decision not in target_decisions:
             continue
-        # Hypothesis content hash / Scientific identity hash filter
-        if query.hypothesis_content_hash and query.scientific_identity_hash:
-            if r.content_hash != query.hypothesis_content_hash and r.scientific_identity_hash != query.scientific_identity_hash:
-                continue
-        elif query.hypothesis_content_hash and r.content_hash != query.hypothesis_content_hash or query.scientific_identity_hash and r.scientific_identity_hash != query.scientific_identity_hash:
+        # Hypothesis content hash filter (exact conjunctive match)
+        if query.hypothesis_content_hash and r.content_hash != query.hypothesis_content_hash:
+            continue
+        # Scientific identity hash filter (exact conjunctive match)
+        if query.scientific_identity_hash and r.scientific_identity_hash != query.scientific_identity_hash:
             continue
 
         filtered_records.append(r)

@@ -120,7 +120,8 @@ class ResearchMemory:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_rm_decision ON research_memory_records(decision)")
             conn.commit()
 
-    def _row_to_record(self, row: sqlite3.Row) -> ResearchMemoryRecord:
+    @staticmethod
+    def _row_to_record(row: sqlite3.Row) -> ResearchMemoryRecord:
         return ResearchMemoryRecord(
             record_id=row["record_id"],
             record_type=row["record_type"],
@@ -437,12 +438,24 @@ class ResearchMemory:
 
     # Query APIs
     def get_all_records(self) -> list[ResearchMemoryRecord]:
-        """Domain read-only API returning all records in insertion order."""
-        with self._get_connection() as conn:
+        """Domain read-only API returning all records via strict mode=ro connection."""
+        uri = f"file:{self.db_path.as_posix()}?mode=ro"
+        with sqlite3.connect(uri, uri=True) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON;")
             rows = conn.execute(
                 "SELECT * FROM research_memory_records ORDER BY rowid ASC"
             ).fetchall()
-        return [self._row_to_record(r) for r in rows]
+            return [self._row_to_record(r) for r in rows]
+
+    def as_readonly_reader(self) -> ReadOnlyResearchMemoryReader:
+        """Expose a dedicated read-only domain reader bound to this store."""
+        return ReadOnlyResearchMemoryReader(self.db_path)
+
+    @classmethod
+    def open_readonly(cls, db_path: Path | str) -> ReadOnlyResearchMemoryReader:
+        """Open an existing database file strictly as a read-only reader without schema mutation."""
+        return ReadOnlyResearchMemoryReader(db_path)
 
     def find_by_hypothesis_id(self, hypothesis_id: str) -> list[ResearchMemoryRecord]:
         with self._get_connection() as conn:
@@ -538,3 +551,35 @@ class ResearchMemory:
                 return False, "skip_terminal_reject_same_coverage"
 
         return True, f"execute_unhandled_prior_state:{prior_decision}"
+class ReadOnlyResearchMemoryReader:
+    """Strict read-only domain reader bound to an existing Research Memory SQLite database.
+
+    Guarantees SQLite connection mode is mode=ro and PRAGMA query_only=ON at the connection boundary.
+    Does not create parent directories, does not initialize SQLite schema or tables, and strictly
+    avoids read-write connection fallback. Yields only immutable domain ResearchMemoryRecord objects.
+    """
+
+    def __init__(self, db_path: Path | str) -> None:
+        self._db_path = Path(db_path).resolve()
+        if not self._db_path.exists():
+            raise FileNotFoundError(f"Research Memory database does not exist: {self._db_path}")
+
+    @property
+    def db_path(self) -> Path:
+        return self._db_path
+
+    def _get_readonly_connection(self) -> sqlite3.Connection:
+        uri = f"file:{self._db_path.as_posix()}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON;")
+        return conn
+
+    def get_all_records(self) -> tuple[ResearchMemoryRecord, ...]:
+        """Fetch all research memory records using strict read-only domain mapping."""
+        with self._get_readonly_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM research_memory_records ORDER BY rowid ASC"
+            ).fetchall()
+            return tuple(ResearchMemory._row_to_record(r) for r in rows)
+

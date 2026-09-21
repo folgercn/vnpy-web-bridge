@@ -24,6 +24,7 @@ from research_lab.alpha_discovery.hypothesis import (
 )
 from research_lab.alpha_discovery.planner import ScreeningPlanner
 from research_lab.alpha_discovery.research_memory import (
+    ReadOnlyResearchMemoryReader,
     ResearchMemory,
     ResearchMemoryRecord,
 )
@@ -55,6 +56,7 @@ __all__ = [
     "DiscoveryItemResult",
     "MethodExecutionResult",
     "PlanProvenance",
+    "ReadOnlyResearchMemoryReader",
     "ResearchMemory",
     "ResearchMemoryRecord",
     "ScreeningMethodRequest",

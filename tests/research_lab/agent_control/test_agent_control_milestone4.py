@@ -73,7 +73,6 @@ from research_lab.agent_control.memory_view import (
     ResearchMemoryCategory,
     ResearchMemoryEntryView,
     ResearchMemoryQuery,
-    ResearchMemoryReadAdapter,
     ResearchMemoryView,
     ResearchMemoryViewPolicy,
     build_research_memory_view,
@@ -82,6 +81,7 @@ from research_lab.agent_control.permissions import AgentPermission
 from research_lab.agent_control.roles import AgentRole
 from research_lab.alpha_discovery import hypothesis as hyp
 from research_lab.alpha_discovery.research_memory import (
+    ReadOnlyResearchMemoryReader,
     ResearchMemory,
     ResearchMemoryRecord,
 )
@@ -1166,8 +1166,8 @@ class TestAgentControlMilestone4(unittest.TestCase):
             is_authorized=True,
         )
 
-        # 3. Read via Read Adapter with mode=ro
-        read_adapter = ResearchMemoryReadAdapter(real_db_path)
+        # 3. Read via ReadOnlyResearchMemoryReader with mode=ro
+        readonly_reader = ReadOnlyResearchMemoryReader(real_db_path)
 
         # 4. Build bounded view across all 6 categories against actual real store
         query_all = ResearchMemoryQuery(
@@ -1186,7 +1186,7 @@ class TestAgentControlMilestone4(unittest.TestCase):
             query=query_all,
             authorized_scope=real_scope,
             project_binding=real_binding,
-            memory_store=read_adapter,
+            memory_store=readonly_reader,
         )
 
         # 5. Verify outputs
@@ -1232,7 +1232,7 @@ class TestAgentControlMilestone4(unittest.TestCase):
             query=query_all,
             authorized_scope=real_scope,
             project_binding=real_binding,
-            memory_store=ResearchMemoryReadAdapter(replica_path),
+            memory_store=ReadOnlyResearchMemoryReader(replica_path),
             current_time=view.generated_at,
         )
         self.assertNotEqual(view.view_id, view_replica.view_id)
@@ -1241,26 +1241,28 @@ class TestAgentControlMilestone4(unittest.TestCase):
         # Final check: real store is still completely untouched after replica operations
         self.assertEqual(hash_before, hashlib.sha256(real_db_path.read_bytes()).hexdigest())
 
-    # 42. ResearchMemoryReadAdapter mode=ro and isolation
-    def test_42_readonly_adapter_mode_ro_isolation(self) -> None:
-        """Verify ResearchMemoryReadAdapter uses mode=ro and prevents any mutation."""
-        adapter = ResearchMemoryReadAdapter(self.db_path)
-        records = adapter.get_all_records()
+    # 42. ReadOnlyResearchMemoryReader mode=ro and isolation
+    def test_42_readonly_memory_reader_mode_ro_isolation(self) -> None:
+        """Verify ReadOnlyResearchMemoryReader uses mode=ro and prevents any mutation."""
+        reader = ReadOnlyResearchMemoryReader(self.db_path)
+        records = reader.get_all_records()
         self.assertIsInstance(records, tuple)
         self.assertGreater(len(records), 0)
         self.assertIsInstance(records[0], ResearchMemoryRecord)
 
-        # Attempting write operation via adapter's read-only connection must fail closed
-        with self.assertRaises(sqlite3.OperationalError), adapter._get_readonly_connection() as conn:
+        # Attempting write operation via reader's read-only connection must fail closed
+        with self.assertRaises(sqlite3.OperationalError), reader._get_readonly_connection() as conn:
             conn.execute("DELETE FROM research_memory_records")
 
         # Non-existent path must raise FileNotFoundError
         with self.assertRaises(FileNotFoundError):
-            ResearchMemoryReadAdapter(self.tmp_dir / "nonexistent.sqlite3")
+            ReadOnlyResearchMemoryReader(self.tmp_dir / "nonexistent.sqlite3")
 
-        # Unsupported type must raise TypeError
-        with self.assertRaises(TypeError):
-            ResearchMemoryReadAdapter(12345)  # type: ignore
+        # Also verify ResearchMemory helper methods return ReadOnlyResearchMemoryReader
+        reader_from_mem = self.memory.as_readonly_reader()
+        self.assertIsInstance(reader_from_mem, ReadOnlyResearchMemoryReader)
+        reader_from_cls = ResearchMemory.open_readonly(self.db_path)
+        self.assertIsInstance(reader_from_cls, ReadOnlyResearchMemoryReader)
 
     # 43. Typed query filtering and negative isolation
     def test_43_typed_query_filtering_negative_isolation(self) -> None:
@@ -1320,13 +1322,16 @@ class TestAgentControlMilestone4(unittest.TestCase):
                 decision_types=("INVALID_DECISION_TYPE",),
             )
 
-        # 5. hypothesis_content_hash filter excludes non-matching records
-        target_hash = self.records["reject"].content_hash
+        # 5. hypothesis_content_hash and scientific_identity_hash strict conjunctive (AND) filtering
+        target_content_hash = self.records["reject"].content_hash
+        target_sci_hash = self.records["reject"].scientific_identity_hash
+
+        # 5a. Matching content hash only
         query_content_hash = ResearchMemoryQuery(
             role=AgentRole.ALPHA_GENERATOR.value,
             project_binding=self.project_binding,
             categories=(ResearchMemoryCategory.RECENT_REJECTS.value,),
-            hypothesis_content_hash=target_hash,
+            hypothesis_content_hash=target_content_hash,
         )
         view_content_hash = build_research_memory_view(
             query=query_content_hash,
@@ -1336,7 +1341,76 @@ class TestAgentControlMilestone4(unittest.TestCase):
         )
         self.assertGreater(len(view_content_hash.entries_by_category[ResearchMemoryCategory.RECENT_REJECTS.value]), 0)
         for e in view_content_hash.entries_by_category[ResearchMemoryCategory.RECENT_REJECTS.value]:
-            self.assertEqual(e.hypothesis_content_hash, target_hash)
+            self.assertEqual(e.hypothesis_content_hash, target_content_hash)
+
+        # 5b. Matching scientific identity hash only
+        query_sci_hash = ResearchMemoryQuery(
+            role=AgentRole.ALPHA_GENERATOR.value,
+            project_binding=self.project_binding,
+            categories=(ResearchMemoryCategory.RECENT_REJECTS.value,),
+            scientific_identity_hash=target_sci_hash,
+        )
+        view_sci_hash = build_research_memory_view(
+            query=query_sci_hash,
+            authorized_scope=self.scope_alpha_generator,
+            project_binding=self.project_binding,
+            memory_store=self.memory,
+        )
+        self.assertGreater(len(view_sci_hash.entries_by_category[ResearchMemoryCategory.RECENT_REJECTS.value]), 0)
+        for e in view_sci_hash.entries_by_category[ResearchMemoryCategory.RECENT_REJECTS.value]:
+            self.assertEqual(e.scientific_identity_hash, target_sci_hash)
+
+        # 5c. Negative isolation: correct content hash, wrong scientific identity hash -> 0 entries
+        query_mismatch_sci = ResearchMemoryQuery(
+            role=AgentRole.ALPHA_GENERATOR.value,
+            project_binding=self.project_binding,
+            categories=(ResearchMemoryCategory.RECENT_REJECTS.value,),
+            hypothesis_content_hash=target_content_hash,
+            scientific_identity_hash="0" * 64,
+        )
+        view_mismatch_sci = build_research_memory_view(
+            query=query_mismatch_sci,
+            authorized_scope=self.scope_alpha_generator,
+            project_binding=self.project_binding,
+            memory_store=self.memory,
+        )
+        self.assertEqual(len(view_mismatch_sci.entries_by_category[ResearchMemoryCategory.RECENT_REJECTS.value]), 0)
+
+        # 5d. Negative isolation: wrong content hash, correct scientific identity hash -> 0 entries
+        query_mismatch_content = ResearchMemoryQuery(
+            role=AgentRole.ALPHA_GENERATOR.value,
+            project_binding=self.project_binding,
+            categories=(ResearchMemoryCategory.RECENT_REJECTS.value,),
+            hypothesis_content_hash="f" * 64,
+            scientific_identity_hash=target_sci_hash,
+        )
+        view_mismatch_content = build_research_memory_view(
+            query=query_mismatch_content,
+            authorized_scope=self.scope_alpha_generator,
+            project_binding=self.project_binding,
+            memory_store=self.memory,
+        )
+        self.assertEqual(len(view_mismatch_content.entries_by_category[ResearchMemoryCategory.RECENT_REJECTS.value]), 0)
+
+        # 5e. Positive conjunctive match: both correct -> exactly returned
+        query_both_match = ResearchMemoryQuery(
+            role=AgentRole.ALPHA_GENERATOR.value,
+            project_binding=self.project_binding,
+            categories=(ResearchMemoryCategory.RECENT_REJECTS.value,),
+            hypothesis_content_hash=target_content_hash,
+            scientific_identity_hash=target_sci_hash,
+        )
+        view_both_match = build_research_memory_view(
+            query=query_both_match,
+            authorized_scope=self.scope_alpha_generator,
+            project_binding=self.project_binding,
+            memory_store=self.memory,
+        )
+        both_entries = view_both_match.entries_by_category[ResearchMemoryCategory.RECENT_REJECTS.value]
+        self.assertGreater(len(both_entries), 0)
+        for e in both_entries:
+            self.assertEqual(e.hypothesis_content_hash, target_content_hash)
+            self.assertEqual(e.scientific_identity_hash, target_sci_hash)
 
     # 44. View identity sensitive to query and policy
     def test_44_view_identity_sensitive_to_query_and_policy(self) -> None:
@@ -1425,8 +1499,8 @@ class TestAgentControlMilestone4(unittest.TestCase):
             latest_row = conn.execute("SELECT record_id, content_hash FROM research_memory_records ORDER BY rowid DESC LIMIT 1").fetchone()
             latest_hash_before = (latest_row[0], latest_row[1])
 
-        # Execute read-only view build via adapter
-        adapter = ResearchMemoryReadAdapter(standalone_db_path)
+        # Execute read-only view build via ReadOnlyResearchMemoryReader
+        reader = ReadOnlyResearchMemoryReader(standalone_db_path)
         query = ResearchMemoryQuery(
             role=AgentRole.ALPHA_GENERATOR.value,
             project_binding=self.project_binding,
@@ -1436,7 +1510,7 @@ class TestAgentControlMilestone4(unittest.TestCase):
             query=query,
             authorized_scope=self.scope_alpha_generator,
             project_binding=self.project_binding,
-            memory_store=adapter,
+            memory_store=reader,
         )
         self.assertGreater(view.total_entries, 0)
 
@@ -1458,9 +1532,49 @@ class TestAgentControlMilestone4(unittest.TestCase):
         self.assertEqual(manifests_before, manifests_after)
         self.assertEqual(latest_hash_before, latest_hash_after)
 
-        self.assertEqual(rows_before, rows_after)
-        self.assertEqual(manifests_before, manifests_after)
-        self.assertEqual(latest_hash_before, latest_hash_after)
+    # 46. Static and structural isolation: agent_control must not expose or import SQLite/SQL
+    def test_46_static_isolation_no_sqlite_in_agent_control(self) -> None:
+        """Verify agent_control.memory_view does not import sqlite3, expose SQL, or leak storage adapters."""
+        import research_lab.agent_control as ac
+        import research_lab.agent_control.memory_view as mv
+
+        # 1. Module attributes must not have sqlite3
+        self.assertNotIn("sqlite3", dir(mv))
+        self.assertNotIn("sqlite", dir(mv))
+
+        # 2. Source code of memory_view.py must not contain sqlite3 or raw SQL
+        mv_src = inspect.getsource(mv)
+        self.assertNotIn("import sqlite3", mv_src)
+        self.assertNotIn("sqlite3.", mv_src)
+        self.assertNotIn("SELECT * FROM", mv_src)
+        self.assertNotIn("CREATE TABLE", mv_src)
+        self.assertNotIn("ResearchMemoryReadAdapter", mv_src)
+
+        # 3. agent_control __all__ must not export any storage adapters
+        self.assertNotIn("ResearchMemoryReadAdapter", ac.__all__)
+        self.assertFalse(hasattr(ac, "ResearchMemoryReadAdapter"))
+
+        # 4. build_research_memory_view must reject non-domain readers (fail-closed)
+        query = ResearchMemoryQuery(
+            role=AgentRole.ALPHA_GENERATOR.value,
+            project_binding=self.project_binding,
+            categories=(ResearchMemoryCategory.RECENT_REJECTS.value,),
+        )
+        # Passing a raw path string or int must raise TypeError
+        with self.assertRaises(TypeError):
+            build_research_memory_view(
+                query=query,
+                authorized_scope=self.scope_alpha_generator,
+                project_binding=self.project_binding,
+                memory_store="/path/to/db.sqlite3",  # type: ignore
+            )
+        with self.assertRaises(TypeError):
+            build_research_memory_view(
+                query=query,
+                authorized_scope=self.scope_alpha_generator,
+                project_binding=self.project_binding,
+                memory_store=12345,  # type: ignore
+            )
 
 
 if __name__ == "__main__":
