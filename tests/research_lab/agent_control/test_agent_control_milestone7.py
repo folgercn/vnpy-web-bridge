@@ -60,11 +60,11 @@ from research_lab.agent_control.orchestration import (
     OrchestratedWorkBlock,
     OrchestrationEngineeringStatus,
     WorkBlockExecutionResult,
-    compute_work_block_result_hash,
     send_worker_message,
     validate_aggregate_hash,
     validate_orchestration_request_hash,
     validate_work_block_hash,
+    validate_work_block_result_hash,
 )
 from research_lab.agent_control.providers.antigravity_local_mcp import (
     AntigravityLocalMCPProvider,
@@ -174,15 +174,17 @@ def test_environment(tmp_path: Path):
     clean_rows = []
     for i in range(1, 41):
         ts = f"2026-01-01T{i:02d}:00:00.000000Z"
-        clean_rows.append({
-            "timestamp": ts,
-            "symbol": "RB2405",
-            "feature_val": str(float(i)),
-            "target_val": str(float(i) * 1.5 + 0.1),
-            "feature_availability_time": ts,
-            "as_of_time": f"2026-01-01T{i:02d}:00:01.000000Z",
-            "target_start_time": f"2026-01-01T{i:02d}:00:02.000000Z",
-        })
+        clean_rows.append(
+            {
+                "timestamp": ts,
+                "symbol": "RB2405",
+                "feature_val": str(float(i)),
+                "target_val": str(float(i) * 1.5 + 0.1),
+                "feature_availability_time": ts,
+                "as_of_time": f"2026-01-01T{i:02d}:00:01.000000Z",
+                "target_start_time": f"2026-01-01T{i:02d}:00:02.000000Z",
+            }
+        )
     c_sha, c_len = _create_synthetic_csv(clean_csv, clean_rows, fields)
     dataset_binding = {
         "snapshot_locator": str(clean_csv),
@@ -204,23 +206,29 @@ def test_environment(tmp_path: Path):
                 "account": {"planName": "pro"},
                 "model_group": "gemini-shared",
                 "quota": {
-                    "groups": [{
-                        "displayName": "gemini-shared",
-                        "buckets": [{
-                            "name": "5-hour",
-                            "remainingFraction": 0.85,
-                            "resetTime": "2026-09-21T05:00:00Z",
-                        }],
-                    }]
+                    "groups": [
+                        {
+                            "displayName": "gemini-shared",
+                            "buckets": [
+                                {
+                                    "name": "5-hour",
+                                    "remainingFraction": 0.85,
+                                    "resetTime": "2026-09-21T05:00:00Z",
+                                }
+                            ],
+                        }
+                    ]
                 },
             }
         if tool_name == "projects":
             return {
-                "projects": [{
-                    "project_id": "vnpy-web-bridge",
-                    "cwd": "/Users/fujun/node/vnpy",
-                    "name": "vnpy-web-bridge",
-                }]
+                "projects": [
+                    {
+                        "project_id": "vnpy-web-bridge",
+                        "cwd": "/Users/fujun/node/vnpy",
+                        "name": "vnpy-web-bridge",
+                    }
+                ]
             }
         if tool_name == "submit":
             submit_call_count["count"] += 1
@@ -472,7 +480,9 @@ def test_e2e_1_multiple_independent_workers_normal_completion(test_environment):
     def customized_caller(tool_name: str, args: dict[str, Any]) -> Any:
         if tool_name == "result":
             job_id = args.get("job_id", "")
-            matching = next((j for j in env["submitted_jobs"] if j["job_id"] == job_id), None)
+            matching = next(
+                (j for j in env["submitted_jobs"] if j["job_id"] == job_id), None
+            )
             if matching:
                 prompt = matching["args"].get("prompt", "")
                 task_id = matching["args"].get("task_id", "")
@@ -493,10 +503,12 @@ def test_e2e_1_multiple_independent_workers_normal_completion(test_environment):
                         "status": "COMPLETED",
                         "terminal_status": "SUCCESS",
                         "outcome": "TURN_COMPLETE",
-                        "response": json.dumps({
-                            "dataset_analysis": "Liquidity is concentrated in primary trading hours.",
-                            "turnover_stable": True,
-                        }),
+                        "response": json.dumps(
+                            {
+                                "dataset_analysis": "Liquidity is concentrated in primary trading hours.",
+                                "turnover_stable": True,
+                            }
+                        ),
                         "issues": [],
                     }
                 else:
@@ -506,10 +518,12 @@ def test_e2e_1_multiple_independent_workers_normal_completion(test_environment):
                         "status": "COMPLETED",
                         "terminal_status": "SUCCESS",
                         "outcome": "TURN_COMPLETE",
-                        "response": json.dumps({
-                            "literature_summary": "Cross-sectional momentum is verified across 15 commodities.",
-                            "key_citations": ["Moskowitz et al., 2012"],
-                        }),
+                        "response": json.dumps(
+                            {
+                                "literature_summary": "Cross-sectional momentum is verified across 15 commodities.",
+                                "key_citations": ["Moskowitz et al., 2012"],
+                            }
+                        ),
                         "issues": [],
                     }
         return orig_caller(tool_name, args)
@@ -528,7 +542,10 @@ def test_e2e_1_multiple_independent_workers_normal_completion(test_environment):
     )
 
     # 1. Engineering outcome status
-    assert aggregate.orchestration_engineering_status == OrchestrationEngineeringStatus.COMPLETED.value
+    assert (
+        aggregate.orchestration_engineering_status
+        == OrchestrationEngineeringStatus.COMPLETED.value
+    )
     assert len(aggregate.work_block_results) == 3
     assert len(aggregate.failed_work_blocks) == 0
     assert len(aggregate.uncertain_work_blocks) == 0
@@ -543,7 +560,16 @@ def test_e2e_1_multiple_independent_workers_normal_completion(test_environment):
     assert res_ext.work_block_id == "wb-external"
 
     assert len({res_alpha.task_id, res_data.task_id, res_ext.task_id}) == 3
-    assert len({res_alpha.provider_job_ref, res_data.provider_job_ref, res_ext.provider_job_ref}) == 3
+    assert (
+        len(
+            {
+                res_alpha.provider_job_ref,
+                res_data.provider_job_ref,
+                res_ext.provider_job_ref,
+            }
+        )
+        == 3
+    )
 
     # 3. Provenance completeness
     for r in aggregate.work_block_results:
@@ -567,7 +593,11 @@ def test_e2e_1_multiple_independent_workers_normal_completion(test_environment):
         dataset_binding=env["dataset_binding"],
     )
     assert discovery_res.engineering_status == EngineeringStatus.COMPLETED.value
-    assert discovery_res.scientific_decision in ("REJECT", "PROMOTE", "NEED_MORE_EVIDENCE")
+    assert discovery_res.scientific_decision in (
+        "REJECT",
+        "PROMOTE",
+        "NEED_MORE_EVIDENCE",
+    )
     assert discovery_res.is_tradable is False
 
 
@@ -582,7 +612,9 @@ def test_e2e_2_single_worker_failure_isolation(test_environment):
     env = test_environment
     orchestrator: MultiAgentOrchestrator = env["orchestrator"]
     with env["memory"]._get_connection() as conn:
-        initial_memory_records = conn.execute("SELECT count(*) FROM research_memory_records").fetchone()[0]
+        initial_memory_records = conn.execute(
+            "SELECT count(*) FROM research_memory_records"
+        ).fetchone()[0]
 
     wb_alpha = OrchestratedWorkBlock.create(
         work_block_id="wb-alpha",
@@ -621,7 +653,9 @@ def test_e2e_2_single_worker_failure_isolation(test_environment):
     def failure_caller(tool_name: str, args: dict[str, Any]) -> Any:
         if tool_name == "result":
             job_id = args.get("job_id", "")
-            matching = next((j for j in env["submitted_jobs"] if j["job_id"] == job_id), None)
+            matching = next(
+                (j for j in env["submitted_jobs"] if j["job_id"] == job_id), None
+            )
             if matching:
                 task_id = matching["args"].get("task_id", "")
                 prompt = matching["args"].get("prompt", "")
@@ -635,7 +669,9 @@ def test_e2e_2_single_worker_failure_isolation(test_environment):
                         "response": json.dumps(_valid_alpha_envelope()),
                         "issues": [],
                     }
-                elif "data researcher query" in prompt.lower() or "wb-data" in matching["args"].get("request_id", ""):
+                elif "data researcher query" in prompt.lower() or "wb-data" in matching[
+                    "args"
+                ].get("request_id", ""):
                     # Simulated unrecoverable tool crash
                     return {
                         "job_id": job_id,
@@ -672,7 +708,10 @@ def test_e2e_2_single_worker_failure_isolation(test_environment):
     )
 
     # 1. Engineering status is PARTIAL
-    assert aggregate.orchestration_engineering_status == OrchestrationEngineeringStatus.PARTIAL.value
+    assert (
+        aggregate.orchestration_engineering_status
+        == OrchestrationEngineeringStatus.PARTIAL.value
+    )
     assert aggregate.failed_work_blocks == ("wb-data",)
 
     # 2. Both successful results are preserved
@@ -693,7 +732,9 @@ def test_e2e_2_single_worker_failure_isolation(test_environment):
 
     # 4. Zero pollution in Research Memory: No scientific REJECT produced
     with env["memory"]._get_connection() as conn:
-        final_memory_records = conn.execute("SELECT count(*) FROM research_memory_records").fetchone()[0]
+        final_memory_records = conn.execute(
+            "SELECT count(*) FROM research_memory_records"
+        ).fetchone()[0]
     assert final_memory_records == initial_memory_records
 
 
@@ -725,13 +766,17 @@ def test_e2e_3_worker_uncertain_and_recovery(test_environment):
         created_at=NOW,
     )
 
-    # Phase 1: Provider returns UNCERTAIN
+    # Phase 1: Provider returns UNCERTAIN (without passing runtime created_at)
     orig_caller = env["provider"].transport._tool_caller
 
     def uncertain_caller(tool_name: str, args: dict[str, Any]) -> Any:
         if tool_name == "result":
             job_id = args.get("job_id", "")
-            task_id = next(j["args"]["task_id"] for j in env["submitted_jobs"] if j["job_id"] == job_id)
+            task_id = next(
+                j["args"]["task_id"]
+                for j in env["submitted_jobs"]
+                if j["job_id"] == job_id
+            )
             # Simulates uncertain status with empty deliverable
             return {
                 "job_id": job_id,
@@ -746,6 +791,7 @@ def test_e2e_3_worker_uncertain_and_recovery(test_environment):
 
     env["provider"].transport._tool_caller = uncertain_caller
 
+    # Call orchestrate without passing runtime created_at:
     agg1 = orchestrator.orchestrate(
         request,
         registry=env["registry"],
@@ -753,16 +799,23 @@ def test_e2e_3_worker_uncertain_and_recovery(test_environment):
         usage_snapshots=env["usage_snapshots"],
         routing_policy=env["routing_policy"],
         provider_lookup=lambda name: env["provider"],
-        created_at=NOW,
     )
 
-    assert agg1.orchestration_engineering_status == OrchestrationEngineeringStatus.UNCERTAIN.value
+    assert (
+        agg1.orchestration_engineering_status
+        == OrchestrationEngineeringStatus.UNCERTAIN.value
+    )
     assert agg1.uncertain_work_blocks == ("wb-alpha",)
     assert agg1.is_eligible_for_m6 is False
     initial_job_count = env["submit_call_count"]["count"]
 
     # Phase 2: Re-submitting same task and request_id reuses the exact same durable job
-    handle1 = env["provider"]._submissions[(agg1.work_block_results[0].task_id, f"{request.orchestration_id}_{wb_alpha.work_block_id}")]
+    handle1 = env["provider"]._submissions[
+        (
+            agg1.work_block_results[0].task_id,
+            f"{request.orchestration_id}_{wb_alpha.work_block_id}",
+        )
+    ]
     durable_job_id = handle1["job_id"]
 
     # Simulate provider recovering with real deliverable
@@ -781,7 +834,10 @@ def test_e2e_3_worker_uncertain_and_recovery(test_environment):
 
     env["provider"].transport._tool_caller = recovered_caller
 
-    # Re-orchestrate using the same request: recovers state idempotently
+    # Re-orchestrate using the same request with a DIFFERENT recovery timestamp:
+    # Must recover state idempotently, yielding the same task_id, reusing durable job_id,
+    # without increasing provider submit count or mutating provenance identity.
+    RECOVERY_TIME = "2026-09-21T18:45:00.000000Z"
     agg2 = orchestrator.orchestrate(
         request,
         registry=env["registry"],
@@ -789,12 +845,31 @@ def test_e2e_3_worker_uncertain_and_recovery(test_environment):
         usage_snapshots=env["usage_snapshots"],
         routing_policy=env["routing_policy"],
         provider_lookup=lambda name: env["provider"],
-        created_at=NOW,
+        created_at=RECOVERY_TIME,
     )
-    # Submission count did NOT increase (no duplicate submit!)
-    assert env["submit_call_count"]["count"] == initial_job_count
+
+    # 1. task_id is strictly identical across recovery
+    assert agg1.work_block_results[0].task_id == agg2.work_block_results[0].task_id
+    # 2. durable job_id is strictly identical
     assert agg2.work_block_results[0].provider_job_ref == durable_job_id
-    assert agg2.orchestration_engineering_status == OrchestrationEngineeringStatus.COMPLETED.value
+    # 3. submission count did NOT increase (no duplicate submit!)
+    assert env["submit_call_count"]["count"] == initial_job_count
+    # 4. route, project binding, and provenance identity are strictly preserved
+    assert agg1.work_block_results[0].route_id == agg2.work_block_results[0].route_id
+    assert (
+        agg1.work_block_results[0].project_binding
+        == agg2.work_block_results[0].project_binding
+    )
+    assert agg2.m6_eligible_candidate is not None
+    assert agg2.m6_eligible_candidate.hypothesis.provenance.created_at == NOW
+    assert agg2.m6_eligible_candidate.hypothesis.provenance.origin_ref == (
+        f"agent_task:{agg2.work_block_results[0].task_id};provider:antigravity;model:Gemini 3.8 Flash High"
+    )
+
+    assert (
+        agg2.orchestration_engineering_status
+        == OrchestrationEngineeringStatus.COMPLETED.value
+    )
     assert agg2.work_block_results[0].terminal_status == "SUCCESS"
     assert agg2.work_block_results[0].acceptance_status == "ACCEPTED"
     assert agg2.is_eligible_for_m6 is True
@@ -812,8 +887,13 @@ def test_e2e_4_nested_delegation_prohibited_fail_closed(test_environment):
     orchestrator: MultiAgentOrchestrator = env["orchestrator"]
 
     # 1. delegation_depth > 1 rejected by contract
-    with pytest.raises(PermissionDeniedError, match="delegation_depth=2 exceeds maximum allowable depth 1"):
-        auth_scope = authorize(AgentRole.ALPHA_GENERATOR.value, ["create_hypothesis"], BINDING)
+    with pytest.raises(
+        PermissionDeniedError,
+        match="delegation_depth=2 exceeds maximum allowable depth 1",
+    ):
+        auth_scope = authorize(
+            AgentRole.ALPHA_GENERATOR.value, ["create_hypothesis"], BINDING
+        )
         AgentTask.create(
             role=AgentRole.ALPHA_GENERATOR.value,
             requested_permissions=["create_hypothesis"],
@@ -846,7 +926,9 @@ def test_e2e_4_nested_delegation_prohibited_fail_closed(test_environment):
     )
 
     # Caller depth > 0 rejected at runtime
-    with pytest.raises(PermissionDeniedError, match="Nested agent delegation prohibited"):
+    with pytest.raises(
+        PermissionDeniedError, match="Nested agent delegation prohibited"
+    ):
         orchestrator.orchestrate(
             req,
             registry=env["registry"],
@@ -858,7 +940,10 @@ def test_e2e_4_nested_delegation_prohibited_fail_closed(test_environment):
         )
 
     # Caller role as worker rejected at runtime
-    with pytest.raises(PermissionDeniedError, match="Worker role 'alpha_generator' cannot invoke MultiAgentOrchestrator"):
+    with pytest.raises(
+        PermissionDeniedError,
+        match="Worker role 'alpha_generator' cannot invoke MultiAgentOrchestrator",
+    ):
         orchestrator.orchestrate(
             req,
             registry=env["registry"],
@@ -871,13 +956,17 @@ def test_e2e_4_nested_delegation_prohibited_fail_closed(test_environment):
         )
 
     # 3. Requesting nested permissions fail-closed
-    with pytest.raises(PermissionDeniedError, match="Unknown permission 'delegate_subagent'"):
+    with pytest.raises(
+        PermissionDeniedError, match="Unknown permission 'delegate_subagent'"
+    ):
         OrchestratedWorkBlock.create(
             work_block_id="wb-nested-perm",
             role=AgentRole.DATA_RESEARCHER.value,
             objective="Try to delegate child",
             prompt="Prompt",
-            requested_permissions=["delegate_subagent"],  # Unauthorized unknown permission
+            requested_permissions=[
+                "delegate_subagent"
+            ],  # Unauthorized unknown permission
         )
 
     # 4. Requesting out-of-role permissions fail-closed (cross-role elevation)
@@ -887,7 +976,9 @@ def test_e2e_4_nested_delegation_prohibited_fail_closed(test_environment):
             role=AgentRole.DATA_RESEARCHER.value,
             objective="Try to elevate to create hypothesis",
             prompt="Prompt",
-            requested_permissions=["create_hypothesis"],  # Data researcher cannot create hypothesis
+            requested_permissions=[
+                "create_hypothesis"
+            ],  # Data researcher cannot create hypothesis
         )
 
 
@@ -936,35 +1027,7 @@ def test_e2e_5_completion_order_does_not_affect_aggregate(test_environment):
     )
 
     def make_res(wb: OrchestratedWorkBlock) -> WorkBlockExecutionResult:
-        raw_payload = {
-            "acceptance_status": "ACCEPTED",
-            "admitted_candidate_id": None,
-            "authorized_permissions": list(wb.requested_permissions),
-            "error_code": None,
-            "error_message": None,
-            "hash_profile": "sha256_canonical_json_v2",
-            "model": "Gemini 3.8 Flash High",
-            "orchestration_id": req.orchestration_id,
-            "ordinal": wb.ordinal,
-            "project_binding": dict(req.project_binding),
-            "provider": "antigravity",
-            "provider_job_ref": f"job-{wb.work_block_id}",
-            "raw_result_ref": None,
-            "role": wb.role,
-            "route_id": f"route-{wb.work_block_id}",
-            "schema_version": "research_lab.multi_agent_orchestration.v1",
-            "structured_output": {"data": f"content-{wb.work_block_id}"},
-            "structured_result_type": "output",
-            "task_id": f"task-{wb.work_block_id}",
-            "terminal_status": "SUCCESS",
-            "tool_failures": [],
-            "transport_ref": "local_mcp://antigravity-local-desktop",
-            "usage_snapshot_ref": None,
-            "work_block_content_hash": wb.work_block_content_hash,
-            "work_block_id": wb.work_block_id,
-        }
-        r_hash = compute_work_block_result_hash(raw_payload)
-        return WorkBlockExecutionResult(
+        return WorkBlockExecutionResult.create(
             orchestration_id=req.orchestration_id,
             work_block_id=wb.work_block_id,
             task_id=f"task-{wb.work_block_id}",
@@ -981,7 +1044,6 @@ def test_e2e_5_completion_order_does_not_affect_aggregate(test_environment):
             structured_result_type="output",
             structured_output={"data": f"content-{wb.work_block_id}"},
             raw_result_ref=None,
-            result_hash=r_hash,
             error_code=None,
             error_message=None,
             tool_failures=(),
@@ -1052,7 +1114,9 @@ def test_negative_unknown_role_fail_closed():
 
 def test_negative_unsupported_worker_role_fail_closed():
     # research_synthesizer is known in general catalog, but unsupported in M7 first version
-    with pytest.raises(PermissionDeniedError, match="Unsupported worker role 'research_synthesizer'"):
+    with pytest.raises(
+        PermissionDeniedError, match="Unsupported worker role 'research_synthesizer'"
+    ):
         OrchestratedWorkBlock.create(
             work_block_id="wb-synth",
             role=AgentRole.RESEARCH_SYNTHESIZER.value,
@@ -1064,9 +1128,14 @@ def test_negative_unsupported_worker_role_fail_closed():
 
 def test_negative_project_binding_mismatch_fail_closed():
     # 1. Empty or placeholder project_id fails closed
-    with pytest.raises(ProjectBindingError, match="project_id must be a non-empty string"):
+    with pytest.raises(
+        ProjectBindingError, match="project_id must be a non-empty string"
+    ):
         MultiAgentOrchestrationRequest.create(
-            project_binding={"project_id": "", "workspace_identity": "/Users/fujun/node/vnpy"},
+            project_binding={
+                "project_id": "",
+                "workspace_identity": "/Users/fujun/node/vnpy",
+            },
             purpose="Mismatch test",
             work_blocks=[
                 OrchestratedWorkBlock.create(
@@ -1083,7 +1152,10 @@ def test_negative_project_binding_mismatch_fail_closed():
     # 2. Expected binding mismatch fails closed
     with pytest.raises(ProjectBindingError, match="Project ID mismatch"):
         MultiAgentOrchestrationRequest.create(
-            project_binding={"project_id": "wrong-proj", "workspace_identity": "/Users/fujun/node/vnpy"},
+            project_binding={
+                "project_id": "wrong-proj",
+                "workspace_identity": "/Users/fujun/node/vnpy",
+            },
             expected_binding=BINDING,
             purpose="Mismatch test",
             work_blocks=[
@@ -1100,11 +1172,16 @@ def test_negative_project_binding_mismatch_fail_closed():
 
 
 def test_negative_worker_inter_communication_forbidden():
-    with pytest.raises(PermissionDeniedError, match="Worker-to-worker peer communication is strictly prohibited"):
+    with pytest.raises(
+        PermissionDeniedError,
+        match="Worker-to-worker peer communication is strictly prohibited",
+    ):
         send_worker_message("wb-alpha", "wb-data", {"data": "shared_signal"})
 
 
-def test_negative_provider_self_reported_success_without_deliverable_rejected(test_environment):
+def test_negative_provider_self_reported_success_without_deliverable_rejected(
+    test_environment,
+):
     """Provider returning status=SUCCESS with empty deliverable cannot bypass acceptance."""
     env = test_environment
     orchestrator: MultiAgentOrchestrator = env["orchestrator"]
@@ -1192,7 +1269,9 @@ def test_negative_data_and_external_researcher_output_not_evidence(test_environm
     assert agg.m6_eligible_candidate is None
 
     # Attempting to handover non-alpha result to M6 fails closed
-    with pytest.raises(ValueError, match="No eligible alpha candidate in aggregate for M6 admission"):
+    with pytest.raises(
+        ValueError, match="No eligible alpha candidate in aggregate for M6 admission"
+    ):
         orchestrator.handover_to_discovery(
             agg,
             discovery_orchestrator=env["discovery_orchestrator"],
@@ -1280,3 +1359,238 @@ def test_audit_trail_integrity(test_environment):
     assert orchestrator.audit_trail.verify_all() is True
     assert records[0].orchestration_id == req.orchestration_id
     assert records[0].audit_id.startswith("orchaudit-")
+
+
+def test_work_block_result_hash_public_validation_and_field_tampering_rejected(
+    test_environment,
+):
+    """P1-1: validate_work_block_result_hash succeeds for valid results and rejects any field tampering."""
+    env = test_environment
+    orchestrator: MultiAgentOrchestrator = env["orchestrator"]
+
+    wb = OrchestratedWorkBlock.create(
+        work_block_id="wb-verify",
+        role=AgentRole.DATA_RESEARCHER.value,
+        objective="Validate hash integrity",
+        prompt="Data prompt",
+        requested_permissions=["read_result_store"],
+    )
+    req = MultiAgentOrchestrationRequest.create(
+        project_binding=BINDING,
+        purpose="Hash verification test",
+        work_blocks=[wb],
+        created_at=NOW,
+    )
+
+    agg = orchestrator.orchestrate(
+        req,
+        registry=env["registry"],
+        providers=env["providers"],
+        usage_snapshots=env["usage_snapshots"],
+        routing_policy=env["routing_policy"],
+        provider_lookup=lambda name: env["provider"],
+    )
+    res = agg.work_block_results[0]
+
+    # 1. Public validation on valid result succeeds
+    td = res.to_dict()
+    validate_work_block_result_hash(td)  # Must not raise
+
+    # 2. Missing result_hash fail-closed
+    missing_hash = dict(td)
+    missing_hash["result_hash"] = ""
+    with pytest.raises(TamperDetectionError, match="Missing result_hash"):
+        validate_work_block_result_hash(missing_hash)
+
+    # 3. Field tampering fail-closed for critical fields
+    tamper_fields = [
+        ("terminal_status", "FAILED"),
+        ("acceptance_status", "REJECTED_BY_ACCEPTANCE"),
+        ("admitted_candidate_id", "tampered_candidate_id"),
+        ("role", AgentRole.ALPHA_GENERATOR.value),
+        ("task_id", "task-tampered-12345"),
+        ("audit_ref", "orchaudit-tampered"),
+        ("structured_output", {"tampered": True}),
+        ("model", "Tampered Model 999"),
+        ("provider_job_ref", "job-tampered-999"),
+    ]
+    for field, tampered_val in tamper_fields:
+        tampered_dict = dict(td)
+        tampered_dict[field] = tampered_val
+        with pytest.raises(
+            TamperDetectionError,
+            match="WorkBlockExecutionResult hash tampering detected",
+        ):
+            validate_work_block_result_hash(tampered_dict)
+
+
+def test_work_block_result_construction_fail_closed():
+    """P1-1: Instantiating WorkBlockExecutionResult with mismatched result_hash fails closed in __post_init__."""
+    with pytest.raises(
+        TamperDetectionError, match="WorkBlockExecutionResult hash tampering detected"
+    ):
+        WorkBlockExecutionResult(
+            orchestration_id="orch-test",
+            work_block_id="wb-1",
+            task_id="task-1",
+            role=AgentRole.ALPHA_GENERATOR.value,
+            authorized_permissions=("create_hypothesis",),
+            route_id="route-1",
+            provider="antigravity",
+            model="Gemini 3.8 Flash High",
+            transport_ref="local_mcp://test",
+            usage_snapshot_ref=None,
+            provider_job_ref="job-1",
+            terminal_status="SUCCESS",
+            acceptance_status="ACCEPTED",
+            structured_result_type=None,
+            structured_output=None,
+            raw_result_ref=None,
+            result_hash="tampered_invalid_hash_value_12345",
+            error_code=None,
+            error_message=None,
+            tool_failures=(),
+            project_binding=BINDING.to_dict(),
+            audit_ref=None,
+        )
+
+
+def test_aggregate_admission_rejects_unverified_or_tampered_worker_result(
+    test_environment,
+):
+    """P1-1: aggregate_results fails closed if any worker result is unverified, missing hash, or tampered."""
+    env = test_environment
+    orchestrator: MultiAgentOrchestrator = env["orchestrator"]
+
+    valid_res = WorkBlockExecutionResult.create(
+        orchestration_id="orch-agg-test",
+        work_block_id="wb-agg-test",
+        task_id="task-wb-agg-test",
+        role=AgentRole.DATA_RESEARCHER.value,
+        authorized_permissions=["read_result_store"],
+        route_id="route-test",
+        provider="antigravity",
+        model="Gemini 3.8 Flash High",
+        transport_ref="local_mcp://test",
+        provider_job_ref="job-test",
+        terminal_status="SUCCESS",
+        acceptance_status="ACCEPTED",
+        project_binding=BINDING,
+    )
+
+    # Valid result passes aggregate_results
+    agg = orchestrator.aggregate_results(
+        orchestration_id="orch-agg-test",
+        project_binding=BINDING.to_dict(),
+        aggregation_policy=DEFAULT_AGGREGATION_POLICY,
+        work_block_results=[valid_res],
+        recorded_at=NOW,
+    )
+    assert (
+        agg.orchestration_engineering_status
+        == OrchestrationEngineeringStatus.COMPLETED.value
+    )
+
+    # Tampered result (e.g. bypassed construction or mocked instance) is rejected before aggregation
+    class TamperedWorkBlockResult(WorkBlockExecutionResult):
+        def to_dict(self):
+            d = super().to_dict()
+            d["terminal_status"] = "FAILED"  # altered status without matching hash
+            return d
+
+    # Instantiate via object.__new__ to simulate tampered in-memory object
+    tampered_res = object.__new__(TamperedWorkBlockResult)
+    tampered_res.__dict__.update(valid_res.__dict__)
+    tampered_res.__dict__["terminal_status"] = "FAILED"
+
+    with pytest.raises(
+        TamperDetectionError, match="WorkBlockExecutionResult hash tampering detected"
+    ):
+        orchestrator.aggregate_results(
+            orchestration_id="orch-agg-test",
+            project_binding=BINDING.to_dict(),
+            aggregation_policy=DEFAULT_AGGREGATION_POLICY,
+            work_block_results=[tampered_res],
+            recorded_at=NOW,
+        )
+
+
+def test_same_task_recovery_across_different_runtime_timestamps_and_canonical_requests(
+    test_environment,
+):
+    """P1-2: same-task recovery across different runtime timestamps and identical canonical requests."""
+    env = test_environment
+    orchestrator: MultiAgentOrchestrator = env["orchestrator"]
+
+    wb = OrchestratedWorkBlock.create(
+        work_block_id="wb-rec-identity",
+        role=AgentRole.ALPHA_GENERATOR.value,
+        objective="Recovery task identity invariance",
+        prompt="Alpha prompt",
+        requested_permissions=["create_hypothesis"],
+    )
+
+    # Request without explicit created_at
+    req1 = MultiAgentOrchestrationRequest.create(
+        project_binding=BINDING,
+        purpose="Identity invariance across recovery",
+        work_blocks=[wb],
+    )
+
+    # Execution 1: no runtime created_at
+    agg1 = orchestrator.orchestrate(
+        req1,
+        registry=env["registry"],
+        providers=env["providers"],
+        usage_snapshots=env["usage_snapshots"],
+        routing_policy=env["routing_policy"],
+        provider_lookup=lambda name: env["provider"],
+    )
+    task_id_1 = agg1.work_block_results[0].task_id
+    job_id_1 = agg1.work_block_results[0].provider_job_ref
+    submit_count_1 = env["submit_call_count"]["count"]
+
+    # Execution 2: recovered 2 hours later with explicit different recovery timestamp
+    agg2 = orchestrator.orchestrate(
+        req1,
+        registry=env["registry"],
+        providers=env["providers"],
+        usage_snapshots=env["usage_snapshots"],
+        routing_policy=env["routing_policy"],
+        provider_lookup=lambda name: env["provider"],
+        created_at="2026-09-21T22:00:00.000000Z",
+    )
+    task_id_2 = agg2.work_block_results[0].task_id
+    job_id_2 = agg2.work_block_results[0].provider_job_ref
+    submit_count_2 = env["submit_call_count"]["count"]
+
+    assert task_id_1 == task_id_2
+    assert job_id_1 == job_id_2
+    assert submit_count_1 == submit_count_2  # No duplicate submission!
+
+    # Identical canonical orchestration request created at a different time
+    req2 = MultiAgentOrchestrationRequest.create(
+        project_binding=BINDING,
+        purpose="Identity invariance across recovery",
+        work_blocks=[wb],
+        created_at="2026-09-22T08:00:00.000000Z",
+    )
+    assert req1.orchestration_id == req2.orchestration_id
+
+    plan1 = orchestrator.build_plan(req1)
+    plan2 = orchestrator.build_plan(req2)
+    assert plan1.plan_id == plan2.plan_id
+
+    agg3 = orchestrator.orchestrate(
+        req2,
+        registry=env["registry"],
+        providers=env["providers"],
+        usage_snapshots=env["usage_snapshots"],
+        routing_policy=env["routing_policy"],
+        provider_lookup=lambda name: env["provider"],
+    )
+    assert agg3.work_block_results[0].task_id == task_id_1
+    assert agg3.work_block_results[0].provider_job_ref == job_id_1
+    assert (
+        env["submit_call_count"]["count"] == submit_count_1
+    )  # Reuses existing durable job!

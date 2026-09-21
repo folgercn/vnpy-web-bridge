@@ -101,7 +101,9 @@ SUPPORTED_WORKER_ROLES = frozenset(
 )
 
 if not hasattr(AlphaGenerationCandidate, "candidate_id"):
-    AlphaGenerationCandidate.candidate_id = property(lambda self: self.hypothesis.hypothesis_id)
+    AlphaGenerationCandidate.candidate_id = property(
+        lambda self: self.hypothesis.hypothesis_id
+    )
 
 
 def _clean_for_canonical(val: Any) -> Any:
@@ -113,7 +115,10 @@ def _clean_for_canonical(val: Any) -> Any:
     if isinstance(val, (list, tuple)):
         return [_clean_for_canonical(x) for x in val]
     if isinstance(val, (dict, Mapping)):
-        return {str(k): _clean_for_canonical(v) for k, v in sorted(val.items(), key=lambda item: str(item[0]))}
+        return {
+            str(k): _clean_for_canonical(v)
+            for k, v in sorted(val.items(), key=lambda item: str(item[0]))
+        }
     return str(val)
 
 
@@ -132,7 +137,11 @@ class OrchestrationEngineeringStatus(str, Enum):
 
 def compute_work_block_content_hash(payload: dict[str, Any]) -> str:
     """Compute canonical hash of OrchestratedWorkBlock specification."""
-    clean = {k: _clean_for_canonical(v) for k, v in payload.items() if k != "work_block_content_hash"}
+    clean = {
+        k: _clean_for_canonical(v)
+        for k, v in payload.items()
+        if k != "work_block_content_hash"
+    }
     return v2.digest(clean)
 
 
@@ -172,7 +181,10 @@ class OrchestratedWorkBlock:
             raise PermissionDeniedError(
                 f"Unsupported worker role '{self.role}' for Multi-Agent Orchestration. "
                 f"Supported roles: {sorted(SUPPORTED_WORKER_ROLES)}",
-                details={"requested_role": self.role, "supported_roles": sorted(SUPPORTED_WORKER_ROLES)},
+                details={
+                    "requested_role": self.role,
+                    "supported_roles": sorted(SUPPORTED_WORKER_ROLES),
+                },
             )
         if not self.objective or not self.objective.strip():
             raise ValueError("objective cannot be empty")
@@ -191,7 +203,10 @@ class OrchestratedWorkBlock:
                 unauthorized = sorted(set(val_req) - allowed)
                 raise PermissionDeniedError(
                     f"Requested permissions {unauthorized} not allowed for role '{self.role}'",
-                    details={"role": self.role, "unauthorized_permissions": unauthorized},
+                    details={
+                        "role": self.role,
+                        "unauthorized_permissions": unauthorized,
+                    },
                 )
 
         if self.work_block_content_hash:
@@ -214,7 +229,10 @@ class OrchestratedWorkBlock:
         if val_role not in SUPPORTED_WORKER_ROLES:
             raise PermissionDeniedError(
                 f"Unsupported worker role '{val_role}' for Multi-Agent Orchestration",
-                details={"requested_role": val_role, "supported_roles": sorted(SUPPORTED_WORKER_ROLES)},
+                details={
+                    "requested_role": val_role,
+                    "supported_roles": sorted(SUPPORTED_WORKER_ROLES),
+                },
             )
         val_req = validate_permissions(requested_permissions)
         enforce_hard_invariants(val_req)
@@ -226,7 +244,10 @@ class OrchestratedWorkBlock:
                 unauthorized = sorted(set(val_req) - allowed)
                 raise PermissionDeniedError(
                     f"Requested permissions {unauthorized} not allowed for role '{val_role}'",
-                    details={"role": val_role, "unauthorized_permissions": unauthorized},
+                    details={
+                        "role": val_role,
+                        "unauthorized_permissions": unauthorized,
+                    },
                 )
 
         clean_inputs = tuple(_clean_for_canonical(x) for x in input_refs)
@@ -290,15 +311,24 @@ def compute_orchestration_deterministic_id(payload: dict[str, Any]) -> str:
             "objective": wb.get("objective"),
             "ordinal": wb.get("ordinal", 0),
             "prompt": wb.get("prompt"),
-            "requested_permissions": _clean_for_canonical(wb.get("requested_permissions", ())),
+            "requested_permissions": _clean_for_canonical(
+                wb.get("requested_permissions", ())
+            ),
             "role": wb.get("role"),
             "work_block_id": wb.get("work_block_id"),
         }
-        for wb in sorted(payload.get("work_blocks", []), key=lambda b: (b.get("ordinal", 0), b.get("work_block_id", "")))
+        for wb in sorted(
+            payload.get("work_blocks", []),
+            key=lambda b: (b.get("ordinal", 0), b.get("work_block_id", "")),
+        )
     ]
     core = {
-        "aggregation_policy": payload.get("aggregation_policy", DEFAULT_AGGREGATION_POLICY),
-        "concurrency_policy": payload.get("concurrency_policy", DEFAULT_CONCURRENCY_POLICY),
+        "aggregation_policy": payload.get(
+            "aggregation_policy", DEFAULT_AGGREGATION_POLICY
+        ),
+        "concurrency_policy": payload.get(
+            "concurrency_policy", DEFAULT_CONCURRENCY_POLICY
+        ),
         "project_binding": _clean_for_canonical(payload.get("project_binding", {})),
         "purpose": payload.get("purpose", ""),
         "work_blocks": clean_blocks,
@@ -309,7 +339,11 @@ def compute_orchestration_deterministic_id(payload: dict[str, Any]) -> str:
 
 def compute_orchestration_request_hash(payload: dict[str, Any]) -> str:
     """Compute canonical hash of MultiAgentOrchestrationRequest payload."""
-    clean = {k: _clean_for_canonical(v) for k, v in payload.items() if k != "request_content_hash"}
+    clean = {
+        k: _clean_for_canonical(v)
+        for k, v in payload.items()
+        if k != "request_content_hash"
+    }
     return v2.digest(clean)
 
 
@@ -357,7 +391,9 @@ class MultiAgentOrchestrationRequest:
         validate_project_binding(self.project_binding)
 
         if not self.work_blocks:
-            raise ValueError("Orchestration request must specify at least one work block (non-empty)")
+            raise ValueError(
+                "Orchestration request must specify at least one work block (non-empty)"
+            )
         if len(self.work_blocks) > MAX_WORK_BLOCKS:
             raise ValueError(
                 f"Orchestration request exceeds maximum allowable work blocks {MAX_WORK_BLOCKS}: got {len(self.work_blocks)}"
@@ -404,11 +440,15 @@ class MultiAgentOrchestrationRequest:
                 details={"caller_identity": caller_identity},
             )
 
-        val_binding = validate_project_binding(project_binding, expected_binding=expected_binding)
+        val_binding = validate_project_binding(
+            project_binding, expected_binding=expected_binding
+        )
         binding_dict = val_binding.to_dict()
 
         if not work_blocks:
-            raise ValueError("Orchestration request must specify at least one work block (non-empty)")
+            raise ValueError(
+                "Orchestration request must specify at least one work block (non-empty)"
+            )
         if len(work_blocks) > MAX_WORK_BLOCKS:
             raise ValueError(
                 f"Orchestration request exceeds maximum allowable work blocks {MAX_WORK_BLOCKS}: got {len(work_blocks)}"
@@ -420,7 +460,9 @@ class MultiAgentOrchestrationRequest:
             raise ValueError(f"Duplicate work block ID fail closed: {duplicates}")
 
         # Ensure stable ordering of blocks
-        ordered_blocks = tuple(sorted(work_blocks, key=lambda b: (b.ordinal, b.work_block_id)))
+        ordered_blocks = tuple(
+            sorted(work_blocks, key=lambda b: (b.ordinal, b.work_block_id))
+        )
 
         raw = {
             "aggregation_policy": aggregation_policy,
@@ -476,7 +518,11 @@ class MultiAgentOrchestrationRequest:
 
 def compute_plan_content_hash(payload: dict[str, Any]) -> str:
     """Compute canonical hash of OrchestrationPlan payload."""
-    clean = {k: _clean_for_canonical(v) for k, v in payload.items() if k != "plan_content_hash"}
+    clean = {
+        k: _clean_for_canonical(v)
+        for k, v in payload.items()
+        if k != "plan_content_hash"
+    }
     return v2.digest(clean)
 
 
@@ -537,14 +583,18 @@ class OrchestrationPlan:
 
 def compute_work_block_result_hash(payload: dict[str, Any]) -> str:
     """Compute canonical hash of WorkBlockExecutionResult payload."""
-    clean = {k: _clean_for_canonical(v) for k, v in payload.items() if k != "result_hash"}
+    clean = {
+        k: _clean_for_canonical(v) for k, v in payload.items() if k != "result_hash"
+    }
     return v2.digest(clean)
 
 
 def validate_work_block_result_hash(payload: dict[str, Any]) -> None:
     expected = payload.get("result_hash")
     if not expected:
-        raise TamperDetectionError("Missing result_hash in WorkBlockExecutionResult payload")
+        raise TamperDetectionError(
+            "Missing result_hash in WorkBlockExecutionResult payload"
+        )
     actual = compute_work_block_result_hash(payload)
     if expected != actual:
         raise TamperDetectionError(
@@ -585,10 +635,25 @@ class WorkBlockExecutionResult:
     schema_version: str = ORCHESTRATION_SCHEMA_VERSION
     hash_profile: str = HASH_PROFILE
 
+    def __post_init__(self) -> None:
+        if not self.work_block_id:
+            raise ValueError("work_block_id cannot be empty")
+        if not self.orchestration_id:
+            raise ValueError("orchestration_id cannot be empty")
+        if not self.task_id:
+            raise ValueError("task_id cannot be empty")
+        if not self.result_hash:
+            raise TamperDetectionError(
+                "Missing result_hash in WorkBlockExecutionResult"
+            )
+        validate_work_block_result_hash(self.to_dict())
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "acceptance_status": self.acceptance_status,
-            "admitted_candidate_id": self.admitted_candidate.candidate_id if self.admitted_candidate else None,
+            "admitted_candidate_id": self.admitted_candidate.candidate_id
+            if self.admitted_candidate
+            else None,
             "audit_ref": self.audit_ref,
             "authorized_permissions": list(self.authorized_permissions),
             "error_code": self.error_code,
@@ -616,6 +681,108 @@ class WorkBlockExecutionResult:
             "work_block_id": self.work_block_id,
         }
 
+    @classmethod
+    def create(
+        cls,
+        *,
+        orchestration_id: str,
+        work_block_id: str,
+        task_id: str,
+        role: str,
+        authorized_permissions: Sequence[str],
+        route_id: str,
+        provider: str,
+        model: str,
+        transport_ref: str,
+        provider_job_ref: str,
+        terminal_status: str,
+        acceptance_status: str | None,
+        structured_result_type: str | None = None,
+        structured_output: dict[str, Any] | None = None,
+        raw_result_ref: str | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        tool_failures: Sequence[str] = (),
+        project_binding: ProjectBinding | Mapping[str, str],
+        audit_ref: str | None = None,
+        ordinal: int = 0,
+        admitted_candidate: AlphaGenerationCandidate | None = None,
+        work_block_content_hash: str = "",
+        usage_snapshot_ref: str | None = None,
+        schema_version: str = ORCHESTRATION_SCHEMA_VERSION,
+        hash_profile: str = HASH_PROFILE,
+    ) -> WorkBlockExecutionResult:
+        binding_dict = dict(
+            project_binding.to_dict()
+            if isinstance(project_binding, ProjectBinding)
+            else project_binding
+        )
+        clean_structured = (
+            _clean_for_canonical(structured_output)
+            if structured_output is not None
+            else None
+        )
+        raw = {
+            "acceptance_status": acceptance_status,
+            "admitted_candidate_id": admitted_candidate.candidate_id
+            if admitted_candidate
+            else None,
+            "audit_ref": audit_ref,
+            "authorized_permissions": sorted(authorized_permissions),
+            "error_code": error_code,
+            "error_message": error_message,
+            "hash_profile": hash_profile,
+            "model": model,
+            "orchestration_id": orchestration_id,
+            "ordinal": ordinal,
+            "project_binding": binding_dict,
+            "provider": provider,
+            "provider_job_ref": provider_job_ref,
+            "raw_result_ref": raw_result_ref,
+            "role": role,
+            "route_id": route_id,
+            "schema_version": schema_version,
+            "structured_output": clean_structured,
+            "structured_result_type": structured_result_type,
+            "task_id": task_id,
+            "terminal_status": terminal_status,
+            "tool_failures": list(tool_failures),
+            "transport_ref": transport_ref,
+            "usage_snapshot_ref": usage_snapshot_ref,
+            "work_block_content_hash": work_block_content_hash,
+            "work_block_id": work_block_id,
+        }
+        res_hash = compute_work_block_result_hash(raw)
+        return cls(
+            orchestration_id=orchestration_id,
+            work_block_id=work_block_id,
+            task_id=task_id,
+            role=role,
+            authorized_permissions=tuple(sorted(authorized_permissions)),
+            route_id=route_id,
+            provider=provider,
+            model=model,
+            transport_ref=transport_ref,
+            usage_snapshot_ref=usage_snapshot_ref,
+            provider_job_ref=provider_job_ref,
+            terminal_status=terminal_status,
+            acceptance_status=acceptance_status,
+            structured_result_type=structured_result_type,
+            structured_output=copy.deepcopy(structured_output),
+            raw_result_ref=raw_result_ref,
+            result_hash=res_hash,
+            error_code=error_code,
+            error_message=error_message,
+            tool_failures=tuple(tool_failures),
+            project_binding=binding_dict,
+            audit_ref=audit_ref,
+            ordinal=ordinal,
+            admitted_candidate=admitted_candidate,
+            work_block_content_hash=work_block_content_hash,
+            schema_version=schema_version,
+            hash_profile=hash_profile,
+        )
+
 
 # --- MultiAgentAggregateResult Contract ---
 
@@ -625,7 +792,11 @@ def compute_aggregate_content_hash(payload: dict[str, Any]) -> str:
 
     Timestamps, audit references, and transient properties are EXCLUDED.
     """
-    clean = {k: _clean_for_canonical(v) for k, v in payload.items() if k not in ("aggregate_content_hash", "audit_ref")}
+    clean = {
+        k: _clean_for_canonical(v)
+        for k, v in payload.items()
+        if k not in ("aggregate_content_hash", "audit_ref")
+    }
     return v2.digest(clean)
 
 
@@ -666,9 +837,15 @@ class MultiAgentAggregateResult:
 
     def __post_init__(self) -> None:
         if self.is_tradable:
-            raise ValueError("Multi-agent orchestration can NEVER grant tradable authority (is_tradable must be False)")
-        if self.orchestration_engineering_status not in {s.value for s in OrchestrationEngineeringStatus}:
-            raise ValueError(f"Invalid orchestration_engineering_status: {self.orchestration_engineering_status}")
+            raise ValueError(
+                "Multi-agent orchestration can NEVER grant tradable authority (is_tradable must be False)"
+            )
+        if self.orchestration_engineering_status not in {
+            s.value for s in OrchestrationEngineeringStatus
+        }:
+            raise ValueError(
+                f"Invalid orchestration_engineering_status: {self.orchestration_engineering_status}"
+            )
 
         if self.aggregate_content_hash:
             validate_aggregate_hash(self.to_dict())
@@ -693,7 +870,9 @@ class MultiAgentAggregateResult:
             "per_worker_provenance": copy.deepcopy(self.per_worker_provenance),
             "project_binding": dict(self.project_binding),
             "schema_version": self.schema_version,
-            "successful_outputs": [_clean_for_canonical(x) for x in self.successful_outputs],
+            "successful_outputs": [
+                _clean_for_canonical(x) for x in self.successful_outputs
+            ],
             "uncertain_work_blocks": list(self.uncertain_work_blocks),
             "work_block_results": [r.to_dict() for r in self.work_block_results],
         }
@@ -714,7 +893,11 @@ def compute_orchestration_audit_id(payload: dict[str, Any]) -> str:
 
 
 def compute_orchestration_audit_hash(payload: dict[str, Any]) -> str:
-    clean = {k: _clean_for_canonical(v) for k, v in payload.items() if k != "audit_content_hash"}
+    clean = {
+        k: _clean_for_canonical(v)
+        for k, v in payload.items()
+        if k != "audit_content_hash"
+    }
     return v2.digest(clean)
 
 
@@ -873,13 +1056,16 @@ class MultiAgentOrchestrator:
         caller_delegation_depth: int = 0,
         caller_role: str = "orchestrator",
         created_at: str | None = None,
-        duplicate_view_lookup: Callable[[AlphaGenerationCandidate], tuple[Any, Any]] | None = None,
+        duplicate_view_lookup: Callable[[AlphaGenerationCandidate], tuple[Any, Any]]
+        | None = None,
         expected_binding: ProjectBinding | Mapping[str, str] | None = None,
     ) -> MultiAgentAggregateResult:
         """Execute multi-agent orchestration across all independent 1st-level work blocks."""
         # 0. Validate project binding against expected binding if provided
         if expected_binding is not None:
-            validate_project_binding(request.project_binding, expected_binding=expected_binding)
+            validate_project_binding(
+                request.project_binding, expected_binding=expected_binding
+            )
 
         # 1. Runtime caller & delegation check
         if caller_delegation_depth != 0:
@@ -896,7 +1082,12 @@ class MultiAgentOrchestrator:
 
         # 2. Build and freeze plan
         plan = self.build_plan(request)
-        now_ts = created_at or datetime.datetime.now(datetime.timezone.utc).isoformat()
+        runtime_recorded_at = (
+            created_at or datetime.datetime.now(datetime.timezone.utc).isoformat()
+        )
+        # Stable task identity decoupled from runtime execution timestamp:
+        # Worker tasks and provenance identity are strictly anchored to the frozen request specification.
+        worker_created_at = request.created_at or "2026-01-01T00:00:00.000000Z"
 
         # 3. Execute each work block independently with complete failure isolation
         block_results: list[WorkBlockExecutionResult] = []
@@ -910,7 +1101,7 @@ class MultiAgentOrchestrator:
                 usage_snapshots=usage_snapshots,
                 routing_policy=routing_policy,
                 provider_lookup=provider_lookup,
-                created_at=now_ts,
+                created_at=worker_created_at,
                 duplicate_view_lookup=duplicate_view_lookup,
             )
             block_results.append(res)
@@ -921,7 +1112,7 @@ class MultiAgentOrchestrator:
             project_binding=request.project_binding,
             aggregation_policy=request.aggregation_policy,
             work_block_results=block_results,
-            recorded_at=now_ts,
+            recorded_at=runtime_recorded_at,
         )
 
         return aggregate
@@ -937,7 +1128,8 @@ class MultiAgentOrchestrator:
         routing_policy: RoutingPolicy | None = None,
         provider_lookup: Callable[[str], AgentProvider],
         created_at: str,
-        duplicate_view_lookup: Callable[[AlphaGenerationCandidate], tuple[Any, Any]] | None = None,
+        duplicate_view_lookup: Callable[[AlphaGenerationCandidate], tuple[Any, Any]]
+        | None = None,
     ) -> WorkBlockExecutionResult:
         """Execute a single work block with failure boundary isolation."""
         task_id = ""
@@ -999,7 +1191,9 @@ class MultiAgentOrchestrator:
             provider = provider_lookup(route.provider)
             sub_request_id = f"{request.orchestration_id}_{wb.work_block_id}"
 
-            handle = provider.submit(task, route, preparation, request_id=sub_request_id)
+            handle = provider.submit(
+                task, route, preparation, request_id=sub_request_id
+            )
             provider_job_ref = handle.provider_job_ref
 
             # 7. Result retrieval & acceptance
@@ -1017,7 +1211,10 @@ class MultiAgentOrchestrator:
             # Role-specific post-processing
             if wb.role == AgentRole.ALPHA_GENERATOR.value:
                 structured_result_type = "alpha_candidate"
-                if terminal_status == TerminalStatus.SUCCESS.value and acceptance_status == "ACCEPTED":
+                if (
+                    terminal_status == TerminalStatus.SUCCESS.value
+                    and acceptance_status == "ACCEPTED"
+                ):
                     # Strictly parse and admit alpha candidate per M5 contract
                     try:
                         raw_text = _extract_raw_output(agent_result)
@@ -1060,8 +1257,12 @@ class MultiAgentOrchestrator:
                         "related_hypothesis_refs": None,
                         "duplicate_of": None,
                     }
-                    payload["hypothesis_content_hash"] = compute_hypothesis_content_hash(payload)
-                    validated = AlphaHypothesis.model_validate(validate_hypothesis(payload))
+                    payload["hypothesis_content_hash"] = (
+                        compute_hypothesis_content_hash(payload)
+                    )
+                    validated = AlphaHypothesis.model_validate(
+                        validate_hypothesis(payload)
+                    )
                     admitted_candidate = AlphaGenerationCandidate(
                         hypothesis=validated,
                         scientific_identity_hash=compute_scientific_identity_hash(
@@ -1083,36 +1284,7 @@ class MultiAgentOrchestrator:
                 # Explicit semantic boundary: external_researcher output != Evidence, != CriticDecision
                 structured_result_type = "external_literature_summary"
 
-            raw_res_payload = {
-                "acceptance_status": acceptance_status,
-                "admitted_candidate_id": admitted_candidate.candidate_id if admitted_candidate else None,
-                "authorized_permissions": list(authorized_perms),
-                "error_code": None,
-                "error_message": None,
-                "hash_profile": HASH_PROFILE,
-                "model": model_name,
-                "orchestration_id": request.orchestration_id,
-                "ordinal": wb.ordinal,
-                "project_binding": dict(request.project_binding),
-                "provider": provider_name,
-                "provider_job_ref": provider_job_ref,
-                "raw_result_ref": raw_ref,
-                "role": wb.role,
-                "route_id": route_id,
-                "schema_version": ORCHESTRATION_SCHEMA_VERSION,
-                "structured_output": _clean_for_canonical(structured_out),
-                "structured_result_type": structured_result_type,
-                "task_id": task_id,
-                "terminal_status": terminal_status,
-                "tool_failures": list(tool_failures),
-                "transport_ref": transport_ref,
-                "usage_snapshot_ref": usage_snapshot_ref,
-                "work_block_content_hash": wb.work_block_content_hash,
-                "work_block_id": wb.work_block_id,
-            }
-            res_hash = compute_work_block_result_hash(raw_res_payload)
-
-            return WorkBlockExecutionResult(
+            return WorkBlockExecutionResult.create(
                 orchestration_id=request.orchestration_id,
                 work_block_id=wb.work_block_id,
                 task_id=task_id,
@@ -1129,7 +1301,6 @@ class MultiAgentOrchestrator:
                 structured_result_type=structured_result_type,
                 structured_output=structured_out,
                 raw_result_ref=raw_ref,
-                result_hash=res_hash,
                 error_code=None,
                 error_message=None,
                 tool_failures=tool_failures,
@@ -1150,41 +1321,13 @@ class MultiAgentOrchestrator:
                 or type(exc).__name__
             )
             err_msg = str(exc)
+            terminal_status = (
+                TerminalStatus.UNCERTAIN.value
+                if "uncertain" in err_code.lower()
+                else TerminalStatus.FAILED.value
+            )
 
-            raw_err_payload = {
-                "acceptance_status": "REJECTED_BY_ACCEPTANCE",
-                "admitted_candidate_id": None,
-                "authorized_permissions": list(authorized_perms),
-                "error_code": err_code,
-                "error_message": err_msg,
-                "hash_profile": HASH_PROFILE,
-                "model": model_name,
-                "orchestration_id": request.orchestration_id,
-                "ordinal": wb.ordinal,
-                "project_binding": dict(request.project_binding),
-                "provider": provider_name,
-                "provider_job_ref": provider_job_ref,
-                "raw_result_ref": None,
-                "role": wb.role,
-                "route_id": route_id,
-                "schema_version": ORCHESTRATION_SCHEMA_VERSION,
-                "structured_output": None,
-                "structured_result_type": None,
-                "task_id": task_id,
-                "terminal_status": (
-                    TerminalStatus.UNCERTAIN.value
-                    if "uncertain" in err_code.lower()
-                    else TerminalStatus.FAILED.value
-                ),
-                "tool_failures": [err_msg],
-                "transport_ref": transport_ref,
-                "usage_snapshot_ref": usage_snapshot_ref,
-                "work_block_content_hash": wb.work_block_content_hash,
-                "work_block_id": wb.work_block_id,
-            }
-            res_hash = compute_work_block_result_hash(raw_err_payload)
-
-            return WorkBlockExecutionResult(
+            return WorkBlockExecutionResult.create(
                 orchestration_id=request.orchestration_id,
                 work_block_id=wb.work_block_id,
                 task_id=task_id,
@@ -1196,12 +1339,11 @@ class MultiAgentOrchestrator:
                 transport_ref=transport_ref,
                 usage_snapshot_ref=usage_snapshot_ref,
                 provider_job_ref=provider_job_ref,
-                terminal_status=raw_err_payload["terminal_status"],
+                terminal_status=terminal_status,
                 acceptance_status="REJECTED_BY_ACCEPTANCE",
                 structured_result_type=None,
                 structured_output=None,
                 raw_result_ref=None,
-                result_hash=res_hash,
                 error_code=err_code,
                 error_message=err_msg,
                 tool_failures=(err_msg,),
@@ -1228,7 +1370,18 @@ class MultiAgentOrchestrator:
         CRITICAL: The results are ALWAYS sorted by (ordinal, work_block_id).
         Concurrent completion order does NOT alter aggregate order or hash!
         """
-        sorted_results = tuple(sorted(work_block_results, key=lambda r: (r.ordinal, r.work_block_id)))
+        # Gate 7 admission validation: Fail-closed validation of every single worker result before aggregation.
+        # Any missing hash, tampered payload, or hash mismatch is immediately rejected.
+        for r in work_block_results:
+            if not isinstance(r, WorkBlockExecutionResult):
+                raise TypeError(
+                    f"Expected WorkBlockExecutionResult, got {type(r).__name__}"
+                )
+            validate_work_block_result_hash(r.to_dict())
+
+        sorted_results = tuple(
+            sorted(work_block_results, key=lambda r: (r.ordinal, r.work_block_id))
+        )
 
         per_worker_outcomes: dict[str, str] = {}
         per_worker_provenance: dict[str, dict[str, str]] = {}
@@ -1247,15 +1400,23 @@ class MultiAgentOrchestrator:
                 "transport_ref": r.transport_ref,
             }
 
-            if r.terminal_status == TerminalStatus.SUCCESS.value and r.acceptance_status == "ACCEPTED":
+            if (
+                r.terminal_status == TerminalStatus.SUCCESS.value
+                and r.acceptance_status == "ACCEPTED"
+            ):
                 if r.structured_output:
-                    successful_outputs.append({
-                        "role": r.role,
-                        "structured_output": copy.deepcopy(r.structured_output),
-                        "structured_result_type": r.structured_result_type,
-                        "work_block_id": r.work_block_id,
-                    })
-                if r.role == AgentRole.ALPHA_GENERATOR.value and r.admitted_candidate is not None:
+                    successful_outputs.append(
+                        {
+                            "role": r.role,
+                            "structured_output": copy.deepcopy(r.structured_output),
+                            "structured_result_type": r.structured_result_type,
+                            "work_block_id": r.work_block_id,
+                        }
+                    )
+                if (
+                    r.role == AgentRole.ALPHA_GENERATOR.value
+                    and r.admitted_candidate is not None
+                ):
                     m6_candidate = r.admitted_candidate
             elif r.terminal_status == TerminalStatus.UNCERTAIN.value:
                 uncertain_blocks.append(r.work_block_id)
@@ -1280,7 +1441,9 @@ class MultiAgentOrchestrator:
             "hash_profile": HASH_PROFILE,
             "is_eligible_for_m6": is_eligible_for_m6,
             "is_tradable": False,
-            "m6_eligible_candidate_id": m6_candidate.candidate_id if m6_candidate else None,
+            "m6_eligible_candidate_id": m6_candidate.candidate_id
+            if m6_candidate
+            else None,
             "orchestration_engineering_status": eng_status,
             "orchestration_id": orchestration_id,
             "per_worker_outcomes": per_worker_outcomes,
@@ -1300,7 +1463,9 @@ class MultiAgentOrchestrator:
             work_block_ids=[r.work_block_id for r in sorted_results],
             engineering_status=eng_status,
             work_block_statuses=per_worker_outcomes,
-            per_worker_job_refs={r.work_block_id: r.provider_job_ref for r in sorted_results},
+            per_worker_job_refs={
+                r.work_block_id: r.provider_job_ref for r in sorted_results
+            },
             recorded_at=recorded_at,
         )
         self.audit_trail.append(audit_rec)
@@ -1348,7 +1513,11 @@ class MultiAgentOrchestrator:
 
         # Find the alpha_generator work block result for provenance
         wb_res = next(
-            (r for r in aggregate.work_block_results if r.role == AgentRole.ALPHA_GENERATOR.value),
+            (
+                r
+                for r in aggregate.work_block_results
+                if r.role == AgentRole.ALPHA_GENERATOR.value
+            ),
             None,
         )
 
