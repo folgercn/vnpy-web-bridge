@@ -28,6 +28,7 @@ from research_lab.agent_control.alpha_generator import (
     AlphaGenerationCandidate,
     AlphaGenerationRequest,
     admit_alpha_generation_output,
+    execute_alpha_generation,
 )
 from research_lab.agent_control.conformance import (
     REQUIRED_CONFORMANCE_CONTRACTS,
@@ -1105,3 +1106,84 @@ def test_reproduced_cross_project_and_cross_task_result_mixing_strictly_rejected
 
     with pytest.raises((PermissionDeniedError, ProjectBindingError), match="cross-task replay rejected|mismatch"):
         test_provider.result(mixed_handle, prep_b)
+
+
+def test_reproduced_transport_invoke_status_fail_closed_and_m5_admission_blocked() -> None:
+    """Review 5267630373 P1 Remediation:
+
+    Transport execute returns FAILED/UNKNOWN/RUNNING/empty must fail-closed,
+    never record COMPLETED, never produce SUCCESS+ACCEPTED, and strictly block
+    real M5 candidate admission.
+    """
+    cases = [
+        # (status_to_return, exp_internal_status, exp_m5_admitted)
+        ("COMPLETED", "COMPLETED", True),
+        ("FAILED", "FAILED", False),
+        ("UNKNOWN", "UNKNOWN", False),
+        ("RUNNING", "RUNNING", False),
+        ("EMPTY_RESPONSE", "UNKNOWN", False),
+    ]
+
+    for status_to_return, exp_internal_status, exp_m5_admitted in cases:
+        transport = DirectSDKTestTransport()
+        provider = ContractTestProvider(transport=transport)
+        req, view, raw_alpha_json = _build_m5_fixtures()
+        parsed_alpha = json.loads(raw_alpha_json)
+
+        if status_to_return == "COMPLETED":
+            transport.set_custom_invoker(
+                lambda op, payload, pa=parsed_alpha: {
+                    "operation": op,
+                    "status": "COMPLETED",
+                    "output": pa,
+                }
+            )
+        elif status_to_return == "FAILED":
+            transport.set_custom_invoker(
+                lambda op, payload: {"operation": op, "status": "FAILED"}
+            )
+        elif status_to_return == "UNKNOWN":
+            transport.set_custom_invoker(
+                lambda op, payload: {"operation": op, "status": "UNKNOWN"}
+            )
+        elif status_to_return == "RUNNING":
+            transport.set_custom_invoker(
+                lambda op, payload: {"operation": op, "status": "RUNNING"}
+            )
+        elif status_to_return == "EMPTY_RESPONSE":
+            transport.set_custom_invoker(
+                lambda op, payload: {}
+            )
+
+        registry = ProviderRegistry()
+        registry.register(provider)
+        routing_policy = RoutingPolicy(
+            role="alpha_generator",
+            provider_priority=(CONTRACT_TEST_PROVIDER_NAME,),
+            allowed_transports=(ProviderTransportKind.DIRECT_SDK.value,),
+        )
+        usage_snapshots = {}
+
+        m5_result = execute_alpha_generation(
+            request=req,
+            memory_view=view,
+            created_at=NOW,
+            registry=registry,
+            providers=[provider],
+            usage_snapshots=usage_snapshots,
+            routing_policy=routing_policy,
+            provider_lookup=lambda name, p=provider: p if name == CONTRACT_TEST_PROVIDER_NAME else None,
+        )
+
+        job_id = m5_result.provider_job_ref
+        assert job_id != "NOT_SUBMITTED"
+        assert provider._job_statuses[job_id] == exp_internal_status
+        assert (provider._job_statuses[job_id] == "COMPLETED") is exp_m5_admitted
+
+        if exp_m5_admitted:
+            assert m5_result.status == "CANDIDATE_ADMITTED"
+            assert m5_result.candidate is not None
+            assert m5_result.candidate.hypothesis.title == "Short-term reversal after abnormal range expansion"
+        else:
+            assert m5_result.status == "GENERATION_FAILED"
+            assert m5_result.candidate is None

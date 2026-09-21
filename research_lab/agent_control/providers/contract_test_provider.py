@@ -279,7 +279,7 @@ class ContractTestProvider:
 
         # 7. Invoke transport to record interaction BEFORE committing state/cache
         # If transport raises an exception, submission is NOT recorded and retry will call transport again
-        self._transport.invoke(
+        invoke_res = self._transport.invoke(
             "execute",
             {
                 "input": payload_data,
@@ -288,13 +288,36 @@ class ContractTestProvider:
             },
         )
 
+        # 8. Strictly validate transport response and status fail-closed
+        determined_status = "UNKNOWN"
+        transport_output = None
+        if isinstance(invoke_res, dict) and invoke_res:
+            raw_status = invoke_res.get("status")
+            if raw_status == "COMPLETED":
+                determined_status = "COMPLETED"
+                transport_output = invoke_res.get("output")
+            elif raw_status == "FAILED":
+                determined_status = "FAILED"
+            elif raw_status in {"RUNNING", "SUBMITTED"}:
+                determined_status = "RUNNING"
+            elif raw_status in {"UNKNOWN", "UNCERTAIN", "CANCEL_REQUESTED", "CANCELLED"}:
+                determined_status = raw_status
+            else:
+                # Unsupported, missing, or unrecognized status -> fail closed to UNKNOWN
+                determined_status = "UNKNOWN"
+        else:
+            # Empty or non-dict response -> fail closed to UNKNOWN
+            determined_status = "UNKNOWN"
+
         self._submissions[sub_key] = {
             "job_id": job_id,
             "payload_signature": payload_signature,
             "submitted_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         }
         self._active_jobs[task.task_id] = job_id
-        self._job_statuses[job_id] = "COMPLETED"
+        self._job_statuses[job_id] = determined_status
+        if transport_output is not None and job_id not in self._job_outputs and task.task_id not in self._job_outputs:
+            self._job_outputs[job_id] = transport_output
         self._job_metadata[job_id] = {
             "effective_req_id": effective_req_id,
             "preparation": preparation,
