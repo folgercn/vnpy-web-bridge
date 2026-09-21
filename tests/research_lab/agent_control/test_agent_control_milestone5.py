@@ -326,34 +326,22 @@ def test_model_display_name_cannot_choose_authoritative_origin(model):
     assert candidate.hypothesis.provenance.origin_type == "astra"
 
 
-def test_authoritative_origin_is_explicit_and_validated():
-    view = _view()
-    request = AlphaGenerationRequest.create(
-        objective="Generate a falsifiable daily commodity alpha candidate.",
-        memory_view=view,
-        project_binding=BINDING,
-        authorized_scope=_scope(),
-        authoritative_origin_type="sol",
-    )
-    candidate = admit_alpha_generation_output(
-        _raw(),
-        request=request,
-        memory_view=view,
-        task_id="task-123",
-        provider="antigravity",
-        actual_model="Gemini 3.8 Flash High",
-        created_at=NOW,
-    )
-    assert candidate.hypothesis.provenance.origin_type == "sol"
-
-    with pytest.raises(AlphaGenerationError):
+def test_authoritative_origin_is_owned_by_closed_generation_policy():
+    request = _request()
+    assert request.authoritative_origin_type == "astra"
+    with pytest.raises(TypeError):
         AlphaGenerationRequest.create(
             objective="Generate a falsifiable daily commodity alpha candidate.",
-            memory_view=view,
+            memory_view=_view(),
             project_binding=BINDING,
             authorized_scope=_scope(),
-            authoritative_origin_type="gemini",
+            authoritative_origin_type="human",
         )
+
+    raw = request.to_dict()
+    raw["authoritative_origin_type"] = "paper"
+    with pytest.raises(TypeError):
+        AlphaGenerationRequest(**raw)
 
 
 def test_hallucinated_source_ref_is_rejected():

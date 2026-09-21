@@ -1,0 +1,46 @@
+{
+  "evidence_schema": "issue573.m5.real_e2e.v1",
+  "job_id": "7abb47806d55632e37d2da4b8e511972",
+  "request_id": "alpha-gen-855507e7ac0606cd6c27445eec018097",
+  "task_id": "task-4a620e4d2bd2ccd1ebf537be28d983cf",
+  "route_id": "route-1bb906c9dded64da3625c4dcb9c1b4eb",
+  "provider_job_ref": "7abb47806d55632e37d2da4b8e511972",
+  "transport_ref": "local_mcp://antigravity-local-desktop",
+  "memory_view_ref": "memview-5e821d05eeb986e5bdf71f129707efc3@e6dfd827fd02cc645748ab6498c931fbb9f940fd05a3e2cfc496b2ed36e27107",
+  "prompt_hash": "a7adea224419140cb1c0a1bda241672b4cddf8b3fb43c984799af9c671b66647",
+  "status": "CANDIDATE_ADMITTED",
+  "error_code": null,
+  "candidate_id": "agent-alpha-8b1ce2829bbd9b4f91fda542",
+  "candidate_hash": "64d69cef8c81a20dbb26a7d84c1d6e8581d583b3964657fdbd79c4d233fca3e7",
+  "scientific_identity_hash": "dce308b74e9c115584cee974ed548ea4c468f081a5da1021daa55e9666afe087",
+  "origin_type": "astra",
+  "duplicate_status": "NOVEL_WITHIN_VIEW",
+  "agent_result_id": "result-b7377a7a7eab7266d8ba79e6e9202620",
+  "agent_result_hash": "24da3907fd8905e4ab53a381cbbf309fc17dd863e9b01e80b90b88653ee431ef",
+  "audit_hash": "c1933e2944e6b151a3851ebeb2b418822d0ac2469ffa38e9bbe4d1518a1ec99a",
+  "audit_verified": true,
+  "provider_acceptance": {
+    "terminal": "SUCCESS",
+    "acceptance": "ACCEPTED",
+    "upstream_status": "TURN_COMPLETE",
+    "inner_status": "SUCCESS",
+    "issues": 0,
+    "unresolved": 0,
+    "tools": 0
+  },
+  "memory_before": {
+    "sha256": "a630392c8d910d916325e84c54aede47acbe6976cda957f1f43fab0eb96211d0",
+    "size": 28672,
+    "mtime_ns": 1789970858792411040,
+    "rows": 0,
+    "latest": null
+  },
+  "memory_after": {
+    "sha256": "a630392c8d910d916325e84c54aede47acbe6976cda957f1f43fab0eb96211d0",
+    "size": 28672,
+    "mtime_ns": 1789970858792411040,
+    "rows": 0,
+    "latest": null
+  },
+  "memory_zero_pollution": true
+}
