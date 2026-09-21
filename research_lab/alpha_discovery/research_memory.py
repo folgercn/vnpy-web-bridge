@@ -582,4 +582,3 @@ class ReadOnlyResearchMemoryReader:
                 "SELECT * FROM research_memory_records ORDER BY rowid ASC"
             ).fetchall()
             return tuple(ResearchMemory._row_to_record(r) for r in rows)
-
