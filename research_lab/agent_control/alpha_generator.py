@@ -39,6 +39,7 @@ from research_lab.agent_control.registry import ProviderRegistry
 from research_lab.agent_control.router import select_agent
 from research_lab.agent_control.routing_policy import RoutingPolicy
 from research_lab.alpha_discovery.hypothesis import (
+    ALLOWED_ORIGIN_TYPES,
     AlphaHypothesis,
     compute_hypothesis_content_hash,
     compute_scientific_identity_hash,
@@ -47,6 +48,7 @@ from research_lab.alpha_discovery.hypothesis import (
 from research_lab.contracts import v2
 
 PROMPT_POLICY_VERSION = "alpha_generator_prompt.v1"
+DEFAULT_AGENT_ORIGIN_TYPE = "astra"
 GENERATION_SCHEMA_VERSION = "research_lab.alpha_generation.v1"
 MAX_OBJECTIVE_CHARS = 2_000
 MAX_OUTPUT_BYTES = 64 * 1024
@@ -117,6 +119,7 @@ class AlphaGenerationRequest:
     memory_view_content_hash: str
     project_binding: dict[str, str]
     authorized_scope_ref: dict[str, Any]
+    authoritative_origin_type: str = DEFAULT_AGENT_ORIGIN_TYPE
     generation_policy_version: str = PROMPT_POLICY_VERSION
     requested_candidate_count: int = 1
     attempt: int = 1
@@ -143,6 +146,8 @@ class AlphaGenerationRequest:
             raise PermissionDeniedError(
                 "Alpha Generator scope project binding mismatch"
             )
+        if self.authoritative_origin_type not in ALLOWED_ORIGIN_TYPES:
+            raise AlphaGenerationError("unsupported authoritative agent origin type")
 
     @classmethod
     def create(
@@ -152,6 +157,7 @@ class AlphaGenerationRequest:
         memory_view: ResearchMemoryView,
         project_binding: ProjectBinding | Mapping[str, str],
         authorized_scope: AgentPermissionScope,
+        authoritative_origin_type: str = DEFAULT_AGENT_ORIGIN_TYPE,
         generation_policy_version: str = PROMPT_POLICY_VERSION,
         attempt: int = 1,
     ) -> AlphaGenerationRequest:
@@ -188,6 +194,7 @@ class AlphaGenerationRequest:
             memory_view_content_hash=memory_view.view_content_hash,
             project_binding=binding,
             authorized_scope_ref=authorized_scope.to_dict(),
+            authoritative_origin_type=authoritative_origin_type,
             generation_policy_version=generation_policy_version,
             attempt=attempt,
         )
@@ -200,6 +207,7 @@ class AlphaGenerationRequest:
         return {
             "attempt": self.attempt,
             "authorized_scope_ref": self.authorized_scope_ref,
+            "authoritative_origin_type": self.authoritative_origin_type,
             "generation_policy_version": self.generation_policy_version,
             "memory_view_content_hash": self.memory_view_content_hash,
             "memory_view_id": self.memory_view_id,
@@ -571,8 +579,6 @@ def admit_alpha_generation_output(
             }
         )[:24]
     )
-    # AlphaHypothesis schema is frozen; its existing provider-specific origin values represent agent origin.
-    origin_type = "astra" if "astra" in actual_model.lower() else "sol"
     payload = {
         "schema_version": "research_lab.alpha_hypothesis.v1",
         "hash_profile": "research-json-v1",
@@ -580,7 +586,7 @@ def admit_alpha_generation_output(
         "revision": "rev.1",
         **scientific,
         "provenance": {
-            "origin_type": origin_type,
+            "origin_type": request.authoritative_origin_type,
             "origin_ref": f"agent_task:{task_id};provider:{provider};model:{actual_model}",
             "created_by": "alpha_generator",
             "created_at": created_at,
