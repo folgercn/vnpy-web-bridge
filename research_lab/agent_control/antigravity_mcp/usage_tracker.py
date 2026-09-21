@@ -5,7 +5,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from research_lab.agent_control.antigravity_mcp.config import STATS_FILE
 
@@ -18,10 +18,10 @@ class UsageTracker:
     Provides ranking and distribution metrics (who is used most/least).
     """
 
-    def __init__(self, stats_file: Optional[Path] = None):
+    def __init__(self, stats_file: Path | None = None):
         self.stats_file = Path(stats_file) if stats_file else STATS_FILE
         self._lock = asyncio.Lock()
-        self._data: Dict[str, Any] = {
+        self._data: dict[str, Any] = {
             "version": 1,
             "last_updated": None,
             "total_switches": 0,
@@ -38,7 +38,7 @@ class UsageTracker:
             loaded = json.loads(content)
             if isinstance(loaded, dict) and "accounts" in loaded:
                 self._data = loaded
-        except Exception as e:
+        except (OSError, json.JSONDecodeError) as e:
             logger.warning("Failed to load usage stats from %s: %s", self.stats_file, e)
 
     def _save_sync(self) -> None:
@@ -51,10 +51,10 @@ class UsageTracker:
             tmp_file = self.stats_file.with_name(f"{self.stats_file.name}.tmp.{os.getpid()}")
             tmp_file.write_text(payload, encoding="utf-8")
             tmp_file.replace(self.stats_file)
-        except Exception as e:
+        except (OSError, json.JSONDecodeError) as e:
             logger.error("Failed to persist usage stats to %s: %s", self.stats_file, e)
 
-    def _ensure_account(self, email: str, account_id: Optional[str] = None) -> Dict[str, Any]:
+    def _ensure_account(self, email: str, account_id: str | None = None) -> dict[str, Any]:
         """Ensure account entry exists and return its dict."""
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
         accounts = self._data.setdefault("accounts", {})
@@ -76,9 +76,9 @@ class UsageTracker:
     async def record_task(
         self,
         email: str,
-        account_id: Optional[str] = None,
-        task_id: Optional[str] = None,
-        prompt_preview: Optional[str] = None,
+        account_id: str | None = None,
+        task_id: str | None = None,
+        prompt_preview: str | None = None,
     ) -> None:
         """Record an executed task dispatched to an account."""
         if not email:
@@ -103,9 +103,9 @@ class UsageTracker:
 
     async def record_switch(
         self,
-        from_email: Optional[str],
+        from_email: str | None,
         to_email: str,
-        account_id: Optional[str] = None,
+        account_id: str | None = None,
         reason: str = "manual",
     ) -> None:
         """Record an account switch event."""
@@ -118,7 +118,7 @@ class UsageTracker:
             self._save_sync()
             logger.info("Recorded switch into %s from %s (reason=%s)", to_email, from_email or "none", reason)
 
-    async def record_429(self, email: str, account_id: Optional[str] = None) -> None:
+    async def record_429(self, email: str, account_id: str | None = None) -> None:
         """Record a rate-limit (429) or quota exhausted incident."""
         if not email:
             return
@@ -128,7 +128,7 @@ class UsageTracker:
             self._save_sync()
             logger.warning("Recorded 429/quota exhaustion incident for %s", email)
 
-    def get_account_stats(self, email: str) -> Optional[Dict[str, Any]]:
+    def get_account_stats(self, email: str) -> dict[str, Any] | None:
         """Retrieve recorded stats for a specific account."""
         return self._data.get("accounts", {}).get(email)
 
@@ -137,7 +137,7 @@ class UsageTracker:
         acc = self.get_account_stats(email)
         return acc.get("task_count", 0) if acc else 0
 
-    def get_leaderboard(self) -> List[Dict[str, Any]]:
+    def get_leaderboard(self) -> list[dict[str, Any]]:
         """Return leaderboard ranked by task_count in descending order."""
         accounts = list(self._data.get("accounts", {}).values())
         total_tasks = sum(a.get("task_count", 0) for a in accounts)
@@ -160,7 +160,7 @@ class UsageTracker:
             })
         return leaderboard
 
-    def get_summary(self) -> Dict[str, Any]:
+    def get_summary(self) -> dict[str, Any]:
         """Return comprehensive usage overview across all accounts."""
         leaderboard = self.get_leaderboard()
         total_tasks = sum(item["task_count"] for item in leaderboard)

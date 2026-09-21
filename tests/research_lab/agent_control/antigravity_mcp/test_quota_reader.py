@@ -1,6 +1,7 @@
 """Tests for QuotaReader parsing Gemini 3.1 Pro and Weekly quotas."""
 import json
 from pathlib import Path
+
 from research_lab.agent_control.antigravity_mcp.quota_reader import QuotaReader
 
 
@@ -84,3 +85,73 @@ def test_quota_reader_parsing_gemini_3_1_pro_and_weekly(tmp_path: Path):
     assert acc2["health_status"] == "CRITICAL_LOW"
     assert "严重警告" in acc2["risk_warnings"][0]
     assert acc2["quotas"]["gemini_weekly_limit"]["remaining"] == "12.0%"
+
+
+def test_quota_reader_missing_quota_is_unknown_and_sorted_last(tmp_path: Path):
+    """Ensure accounts with missing/null quotas are marked UNKNOWN and sorted last (no fail-open)."""
+    accounts_dir = tmp_path / "accounts"
+    accounts_dir.mkdir()
+
+    # 1. Normal known account
+    known_file = accounts_dir / "acc-known.json"
+    known_file.write_text(json.dumps({
+        "id": "acc-known",
+        "email": "known@example.com",
+        "quota": {
+            "models": [{"name": "gemini-3.1-pro-high", "percentage": 80}],
+            "quota_groups": [{"display_name": "Gemini Models", "buckets": [{"window": "weekly", "remaining_fraction": 0.8}]}]
+        }
+    }), encoding="utf-8")
+
+    # 2. Account with missing/empty quota dict
+    empty_file = accounts_dir / "acc-empty.json"
+    empty_file.write_text(json.dumps({
+        "id": "acc-empty",
+        "email": "empty@example.com",
+        "quota": None
+    }), encoding="utf-8")
+
+    # 3. Account with empty models and quota_groups
+    unknown_file = accounts_dir / "acc-unknown.json"
+    unknown_file.write_text(json.dumps({
+        "id": "acc-unknown",
+        "email": "unknown@example.com",
+        "quota": {"models": [], "quota_groups": []}
+    }), encoding="utf-8")
+
+    accounts_json = tmp_path / "accounts.json"
+    accounts_json.write_text(json.dumps({
+        "current_account_id": "acc-empty",
+        "accounts": [{"id": "acc-known"}, {"id": "acc-empty"}, {"id": "acc-unknown"}]
+    }), encoding="utf-8")
+
+    reader = QuotaReader(
+        accounts_json=accounts_json,
+        accounts_dir=accounts_dir,
+    )
+
+    all_accounts = reader.list_all_accounts()
+    assert len(all_accounts) == 3
+
+    empty_acc = next(a for a in all_accounts if a["id"] == "acc-empty")
+    assert empty_acc["health_status"] == "UNKNOWN"
+    assert empty_acc["quotas"]["gemini_3_1_pro"]["remaining_5h"] == "unknown"
+    assert empty_acc["quotas"]["gemini_weekly_limit"]["remaining"] == "unknown"
+    assert "【额度数据未知】" in empty_acc["risk_warnings"][0]
+
+    unknown_acc = next(a for a in all_accounts if a["id"] == "acc-unknown")
+    assert unknown_acc["health_status"] == "UNKNOWN"
+
+    known_acc = next(a for a in all_accounts if a["id"] == "acc-known")
+    assert known_acc["health_status"] == "HEALTHY"
+
+    # Verify smart sorting:
+    # 1. Current active account is always kept at index 0 for immediate visibility
+    assert all_accounts[0]["id"] == "acc-empty"
+    assert all_accounts[0]["is_current"] is True
+
+    # 2. Among candidate switch targets (non-current), known quotas MUST be prioritized over UNKNOWN quotas
+    candidates = [a for a in all_accounts if not a["is_current"]]
+    assert len(candidates) == 2
+    assert candidates[0]["id"] == "acc-known"
+    assert candidates[1]["id"] == "acc-unknown"

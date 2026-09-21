@@ -1,3 +1,4 @@
+# ruff: noqa: E402
 """Codex Antigravity Network MCP Server.
 
 Provides a network-accessible FastMCP bridge with multi-account inspection
@@ -15,7 +16,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 from urllib.parse import parse_qs
 
 # Ensure local package is on sys.path
@@ -23,13 +24,13 @@ CURRENT_DIR = Path(__file__).resolve().parent
 if str(CURRENT_DIR) not in sys.path:
     sys.path.insert(0, str(CURRENT_DIR))
 
+from research_lab.agent_control.antigravity_mcp.cockpit_switcher import CockpitSwitcher
 from research_lab.agent_control.antigravity_mcp.config import (
     AGY_MCP_API_KEY,
     DEFAULT_HOST,
     DEFAULT_PORT,
     DEFAULT_TRANSPORT,
 )
-from research_lab.agent_control.antigravity_mcp.cockpit_switcher import CockpitSwitcher
 from research_lab.agent_control.antigravity_mcp.inspectors import ToolInspector
 from research_lab.agent_control.antigravity_mcp.quota_reader import QuotaReader
 from research_lab.agent_control.antigravity_mcp.usage_tracker import UsageTracker
@@ -54,7 +55,7 @@ class ApiKeyAuthMiddleware:
     def __init__(self, app, api_key: str):
         self.app = app
         self.api_key = api_key.strip()
-        self._authenticated_sessions: Dict[str, float] = {}
+        self._authenticated_sessions: dict[str, float] = {}
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or not self.api_key:
@@ -109,7 +110,7 @@ class ApiKeyAuthMiddleware:
         await self.app(scope, receive, send)
 
 
-async def invoke(operation: str, arguments: Dict[str, Any], on_events=None, on_status=None):
+async def invoke(operation: str, arguments: dict[str, Any], on_events=None, on_status=None):
     """Invoke the agy_service business backend via disposable sub-process."""
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -127,7 +128,7 @@ async def invoke(operation: str, arguments: Dict[str, Any], on_events=None, on_s
         ),
     )
     try:
-        proc.stdin.write((json.dumps(dict(version=1, operation=operation, arguments=arguments)) + "\n").encode())
+        proc.stdin.write((json.dumps({"version": 1, "operation": operation, "arguments": arguments}) + "\n").encode())
         await proc.stdin.drain()
         fragments = []
         position = 0
@@ -161,7 +162,7 @@ async def invoke(operation: str, arguments: Dict[str, Any], on_events=None, on_s
                     await on_status(data)
             elif kind == "events":
                 delivered = on_events is not None and await on_events(data) is not False
-                proc.stdin.write((json.dumps(dict(delivered=delivered)) + "\n").encode())
+                proc.stdin.write((json.dumps({"delivered": delivered}) + "\n").encode())
                 await proc.stdin.drain()
             else:
                 raise RuntimeError("Unknown business protocol frame")
@@ -181,7 +182,7 @@ async def invoke(operation: str, arguments: Dict[str, Any], on_events=None, on_s
 
 def create_mcp_server():
     """Create and configure the FastMCP instance."""
-    from mcp.server.fastmcp import FastMCP, Context
+    from mcp.server.fastmcp import Context, FastMCP
 
     mcp = FastMCP(
         "antigravity",
@@ -242,15 +243,23 @@ def create_mcp_server():
         Codex passes an account email (e.g. 'quickcoin2016@gmail.com') or account_id.
         Performs instant zero-restart credential rotation if Cockpit is running.
         """
+        # 1. Capture current active email BEFORE switching
+        before_active = quota_reader.get_current_active_identity()
+        before_email = before_active.get("current_email")
+
         success, msg, details = await switcher.switch_account(account_or_email)
         if success:
-            active_info = quota_reader.get_current_active_identity()
-            to_email = account_or_email if "@" in account_or_email else (details.get("email") or account_or_email)
-            await usage_tracker.record_switch(
-                from_email=active_info.get("current_email"),
-                to_email=to_email,
-                reason="codex_instructed_switch",
-            )
+            target_email = details.get("email")
+            if not target_email or "@" not in target_email:
+                target_email, _ = switcher.resolve_email_and_id(account_or_email)
+
+            if target_email:
+                await usage_tracker.record_switch(
+                    from_email=before_email,
+                    to_email=target_email,
+                    account_id=details.get("account_id"),
+                    reason="codex_instructed_switch",
+                )
         return {
             "success": success,
             "message": msg,
@@ -288,7 +297,7 @@ def create_mcp_server():
     @mcp.tool(name="projects")
     async def projects_tool(cwd: str = "") -> dict:
         """List desktop projects, or resolve one absolute worktree to exactly one project."""
-        return await invoke("projects", dict(cwd=cwd))
+        return await invoke("projects", {"cwd": cwd})
 
     @mcp.tool(name="submit")
     async def submit_tool(
@@ -302,11 +311,9 @@ def create_mcp_server():
     ) -> dict:
         """Submit an authorized work block to desktop worker."""
         active_email = ""
-        try:
+        with contextlib.suppress(Exception):
             active_info = quota_reader.get_current_active_identity()
             active_email = active_info.get("current_email") or ""
-        except Exception:
-            pass
 
         if active_email:
             try:
@@ -315,21 +322,21 @@ def create_mcp_server():
                     task_id=task_id,
                     prompt_preview=prompt,
                 )
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.warning("Failed to record task dispatch: %s", e)
 
         try:
             return await invoke(
                 "submit",
-                dict(
-                    task_id=task_id,
-                    prompt=prompt,
-                    cwd=cwd,
-                    request_id=request_id,
-                    mode=mode,
-                    timeout_seconds=timeout_seconds,
-                    ack_uncertain=ack_uncertain,
-                ),
+                {
+                    "task_id": task_id,
+                    "prompt": prompt,
+                    "cwd": cwd,
+                    "request_id": request_id,
+                    "mode": mode,
+                    "timeout_seconds": timeout_seconds,
+                    "ack_uncertain": ack_uncertain,
+                },
             )
         except Exception as e:
             err_str = str(e).lower()
@@ -350,13 +357,13 @@ def create_mcp_server():
         """Continue a completed managed task in its existing desktop conversation."""
         return await invoke(
             "message",
-            dict(
-                task_id=task_id,
-                prompt=prompt,
-                request_id=request_id,
-                timeout_seconds=timeout_seconds,
-                ack_uncertain=ack_uncertain,
-            ),
+            {
+                "task_id": task_id,
+                "prompt": prompt,
+                "request_id": request_id,
+                "timeout_seconds": timeout_seconds,
+                "ack_uncertain": ack_uncertain,
+            },
         )
 
     @mcp.tool(name="watch")
@@ -378,7 +385,7 @@ def create_mcp_server():
 
         return await invoke(
             "watch",
-            dict(job_id=job_id, cursor=cursor, timeout_seconds=timeout_seconds),
+            {"job_id": job_id, "cursor": cursor, "timeout_seconds": timeout_seconds},
             pushed,
             status_changed,
         )
@@ -386,27 +393,27 @@ def create_mcp_server():
     @mcp.tool(name="events")
     async def events_tool(job_id: str, cursor: int = 0) -> dict:
         """Explicit raw event replay/readback."""
-        return await invoke("events", dict(job_id=job_id, cursor=cursor))
+        return await invoke("events", {"job_id": job_id, "cursor": cursor})
 
     @mcp.tool(name="wait")
     async def wait_tool(job_id: str, cursor: int = 0, timeout_seconds: float = 25) -> dict:
         """Legacy explicit event read/wait."""
-        return await invoke("wait", dict(job_id=job_id, cursor=cursor, timeout_seconds=timeout_seconds))
+        return await invoke("wait", {"job_id": job_id, "cursor": cursor, "timeout_seconds": timeout_seconds})
 
     @mcp.tool(name="status")
-    async def status_tool(job_id: Optional[str] = None) -> dict:
+    async def status_tool(job_id: str | None = None) -> dict:
         """Read a job or shared adapter state without submitting work."""
-        return await invoke("status", dict(job_id=job_id))
+        return await invoke("status", {"job_id": job_id})
 
     @mcp.tool(name="result")
     async def result_tool(job_id: str, offset: int = 0, max_chars: int = 8000) -> dict:
         """Read the saved final result."""
-        return await invoke("result", dict(job_id=job_id, offset=offset, max_chars=max_chars))
+        return await invoke("result", {"job_id": job_id, "offset": offset, "max_chars": max_chars})
 
     @mcp.tool(name="cancel")
     async def cancel_tool(job_id: str) -> dict:
         """Request cancellation only for this bridge-owned job."""
-        return await invoke("cancel", dict(job_id=job_id))
+        return await invoke("cancel", {"job_id": job_id})
 
     return mcp
 

@@ -1,6 +1,7 @@
 """Tests for ToolInspector discovery and fallback diagnostics."""
 import json
 from pathlib import Path
+
 from research_lab.agent_control.antigravity_mcp.inspectors import ToolInspector
 
 

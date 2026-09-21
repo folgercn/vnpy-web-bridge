@@ -1,10 +1,22 @@
 #!/usr/bin/env python3
+# ruff: noqa: E701, E702, F821
 """Reloadable business implementation. One fresh process per MCP call."""
-import asyncio,contextlib,fcntl,hashlib,json,math,os,re,subprocess,sys,time,uuid
+import asyncio
+import contextlib
+import fcntl
+import hashlib
+import json
+import math
+import os
+import re
+import subprocess
+import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
-import agy_desktop as desktop
+
 import agy_account as account
+import agy_desktop as desktop
 
 ROOT=desktop.STATE/'mcp';JOBS=ROOT/'jobs'
 PROGRESS_INTERVAL=60.0
@@ -36,12 +48,12 @@ def jobread(job_id,locked=False):
     if not d:raise ValueError('Unknown job_id')
     if d['status'] not in TERMINAL and d.get('pid'):
         # Never signal this PID; command identity only diagnoses lost workers.
-        command=subprocess.run(['ps','-p',str(d['pid']),'-o','command='],capture_output=True,text=True).stdout
+        command=subprocess.run(['ps','-p',str(d['pid']),'-o','command='],capture_output=True,text=True,check=False).stdout
         if '_worker '+job_id not in command:
             result=desktop.read(directory/'result.json')
             if result:d=terminal_update(d,result)
             else:
-                result=dict(status='ERROR',error='WORKER_LOST',outcome='uncertain',message='Worker disappeared; inspect the owned desktop conversation before continuation.')
+                result={'status': 'ERROR','error': 'WORKER_LOST','outcome': 'uncertain','message': 'Worker disappeared; inspect the owned desktop conversation before continuation.'}
                 desktop.save(directory/'result.json',result)
                 d.update(status='worker_lost',error='WORKER_LOST',outcome='uncertain',finished_at=time.time())
             desktop.save(directory/'job.json',d)
@@ -56,7 +68,7 @@ def submit(task_id,prompt,cwd,request_id,mode='implement',timeout_seconds=600,ac
     if not prompt.strip() or len(prompt)>100000:raise ValueError('Prompt must be 1-100000 characters')
     if not math.isfinite(timeout_seconds) or timeout_seconds<=0 or timeout_seconds>86400:raise ValueError('Timeout must be 0-86400 seconds')
     if not Path(cwd).is_absolute() or not Path(cwd).is_dir():raise ValueError('cwd must be an existing absolute directory')
-    request=dict(task_id=task_id,prompt=prompt,cwd=str(Path(cwd).resolve()),mode=mode,timeout_seconds=timeout_seconds,ack_uncertain=ack_uncertain)
+    request={'task_id': task_id,'prompt': prompt,'cwd': str(Path(cwd).resolve()),'mode': mode,'timeout_seconds': timeout_seconds,'ack_uncertain': ack_uncertain}
     digest=hashlib.sha256(json.dumps(request,sort_keys=True).encode()).hexdigest()
     job_id=hashlib.sha256((task_id+'\0'+request_id).encode()).hexdigest()[:32];directory=jobpath(job_id)
     with guard():
@@ -68,17 +80,17 @@ def submit(task_id,prompt,cwd,request_id,mode='implement',timeout_seconds=600,ac
             other=desktop.read(p)
             if other['task_id']==task_id and jobread(other['job_id'],locked=True)['status'] not in TERMINAL:
                 desktop.diagnostic('continuation_rejected',task_id=task_id,job_id=other['job_id'],source='bridge_job',error_code='TASK_BUSY',accepted=False,queued=False)
-                return dict(status='TASK_BUSY',job_id=other['job_id'],task_id=task_id,source='bridge_job',accepted=False,queued=False,message='Use wait/status; do not submit duplicate work.')
+                return {'status': 'TASK_BUSY','job_id': other['job_id'],'task_id': task_id,'source': 'bridge_job','accepted': False,'queued': False,'message': 'Use wait/status; do not submit duplicate work.'}
         directory.mkdir(mode=0o700)
-        job=dict(job_id=job_id,task_id=task_id,status='starting',created_at=time.time(),request_hash=digest)
+        job={'job_id': job_id,'task_id': task_id,'status': 'starting','created_at': time.time(),'request_hash': digest}
         desktop.save(directory/'request.json',request);desktop.save(directory/'job.json',job)
         try:
             with (directory/'worker.log').open('a') as log:
                 proc=subprocess.Popen([sys.executable,str(Path(__file__).resolve()),'_worker',job_id],stdin=subprocess.DEVNULL,stdout=log,stderr=log,start_new_session=True)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             job.update(status='failed',error='WORKER_START_FAILED',outcome='not_executed',finished_at=time.time())
             desktop.save(directory/'job.json',job)
-            desktop.save(directory/'result.json',dict(status='ERROR',error='WORKER_START_FAILED',outcome='not_executed',message=type(exc).__name__))
+            desktop.save(directory/'result.json',{'status': 'ERROR','error': 'WORKER_START_FAILED','outcome': 'not_executed','message': type(exc).__name__})
             return dict(brief(job),cursor=0)
         job.update(pid=proc.pid,status='submitted');desktop.save(directory/'job.json',job)
     return dict(brief(job),cursor=0)
@@ -96,8 +108,8 @@ def worker(job_id):
     try:
         with (directory/'events.jsonl').open('a',buffering=1) as events, contextlib.redirect_stderr(events):
             result=desktop.run_task(args)
-    except BaseException as e:
-        result=dict(status='ERROR',error=e.code if isinstance(e,desktop.Failure) else type(e).__name__,message=desktop.clean(e.message if isinstance(e,desktop.Failure) else str(e)))
+    except BaseException as e:  # noqa: BLE001
+        result={'status': 'ERROR','error': e.code if isinstance(e,desktop.Failure) else type(e).__name__,'message': desktop.clean(e.message if isinstance(e,desktop.Failure) else str(e))}
         rec=desktop.read(desktop.STATE/'tasks'/(r['task_id']+'.json'),{})
         previous=rec.get('last_result',{})
         if previous!=previous_result and previous.get('error')==result['error']:result.update(previous)
@@ -122,7 +134,7 @@ def read_events(job_id,cursor=0,max_events=200,max_bytes=262144):
                 position=f.tell();used+=len(line)
                 try:events.append(json.loads(line))
                 except json.JSONDecodeError:events.append({'event':'unparsed','detail':line.decode(errors='replace')})
-    return dict(cursor=position,events=events,has_more=p.exists() and position<p.stat().st_size)
+    return {'cursor': position,'events': events,'has_more': p.exists() and position<p.stat().st_size}
 
 def poll(job_id,cursor=0,max_events=20):
     d=jobread(job_id);page=read_events(job_id,cursor,max_events,24000)
@@ -145,11 +157,11 @@ def result(job_id,offset=0,max_chars=8000):
 def projects(cwd='',backend_factory=desktop.Desktop):
     backend=backend_factory()
     if not cwd:
-        return dict(projects=backend.projects())
+        return {'projects': backend.projects()}
     path=Path(cwd)
     if not path.is_absolute() or not path.is_dir():
         raise ValueError('cwd must be an existing absolute directory')
-    return dict(project=backend.resolve_project(str(path.resolve())))
+    return {'project': backend.resolve_project(str(path.resolve()))}
 
 def activity_snapshot(job_id):
     directory=jobpath(job_id)
@@ -162,8 +174,8 @@ def activity_snapshot(job_id):
         owned=any(x.get('task')==job.get('task_id') and x.get('pid')==job.get('pid') for x in owners)
         rec=desktop.read(desktop.STATE/'tasks'/(job.get('task_id','')+'.json'),{}) if owned else {}
         metrics=rec.get('efficiency') or {}
-        activity=dict(source='legacy_worker_metrics',metrics={k:metrics[k] for k in
-            ('model_rounds','file_reads','observed_edit_steps','tool_issues','elapsed_seconds') if k in metrics})
+        activity={'source': 'legacy_worker_metrics','metrics': {k:metrics[k] for k in
+            ('model_rounds','file_reads','observed_edit_steps','tool_issues','elapsed_seconds') if k in metrics}}
         if owned:
             # Bounded read of the existing scheduler log supports workers that
             # were already running before this update. Never scan full transcripts.
@@ -236,9 +248,9 @@ async def watch_job(job_id,cursor=0,timeout_seconds=1800,on_events=None,on_statu
                 page=await asyncio.to_thread(read_events,job_id,cursor,0)
                 if not delivery_enabled or not page['has_more']:
                     return dict(brief(d),cursor=cursor,has_more=page['has_more'],
-                                activity=activity_snapshot(job_id),final_result=desktop.read(directory/'result.json'),resume=dict(job_id=job_id,cursor=cursor),events_path=str(directory/'events.jsonl'))
+                                activity=activity_snapshot(job_id),final_result=desktop.read(directory/'result.json'),resume={'job_id': job_id,'cursor': cursor},events_path=str(directory/'events.jsonl'))
             if time.monotonic()>=deadline:
-                return dict(brief(d),cursor=cursor,resume=dict(job_id=job_id,cursor=cursor),
+                return dict(brief(d),cursor=cursor,resume={'job_id': job_id,'cursor': cursor},
                             watch_timeout=True,progress_update=True,worker_continues=True,
                             activity=activity_snapshot(job_id),next_check_seconds=0,
                             next_action='Read activity, then immediately call watch with the SAME job_id and resume.cursor. This is observation only: do not submit/message/cancel or change executor. No quota claim can be made from silence.',
@@ -289,10 +301,11 @@ async def dispatch(name, arguments, on_events=None, on_status=None):
             def inspect():
                 rec=desktop.read(desktop.STATE/'tasks'/(out['task_id']+'.json'),{})
                 cid=rec.get('conversation_id')
-                state=dict(readiness='unknown',scope='current_task_conversation',checked_at=time.time(),conversation_id=cid)
+                state={'readiness': 'unknown','scope': 'current_task_conversation','checked_at': time.time(),'conversation_id': cid}
                 if cid:
                     try:state.update(desktop.conversation_state(desktop.Desktop().trajectory(cid)))
-                    except Exception as exc:state['error_code']=exc.code if isinstance(exc,desktop.Failure) else type(exc).__name__
+                    except Exception as exc:  # noqa: BLE001
+                        state['error_code']=exc.code if isinstance(exc,desktop.Failure) else type(exc).__name__
                 with guard():
                     pending=[d['job_id'] for p in JOBS.glob('*/job.json')
                              if (d:=desktop.read(p,{})).get('task_id')==out['task_id']
@@ -308,7 +321,7 @@ async def dispatch(name, arguments, on_events=None, on_status=None):
         def snapshot():
             with desktop.guard():
                 records=desktop.active_records();active=records[0] if records else None
-                return dict(active=active,active_tasks=records,queued=desktop.queue_view(records),execution_limit=desktop.execution_limit(),runtime=dict(business_reload='per_call',business_pid=os.getpid()),scope='local_scheduler_only',desktop_readiness='not_checked',next_action='Use status(job_id) to check current conversation readiness; an empty local queue does not mean Desktop is idle.')
+                return {'active': active,'active_tasks': records,'queued': desktop.queue_view(records),'execution_limit': desktop.execution_limit(),'runtime': {'business_reload': 'per_call','business_pid': os.getpid()},'scope': 'local_scheduler_only','desktop_readiness': 'not_checked','next_action': 'Use status(job_id) to check current conversation readiness; an empty local queue does not mean Desktop is idle.'}
         return await asyncio.to_thread(snapshot)
     if name=='result':return await asyncio.to_thread(result,**arguments)
     if name=='cancel':return await asyncio.to_thread(cancel,**arguments)
@@ -316,10 +329,10 @@ async def dispatch(name, arguments, on_events=None, on_status=None):
 
 
 def send_frame(kind, data):
-    payload=json.dumps(dict(kind=kind,data=data),ensure_ascii=False)
+    payload=json.dumps({'kind': kind,'data': data},ensure_ascii=False)
     for offset in range(0,len(payload),16000):
         piece=payload[offset:offset+16000]
-        print(json.dumps(dict(chunk=piece,offset=offset,final=offset+len(piece)==len(payload)),ensure_ascii=False),flush=True)
+        print(json.dumps({'chunk': piece,'offset': offset,'final': offset+len(piece)==len(payload)},ensure_ascii=False),flush=True)
 
 
 async def call_from_stdio():
@@ -341,6 +354,6 @@ if __name__=='__main__':
     if len(sys.argv)==3 and sys.argv[1]=='_worker':worker(valid(sys.argv[2]))
     elif len(sys.argv)==2 and sys.argv[1]=='_call':
         try:asyncio.run(call_from_stdio())
-        except Exception as exc:
-            send_frame('error',dict(type=type(exc).__name__,message=desktop.clean(str(exc))))
+        except Exception as exc:  # noqa: BLE001
+            send_frame('error',{'type': type(exc).__name__,'message': desktop.clean(str(exc))})
     else:raise SystemExit('Use the stable agy_mcp.py entrypoint')

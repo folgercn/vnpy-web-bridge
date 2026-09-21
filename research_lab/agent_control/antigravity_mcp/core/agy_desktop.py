@@ -1,8 +1,27 @@
 #!/usr/bin/env python3
+# ruff: noqa: E701, E702
 """Schedule owned tasks against the existing Antigravity desktop backend.
 No CLI workers; no desktop launch/kill; no automatic replay of uncertain turns.
 """
-import argparse, contextlib, fcntl, hashlib, json, math, os, re, shlex, signal, socket, ssl, struct, subprocess, sys, threading, time, urllib.request, urllib.error, uuid
+import argparse
+import contextlib
+import fcntl
+import hashlib
+import json
+import math
+import os
+import re
+import shlex
+import socket
+import ssl
+import struct
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+import uuid
 from pathlib import Path
 
 STATE = Path(os.environ.get('AGY_DESKTOP_STATE', Path(__file__).resolve().parents[1] / '.desktop'))
@@ -98,7 +117,7 @@ def conversation_state(snapshot):
         'CORTEX_STEP_STATUS_WAITING') for x in steps)
     readiness=('busy' if unfinished or raw=='CASCADE_RUN_STATUS_RUNNING' else
                'ready' if raw==IDLE else 'unknown')
-    return dict(raw_status=raw,readiness=readiness,unfinished_steps=unfinished)
+    return {'raw_status': raw,'readiness': readiness,'unfinished_steps': unfinished}
 
 OUTPUT_LOCK=threading.RLock()
 def emit(item,sink=None):
@@ -113,8 +132,8 @@ def expose(task,source,payload,sink=None):
     identifier=uuid.uuid4().hex
     for offset in range(0,len(data),8000):
         end=min(offset+8000,len(data))
-        emit(dict(event='upstream_payload',time=time.time(),task=task,source=source,payload_id=identifier,
-                  offset=offset,total_chars=len(data),final=end==len(data),data=data[offset:end]),sink)
+        emit({'event': 'upstream_payload','time': time.time(),'task': task,'source': source,'payload_id': identifier,
+                  'offset': offset,'total_chars': len(data),'final': end==len(data),'data': data[offset:end]},sink)
 
 class Desktop:
     def __init__(self,task=None):
@@ -132,8 +151,8 @@ class Desktop:
                 if x.startswith(name+'='):return x.split('=',1)[1]
             raise Failure('PROTOCOL_CHANGED','Missing backend flag '+name)
         self.token=flag('--csrf_token')
-        ls=subprocess.run(['lsof','-nP','-a','-p',str(self.pid),'-iTCP','-sTCP:LISTEN','-Fn'],capture_output=True,text=True).stdout
-        ports=set(re.findall(r'^n(?:127\.0\.0\.1|\[::1\]|\*):(\d+)$',ls,re.M))
+        ls=subprocess.run(['lsof','-nP','-a','-p',str(self.pid),'-iTCP','-sTCP:LISTEN','-Fn'],capture_output=True,text=True,check=False).stdout
+        ports=set(re.findall(r'^n(?:127\.0\.0\.1|\[::1\]|\*):(\d+)$',ls,re.MULTILINE))
         configured=flag('--https_server_port')
         if configured!='0':ports={configured}
         self.port=None
@@ -147,7 +166,8 @@ class Desktop:
                 self.port=int(port)
                 self.rpc('GetCascadeModelConfigData',{},timeout=3)
                 break
-            except Exception:self.port=None
+            except Exception:  # noqa: BLE001
+                self.port=None
         if self.port is None:raise Failure('DESKTOP_UNAVAILABLE','No matching local HTTPS backend.')
     def request(self,method,body,stream=False,timeout=15):
         body=json.dumps(body).encode()
@@ -156,7 +176,7 @@ class Desktop:
         try:return self.opener.open(req,timeout=timeout)
         except urllib.error.HTTPError as e:
             detail=clean(e.read().decode(errors='replace'))
-            payload=dict(status=e.code,body=detail)
+            payload={'status': e.code,'body': detail}
             if not stream and getattr(self,'task',None):expose(self.task,method+':HTTPError',payload)
             failure=Failure('RPC_ERROR',str(e.code)+': '+detail);failure.upstream_payload=payload
             raise failure from None
@@ -165,7 +185,7 @@ class Desktop:
             data=r.read()
             try:result=json.loads(data)
             except (ValueError,UnicodeDecodeError):
-                if getattr(self,'task',None):expose(self.task,method+':invalid_json',dict(body=data.decode(errors='replace')))
+                if getattr(self,'task',None):expose(self.task,method+':invalid_json',{'body': data.decode(errors='replace')})
                 raise
         if getattr(self,'task',None):expose(self.task,method,result)
         return result
@@ -182,7 +202,7 @@ class Desktop:
         if ids is None:raise Failure('PROJECT_DISCOVERY_FAILED','Missing project list snapshot.')
         if not ids:return []
         records=self.rpc('ReadProjects',{'ids':ids}).get('projects',[])
-        from urllib.parse import urlparse,unquote
+        from urllib.parse import unquote, urlparse
         projects=[]
         for record in records:
             folders=[]
@@ -191,7 +211,7 @@ class Desktop:
                     uri=value.get('folderUri') if isinstance(value,dict) else None
                     if uri and urlparse(uri).scheme=='file' and urlparse(uri).netloc in ('','localhost'):
                         folders.append(str(Path(unquote(urlparse(uri).path)).resolve()))
-            projects.append(dict(project_id=record['id'],name=record.get('name'),folders=folders))
+            projects.append({'project_id': record['id'],'name': record.get('name'),'folders': folders})
         return projects
     def resolve_project(self,cwd):
         path=Path(cwd).resolve()
@@ -250,7 +270,7 @@ class Updates:
                     if len(payload)!=size:raise Failure('INCOMPLETE_FRAME')
                     msg=json.loads(payload)
                     with OUTPUT_LOCK:
-                        expose(self.task,'StreamAgentStateUpdates',dict(flags=h[0],message=msg),self.sink)
+                        expose(self.task,'StreamAgentStateUpdates',{'flags': h[0],'message': msg},self.sink)
                     if h[0]&2:
                         if msg.get('error'):self.error=clean(msg['error'])
                         break
@@ -259,7 +279,7 @@ class Updates:
                     update=msg.get('update',{})
                     self.apply(update)
                     self.changed.set()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             with OUTPUT_LOCK:
                 if hasattr(e,'upstream_payload'):
                     expose(self.task,'StreamAgentStateUpdates:HTTPError',e.upstream_payload,self.sink)
@@ -308,7 +328,7 @@ def step_issue(st):
     detail=st.get('error',{}) or st.get('errorMessage',{})
     if not detail and command:detail=command.get('combinedOutput',{})
     if isinstance(detail,dict):detail=detail.get('shortError') or detail.get('fullError') or detail.get('message') or detail.get('full') or str(detail)
-    return clean(dict(type=st.get('type'),status=status,message=str(detail)[:2000],exit_code=command.get('exitCode')))
+    return clean({'type': st.get('type'),'status': status,'message': str(detail)[:2000],'exit_code': command.get('exitCode')})
 
 def recovery_state(steps, offset=0):
     """Conservative evidence: identical command, cwd and shell, later DONE/0.
@@ -334,26 +354,26 @@ def recovery_state(steps, offset=0):
             # No retry-parent id is available: only the nearest failed
             # invocation can be conservatively paired with this success.
             for entry in pending.pop(key,[])[-1:]:
-                entry.update(recovery='exact_retry_succeeded',recovery_evidence=dict(
-                    step_index=index,command=line,cwd=cwd,shell=command.get('shellName'),exit_code=0,
-                    sandbox_override=command.get('sandboxOverride')))
+                entry.update(recovery='exact_retry_succeeded',recovery_evidence={
+                    'step_index': index,'command': line,'cwd': cwd,'shell': command.get('shellName'),'exit_code': 0,
+                    'sandbox_override': command.get('sandboxOverride')})
         response=step.get('plannerResponse',{})
         if step.get('type')=='CORTEX_STEP_TYPE_PLANNER_RESPONSE' and step.get('status')=='CORTEX_STEP_STATUS_DONE' and (response.get('modifiedResponse') or response.get('response')) and not issue:
             for entry in generation_pending:
-                entry.update(recovery='generation_resumed',recovery_evidence=dict(step_index=index,type=step['type'],status=step['status'],scope='generation returned a completed response; does not resolve tool failures'))
+                entry.update(recovery='generation_resumed',recovery_evidence={'step_index': index,'type': step['type'],'status': step['status'],'scope': 'generation returned a completed response; does not resolve tool failures'})
             generation_pending=[]
     unresolved=[x['step_index'] for x in history if x['recovery']=='unverified']
-    return clean(dict(error_history=history,unresolved_issue_indices=unresolved,
-        recovered_issue_count=len(history)-len(unresolved),
-        assessment='unresolved_history' if unresolved else ('observed_recoveries' if history else 'no_observed_errors'),
-        note='Historical issues are not current blocking proof. Exact retry success does not certify side effects or task acceptance.'))
+    return clean({'error_history': history,'unresolved_issue_indices': unresolved,
+        'recovered_issue_count': len(history)-len(unresolved),
+        'assessment': 'unresolved_history' if unresolved else ('observed_recoveries' if history else 'no_observed_errors'),
+        'note': 'Historical issues are not current blocking proof. Exact retry success does not certify side effects or task acceptance.'})
 
 class Progress:
     def __init__(self):self.seen={}
     def changes(self,steps,offset=0):
         changes=[]
         for i,st in enumerate(steps,offset):
-            item=dict(index=i,type=st.get('type'),status=st.get('status'))
+            item={'index': i,'type': st.get('type'),'status': st.get('status')}
             issue=step_issue(st)
             if issue:item['error']=issue
             if self.seen.get(i)!=item:
@@ -376,7 +396,7 @@ def classify(steps):
     # finished invocation uncertain. Only explicit generator error steps classify
     # backend 500/503, never file contents or a tool's quoted output.
     blob=json.dumps(terminal_errors)
-    code='SERVICE_UNAVAILABLE' if re.search(r'\b503\b|No capacity available',blob,re.I) else ('SERVICE_INTERNAL_ERROR' if re.search(r'\b500\b|Internal error',blob,re.I) else ('AGENT_ERROR' if terminal_errors else None))
+    code='SERVICE_UNAVAILABLE' if re.search(r'\b503\b|No capacity available',blob,re.IGNORECASE) else ('SERVICE_INTERNAL_ERROR' if re.search(r'\b500\b|Internal error',blob,re.IGNORECASE) else ('AGENT_ERROR' if terminal_errors else None))
     return next((x for x in reversed(responses) if x),''),issues,tools,code
 
 
@@ -388,15 +408,15 @@ def efficiency(steps, elapsed, remaining):
         if typ in ('CORTEX_STEP_TYPE_CODE_ACTION','CORTEX_STEP_TYPE_WRITE_TO_FILE') and step.get('status')=='CORTEX_STEP_STATUS_DONE':edits+=1
         view=step.get('viewFile')
         if view:
-            path=view.get('absolutePathUri','unknown');entry=files.setdefault(path,dict(reads=0,overlapping_reads=0,ranges=[]))
+            path=view.get('absolutePathUri','unknown');entry=files.setdefault(path,{'reads': 0,'overlapping_reads': 0,'ranges': []})
             entry['reads']+=1
             if 'endLine' in view:
                 lo=view.get('startLine',0);hi=view['endLine']
                 if any(lo<=b and hi>=a for a,b in entry['ranges']):entry['overlapping_reads']+=1
                 entry['ranges'].append((lo,hi))
-    repeated=[dict(path=p,reads=v['reads'],overlapping_reads=v['overlapping_reads']) for p,v in files.items() if v['reads']>1]
+    repeated=[{'path': p,'reads': v['reads'],'overlapping_reads': v['overlapping_reads']} for p,v in files.items() if v['reads']>1]
     repeated.sort(key=lambda x:x['reads'],reverse=True)
-    return dict(model_rounds=models,file_reads=sum(v['reads'] for v in files.values()),unique_files=len(files),repeated_files=repeated[:5],observed_edit_steps=edits,tool_issues=failed,elapsed_seconds=round(elapsed),remaining_seconds=max(0,round(remaining)),note='Edit steps are observable tool events, not a git diff or delivery verdict.')
+    return {'model_rounds': models,'file_reads': sum(v['reads'] for v in files.values()),'unique_files': len(files),'repeated_files': repeated[:5],'observed_edit_steps': edits,'tool_issues': failed,'elapsed_seconds': round(elapsed),'remaining_seconds': max(0,round(remaining)),'note': 'Edit steps are observable tool events, not a git diff or delivery verdict.'}
 
 def execution_limit():
     value=read(STATE/'config.json',{}).get('max_concurrency',2)
@@ -460,7 +480,7 @@ def run_task(args):
             if args.conversation and args.conversation!=rec['conversation_id']:raise Failure('CONVERSATION_MISMATCH')
             if rec['state']=='uncertain' and not args.ack_uncertain:raise Failure('OUTCOME_UNCERTAIN','Inspect result and desktop before acknowledged continuation.')
         elif args.conversation:raise Failure('IMPORT_UNSUPPORTED','Use a new managed task; existing desktop sessions are not imported automatically.')
-        save(ticket,dict(task=task,pid=os.getpid()));event(task,'queued')
+        save(ticket,{'task': task,'pid': os.getpid()});event(task,'queued')
     lock=None;active=False;backend=None;cid=None;sent=False;active_path=None
     try:
         while True:
@@ -479,7 +499,7 @@ def run_task(args):
                         try:fcntl.flock(candidate,fcntl.LOCK_EX|fcntl.LOCK_NB)
                         except BlockingIOError:candidate.close();continue
                         lock=candidate;active=True;active_path=slot_path(slot,'active')
-                        save(ticket,dict(task=task,pid=os.getpid(),slot=slot))
+                        save(ticket,{'task': task,'pid': os.getpid(),'slot': slot})
                         break
             if active:break
             time.sleep(.2)
@@ -509,7 +529,7 @@ def run_task(args):
         if MODELS[index] not in model_map:raise Failure('MODEL_UNAVAILABLE',MODELS[index])
         cid=(rec or {}).get('conversation_id') or str(uuid.uuid4())
         if rec is None:
-            rec=dict(task=task,cwd=args.cwd,mode=args.mode,project=project,conversation_id=cid,state='creating',model_index=index,turn=0)
+            rec={'task': task,'cwd': args.cwd,'mode': args.mode,'project': project,'conversation_id': cid,'state': 'creating','model_index': index,'turn': 0}
             save(path,rec)
             backend.rpc('StartCascade',{'cascadeId':cid,'projectEnvConfig':{'projectId':project['project_id'],'defaultProjectEnvironment':{}},'trajectoryType':'CORTEX_TRAJECTORY_TYPE_CASCADE','source':'CORTEX_TRAJECTORY_SOURCE_CASCADE_CLIENT'})
         baseline=backend.trajectory(cid)
@@ -524,7 +544,7 @@ def run_task(args):
             raise Failure(code,json.dumps(dict(source='desktop_conversation',accepted=False,
                                               queued=False,**readiness)))
         rec.update(state='running',turn=rec.get('turn',0)+1,updated_at=time.time(),recovery=recovery_state([]),efficiency=None)
-        save(path,rec);save(active_path,dict(task=task,conversation_id=cid,pid=os.getpid()))
+        save(path,rec);save(active_path,{'task': task,'conversation_id': cid,'pid': os.getpid()})
         event(task,'started',conversation_id=cid,backend_pid=backend.pid,slot=slot,execution_limit=execution_limit(),queue_seconds=round(args.timeout-(deadline-time.monotonic()),3))
         attempts=[];watch=StallWatch(time.monotonic());work_started=time.monotonic();next_efficiency=work_started+60;turn_start=len(baseline.get('trajectory',{}).get('steps',[]))
         while True:
@@ -544,7 +564,7 @@ def run_task(args):
                             if native.seek(0,2)<log_offset:log_offset=0
                             native.seek(log_offset);data=native.read();log_offset=native.tell()
                         for line in data.decode(errors='replace').splitlines():
-                            if re.search(r'code 50[03]|No capacity available|Internal error',line,re.I):
+                            if re.search(r'code 50[03]|No capacity available|Internal error',line,re.IGNORECASE):
                                 detail=clean(line[:2000]);diagnostics.append(detail)
                                 event(task,'backend_window_error',attribution='shared_desktop_time_window',detail=detail)
                     current=stream.snapshot()
@@ -594,10 +614,10 @@ def run_task(args):
                 executors=current.get('trajectory',{}).get('executorMetadatas',[])
                 if executors and 'CANCELED' in executors[-1].get('terminationReason',''):
                     code='TASK_CANCELED'
-                attempt=dict(model=MODELS[index],error=code,tools=tools,stream_frames=stream.frames,stream_error=stream.error,stream_reconnects=stream.reconnects,backend_window_errors=diagnostics)
+                attempt={'model': MODELS[index],'error': code,'tools': tools,'stream_frames': stream.frames,'stream_error': stream.error,'stream_reconnects': stream.reconnects,'backend_window_errors': diagnostics}
                 attempts.append(attempt)
                 log=STATE/'logs'/(task+'--turn-'+str(rec['turn'])+'--attempt-'+str(len(attempts))+'.json')
-                save(log,clean(dict(conversation_id=cid,steps=steps,attempt=attempt)))
+                save(log,clean({'conversation_id': cid,'steps': steps,'attempt': attempt}))
                 event(task,'attempt_finished',**attempt)
                 if code in ('SERVICE_UNAVAILABLE','SERVICE_INTERNAL_ERROR') and not tools and not args.no_fallback and index<2 and time.monotonic()<deadline:
                     if MODELS[index+1] not in model_map:break
@@ -610,7 +630,7 @@ def run_task(args):
         rec['efficiency']=metrics
         emit(event(task,'efficiency',**metrics))
         outcome='uncertain' if code=='TASK_CANCELED' else ('turn_failed' if code or not response else 'turn_returned')
-        result=dict(status='ERROR' if code or not response else ('REVIEW_REQUIRED' if errors else 'TURN_COMPLETE'),error=code,conversation_id=cid,project=project,backend='desktop',backend_pid=backend.pid,model=MODELS[index],result=dict(status='ERROR' if code or not response else 'SUCCESS',response=response),issues=errors,recovery=recovery_state(current.get('trajectory',{}).get('steps',[])[turn_start:],turn_start),outcome=outcome,attempts=attempts,nudge_attempted=watch.nudged,efficiency=metrics,log_file=str(log),task=task)
+        result={'status': 'ERROR' if code or not response else ('REVIEW_REQUIRED' if errors else 'TURN_COMPLETE'),'error': code,'conversation_id': cid,'project': project,'backend': 'desktop','backend_pid': backend.pid,'model': MODELS[index],'result': {'status': 'ERROR' if code or not response else 'SUCCESS','response': response},'issues': errors,'recovery': recovery_state(current.get('trajectory',{}).get('steps',[])[turn_start:],turn_start),'outcome': outcome,'attempts': attempts,'nudge_attempted': watch.nudged,'efficiency': metrics,'log_file': str(log),'task': task}
         rec.update(state='uncertain' if outcome=='uncertain' else 'idle',last_result=result,model_index=index)
         save(path,rec);save(STATE/'logs'/(task+'--turn-'+str(rec['turn'])+'.summary.json'),clean(result))
         (active_path).unlink(missing_ok=True)
@@ -634,7 +654,7 @@ def run_task(args):
         canceled=None
         if sent and backend and cid:
             try:canceled=backend.cancel(cid)
-            except Exception:canceled=False
+            except Exception:canceled=False  # noqa: BLE001
         if cid:
             if backend:
                 try:
@@ -645,9 +665,9 @@ def run_task(args):
                         save(path,rec)
                         emit(event(task,'efficiency',**rec['efficiency']))
                     save(STATE/'logs'/(task+'--failure-'+str(time.time_ns())+'.json'),clean(evidence))
-                except Exception:pass
+                except Exception:pass  # noqa: BLE001, S110
             rec=read(path,{})
-            result=dict(status='ERROR',error=code,outcome='uncertain' if sent else 'not_executed',conversation_id=cid,cancel_confirmed=canceled,task=task,efficiency=rec.get('efficiency'))
+            result={'status': 'ERROR','error': code,'outcome': 'uncertain' if sent else 'not_executed','conversation_id': cid,'cancel_confirmed': canceled,'task': task,'efficiency': rec.get('efficiency')}
             # A rejected continuation must not overwrite the previous delivered turn.
             if sent or code not in ('TASK_BUSY','DESKTOP_STATE_UNKNOWN'):
                 rec.update(state='uncertain' if sent else 'failed',last_result=result);save(path,rec)
@@ -671,13 +691,13 @@ def main():
             if not a.task or not a.prompt or not math.isfinite(a.timeout) or a.timeout<=0:raise Failure('INVALID_REQUEST')
             result=run_task(a)
         elif a.action=='ping':
-            b=Desktop();result=dict(status='OK',backend='desktop',backend_pid=b.pid,execution_limit=execution_limit(),cli_workers=0)
+            b=Desktop();result={'status': 'OK','backend': 'desktop','backend_pid': b.pid,'execution_limit': execution_limit(),'cli_workers': 0}
         elif a.action=='status':
             with guard():
                 records=active_records();active=records[0] if records else None
-                result=dict(status='OK',backend='desktop',execution_limit=execution_limit(),active=active,active_tasks=records,queued=queue_view(records),efficiency=(read(STATE/'tasks'/(active['task']+'.json'),{}).get('efficiency') if active else None),task_record=read(STATE/'tasks'/(a.task+'.json')) if a.task else None)
+                result={'status': 'OK','backend': 'desktop','execution_limit': execution_limit(),'active': active,'active_tasks': records,'queued': queue_view(records),'efficiency': (read(STATE/'tasks'/(active['task']+'.json'),{}).get('efficiency') if active else None),'task_record': read(STATE/'tasks'/(a.task+'.json')) if a.task else None}
         elif a.action=='result':
-            result=(read(STATE/'tasks'/(a.task+'.json'),{}) if a.task else {}).get('last_result') or dict(status='ERROR',error='NO_RESULT')
+            result=(read(STATE/'tasks'/(a.task+'.json'),{}) if a.task else {}).get('last_result') or {'status': 'ERROR','error': 'NO_RESULT'}
         else:
             # Retirement releases the managed task, not the shared desktop process
             # or its history. Exact conversation can still resume with the same ID.
@@ -688,9 +708,9 @@ def main():
                 for x in targets:
                     rec=read(x)
                     if rec and rec.get('state')!='uncertain':rec['state']='retired';save(x,rec)
-                result=dict(status='OK',retired=[x.stem for x in targets])
-    except Exception as exc:
-        result=dict(status='ERROR',error=exc.code if isinstance(exc,Failure) else type(exc).__name__,message=clean(exc.message if isinstance(exc,Failure) else str(exc)))
+                result={'status': 'OK','retired': [x.stem for x in targets]}
+    except Exception as exc:  # noqa: BLE001
+        result={'status': 'ERROR','error': exc.code if isinstance(exc,Failure) else type(exc).__name__,'message': clean(exc.message if isinstance(exc,Failure) else str(exc))}
     print(json.dumps(clean(result),ensure_ascii=False,indent=2) if a.json else (result.get('result',{}).get('response') or json.dumps(clean(result),ensure_ascii=False)))
     return 0 if result.get('status') in ('OK','TURN_COMPLETE') else 1
 

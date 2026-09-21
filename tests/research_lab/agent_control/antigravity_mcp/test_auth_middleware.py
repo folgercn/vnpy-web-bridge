@@ -1,5 +1,6 @@
 """Tests for ApiKeyAuthMiddleware ASGI interception."""
 import asyncio
+
 from research_lab.agent_control.antigravity_mcp.server import ApiKeyAuthMiddleware
 
 

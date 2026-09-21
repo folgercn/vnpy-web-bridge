@@ -7,7 +7,7 @@ Checks presence and health of external tools:
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any
 
 from research_lab.agent_control.antigravity_mcp.config import (
     ANTIGRAVITY_TOOLS_ACCOUNTS_DIR,
@@ -31,7 +31,7 @@ class ToolInspector:
         self.antigravity_tools_dir = Path(antigravity_tools_dir)
         self.cockpit_server_json = Path(cockpit_server_json)
 
-    def check_antigravity_tools(self) -> Tuple[bool, str]:
+    def check_antigravity_tools(self) -> tuple[bool, str]:
         """Check if Antigravity-Manager (~/.antigravity_tools) is installed with valid accounts."""
         if not self.antigravity_tools_json.exists():
             return False, "Antigravity-Manager (~/.antigravity_tools/accounts.json) 未找到。"
@@ -43,10 +43,10 @@ class ToolInspector:
             if count == 0:
                 return False, "Antigravity-Manager 已安装但未导入任何账号。"
             return True, f"Antigravity-Manager 正常运行，已检测到 {count} 个已注册账号及实时额度缓存。"
-        except Exception as e:
+        except (OSError, json.JSONDecodeError, KeyError, ValueError) as e:
             return False, f"Antigravity-Manager 配置文件读取异常: {e}"
 
-    def check_cockpit_tools(self) -> Tuple[bool, str]:
+    def check_cockpit_tools(self) -> tuple[bool, str]:
         """Check if Cockpit-Tools (~/.antigravity_cockpit) is running with active server info."""
         if not self.cockpit_server_json.exists():
             return False, "Cockpit-Tools 本地服务未运行 (~/.antigravity_cockpit/server.json 不存在)。"
@@ -57,10 +57,10 @@ class ToolInspector:
             if not ws_port:
                 return False, "Cockpit-Tools server.json 中未配置有效 WebSocket 端口。"
             return True, f"Cockpit-Tools 本地后台正在运行 (WebSocket 端口: {ws_port})。"
-        except Exception as e:
+        except (OSError, json.JSONDecodeError, KeyError, ValueError) as e:
             return False, f"Cockpit-Tools 状态检查异常: {e}"
 
-    def get_capabilities_report(self) -> Dict[str, Any]:
+    def get_capabilities_report(self) -> dict[str, Any]:
         """
         Generate a comprehensive capability diagnostic report.
         Clearly informs Codex whether multi-account inspection and switching are supported.

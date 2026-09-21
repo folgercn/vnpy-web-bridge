@@ -1,6 +1,7 @@
 """Tests for UsageTracker persistence and leaderboard rankings."""
 import asyncio
 from pathlib import Path
+
 from research_lab.agent_control.antigravity_mcp.usage_tracker import UsageTracker
 
 
