@@ -48,6 +48,8 @@ from research_lab.agent_control.permissions import (
 )
 from research_lab.agent_control.provider import AgentProvider
 from research_lab.agent_control.quota import (
+    DEFAULT_BINDING_PROFILE_VERSION,
+    DEFAULT_BINDING_SOURCE,
     AntigravityQuotaNormalizer,
     ModelQuotaBinding,
     ProviderQuotaFacts,
@@ -56,6 +58,7 @@ from research_lab.agent_control.quota import (
     QuotaWindowSnapshot,
     evaluate_group_status,
     evaluate_window_status,
+    verify_quota_facts_provenance,
 )
 from research_lab.agent_control.registry import ProviderRegistry
 from research_lab.agent_control.roles import (
@@ -441,74 +444,29 @@ def select_agent(
                 provider_mismatch_candidates.append(prov_name)
             else:
                 effective_max_age = max_usage_snapshot_age if max_usage_snapshot_age is not None else float("inf")
-                if prov_name in context_quota_facts:
-                    facts = context_quota_facts[prov_name]
-                    # P1-2: Validate facts against snapshot ground truth
-                    validate_usage_hash(snapshot.to_dict())
-                    if facts.provider != prov_name or facts.provider != snapshot.provider:
-                        raise TamperDetectionError(
-                            f"quota_facts provider '{facts.provider}' mismatch with snapshot provider '{snapshot.provider}'"
-                        )
-                    if facts.captured_at != snapshot.captured_at:
-                        raise TamperDetectionError(
-                            f"quota_facts captured_at '{facts.captured_at}' mismatch with snapshot '{snapshot.captured_at}'"
-                        )
-                    expected_ref = f"{snapshot.snapshot_id}@{snapshot.usage_content_hash}"
-                    if facts.snapshot_ref != expected_ref and facts.snapshot_ref != snapshot.snapshot_id:
-                        raise TamperDetectionError(
-                            f"quota_facts snapshot_ref '{facts.snapshot_ref}' mismatch with snapshot expected ref '{expected_ref}'"
-                        )
-                    # Anti-forgery: Check if ground truth snapshot windows contradict injected healthy facts
-                    for raw_w in snapshot.quota_windows:
-                        rem = raw_w.get("remaining_fraction")
-                        if rem is not None:
-                            try:
-                                rem_val = float(rem)
-                            except (ValueError, TypeError):
-                                rem_val = None
-                            if rem_val is not None and rem_val <= 0.0:
-                                w_name = str(raw_w.get("window") or raw_w.get("bucketId") or "")
-                                for g in facts.groups:
-                                    group_matches = False
-                                    if (
-                                        snapshot.model_group
-                                        and (
-                                            g.display_name == snapshot.model_group
-                                            or g.group_id == snapshot.model_group
-                                        )
-                                    ) or len(facts.groups) == 1:
-                                        group_matches = True
-                                    elif any(gw.window == w_name for gw in g.windows):
-                                        if snapshot.model_group and g.display_name != snapshot.model_group:
-                                            group_matches = False
-                                        else:
-                                            group_matches = True
+                # 1. Validate underlying snapshot integrity
+                validate_usage_hash(snapshot.to_dict())
 
-                                    if group_matches and g.status == QuotaStatus.HEALTHY:
-                                        raise TamperDetectionError(
-                                            f"Injected quota_facts group '{g.group_id}' claims HEALTHY status while underlying snapshot window '{w_name}' is exhausted"
-                                        )
-                    if AntigravityQuotaNormalizer.is_snapshot_stale(
-                        snapshot.captured_at,
-                        max_age_seconds=effective_max_age,
-                        current_time=current_time,
-                    ):
-                        try:
-                            object.__setattr__(facts, "is_stale", True)
-                        except (AttributeError, TypeError):
-                            pass
-                elif prov_name == "antigravity" or snapshot.provider == "antigravity":
+                # 2. Recompute authoritative facts from ground truth
+                if prov_name == "antigravity" or snapshot.provider == "antigravity":
                     custom_bindings = []
                     if routing_policy and prov_name in routing_policy.model_quota_bindings:
                         for m_k, g_v in routing_policy.model_quota_bindings[prov_name].items():
                             custom_bindings.append(
-                                ModelQuotaBinding(provider=prov_name, model=m_k, quota_group_id=g_v)
+                                ModelQuotaBinding(
+                                    provider=prov_name,
+                                    model=m_k,
+                                    quota_group_id=g_v,
+                                    binding_profile_version=DEFAULT_BINDING_PROFILE_VERSION,
+                                    binding_source=DEFAULT_BINDING_SOURCE,
+                                )
                             )
-                    facts = AntigravityQuotaNormalizer.normalize(
+                    expected_facts = AntigravityQuotaNormalizer.normalize(
                         snapshot,
                         healthy_threshold=healthy_threshold,
                         max_age_seconds=effective_max_age,
                         current_time=current_time,
+                        binding_profile_version=DEFAULT_BINDING_PROFILE_VERSION,
                         custom_model_bindings=custom_bindings,
                     )
                 else:
@@ -540,18 +498,41 @@ def select_agent(
                         bound_models=tuple(desc.supported_models),
                     )
                     bindings = [
-                        ModelQuotaBinding(provider=prov_name, model=m, quota_group_id=grp.group_id)
+                        ModelQuotaBinding(
+                            provider=prov_name,
+                            model=m,
+                            quota_group_id=grp.group_id,
+                            binding_profile_version=DEFAULT_BINDING_PROFILE_VERSION,
+                            binding_source=DEFAULT_BINDING_SOURCE,
+                        )
                         for m in desc.supported_models
                     ]
                     snapshot_ref = f"{snapshot.snapshot_id}@{snapshot.usage_content_hash}"
-                    facts = ProviderQuotaFacts(
+                    expected_facts = ProviderQuotaFacts(
                         provider=prov_name,
                         snapshot_ref=snapshot_ref,
                         captured_at=snapshot.captured_at,
                         groups=(grp,),
                         model_bindings=tuple(bindings),
+                        binding_profile_version=DEFAULT_BINDING_PROFILE_VERSION,
+                        binding_source=DEFAULT_BINDING_SOURCE,
                         is_stale=is_stale,
                     )
+
+                if prov_name in context_quota_facts:
+                    injected_facts = context_quota_facts[prov_name]
+                    # 3. Exact ref match: must be snapshot_id@usage_content_hash, bare snapshot_id rejected
+                    expected_ref = f"{snapshot.snapshot_id}@{snapshot.usage_content_hash}"
+                    if injected_facts.snapshot_ref != expected_ref:
+                        raise TamperDetectionError(
+                            f"quota_facts snapshot_ref '{injected_facts.snapshot_ref}' does not match expected exact ref '{expected_ref}'; "
+                            "bare snapshot_id or invalid content hash is strictly rejected"
+                        )
+                    # 4. Strict exact-equality validation ensuring caller injected facts match authoritative recomputed facts
+                    verify_quota_facts_provenance(injected_facts, expected_facts)
+                    facts = injected_facts
+                else:
+                    facts = expected_facts
 
                 if facts.is_stale:
                     quota_status_str = "stale"

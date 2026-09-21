@@ -14,6 +14,7 @@ Comprehensive 31-case contract test suite strictly enforcing:
 from __future__ import annotations
 
 import copy
+import dataclasses
 from typing import Any
 
 import pytest
@@ -484,34 +485,21 @@ def test_12_exhausted_shared_group_skips_all_bound_models() -> None:
 def test_13_independent_group_fallback() -> None:
     snap = AgentUsageSnapshot.create(
         provider="antigravity",
-        model_group="Gemini Models",
-        quota_windows=[{"window": "5h", "remaining_fraction": 0.0}],  # Gemini exhausted
+        model_group="Multi-Group Provider",
+        quota_windows=[
+            {"window": "5h", "remaining_fraction": 0.0, "group_id": "gemini-shared", "group_display_name": "Gemini Models"},
+            {"window": "5h", "remaining_fraction": 0.85, "group_id": "independent-group", "group_display_name": "Independent Models"},
+        ],
         captured_at="2026-09-21T00:00:00Z",
     )
-    # Provide neutral facts containing an independent group (3p-group) that is healthy
-    gemini_grp = QuotaGroupSnapshot(
-        group_id="gemini-shared",
-        display_name="Gemini Models",
-        status=QuotaStatus.EXHAUSTED,
-        windows=(QuotaWindowSnapshot(window="5h", remaining_fraction=0.0, reset_time=None, status=QuotaStatus.EXHAUSTED),),
-        bound_models=("Gemini 3.8 Flash High",),
-    )
-    other_grp = QuotaGroupSnapshot(
-        group_id="independent-group",
-        display_name="Independent Models",
-        status=QuotaStatus.HEALTHY,
-        windows=(QuotaWindowSnapshot(window="5h", remaining_fraction=0.85, reset_time=None, status=QuotaStatus.HEALTHY),),
-        bound_models=("Independent-Model-X",),
-    )
-    facts = ProviderQuotaFacts(
-        provider="antigravity",
-        snapshot_ref=f"{snap.snapshot_id}@{snap.usage_content_hash}",
-        captured_at=snap.captured_at,
-        groups=(gemini_grp, other_grp),
-        model_bindings=(
-            ModelQuotaBinding(provider="antigravity", model="Gemini 3.8 Flash High", quota_group_id="gemini-shared"),
-            ModelQuotaBinding(provider="antigravity", model="Independent-Model-X", quota_group_id="independent-group"),
-        ),
+    custom_bindings = [
+        ModelQuotaBinding(provider="antigravity", model="Independent-Model-X", quota_group_id="independent-group")
+    ]
+    facts = AntigravityQuotaNormalizer.normalize(
+        snap,
+        binding_profile_version="2026-09-m3.v1",
+        custom_model_bindings=custom_bindings,
+        current_time="2026-09-21T00:01:00Z",
     )
 
     registry = ProviderRegistry()
@@ -523,6 +511,7 @@ def test_13_independent_group_fallback() -> None:
         role=AgentRole.ALPHA_GENERATOR.value,
         provider_priority=("antigravity",),
         model_preference={"antigravity": ("Gemini 3.8 Flash High", "Independent-Model-X")},
+        model_quota_bindings={"antigravity": {"Independent-Model-X": "independent-group"}},
         policy_version="2026-09-m3",
     )
     ctx = RoutingContext(
@@ -1240,7 +1229,8 @@ def test_p1_2_exhausted_snapshot_fake_healthy_facts_rejected() -> None:
     )
     with pytest.raises(TamperDetectionError) as exc:
         select_agent(registry=registry, routing_policy=policy, routing_context=ctx)
-    assert "claims HEALTHY status while underlying snapshot window" in str(exc.value)
+    assert "status mismatch" in str(exc.value)
+
 
 
 # P1-3: Binding profile version in route, provenance & deterministic identity
@@ -1318,36 +1308,20 @@ def test_p1_4_multi_group_fallback_trace_windows_exact_alignment() -> None:
         provider="antigravity",
         model_group="Multi Group Provider",
         quota_windows=[
-            {"window": "shared_5h", "remaining_fraction": 0.0},
-            {"window": "dedicated_daily", "remaining_fraction": 0.95},
+            {"window": "shared_5h", "remaining_fraction": 0.0, "group_id": "group-a-exhausted", "group_display_name": "Group A"},
+            {"window": "dedicated_daily", "remaining_fraction": 0.95, "group_id": "group-b-healthy", "group_display_name": "Group B"},
         ],
         captured_at="2026-09-21T00:00:00Z",
     )
-    # Primary group A: exhausted
-    grp_a = QuotaGroupSnapshot(
-        group_id="group-a-exhausted",
-        display_name="Group A",
-        status=QuotaStatus.EXHAUSTED,
-        windows=(QuotaWindowSnapshot(window="shared_5h", remaining_fraction=0.0, reset_time=None, status=QuotaStatus.EXHAUSTED),),
-        bound_models=("model-a",),
-    )
-    # Fallback group B: healthy
-    grp_b = QuotaGroupSnapshot(
-        group_id="group-b-healthy",
-        display_name="Group B",
-        status=QuotaStatus.HEALTHY,
-        windows=(QuotaWindowSnapshot(window="dedicated_daily", remaining_fraction=0.95, reset_time=None, status=QuotaStatus.HEALTHY),),
-        bound_models=("model-b",),
-    )
-    facts = ProviderQuotaFacts(
-        provider="antigravity",
-        snapshot_ref=f"{snap.snapshot_id}@{snap.usage_content_hash}",
-        captured_at=snap.captured_at,
-        groups=(grp_a, grp_b),
-        model_bindings=(
-            ModelQuotaBinding(provider="antigravity", model="model-a", quota_group_id="group-a-exhausted"),
-            ModelQuotaBinding(provider="antigravity", model="model-b", quota_group_id="group-b-healthy"),
-        ),
+    custom_bindings = [
+        ModelQuotaBinding(provider="antigravity", model="model-a", quota_group_id="group-a-exhausted"),
+        ModelQuotaBinding(provider="antigravity", model="model-b", quota_group_id="group-b-healthy"),
+    ]
+    facts = AntigravityQuotaNormalizer.normalize(
+        snap,
+        binding_profile_version="2026-09-m3.v1",
+        custom_model_bindings=custom_bindings,
+        current_time="2026-09-21T00:01:00Z",
     )
 
     registry = ProviderRegistry()
@@ -1359,6 +1333,7 @@ def test_p1_4_multi_group_fallback_trace_windows_exact_alignment() -> None:
         role=AgentRole.ALPHA_GENERATOR.value,
         provider_priority=("antigravity",),
         model_preference={"antigravity": ("model-a", "model-b")},
+        model_quota_bindings={"antigravity": {"model-a": "group-a-exhausted", "model-b": "group-b-healthy"}},
         policy_version="2026-09-m3",
     )
     ctx = RoutingContext(
@@ -1381,3 +1356,556 @@ def test_p1_4_multi_group_fallback_trace_windows_exact_alignment() -> None:
     assert len(trace_item["quota_windows"]) == 1
     assert trace_item["quota_windows"][0]["window"] == "dedicated_daily"
     assert float(trace_item["quota_windows"][0]["remaining_fraction"]) == 0.95
+
+
+# ==============================================================================
+# Final P1: Complete verifiable provenance & exact equality validation
+# ==============================================================================
+
+
+def test_p1_provenance_bare_snapshot_id_rejected() -> None:
+    """Bare snapshot_id without content hash must fail-closed."""
+    registry = ProviderRegistry()
+    prov = MockM3Provider("antigravity", supported_models=("Gemini 3.8 Flash High",))
+    registry.register(prov)
+
+    snap = AgentUsageSnapshot.create(
+        provider="antigravity",
+        model_group="Gemini Models",
+        quota_windows=[{"window": "5h", "remaining_fraction": 0.8}],
+        captured_at="2026-09-21T00:00:00Z",
+    )
+    valid_facts = AntigravityQuotaNormalizer.normalize(snap, current_time="2026-09-21T00:01:00Z")
+    bare_facts = ProviderQuotaFacts(
+        provider="antigravity",
+        snapshot_ref=snap.snapshot_id,  # Bare snapshot_id without @hash!
+        captured_at=valid_facts.captured_at,
+        groups=valid_facts.groups,
+        model_bindings=valid_facts.model_bindings,
+        binding_profile_version=valid_facts.binding_profile_version,
+        binding_source=valid_facts.binding_source,
+    )
+    scope = _create_scope()
+    policy = RoutingPolicy(role=AgentRole.ALPHA_GENERATOR.value, provider_priority=("antigravity",), policy_version="2026-09-m3")
+    ctx = RoutingContext(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        authorized_scope=scope,
+        project_binding=scope.project_binding,
+        usage_snapshots={"antigravity": snap},
+        quota_facts={"antigravity": bare_facts},
+        current_time="2026-09-21T00:01:00Z",
+    )
+    with pytest.raises(TamperDetectionError) as exc:
+        select_agent(registry=registry, routing_policy=policy, routing_context=ctx)
+    assert "bare snapshot_id or invalid content hash is strictly rejected" in str(exc.value)
+
+
+def test_p1_provenance_hash_mismatch_rejected() -> None:
+    """Mismatching content hash in snapshot_ref must fail-closed."""
+    registry = ProviderRegistry()
+    prov = MockM3Provider("antigravity", supported_models=("Gemini 3.8 Flash High",))
+    registry.register(prov)
+
+    snap = AgentUsageSnapshot.create(
+        provider="antigravity",
+        model_group="Gemini Models",
+        quota_windows=[{"window": "5h", "remaining_fraction": 0.8}],
+        captured_at="2026-09-21T00:00:00Z",
+    )
+    valid_facts = AntigravityQuotaNormalizer.normalize(snap, current_time="2026-09-21T00:01:00Z")
+    tampered_ref_facts = ProviderQuotaFacts(
+        provider="antigravity",
+        snapshot_ref=f"{snap.snapshot_id}@wrong_content_hash_12345",
+        captured_at=valid_facts.captured_at,
+        groups=valid_facts.groups,
+        model_bindings=valid_facts.model_bindings,
+        binding_profile_version=valid_facts.binding_profile_version,
+        binding_source=valid_facts.binding_source,
+    )
+    scope = _create_scope()
+    policy = RoutingPolicy(role=AgentRole.ALPHA_GENERATOR.value, provider_priority=("antigravity",), policy_version="2026-09-m3")
+    ctx = RoutingContext(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        authorized_scope=scope,
+        project_binding=scope.project_binding,
+        usage_snapshots={"antigravity": snap},
+        quota_facts={"antigravity": tampered_ref_facts},
+        current_time="2026-09-21T00:01:00Z",
+    )
+    with pytest.raises(TamperDetectionError) as exc:
+        select_agent(registry=registry, routing_policy=policy, routing_context=ctx)
+    assert "does not match expected exact ref" in str(exc.value)
+
+
+def test_p1_provenance_exhausted_to_forged_healthy_rejected() -> None:
+    """Underlying exhausted window (rem=0.0) forged to HEALTHY must fail-closed."""
+    registry = ProviderRegistry()
+    prov = MockM3Provider("antigravity", supported_models=("Gemini 3.8 Flash High",))
+    registry.register(prov)
+
+    snap = AgentUsageSnapshot.create(
+        provider="antigravity",
+        model_group="Gemini Models",
+        quota_windows=[{"window": "5h", "remaining_fraction": 0.0}],
+        captured_at="2026-09-21T00:00:00Z",
+    )
+    # Recomputed expected status is EXHAUSTED. Caller injects forged HEALTHY status.
+    forged_window = QuotaWindowSnapshot(window="5h", remaining_fraction=0.0, reset_time=None, status=QuotaStatus.HEALTHY)
+    forged_grp = QuotaGroupSnapshot(
+        group_id="gemini-shared",
+        display_name="Gemini Models",
+        status=QuotaStatus.HEALTHY,
+        windows=(forged_window,),
+        bound_models=("Gemini 3.8 Flash High",),
+    )
+    forged_facts = ProviderQuotaFacts(
+        provider="antigravity",
+        snapshot_ref=f"{snap.snapshot_id}@{snap.usage_content_hash}",
+        captured_at=snap.captured_at,
+        groups=(forged_grp,),
+        binding_profile_version="2026-09-m3.v1",
+        binding_source="versioned_provider_profile",
+    )
+    scope = _create_scope()
+    policy = RoutingPolicy(role=AgentRole.ALPHA_GENERATOR.value, provider_priority=("antigravity",), policy_version="2026-09-m3")
+    ctx = RoutingContext(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        authorized_scope=scope,
+        project_binding=scope.project_binding,
+        usage_snapshots={"antigravity": snap},
+        quota_facts={"antigravity": forged_facts},
+        current_time="2026-09-21T00:01:00Z",
+    )
+    with pytest.raises(TamperDetectionError) as exc:
+        select_agent(registry=registry, routing_policy=policy, routing_context=ctx)
+    assert "status mismatch" in str(exc.value)
+
+
+def test_p1_provenance_constrained_to_forged_healthy_rejected() -> None:
+    """Underlying constrained window (rem=0.15 < 0.30) forged to HEALTHY must fail-closed."""
+    registry = ProviderRegistry()
+    prov = MockM3Provider("antigravity", supported_models=("Gemini 3.8 Flash High",))
+    registry.register(prov)
+
+    snap = AgentUsageSnapshot.create(
+        provider="antigravity",
+        model_group="Gemini Models",
+        quota_windows=[{"window": "5h", "remaining_fraction": 0.15}],
+        captured_at="2026-09-21T00:00:00Z",
+    )
+    forged_window = QuotaWindowSnapshot(window="5h", remaining_fraction=0.15, reset_time=None, status=QuotaStatus.HEALTHY)
+    forged_grp = QuotaGroupSnapshot(
+        group_id="gemini-shared",
+        display_name="Gemini Models",
+        status=QuotaStatus.HEALTHY,
+        windows=(forged_window,),
+        bound_models=("Gemini 3.8 Flash High",),
+    )
+    forged_facts = ProviderQuotaFacts(
+        provider="antigravity",
+        snapshot_ref=f"{snap.snapshot_id}@{snap.usage_content_hash}",
+        captured_at=snap.captured_at,
+        groups=(forged_grp,),
+        binding_profile_version="2026-09-m3.v1",
+        binding_source="versioned_provider_profile",
+    )
+    scope = _create_scope()
+    policy = RoutingPolicy(role=AgentRole.ALPHA_GENERATOR.value, provider_priority=("antigravity",), policy_version="2026-09-m3")
+    ctx = RoutingContext(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        authorized_scope=scope,
+        project_binding=scope.project_binding,
+        usage_snapshots={"antigravity": snap},
+        quota_facts={"antigravity": forged_facts},
+        current_time="2026-09-21T00:01:00Z",
+    )
+    with pytest.raises(TamperDetectionError) as exc:
+        select_agent(registry=registry, routing_policy=policy, routing_context=ctx)
+    assert "status mismatch" in str(exc.value)
+
+
+def test_p1_provenance_unknown_to_forged_healthy_rejected() -> None:
+    """Underlying unknown window (rem=None) forged to HEALTHY must fail-closed."""
+    registry = ProviderRegistry()
+    prov = MockM3Provider("antigravity", supported_models=("Gemini 3.8 Flash High",))
+    registry.register(prov)
+
+    snap = AgentUsageSnapshot.create(
+        provider="antigravity",
+        model_group="Gemini Models",
+        quota_windows=[{"window": "5h", "remaining_fraction": None}],
+        captured_at="2026-09-21T00:00:00Z",
+    )
+    forged_window = QuotaWindowSnapshot(window="5h", remaining_fraction=None, reset_time=None, status=QuotaStatus.HEALTHY)
+    forged_grp = QuotaGroupSnapshot(
+        group_id="gemini-shared",
+        display_name="Gemini Models",
+        status=QuotaStatus.HEALTHY,
+        windows=(forged_window,),
+        bound_models=("Gemini 3.8 Flash High",),
+    )
+    forged_facts = ProviderQuotaFacts(
+        provider="antigravity",
+        snapshot_ref=f"{snap.snapshot_id}@{snap.usage_content_hash}",
+        captured_at=snap.captured_at,
+        groups=(forged_grp,),
+        binding_profile_version="2026-09-m3.v1",
+        binding_source="versioned_provider_profile",
+    )
+    scope = _create_scope()
+    policy = RoutingPolicy(role=AgentRole.ALPHA_GENERATOR.value, provider_priority=("antigravity",), policy_version="2026-09-m3")
+    ctx = RoutingContext(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        authorized_scope=scope,
+        project_binding=scope.project_binding,
+        usage_snapshots={"antigravity": snap},
+        quota_facts={"antigravity": forged_facts},
+        current_time="2026-09-21T00:01:00Z",
+    )
+    with pytest.raises(TamperDetectionError) as exc:
+        select_agent(registry=registry, routing_policy=policy, routing_context=ctx)
+    assert "status mismatch" in str(exc.value)
+
+
+def test_p1_provenance_window_deleted_rejected() -> None:
+    """Caller deleting a window from injected facts must fail-closed."""
+    registry = ProviderRegistry()
+    prov = MockM3Provider("antigravity", supported_models=("Gemini 3.8 Flash High",))
+    registry.register(prov)
+
+    snap = AgentUsageSnapshot.create(
+        provider="antigravity",
+        model_group="Gemini Models",
+        quota_windows=[
+            {"window": "5h", "remaining_fraction": 0.8},
+            {"window": "weekly", "remaining_fraction": 0.5},
+        ],
+        captured_at="2026-09-21T00:00:00Z",
+    )
+    valid_facts = AntigravityQuotaNormalizer.normalize(snap, current_time="2026-09-21T00:01:00Z")
+    tampered_grp = dataclasses.replace(valid_facts.groups[0], windows=valid_facts.groups[0].windows[:1])
+    # Caller recomputes its internal hash to simulate self-consistent forged object
+    tampered_facts = dataclasses.replace(valid_facts, groups=(tampered_grp,), provenance_hash="")
+
+    scope = _create_scope()
+    policy = RoutingPolicy(role=AgentRole.ALPHA_GENERATOR.value, provider_priority=("antigravity",), policy_version="2026-09-m3")
+    ctx = RoutingContext(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        authorized_scope=scope,
+        project_binding=scope.project_binding,
+        usage_snapshots={"antigravity": snap},
+        quota_facts={"antigravity": tampered_facts},
+        current_time="2026-09-21T00:01:00Z",
+    )
+    with pytest.raises(TamperDetectionError) as exc:
+        select_agent(registry=registry, routing_policy=policy, routing_context=ctx)
+    assert "windows count" in str(exc.value)
+
+
+def test_p1_provenance_window_reordered_rejected() -> None:
+    """Caller reordering windows in injected facts must fail-closed."""
+    registry = ProviderRegistry()
+    prov = MockM3Provider("antigravity", supported_models=("Gemini 3.8 Flash High",))
+    registry.register(prov)
+
+    snap = AgentUsageSnapshot.create(
+        provider="antigravity",
+        model_group="Gemini Models",
+        quota_windows=[
+            {"window": "5h", "remaining_fraction": 0.8},
+            {"window": "weekly", "remaining_fraction": 0.5},
+        ],
+        captured_at="2026-09-21T00:00:00Z",
+    )
+    valid_facts = AntigravityQuotaNormalizer.normalize(snap, current_time="2026-09-21T00:01:00Z")
+    tampered_grp = dataclasses.replace(valid_facts.groups[0], windows=tuple(reversed(valid_facts.groups[0].windows)))
+    tampered_facts = dataclasses.replace(valid_facts, groups=(tampered_grp,), provenance_hash="")
+
+    scope = _create_scope()
+    policy = RoutingPolicy(role=AgentRole.ALPHA_GENERATOR.value, provider_priority=("antigravity",), policy_version="2026-09-m3")
+    ctx = RoutingContext(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        authorized_scope=scope,
+        project_binding=scope.project_binding,
+        usage_snapshots={"antigravity": snap},
+        quota_facts={"antigravity": tampered_facts},
+        current_time="2026-09-21T00:01:00Z",
+    )
+    with pytest.raises(TamperDetectionError) as exc:
+        select_agent(registry=registry, routing_policy=policy, routing_context=ctx)
+    assert "name" in str(exc.value) and "mismatch" in str(exc.value)
+
+
+def test_p1_provenance_window_value_tampered_rejected() -> None:
+    """Caller tampering window remaining_fraction (0.5 -> 0.95) must fail-closed."""
+    registry = ProviderRegistry()
+    prov = MockM3Provider("antigravity", supported_models=("Gemini 3.8 Flash High",))
+    registry.register(prov)
+
+    snap = AgentUsageSnapshot.create(
+        provider="antigravity",
+        model_group="Gemini Models",
+        quota_windows=[{"window": "5h", "remaining_fraction": 0.5}],
+        captured_at="2026-09-21T00:00:00Z",
+    )
+    valid_facts = AntigravityQuotaNormalizer.normalize(snap, current_time="2026-09-21T00:01:00Z")
+    tampered_win = dataclasses.replace(valid_facts.groups[0].windows[0], remaining_fraction=0.95)
+    tampered_grp = dataclasses.replace(valid_facts.groups[0], windows=(tampered_win,))
+    tampered_facts = dataclasses.replace(valid_facts, groups=(tampered_grp,), provenance_hash="")
+
+    scope = _create_scope()
+    policy = RoutingPolicy(role=AgentRole.ALPHA_GENERATOR.value, provider_priority=("antigravity",), policy_version="2026-09-m3")
+    ctx = RoutingContext(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        authorized_scope=scope,
+        project_binding=scope.project_binding,
+        usage_snapshots={"antigravity": snap},
+        quota_facts={"antigravity": tampered_facts},
+        current_time="2026-09-21T00:01:00Z",
+    )
+    with pytest.raises(TamperDetectionError) as exc:
+        select_agent(registry=registry, routing_policy=policy, routing_context=ctx)
+    assert "remaining_fraction mismatch" in str(exc.value)
+
+
+def test_p1_provenance_group_tampered_rejected() -> None:
+    """Caller tampering group_id in injected facts must fail-closed."""
+    registry = ProviderRegistry()
+    prov = MockM3Provider("antigravity", supported_models=("Gemini 3.8 Flash High",))
+    registry.register(prov)
+
+    snap = AgentUsageSnapshot.create(
+        provider="antigravity",
+        model_group="Gemini Models",
+        quota_windows=[{"window": "5h", "remaining_fraction": 0.8}],
+        captured_at="2026-09-21T00:00:00Z",
+    )
+    grp = QuotaGroupSnapshot(
+        group_id="forged-group-id",
+        display_name="Gemini Models",
+        status=QuotaStatus.HEALTHY,
+        windows=(QuotaWindowSnapshot(window="5h", remaining_fraction=0.8, reset_time=None, status=QuotaStatus.HEALTHY),),
+        bound_models=("Gemini 3.8 Flash High",),
+    )
+    tampered_facts = ProviderQuotaFacts(
+        provider="antigravity",
+        snapshot_ref=f"{snap.snapshot_id}@{snap.usage_content_hash}",
+        captured_at=snap.captured_at,
+        groups=(grp,),
+        binding_profile_version="2026-09-m3.v1",
+        binding_source="versioned_provider_profile",
+    )
+    scope = _create_scope()
+    policy = RoutingPolicy(role=AgentRole.ALPHA_GENERATOR.value, provider_priority=("antigravity",), policy_version="2026-09-m3")
+    ctx = RoutingContext(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        authorized_scope=scope,
+        project_binding=scope.project_binding,
+        usage_snapshots={"antigravity": snap},
+        quota_facts={"antigravity": tampered_facts},
+        current_time="2026-09-21T00:01:00Z",
+    )
+    with pytest.raises(TamperDetectionError) as exc:
+        select_agent(registry=registry, routing_policy=policy, routing_context=ctx)
+    assert "group_id" in str(exc.value) and "mismatch" in str(exc.value)
+
+
+def test_p1_provenance_model_binding_tampered_rejected() -> None:
+    """Caller tampering model bindings in injected facts must fail-closed."""
+    registry = ProviderRegistry()
+    prov = MockM3Provider("antigravity", supported_models=("Gemini 3.8 Flash High",))
+    registry.register(prov)
+
+    snap = AgentUsageSnapshot.create(
+        provider="antigravity",
+        model_group="Gemini Models",
+        quota_windows=[{"window": "5h", "remaining_fraction": 0.8}],
+        captured_at="2026-09-21T00:00:00Z",
+    )
+    valid_facts = AntigravityQuotaNormalizer.normalize(snap, current_time="2026-09-21T00:01:00Z")
+    forged_bindings = (
+        ModelQuotaBinding(
+            provider="antigravity",
+            model="Gemini 3.8 Flash High",
+            quota_group_id="unauthorized-group",
+            binding_profile_version="2026-09-m3.v1",
+            binding_source="versioned_provider_profile",
+        ),
+    )
+    tampered_facts = ProviderQuotaFacts(
+        provider="antigravity",
+        snapshot_ref=f"{snap.snapshot_id}@{snap.usage_content_hash}",
+        captured_at=snap.captured_at,
+        groups=valid_facts.groups,
+        model_bindings=forged_bindings,
+        binding_profile_version=valid_facts.binding_profile_version,
+        binding_source=valid_facts.binding_source,
+    )
+    scope = _create_scope()
+    policy = RoutingPolicy(role=AgentRole.ALPHA_GENERATOR.value, provider_priority=("antigravity",), policy_version="2026-09-m3")
+    ctx = RoutingContext(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        authorized_scope=scope,
+        project_binding=scope.project_binding,
+        usage_snapshots={"antigravity": snap},
+        quota_facts={"antigravity": tampered_facts},
+        current_time="2026-09-21T00:01:00Z",
+    )
+    with pytest.raises(TamperDetectionError) as exc:
+        select_agent(registry=registry, routing_policy=policy, routing_context=ctx)
+    assert "model_bindings" in str(exc.value) and "mismatch" in str(exc.value)
+
+
+def test_p1_provenance_profile_version_tampered_rejected() -> None:
+    """Caller tampering binding_profile_version must fail-closed."""
+    registry = ProviderRegistry()
+    prov = MockM3Provider("antigravity", supported_models=("Gemini 3.8 Flash High",))
+    registry.register(prov)
+
+    snap = AgentUsageSnapshot.create(
+        provider="antigravity",
+        model_group="Gemini Models",
+        quota_windows=[{"window": "5h", "remaining_fraction": 0.8}],
+        captured_at="2026-09-21T00:00:00Z",
+    )
+    valid_facts = AntigravityQuotaNormalizer.normalize(snap, current_time="2026-09-21T00:01:00Z")
+    tampered_facts = ProviderQuotaFacts(
+        provider="antigravity",
+        snapshot_ref=f"{snap.snapshot_id}@{snap.usage_content_hash}",
+        captured_at=snap.captured_at,
+        groups=valid_facts.groups,
+        model_bindings=valid_facts.model_bindings,
+        binding_profile_version="forged-profile-v9",
+        binding_source=valid_facts.binding_source,
+    )
+    scope = _create_scope()
+    policy = RoutingPolicy(role=AgentRole.ALPHA_GENERATOR.value, provider_priority=("antigravity",), policy_version="2026-09-m3")
+    ctx = RoutingContext(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        authorized_scope=scope,
+        project_binding=scope.project_binding,
+        usage_snapshots={"antigravity": snap},
+        quota_facts={"antigravity": tampered_facts},
+        current_time="2026-09-21T00:01:00Z",
+    )
+    with pytest.raises(TamperDetectionError) as exc:
+        select_agent(registry=registry, routing_policy=policy, routing_context=ctx)
+    assert "binding_profile_version" in str(exc.value) and "mismatch" in str(exc.value)
+
+
+def test_p1_provenance_captured_at_mismatch_rejected() -> None:
+    """Caller tampering captured_at timestamp must fail-closed."""
+    registry = ProviderRegistry()
+    prov = MockM3Provider("antigravity", supported_models=("Gemini 3.8 Flash High",))
+    registry.register(prov)
+
+    snap = AgentUsageSnapshot.create(
+        provider="antigravity",
+        model_group="Gemini Models",
+        quota_windows=[{"window": "5h", "remaining_fraction": 0.8}],
+        captured_at="2026-09-21T00:00:00Z",
+    )
+    valid_facts = AntigravityQuotaNormalizer.normalize(snap, current_time="2026-09-21T00:01:00Z")
+    tampered_facts = ProviderQuotaFacts(
+        provider="antigravity",
+        snapshot_ref=f"{snap.snapshot_id}@{snap.usage_content_hash}",
+        captured_at="2026-09-21T00:05:00Z",  # Tampered captured_at
+        groups=valid_facts.groups,
+        model_bindings=valid_facts.model_bindings,
+        binding_profile_version=valid_facts.binding_profile_version,
+        binding_source=valid_facts.binding_source,
+    )
+    scope = _create_scope()
+    policy = RoutingPolicy(role=AgentRole.ALPHA_GENERATOR.value, provider_priority=("antigravity",), policy_version="2026-09-m3")
+    ctx = RoutingContext(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        authorized_scope=scope,
+        project_binding=scope.project_binding,
+        usage_snapshots={"antigravity": snap},
+        quota_facts={"antigravity": tampered_facts},
+        current_time="2026-09-21T00:01:00Z",
+    )
+    with pytest.raises(TamperDetectionError) as exc:
+        select_agent(registry=registry, routing_policy=policy, routing_context=ctx)
+    assert "captured_at" in str(exc.value) and "mismatch" in str(exc.value)
+
+
+def test_p1_provenance_freshness_is_stale_mismatch_rejected() -> None:
+    """Underlying stale snapshot (age > max_age) with caller forging is_stale=False must fail-closed."""
+    registry = ProviderRegistry()
+    prov = MockM3Provider("antigravity", supported_models=("Gemini 3.8 Flash High",))
+    registry.register(prov)
+
+    # Snapshot captured 1 hour ago
+    snap = AgentUsageSnapshot.create(
+        provider="antigravity",
+        model_group="Gemini Models",
+        quota_windows=[{"window": "5h", "remaining_fraction": 0.8}],
+        captured_at="2026-09-21T00:00:00Z",
+    )
+    # At current_time 01:00:00Z, age is 3600s > max_age_seconds (300s). Ground truth is stale=True.
+    # Caller constructs forged facts claiming is_stale=False.
+    valid_facts = AntigravityQuotaNormalizer.normalize(
+        snap,
+        max_age_seconds=300.0,
+        current_time="2026-09-21T00:01:00Z",  # 60s age -> is_stale=False
+    )
+    # When router evaluates at current_time 01:00:00Z, expected_facts.is_stale=True, but injected is_stale=False:
+    scope = _create_scope()
+    policy = RoutingPolicy(role=AgentRole.ALPHA_GENERATOR.value, provider_priority=("antigravity",), policy_version="2026-09-m3")
+    ctx = RoutingContext(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        authorized_scope=scope,
+        project_binding=scope.project_binding,
+        usage_snapshots={"antigravity": snap},
+        quota_facts={"antigravity": valid_facts},
+        current_time="2026-09-21T01:00:00Z",  # 3600s later!
+    )
+    with pytest.raises(TamperDetectionError) as exc:
+        select_agent(registry=registry, routing_policy=policy, routing_context=ctx)
+    assert "freshness is_stale" in str(exc.value) and "mismatch" in str(exc.value)
+
+
+def test_p1_provenance_deterministic_recompute_legitimate_pass() -> None:
+    """Legitimately normalized ProviderQuotaFacts matching ground truth must pass exact equality validation."""
+    registry = ProviderRegistry()
+    prov = MockM3Provider("antigravity", supported_models=("Gemini 3.8 Flash High",))
+    registry.register(prov)
+
+    snap = AgentUsageSnapshot.create(
+        provider="antigravity",
+        model_group="Gemini Models",
+        quota_windows=[
+            {"window": "5h", "remaining_fraction": 0.75, "reset_time": "2026-09-21T05:00:00Z"},
+            {"window": "weekly", "remaining_fraction": 0.60, "reset_time": "2026-09-28T00:00:00Z"},
+        ],
+        captured_at="2026-09-21T00:00:00Z",
+    )
+    current_time = "2026-09-21T00:02:00Z"
+    legit_facts = AntigravityQuotaNormalizer.normalize(
+        snap,
+        healthy_threshold=0.30,
+        max_age_seconds=300.0,
+        current_time=current_time,
+        binding_profile_version="2026-09-m3.v1",
+    )
+    scope = _create_scope()
+    policy = RoutingPolicy(role=AgentRole.ALPHA_GENERATOR.value, provider_priority=("antigravity",), policy_version="2026-09-m3")
+    ctx = RoutingContext(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        authorized_scope=scope,
+        project_binding=scope.project_binding,
+        usage_snapshots={"antigravity": snap},
+        quota_facts={"antigravity": legit_facts},
+        current_time=current_time,
+    )
+    route = select_agent(registry=registry, routing_policy=policy, routing_context=ctx)
+    assert route.resolved_model == "Gemini 3.8 Flash High"
+    assert route.quota_group == "gemini-shared"
+    assert route.usage_snapshot_ref == f"{snap.snapshot_id}@{snap.usage_content_hash}"
+    assert len(route.candidate_trace) == 1
+    tr = route.candidate_trace[0]
+    assert tr["decision"] == "selected"
+    assert tr["quota_group"] == "gemini-shared"
+    assert tr["quota_status"] == QuotaStatus.HEALTHY.value
+    assert len(tr["quota_windows"]) == 2
