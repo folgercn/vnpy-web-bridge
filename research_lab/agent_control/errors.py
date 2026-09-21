@@ -107,3 +107,46 @@ def assert_provider_error_does_not_pollute_scientific_decision(error: Exception)
                 raise ValueError(
                     f"Violation: ProviderError details contain forbidden scientific verdict: {k}={v}"
                 )
+
+
+class ResearchMemoryAccessError(ProviderError):
+    """Base error for Controlled Research Memory View access control failure."""
+
+    def __init__(
+        self,
+        message: str,
+        reason_code: str = "MEMORY_PERMISSION_DENIED",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        det = dict(details or {})
+        det["reason_code"] = reason_code
+        super().__init__(ProviderErrorCode.PERMISSION_DENIED, message, det)
+        self.reason_code = reason_code
+
+
+class ResearchMemoryPermissionError(ResearchMemoryAccessError):
+    """Raised when role or authorization scope lacks read_research_memory permission."""
+
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message, reason_code="MEMORY_PERMISSION_DENIED", details=details)
+
+
+class ResearchMemoryCategoryError(ResearchMemoryAccessError):
+    """Raised when query requests an unknown or unauthorized memory category."""
+
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message, reason_code="MEMORY_CATEGORY_DENIED", details=details)
+
+
+class ResearchMemoryLimitError(ResearchMemoryAccessError):
+    """Raised when requested query limit exceeds bounded policy maximum."""
+
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message, reason_code="MEMORY_LIMIT_EXCEEDED", details=details)
+
+
+class ResearchMemorySourceCorruptionError(ResearchMemoryAccessError):
+    """Raised when source research record content/decision/evidence hash is corrupted."""
+
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message, reason_code="MEMORY_SOURCE_CORRUPT", details=details)
