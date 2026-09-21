@@ -18,6 +18,7 @@ import ast
 import csv
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,7 @@ from research_lab.agent_control.errors import (
     ProviderError,
     ProviderErrorCode,
     ProviderUnavailableError,
+    ResultAcceptanceError,
     TamperDetectionError,
     assert_provider_error_does_not_pollute_scientific_decision,
 )
@@ -286,14 +288,20 @@ class MockLocalMCPTransport(LocalMCPTransport):
     def _mock_result(self, args: dict[str, Any]) -> dict[str, Any]:
         job_id = args.get("job_id", "")
         job_data = self._jobs.get(job_id, {})
+        raw_status = job_data.get("status", "COMPLETED")
+        is_failed = raw_status == "FAILED"
+        terminal_status = "FAILED" if is_failed else ("SUCCESS" if raw_status == "COMPLETED" else raw_status)
+        outcome = "FAILED" if is_failed else "TURN_COMPLETE"
+        output = job_data.get("output", {"content": "Antigravity result"})
+        response = job_data.get("response", "Antigravity result")
         return {
             "job_id": job_id,
-            "status": "COMPLETED",
-            "terminal_status": "SUCCESS",
-            "outcome": "TURN_COMPLETE",
-            "response": job_data.get("response", "Antigravity result"),
-            "structured_output": job_data.get("output", {"content": "Antigravity result"}),
-            "issues": [],
+            "status": raw_status,
+            "terminal_status": terminal_status,
+            "outcome": outcome,
+            "response": response,
+            "structured_output": output,
+            "issues": ["Execution failure injected"] if is_failed else [],
         }
 
     def _mock_cancel(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -983,3 +991,118 @@ def test_anti_leakage_guard_zero_test_provider_special_casing_in_business_logic(
                     assert node.value != token, (
                         f"Leakage detected! Agent Control file '{py_file}' contains special-case string '{token}'"
                     )
+
+
+# =====================================================================
+# 10. Review Counterexamples & Remediation Tests (Review P1 Blockers)
+# =====================================================================
+
+class FlawedAcceptanceProvider(ContractTestProvider):
+    """Malicious/faulty provider that unconditionally marks empty deliverable as ACCEPTED."""
+
+    def result(self, handle: Any, preparation: Any = None) -> Any:
+        res = super().result(handle, preparation)
+        # Violate frozen acceptance boundary: force empty deliverable to be ACCEPTED
+        return replace(res, acceptance_status="ACCEPTED")
+
+
+def test_reproduced_flawed_acceptance_provider_fails_conformance() -> None:
+    """Review P1-1 Remediation: Acceptance check must strictly FAIL for flawed providers."""
+    flawed_provider = FlawedAcceptanceProvider()
+    suite = AgentProviderConformanceSuite(workspace_identity=WORKSPACE_IDENTITY)
+
+    # 1. Acceptance boundary check must fail
+    check_res = suite.check_acceptance_boundary(flawed_provider)
+    assert check_res.passed is False
+    assert "Flawed provider accepted an empty deliverable" in check_res.error_detail
+
+    # 2. Overall suite execution must NOT be 10/10 PASS
+    report = suite.run_all(flawed_provider)
+    assert report.is_all_passed is False
+    conformance_dict = {r.contract_name: r.passed for r in report.results}
+    assert conformance_dict["Acceptance boundary"] is False
+
+
+def test_reproduced_unknown_running_and_failed_submission_recovery_fail_closed(
+    test_provider: ContractTestProvider,
+) -> None:
+    """Review P1-2 Remediation: UNKNOWN/RUNNING and failed submissions must fail closed."""
+    suite = AgentProviderConformanceSuite(workspace_identity=WORKSPACE_IDENTITY)
+    task, route, registry = suite._build_standard_fixtures(test_provider, work_block="wb-m5-unknown")
+    prep = prepare_execution(task, route, registry)
+
+    _, _, raw_alpha_json = _build_m5_fixtures()
+    test_provider.set_configured_output(task.task_id, raw_alpha_json)
+
+    handle_unknown = test_provider.submit(task, route, prep, request_id="req-m5-unknown")
+    test_provider.set_job_status(handle_unknown.provider_job_ref, "UNKNOWN")
+
+    res_unknown = test_provider.result(handle_unknown, prep)
+    assert res_unknown.terminal_status == "UNCERTAIN"
+    assert res_unknown.acceptance_status == "REJECTED"
+
+    # Must fail closed in real M5 admission pipeline
+    with pytest.raises(ResultAcceptanceError, match="provider result is not accepted"):
+        from research_lab.agent_control.alpha_generator import _extract_raw_output
+
+        _extract_raw_output(res_unknown)
+
+    # 2. RUNNING status must reject result query (not completed)
+    test_provider.set_job_status(handle_unknown.provider_job_ref, "RUNNING")
+    with pytest.raises(ProviderError, match="is still in non-terminal state"):
+        test_provider.result(handle_unknown, prep)
+
+    # 3. Transport invocation failure must not record false idempotency cache
+    transport = test_provider._transport
+    fail_counter = 0
+
+    def failing_invoker(op: str, payload: dict[str, Any]) -> dict[str, Any]:
+        nonlocal fail_counter
+        fail_counter += 1
+        if fail_counter == 1:
+            raise ProviderUnavailableError("Simulated transient transport failure")
+        return {"operation": op, "status": "COMPLETED", "output": payload.get("input", {})}
+
+    transport.set_custom_invoker(failing_invoker)
+    task_retry, route_retry, reg_retry = suite._build_standard_fixtures(test_provider, work_block="wb-retry-transport")
+    prep_retry = prepare_execution(task_retry, route_retry, reg_retry)
+
+    # First attempt fails at transport
+    with pytest.raises(ProviderUnavailableError, match="Simulated transient transport failure"):
+        test_provider.submit(task_retry, route_retry, prep_retry, request_id="req-retry-01")
+
+    # Second attempt must actually invoke transport again (call_counter == 2) instead of cache hit
+    handle_recovered = test_provider.submit(task_retry, route_retry, prep_retry, request_id="req-retry-01")
+    assert fail_counter == 2
+    assert handle_recovered.provider_job_ref is not None
+    transport.set_custom_invoker(None)
+
+
+def test_reproduced_cross_project_and_cross_task_result_mixing_strictly_rejected(
+    test_provider: ContractTestProvider,
+) -> None:
+    """Review P1-3 Remediation: Result query cross-validates original task, route, and project."""
+    suite = AgentProviderConformanceSuite(workspace_identity=WORKSPACE_IDENTITY)
+    task_a, route_a, reg_a = suite._build_standard_fixtures(
+        test_provider,
+        override_binding={"project_id": "project_alpha", "workspace_identity": "/ws/alpha"},
+        work_block="wb-proj-a",
+    )
+    task_b, route_b, reg_b = suite._build_standard_fixtures(
+        test_provider,
+        override_binding={"project_id": "project_beta", "workspace_identity": "/ws/beta"},
+        work_block="wb-proj-b",
+    )
+
+    prep_a = prepare_execution(task_a, route_a, reg_a)
+    prep_b = prepare_execution(task_b, route_b, reg_b)
+
+    handle_a = test_provider.submit(task_a, route_a, prep_a, request_id="req-proj-a")
+    handle_b = test_provider.submit(task_b, route_b, prep_b, request_id="req-proj-b")
+
+    # Attacker tries to mix Job A with Task/Route/Preparation B
+    mixed_handle = replace(handle_a, task_ref=dict(handle_b.task_ref), route_ref=dict(handle_b.route_ref))
+
+    with pytest.raises((PermissionDeniedError, ProjectBindingError), match="cross-task replay rejected|mismatch"):
+        test_provider.result(mixed_handle, prep_b)
+

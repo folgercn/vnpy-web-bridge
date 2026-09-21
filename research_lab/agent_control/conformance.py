@@ -332,27 +332,7 @@ class AgentProviderConformanceSuite:
     def check_acceptance_boundary(self, provider: AgentProvider) -> ContractCheckResult:
         """5. Acceptance boundary: empty deliverable is REJECTED even if provider reported SUCCESS."""
         try:
-            task, route, registry = self._build_standard_fixtures(provider, work_block="wb-conf-05-empty")
-            prep = prepare_execution(task, route, registry)
-            # Create a task designed to return or simulate an empty deliverable
-            if hasattr(provider, "set_configured_output"):
-                provider.set_configured_output(task.task_id, False)  # inject empty deliverable
-
-            handle = provider.submit(task, route, prep, request_id=f"req-accept-{task.task_id}")
-            result = provider.result(handle, prep)
-
-            # Clean up configured output if injected
-            if hasattr(provider, "set_configured_output"):
-                provider.set_configured_output(task.task_id, None)
-
-            if result.terminal_status == "SUCCESS" and result.acceptance_status in {"REJECTED", "REJECTED_BY_ACCEPTANCE"}:
-                return ContractCheckResult(
-                    contract_name="Acceptance boundary",
-                    passed=True,
-                    evidence="Self-reported SUCCESS without deliverable properly marked REJECTED by acceptance boundary",
-                )
-
-            # Also check standard valid deliverable passes acceptance
+            # 1. First verify standard valid deliverable passes acceptance cleanly
             task_ok, route_ok, reg_ok = self._build_standard_fixtures(
                 provider, prompt="Valid prompt with actual deliverable content", work_block="wb-conf-05-valid"
             )
@@ -360,17 +340,67 @@ class AgentProviderConformanceSuite:
             handle_ok = provider.submit(task_ok, route_ok, prep_ok, request_id=f"req-ok-{task_ok.task_id}")
             result_ok = provider.result(handle_ok, prep_ok)
 
-            if result_ok.acceptance_status == "ACCEPTED":
+            if result_ok.terminal_status != "SUCCESS" or result_ok.acceptance_status != "ACCEPTED":
                 return ContractCheckResult(
                     contract_name="Acceptance boundary",
-                    passed=True,
-                    evidence="Valid result passed acceptance and empty result properly rejected",
+                    passed=False,
+                    error_detail=f"Valid deliverable failed acceptance: terminal={result_ok.terminal_status}, acceptance={result_ok.acceptance_status}",
+                )
+
+            # 2. Inject empty deliverable to verify provider REJECTS empty output despite SUCCESS
+            task_empty, route_empty, reg_empty = self._build_standard_fixtures(
+                provider, work_block="wb-conf-05-empty"
+            )
+            prep_empty = prepare_execution(task_empty, route_empty, reg_empty)
+
+            empty_injected = False
+            if hasattr(provider, "set_configured_output"):
+                provider.set_configured_output(task_empty.task_id, False)  # inject empty deliverable
+                empty_injected = True
+
+            handle_empty = provider.submit(task_empty, route_empty, prep_empty, request_id=f"req-accept-{task_empty.task_id}")
+
+            # If provider transport supports mock job output (e.g. AntigravityLocalMCPProvider)
+            transport = getattr(provider, "transport", getattr(provider, "_transport", None))
+            if not empty_injected and transport is not None and hasattr(transport, "_jobs"):
+                job_ref = handle_empty.provider_job_ref
+                if job_ref in transport._jobs:
+                    transport._jobs[job_ref]["output"] = {}
+                    transport._jobs[job_ref]["response"] = ""
+                    empty_injected = True
+
+            if not empty_injected:
+                return ContractCheckResult(
+                    contract_name="Acceptance boundary",
+                    passed=False,
+                    error_detail="Provider does not support empty deliverable injection for acceptance boundary test",
+                )
+
+            result_empty = provider.result(handle_empty, prep_empty)
+
+            # Clean up configured output if injected
+            if hasattr(provider, "set_configured_output"):
+                provider.set_configured_output(task_empty.task_id, None)
+
+            # Strict negative assertion: empty deliverable MUST NOT be ACCEPTED
+            if result_empty.acceptance_status == "ACCEPTED":
+                return ContractCheckResult(
+                    contract_name="Acceptance boundary",
+                    passed=False,
+                    error_detail="Flawed provider accepted an empty deliverable (Provider reported SUCCESS != Acceptance SUCCESS violated)",
+                )
+
+            if result_empty.acceptance_status not in {"REJECTED", "REJECTED_BY_ACCEPTANCE"}:
+                return ContractCheckResult(
+                    contract_name="Acceptance boundary",
+                    passed=False,
+                    error_detail=f"Empty deliverable not marked as REJECTED: acceptance_status='{result_empty.acceptance_status}'",
                 )
 
             return ContractCheckResult(
                 contract_name="Acceptance boundary",
                 passed=True,
-                evidence="Acceptance status cleanly distinguishes ACCEPTED from REJECTED",
+                evidence="Valid deliverable was ACCEPTED and empty deliverable was strictly REJECTED (both positive and negative assertions verified)",
             )
         except Exception as exc:  # noqa: BLE001
             return ContractCheckResult(
@@ -551,23 +581,59 @@ class AgentProviderConformanceSuite:
             task, route, registry = self._build_standard_fixtures(provider, work_block="wb-conf-10-pollution")
             prep = prepare_execution(task, route, registry)
 
+            handle = provider.submit(task, route, prep, request_id=f"req-fail-{task.task_id}")
+
+            failure_injected = False
             # Simulate an execution failure
             if hasattr(provider, "set_job_status"):
-                handle = provider.submit(task, route, prep, request_id=f"req-fail-{task.task_id}")
                 provider.set_job_status(handle.provider_job_ref, "FAILED")
-                res = provider.result(handle, prep)
+                failure_injected = True
+            else:
+                transport = getattr(provider, "transport", getattr(provider, "_transport", None))
+                if transport is not None and hasattr(transport, "_jobs"):
+                    job_ref = handle.provider_job_ref
+                    if job_ref in transport._jobs:
+                        transport._jobs[job_ref]["status"] = "FAILED"
+                        failure_injected = True
 
-                # Ensure result is REJECTED / FAILED and contains NO scientific decisions
-                assert res.terminal_status == "FAILED"
-                assert res.acceptance_status == "REJECTED"
-                # Provider result envelope must not contain scientific fields
-                assert "scientific_decision" not in (res.structured_output or {})
-                assert "critic_decision" not in (res.structured_output or {})
+            if not failure_injected:
+                return ContractCheckResult(
+                    contract_name="No scientific pollution",
+                    passed=False,
+                    error_detail="Provider does not support failure injection for scientific pollution check",
+                )
+
+            res = provider.result(handle, prep)
+
+            # Ensure result is REJECTED / FAILED and contains NO scientific decisions
+            if res.terminal_status not in {"FAILED", "UNCERTAIN"}:
+                return ContractCheckResult(
+                    contract_name="No scientific pollution",
+                    passed=False,
+                    error_detail=f"Expected terminal_status FAILED or UNCERTAIN on execution failure, got '{res.terminal_status}'",
+                )
+
+            if res.acceptance_status not in {"REJECTED", "REJECTED_BY_ACCEPTANCE"}:
+                return ContractCheckResult(
+                    contract_name="No scientific pollution",
+                    passed=False,
+                    error_detail=f"Expected acceptance_status REJECTED on execution failure, got '{res.acceptance_status}'",
+                )
+
+            # Provider result envelope must not contain scientific fields
+            struct = res.structured_output or {}
+            for forbidden_key in ("scientific_decision", "critic_decision", "decision", "gate_decision"):
+                if forbidden_key in struct:
+                    return ContractCheckResult(
+                        contract_name="No scientific pollution",
+                        passed=False,
+                        error_detail=f"Provider result envelope contains forbidden scientific field '{forbidden_key}'",
+                    )
 
             return ContractCheckResult(
                 contract_name="No scientific pollution",
                 passed=True,
-                evidence="Provider execution failure mapped cleanly without producing false scientific decision",
+                evidence="Provider execution failure verified with zero scientific decision pollution",
             )
         except Exception as exc:  # noqa: BLE001
             return ContractCheckResult(

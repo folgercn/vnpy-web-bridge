@@ -35,6 +35,7 @@ from research_lab.agent_control.contracts import (
 )
 from research_lab.agent_control.errors import (
     PermissionDeniedError,
+    ProjectBindingError,
     ProviderError,
     ProviderErrorCode,
     ProviderUnavailableError,
@@ -276,6 +277,17 @@ class ContractTestProvider:
         job_hash = hashlib.sha256(f"{task.task_id}::{effective_req_id}".encode()).hexdigest()[:10]
         job_id = f"testjob-{job_hash}"
 
+        # 7. Invoke transport to record interaction BEFORE committing state/cache
+        # If transport raises an exception, submission is NOT recorded and retry will call transport again
+        self._transport.invoke(
+            "execute",
+            {
+                "input": payload_data,
+                "job_id": job_id,
+                "request_id": effective_req_id,
+            },
+        )
+
         self._submissions[sub_key] = {
             "job_id": job_id,
             "payload_signature": payload_signature,
@@ -289,16 +301,6 @@ class ContractTestProvider:
             "route": route,
             "task": task,
         }
-
-        # Invoke transport to record interaction
-        self._transport.invoke(
-            "execute",
-            {
-                "input": payload_data,
-                "job_id": job_id,
-                "request_id": effective_req_id,
-            },
-        )
 
         return AgentExecutionHandle(
             handle_id=f"handle-{job_id}",
@@ -356,79 +358,139 @@ class ContractTestProvider:
             raise self._failure_injections["result"]
 
         job_id = handle.provider_job_ref
-        meta = self._job_metadata.get(job_id, {})
-        task: AgentTask | None = meta.get("task")
-        route: AgentRoute | None = meta.get("route")
-
-        if task is None or route is None:
+        meta = self._job_metadata.get(job_id)
+        if meta is None:
             raise ProviderError(
                 ProviderErrorCode.EXECUTION_FAILED,
                 f"No submission metadata found for job '{job_id}'",
                 details={"job_id": job_id},
             )
 
+        orig_task: AgentTask = meta["task"]
+        orig_route: AgentRoute = meta["route"]
+
+        # 1. Exact identity & cross-task/cross-project replay verification
+        handle_task_ref = handle.task_ref if isinstance(handle.task_ref, dict) else handle.task_ref.to_dict()
+        handle_route_ref = handle.route_ref if isinstance(handle.route_ref, dict) else handle.route_ref.to_dict()
+
+        handle_task_id = handle_task_ref.get("task_id")
+        if handle_task_id != orig_task.task_id:
+            raise PermissionDeniedError(
+                f"Job '{job_id}' was submitted for task '{orig_task.task_id}', but handle has task '{handle_task_id}' (cross-task replay rejected)",
+                details={"job_id": job_id, "original_task_id": orig_task.task_id, "handle_task_id": handle_task_id},
+            )
+
+        handle_route_id = handle_route_ref.get("route_id")
+        if handle_route_id != orig_route.route_id:
+            raise PermissionDeniedError(
+                f"Job '{job_id}' was submitted for route '{orig_route.route_id}', but handle has route '{handle_route_id}'",
+                details={"job_id": job_id, "original_route_id": orig_route.route_id, "handle_route_id": handle_route_id},
+            )
+
+        handle_project_binding = handle_task_ref.get("project_binding")
+        if dict(handle_project_binding or {}) != dict(orig_task.project_binding):
+            raise ProjectBindingError(
+                f"Job '{job_id}' project_binding mismatch between handle and original submission (cross-project replay rejected)",
+                details={"job_id": job_id, "expected": dict(orig_task.project_binding), "actual": dict(handle_project_binding or {})},
+            )
+
+        if preparation is not None:
+            prep_task_id = getattr(preparation, "task_id", None) or (preparation.get("task_id") if isinstance(preparation, dict) else None)
+            prep_route_id = getattr(preparation, "route_id", None) or (preparation.get("route_id") if isinstance(preparation, dict) else None)
+            if prep_task_id != orig_task.task_id:
+                raise PermissionDeniedError(
+                    f"Preparation task_id '{prep_task_id}' does not match original job task_id '{orig_task.task_id}'",
+                    details={"job_id": job_id, "prep_task_id": prep_task_id, "original_task_id": orig_task.task_id},
+                )
+            if prep_route_id != orig_route.route_id:
+                raise PermissionDeniedError(
+                    f"Preparation route_id '{prep_route_id}' does not match original job route_id '{orig_route.route_id}'",
+                    details={"job_id": job_id, "prep_route_id": prep_route_id, "original_route_id": orig_route.route_id},
+                )
+
+        # 2. Closed status mapping: only confirmed terminal COMPLETED can yield SUCCESS
         job_status = self._job_statuses.get(job_id, "COMPLETED")
 
-        # Check configured output by job_id or task_id
-        configured = self._job_outputs.get(job_id, self._job_outputs.get(task.task_id))
-
-        terminal_status = TerminalStatus.SUCCESS.value
-        acceptance_status = "ACCEPTED"
         tool_failures: list[str] = []
         raw_result_ref: str | None = None
         structured_output: dict[str, Any] | None = None
+        terminal_status: str
+        acceptance_status: str
 
-        if job_status == "FAILED":
+        if job_status in {"RUNNING", "SUBMITTED"}:
+            raise ProviderError(
+                ProviderErrorCode.EXECUTION_FAILED,
+                f"Job '{job_id}' is still in non-terminal state '{job_status}', result cannot be retrieved",
+                details={"job_id": job_id, "status": job_status},
+            )
+        elif job_status == "FAILED":
             terminal_status = TerminalStatus.FAILED.value
             acceptance_status = "REJECTED"
             tool_failures.append("Execution failure injected")
-        elif job_status in {"CANCEL_REQUESTED", "CANCELLED"}:
+        elif job_status == "CANCELLED":
             terminal_status = TerminalStatus.CANCELLED.value
             acceptance_status = "REJECTED"
-        elif job_status == "UNCERTAIN":
+        elif job_status in {"UNKNOWN", "UNCERTAIN", "CANCEL_REQUESTED"}:
             terminal_status = TerminalStatus.UNCERTAIN.value
             acceptance_status = "REJECTED"
-            tool_failures.append("Execution state uncertain")
-        elif configured is not None:
-            if isinstance(configured, dict):
-                structured_output = copy.deepcopy(configured)
-                raw_result_ref = json.dumps(structured_output)
-            elif isinstance(configured, str):
-                raw_result_ref = configured
-                # If valid json, also populate structured_output
-                try:
-                    loaded = json.loads(configured)
-                    if isinstance(loaded, dict):
-                        structured_output = loaded
-                except (json.JSONDecodeError, TypeError, ValueError):
-                    structured_output = {"text": configured}
-            elif configured is False:
-                # Explicit empty deliverable test
-                raw_result_ref = ""
-                structured_output = {}
-        else:
-            # Default minimal valid deliverable
-            structured_output = {
-                "output": f"Executed task '{task.task_id}' successfully by {self._provider_name}",
-                "status": "SUCCESS",
-            }
-            raw_result_ref = json.dumps(structured_output)
+            tool_failures.append(f"Uncertain or unconfirmed execution status: {job_status}")
+        elif job_status == "COMPLETED":
+            terminal_status = TerminalStatus.SUCCESS.value
+            acceptance_status = "ACCEPTED"
 
-        # Provider SUCCESS != Acceptance SUCCESS enforcement:
-        # If terminal_status is SUCCESS but deliverable is empty, acceptance MUST reject
-        if terminal_status == TerminalStatus.SUCCESS.value:
+            # Check configured output by job_id or task_id
+            configured = self._job_outputs.get(job_id, self._job_outputs.get(orig_task.task_id))
+            if configured is not None:
+                if isinstance(configured, dict):
+                    structured_output = copy.deepcopy(configured)
+                    raw_result_ref = json.dumps(structured_output)
+                elif isinstance(configured, str):
+                    raw_result_ref = configured
+                    try:
+                        loaded = json.loads(configured)
+                        if isinstance(loaded, dict):
+                            structured_output = loaded
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        structured_output = {"text": configured}
+                elif configured is False:
+                    raw_result_ref = ""
+                    structured_output = {}
+            else:
+                structured_output = {
+                    "output": f"Executed task '{orig_task.task_id}' successfully by {self._provider_name}",
+                    "status": "SUCCESS",
+                }
+                raw_result_ref = json.dumps(structured_output)
+
+            # Provider SUCCESS != Acceptance SUCCESS enforcement:
+            # If terminal_status is SUCCESS but deliverable is empty, acceptance MUST reject
             has_content = False
-            if raw_result_ref and raw_result_ref.strip() or structured_output and any(bool(v) for v in structured_output.values()):
+            if raw_result_ref and raw_result_ref.strip():
+                try:
+                    parsed = json.loads(raw_result_ref)
+                    if isinstance(parsed, dict) and parsed:
+                        has_content = any(bool(v) for v in parsed.values())
+                    elif parsed:
+                        has_content = True
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    has_content = True
+            elif structured_output and any(bool(v) for v in structured_output.values()):
                 has_content = True
 
             if not has_content:
                 acceptance_status = "REJECTED"
                 tool_failures.append("Provider self-reported SUCCESS but delivered empty deliverable")
+        else:
+            raise ProviderError(
+                ProviderErrorCode.EXECUTION_FAILED,
+                f"Unrecognized job status '{job_status}'",
+                details={"job_id": job_id, "status": job_status},
+            )
 
-        # Create standard AgentResult
+        # Create standard AgentResult using verified original task_ref and route_ref
         agent_result = AgentResult.create(
-            task_ref=dict(handle.task_ref),
-            route_ref=dict(handle.route_ref),
+            task_ref=dict(orig_task.to_dict()),
+            route_ref=dict(orig_route.to_dict()),
             provider_job_ref=job_id,
             terminal_status=terminal_status,
             raw_result_ref=raw_result_ref,
