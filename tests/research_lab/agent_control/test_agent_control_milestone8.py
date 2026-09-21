@@ -1105,4 +1105,3 @@ def test_reproduced_cross_project_and_cross_task_result_mixing_strictly_rejected
 
     with pytest.raises((PermissionDeniedError, ProjectBindingError), match="cross-task replay rejected|mismatch"):
         test_provider.result(mixed_handle, prep_b)
-
