@@ -19,16 +19,36 @@ fi
 HOST="${AGY_MCP_HOST:-127.0.0.1}"
 PORT="${AGY_MCP_PORT:-8765}"
 TRANSPORT="${AGY_MCP_TRANSPORT:-sse}"
+SOCKET_PATH="${AGY_MCP_SOCKET_PATH:-${SCRIPT_DIR}/data/antigravity_mcp.sock}"
+
+if [[ $# -gt 0 ]]; then
+  echo "======================================================================"
+  echo " Starting Antigravity MCP Server (CLI arguments provided)..."
+  echo " Python : ${PYTHON_BIN}"
+  echo " Args   : $*"
+  echo "======================================================================"
+  exec "${PYTHON_BIN}" "${SCRIPT_DIR}/server.py" "$@"
+fi
 
 echo "======================================================================"
-echo " Starting Antigravity Network MCP Server..."
+echo " Starting Antigravity MCP Server..."
 echo " Python    : ${PYTHON_BIN}"
 echo " Transport : ${TRANSPORT}"
-echo " Bind Host : ${HOST}"
-echo " Port      : ${PORT}"
+if [[ "${TRANSPORT}" == "socket" ]]; then
+  echo " Socket    : ${SOCKET_PATH}"
+else
+  echo " Bind Host : ${HOST}"
+  echo " Port      : ${PORT}"
+fi
 echo "======================================================================"
 
-exec "${PYTHON_BIN}" "${SCRIPT_DIR}/server.py" \
-  --transport "${TRANSPORT}" \
-  --host "${HOST}" \
-  --port "${PORT}"
+if [[ "${TRANSPORT}" == "socket" ]]; then
+  exec "${PYTHON_BIN}" "${SCRIPT_DIR}/server.py" \
+    --transport "socket" \
+    --socket "${SOCKET_PATH}"
+else
+  exec "${PYTHON_BIN}" "${SCRIPT_DIR}/server.py" \
+    --transport "${TRANSPORT}" \
+    --host "${HOST}" \
+    --port "${PORT}"
+fi
