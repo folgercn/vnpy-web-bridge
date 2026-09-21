@@ -1038,3 +1038,346 @@ def test_31_real_account_usage_routing_mock_e2e() -> None:
     assert route.quota_group == "gemini-shared"
     assert route.route_reason_code == RouteReasonCode.PRIMARY_HEALTHY.value
     assert route.usage_snapshot_ref == f"{usage.snapshot_id}@{usage.usage_content_hash}"
+
+
+# ---------------------------------------------------------------------------
+# Gate 3 P1 Remediation Targeted Test Cases
+# ---------------------------------------------------------------------------
+
+
+# P1-1: M3 missing usage fail closed & explicit opt-in
+def test_p1_1_m3_default_missing_usage_fails_closed() -> None:
+    registry = ProviderRegistry()
+    prov = MockM3Provider("antigravity", supported_models=("gemini-2.5-pro",))
+    registry.register(prov)
+
+    scope = _create_scope()
+    # No allow_missing_usage provided -> should default to conservative fail-closed under M3
+    policy = RoutingPolicy(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        provider_priority=("antigravity",),
+        policy_version="2026-09-m3",
+    )
+    ctx = RoutingContext(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        authorized_scope=scope,
+        project_binding=scope.project_binding,
+        usage_snapshots={},  # Missing snapshot
+    )
+    with pytest.raises(QuotaUnavailableError) as exc:
+        select_agent(registry=registry, routing_policy=policy, routing_context=ctx)
+    assert "missing required usage snapshot" in str(exc.value)
+
+
+def test_p1_1_m3_explicit_opt_in_allows_missing() -> None:
+    registry = ProviderRegistry()
+    prov = MockM3Provider("antigravity", supported_models=("gemini-2.5-pro",))
+    registry.register(prov)
+
+    scope = _create_scope()
+    # Explicit opt-in allow_missing_usage=True under M3
+    policy = RoutingPolicy(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        provider_priority=("antigravity",),
+        allow_missing_usage=True,
+        policy_version="2026-09-m3",
+    )
+    ctx = RoutingContext(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        authorized_scope=scope,
+        project_binding=scope.project_binding,
+        usage_snapshots={},
+    )
+    route = select_agent(registry=registry, routing_policy=policy, routing_context=ctx)
+    assert route.provider == "antigravity"
+    assert route.usage_snapshot_ref is None
+
+
+def test_p1_1_legacy_policy_allows_missing_by_default() -> None:
+    registry = ProviderRegistry()
+    prov = MockM3Provider("antigravity", supported_models=("gemini-2.5-pro",))
+    registry.register(prov)
+
+    scope = _create_scope()
+    # Legacy policy_version="2026-09-m1" retains default permissive missing usage
+    policy = RoutingPolicy(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        provider_priority=("antigravity",),
+        policy_version="2026-09-m1",
+    )
+    ctx = RoutingContext(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        authorized_scope=scope,
+        project_binding=scope.project_binding,
+        usage_snapshots={},
+    )
+    route = select_agent(registry=registry, routing_policy=policy, routing_context=ctx)
+    assert route.provider == "antigravity"
+    assert route.usage_snapshot_ref is None
+
+
+# P1-2: quota_facts injection bypass prevention & anti-forgery
+def test_p1_2_quota_facts_without_snapshot_strictly_rejected() -> None:
+    registry = ProviderRegistry()
+    prov = MockM3Provider("antigravity", supported_models=("gemini-2.5-pro",))
+    registry.register(prov)
+
+    scope = _create_scope()
+    grp = QuotaGroupSnapshot(
+        group_id="gemini-shared",
+        display_name="Gemini Models",
+        status=QuotaStatus.HEALTHY,
+        windows=(),
+        bound_models=("gemini-2.5-pro",),
+    )
+    facts = ProviderQuotaFacts(
+        provider="antigravity",
+        snapshot_ref="fake_ref",
+        captured_at="2026-09-21T00:00:00Z",
+        groups=(grp,),
+    )
+    policy = RoutingPolicy(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        provider_priority=("antigravity",),
+        policy_version="2026-09-m3",
+    )
+    # Context passes quota_facts but NO usage_snapshots
+    ctx = RoutingContext(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        authorized_scope=scope,
+        project_binding=scope.project_binding,
+        usage_snapshots={},
+        quota_facts={"antigravity": facts},
+    )
+    with pytest.raises(QuotaUnavailableError) as exc:
+        select_agent(registry=registry, routing_policy=policy, routing_context=ctx)
+    assert "cannot use quota_facts without a corresponding verified AgentUsageSnapshot" in str(exc.value)
+
+
+def test_p1_2_quota_facts_ref_mismatch_rejected() -> None:
+    registry = ProviderRegistry()
+    prov = MockM3Provider("antigravity", supported_models=("gemini-2.5-pro",))
+    registry.register(prov)
+
+    snap = AgentUsageSnapshot.create(
+        provider="antigravity",
+        model_group="Gemini Models",
+        quota_windows=[{"window": "5h", "remaining_fraction": 0.8}],
+        captured_at="2026-09-21T00:00:00Z",
+    )
+    grp = QuotaGroupSnapshot(
+        group_id="gemini-shared",
+        display_name="Gemini Models",
+        status=QuotaStatus.HEALTHY,
+        windows=(),
+        bound_models=("gemini-2.5-pro",),
+    )
+    # Tampered snapshot_ref in facts
+    tampered_facts = ProviderQuotaFacts(
+        provider="antigravity",
+        snapshot_ref="tampered_snapshot_ref@wronghash",
+        captured_at=snap.captured_at,
+        groups=(grp,),
+    )
+    scope = _create_scope()
+    policy = RoutingPolicy(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        provider_priority=("antigravity",),
+        policy_version="2026-09-m3",
+    )
+    ctx = RoutingContext(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        authorized_scope=scope,
+        project_binding=scope.project_binding,
+        usage_snapshots={"antigravity": snap},
+        quota_facts={"antigravity": tampered_facts},
+        current_time="2026-09-21T00:01:00Z",
+    )
+    with pytest.raises(TamperDetectionError) as exc:
+        select_agent(registry=registry, routing_policy=policy, routing_context=ctx)
+    assert "snapshot_ref" in str(exc.value)
+
+
+def test_p1_2_exhausted_snapshot_fake_healthy_facts_rejected() -> None:
+    registry = ProviderRegistry()
+    prov = MockM3Provider("antigravity", supported_models=("gemini-2.5-pro",))
+    registry.register(prov)
+
+    # Real snapshot indicates exhausted quota
+    snap = AgentUsageSnapshot.create(
+        provider="antigravity",
+        model_group="Gemini Models",
+        quota_windows=[{"window": "5h", "remaining_fraction": 0.0}],
+        captured_at="2026-09-21T00:00:00Z",
+    )
+    # Injected facts fraudulently claims HEALTHY
+    fraud_grp = QuotaGroupSnapshot(
+        group_id="gemini-shared",
+        display_name="Gemini Models",
+        status=QuotaStatus.HEALTHY,  # Contradicts real 0.0 remaining!
+        windows=(QuotaWindowSnapshot(window="5h", remaining_fraction=1.0, reset_time=None, status=QuotaStatus.HEALTHY),),
+        bound_models=("gemini-2.5-pro",),
+    )
+    fraud_facts = ProviderQuotaFacts(
+        provider="antigravity",
+        snapshot_ref=f"{snap.snapshot_id}@{snap.usage_content_hash}",
+        captured_at=snap.captured_at,
+        groups=(fraud_grp,),
+    )
+    scope = _create_scope()
+    policy = RoutingPolicy(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        provider_priority=("antigravity",),
+        policy_version="2026-09-m3",
+    )
+    ctx = RoutingContext(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        authorized_scope=scope,
+        project_binding=scope.project_binding,
+        usage_snapshots={"antigravity": snap},
+        quota_facts={"antigravity": fraud_facts},
+        current_time="2026-09-21T00:01:00Z",
+    )
+    with pytest.raises(TamperDetectionError) as exc:
+        select_agent(registry=registry, routing_policy=policy, routing_context=ctx)
+    assert "claims HEALTHY status while underlying snapshot window" in str(exc.value)
+
+
+# P1-3: Binding profile version in route, provenance & deterministic identity
+def test_p1_3_binding_profile_version_enforced_and_identity_affected() -> None:
+    snap = AgentUsageSnapshot.create(
+        provider="antigravity",
+        model_group="Gemini Models",
+        quota_windows=[{"window": "5h", "remaining_fraction": 0.5}],
+        captured_at="2026-09-21T00:00:00Z",
+    )
+    facts = AntigravityQuotaNormalizer.normalize(snap)
+    assert facts.binding_profile_version == "2026-09-m3.v1"
+    assert facts.binding_source == "versioned_provider_profile"
+
+    registry = ProviderRegistry()
+    prov = MockM3Provider("antigravity", supported_models=("Gemini 3.8 Flash High",))
+    registry.register(prov)
+
+    scope = _create_scope()
+    policy = RoutingPolicy(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        provider_priority=("antigravity",),
+        policy_version="2026-09-m3",
+    )
+    ctx = RoutingContext(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        authorized_scope=scope,
+        project_binding=scope.project_binding,
+        usage_snapshots={"antigravity": snap},
+        current_time="2026-09-21T00:01:00Z",
+    )
+    route = select_agent(registry=registry, routing_policy=policy, routing_context=ctx)
+    assert route.binding_profile_version == "2026-09-m3.v1"
+
+    # Verify that different profile versions result in different deterministic route IDs
+    id_v1 = compute_route_deterministic_id(route)
+    route_tampered_version = AgentRoute.create(
+        role=route.role,
+        provider=route.provider,
+        resolved_model=route.resolved_model,
+        policy_version=route.policy_version,
+        route_reason=route.route_reason,
+        usage_snapshot_ref=route.usage_snapshot_ref,
+        project_binding=route.project_binding,
+        authorized_permissions=list(route.authorized_permissions),
+        authorized_scope=scope,
+        route_reason_code=route.route_reason_code,
+        transport_ref=route.transport_ref,
+        candidate_trace=route.candidate_trace,
+        quota_group=route.quota_group,
+        binding_profile_version="custom_future_profile.v2",
+    )
+    id_v2 = compute_route_deterministic_id(route_tampered_version)
+    assert id_v1 != id_v2
+    assert route.route_id != route_tampered_version.route_id
+
+
+def test_p1_3_unmapped_model_not_in_shared_group() -> None:
+    snap = AgentUsageSnapshot.create(
+        provider="antigravity",
+        model_group="Gemini Models",
+        quota_windows=[{"window": "5h", "remaining_fraction": 0.5}],
+        captured_at="2026-09-21T00:00:00Z",
+    )
+    facts = AntigravityQuotaNormalizer.normalize(snap)
+    # Model not in ANTIGRAVITY_GEMINI_MODEL_MAP must return None / UNKNOWN, not gemini-shared
+    unmapped_grp = facts.get_group_for_model("gemini-alien-999")
+    assert unmapped_grp is None
+    assert facts.get_status_for_model("gemini-alien-999") == QuotaStatus.UNKNOWN
+
+
+# P1-4: Multi-group fallback trace windows exact alignment
+def test_p1_4_multi_group_fallback_trace_windows_exact_alignment() -> None:
+    snap = AgentUsageSnapshot.create(
+        provider="antigravity",
+        model_group="Multi Group Provider",
+        quota_windows=[
+            {"window": "shared_5h", "remaining_fraction": 0.0},
+            {"window": "dedicated_daily", "remaining_fraction": 0.95},
+        ],
+        captured_at="2026-09-21T00:00:00Z",
+    )
+    # Primary group A: exhausted
+    grp_a = QuotaGroupSnapshot(
+        group_id="group-a-exhausted",
+        display_name="Group A",
+        status=QuotaStatus.EXHAUSTED,
+        windows=(QuotaWindowSnapshot(window="shared_5h", remaining_fraction=0.0, reset_time=None, status=QuotaStatus.EXHAUSTED),),
+        bound_models=("model-a",),
+    )
+    # Fallback group B: healthy
+    grp_b = QuotaGroupSnapshot(
+        group_id="group-b-healthy",
+        display_name="Group B",
+        status=QuotaStatus.HEALTHY,
+        windows=(QuotaWindowSnapshot(window="dedicated_daily", remaining_fraction=0.95, reset_time=None, status=QuotaStatus.HEALTHY),),
+        bound_models=("model-b",),
+    )
+    facts = ProviderQuotaFacts(
+        provider="antigravity",
+        snapshot_ref=f"{snap.snapshot_id}@{snap.usage_content_hash}",
+        captured_at=snap.captured_at,
+        groups=(grp_a, grp_b),
+        model_bindings=(
+            ModelQuotaBinding(provider="antigravity", model="model-a", quota_group_id="group-a-exhausted"),
+            ModelQuotaBinding(provider="antigravity", model="model-b", quota_group_id="group-b-healthy"),
+        ),
+    )
+
+    registry = ProviderRegistry()
+    prov = MockM3Provider("antigravity", supported_models=("model-a", "model-b"))
+    registry.register(prov)
+
+    scope = _create_scope()
+    policy = RoutingPolicy(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        provider_priority=("antigravity",),
+        model_preference={"antigravity": ("model-a", "model-b")},
+        policy_version="2026-09-m3",
+    )
+    ctx = RoutingContext(
+        role=AgentRole.ALPHA_GENERATOR.value,
+        authorized_scope=scope,
+        project_binding=scope.project_binding,
+        usage_snapshots={"antigravity": snap},
+        quota_facts={"antigravity": facts},
+        current_time="2026-09-21T00:01:00Z",
+    )
+    route = select_agent(registry=registry, routing_policy=policy, routing_context=ctx)
+    assert route.resolved_model == "model-b"
+    assert route.quota_group == "group-b-healthy"
+
+    trace_item = route.candidate_trace[0]
+    assert trace_item["decision"] == "selected"
+    assert trace_item["quota_group"] == "group-b-healthy"
+    assert trace_item["quota_status"] == QuotaStatus.HEALTHY.value
+    # Windows MUST belong to Group B, NEVER to Group A
+    assert len(trace_item["quota_windows"]) == 1
+    assert trace_item["quota_windows"][0]["window"] == "dedicated_daily"
+    assert float(trace_item["quota_windows"][0]["remaining_fraction"]) == 0.95

@@ -58,7 +58,7 @@ class RoutingPolicy:
     model_preference: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     allowed_transports: tuple[str, ...] = DEFAULT_ALLOWED_TRANSPORTS
     required_capabilities: tuple[str, ...] = ()
-    allow_missing_usage: bool = True
+    allow_missing_usage: bool | None = None
     allow_unknown_quota_fallback: bool = False
     healthy_threshold: float = 0.30
     max_usage_snapshot_age: float | None = None

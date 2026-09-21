@@ -40,6 +40,7 @@ from research_lab.agent_control.errors import (
     ProviderErrorCode,
     ProviderUnavailableError,
     QuotaUnavailableError,
+    TamperDetectionError,
 )
 from research_lab.agent_control.permissions import (
     enforce_hard_invariants,
@@ -325,6 +326,7 @@ def select_agent(
     selected_snapshot_ref: str | None = None
     selected_transport_ref: str = ""
     selected_quota_group: str = ""
+    selected_binding_profile_version: str = ""
     route_reason_code: RouteReasonCode = RouteReasonCode.PRIMARY_AVAILABLE
     route_reason: str = ""
 
@@ -339,7 +341,6 @@ def select_agent(
         max_usage_snapshot_age = 300.0
     else:
         max_usage_snapshot_age = None
-    is_m3_mode = active_policy_version.endswith("-m3") or active_policy_version == "2026-09-m3"
 
     # Tracking reasons for fine-grained error taxonomy
     quota_exhausted_candidates: list[str] = []
@@ -428,7 +429,6 @@ def select_agent(
         # Quota check
         snapshot = snapshots.get(prov_name)
         facts: ProviderQuotaFacts | None = None
-        quota_windows_trace: list[dict[str, Any]] = []
         quota_status_str = "healthy"
         quota_viable = True
         skip_reason: str | None = None
@@ -443,6 +443,60 @@ def select_agent(
                 effective_max_age = max_usage_snapshot_age if max_usage_snapshot_age is not None else float("inf")
                 if prov_name in context_quota_facts:
                     facts = context_quota_facts[prov_name]
+                    # P1-2: Validate facts against snapshot ground truth
+                    validate_usage_hash(snapshot.to_dict())
+                    if facts.provider != prov_name or facts.provider != snapshot.provider:
+                        raise TamperDetectionError(
+                            f"quota_facts provider '{facts.provider}' mismatch with snapshot provider '{snapshot.provider}'"
+                        )
+                    if facts.captured_at != snapshot.captured_at:
+                        raise TamperDetectionError(
+                            f"quota_facts captured_at '{facts.captured_at}' mismatch with snapshot '{snapshot.captured_at}'"
+                        )
+                    expected_ref = f"{snapshot.snapshot_id}@{snapshot.usage_content_hash}"
+                    if facts.snapshot_ref != expected_ref and facts.snapshot_ref != snapshot.snapshot_id:
+                        raise TamperDetectionError(
+                            f"quota_facts snapshot_ref '{facts.snapshot_ref}' mismatch with snapshot expected ref '{expected_ref}'"
+                        )
+                    # Anti-forgery: Check if ground truth snapshot windows contradict injected healthy facts
+                    for raw_w in snapshot.quota_windows:
+                        rem = raw_w.get("remaining_fraction")
+                        if rem is not None:
+                            try:
+                                rem_val = float(rem)
+                            except (ValueError, TypeError):
+                                rem_val = None
+                            if rem_val is not None and rem_val <= 0.0:
+                                w_name = str(raw_w.get("window") or raw_w.get("bucketId") or "")
+                                for g in facts.groups:
+                                    group_matches = False
+                                    if (
+                                        snapshot.model_group
+                                        and (
+                                            g.display_name == snapshot.model_group
+                                            or g.group_id == snapshot.model_group
+                                        )
+                                    ) or len(facts.groups) == 1:
+                                        group_matches = True
+                                    elif any(gw.window == w_name for gw in g.windows):
+                                        if snapshot.model_group and g.display_name != snapshot.model_group:
+                                            group_matches = False
+                                        else:
+                                            group_matches = True
+
+                                    if group_matches and g.status == QuotaStatus.HEALTHY:
+                                        raise TamperDetectionError(
+                                            f"Injected quota_facts group '{g.group_id}' claims HEALTHY status while underlying snapshot window '{w_name}' is exhausted"
+                                        )
+                    if AntigravityQuotaNormalizer.is_snapshot_stale(
+                        snapshot.captured_at,
+                        max_age_seconds=effective_max_age,
+                        current_time=current_time,
+                    ):
+                        try:
+                            object.__setattr__(facts, "is_stale", True)
+                        except (AttributeError, TypeError):
+                            pass
                 elif prov_name == "antigravity" or snapshot.provider == "antigravity":
                     custom_bindings = []
                     if routing_policy and prov_name in routing_policy.model_quota_bindings:
@@ -504,14 +558,24 @@ def select_agent(
                     quota_viable = False
                     skip_reason = "usage snapshot is stale"
                     stale_snapshot_candidates.append(prov_name)
-                else:
-                    quota_windows_trace = (
-                        [w.to_dict() for w in facts.groups[0].windows] if facts.groups else []
-                    )
         else:
-            allow_missing = (
-                routing_policy.allow_missing_usage if routing_policy else True
-            )
+            # P1-2: Facts without snapshot is strictly rejected (no bypass)
+            if prov_name in context_quota_facts:
+                raise QuotaUnavailableError(
+                    f"Provider '{prov_name}' cannot use quota_facts without a corresponding verified AgentUsageSnapshot",
+                    details={"provider": prov_name},
+                )
+            if routing_policy is None:
+                allow_missing = True
+            elif routing_policy.allow_missing_usage is not None:
+                allow_missing = routing_policy.allow_missing_usage
+            elif active_policy_version.endswith("-m3") or active_policy_version == "2026-09-m3":
+                # M3 quota-aware mode strictly requires snapshots; missing fails closed
+                allow_missing = False
+            else:
+                # Retaining legacy policy_version (e.g. 2026-09-m1) allows missing usage by default
+                allow_missing = True
+
             if not allow_missing:
                 quota_status_str = "missing"
                 quota_viable = False
@@ -604,6 +668,33 @@ def select_agent(
 
         decision = "selected" if (skip_reason is None and resolved_model_candidate) else "skipped"
 
+        # P1-4: candidate trace 的 quota_group、quota_status、quota_windows 必须精确取自当前实际评估/选中或跳过的同一个 group
+        evaluated_group = None
+        if facts is not None:
+            if resolved_group_id:
+                evaluated_group = facts.get_group(resolved_group_id)
+            else:
+                target_m = resolved_model_candidate or (candidate_models[0] if candidate_models else None)
+                if target_m:
+                    evaluated_group = facts.get_group_for_model(target_m)
+
+        if evaluated_group is not None:
+            trace_group_id = evaluated_group.group_id
+            trace_quota_windows = [w.to_dict() for w in evaluated_group.windows]
+            trace_quota_status = (
+                resolved_model_status.value
+                if resolved_model_status
+                else evaluated_group.status.value
+            )
+        else:
+            trace_group_id = resolved_group_id or "unknown"
+            trace_quota_windows = []
+            trace_quota_status = (
+                resolved_model_status.value
+                if resolved_model_status
+                else quota_status_str
+            )
+
         candidate_trace.append(
             {
                 "availability": avail_status,
@@ -612,9 +703,9 @@ def select_agent(
                 "model": resolved_model_candidate or (candidate_models[0] if candidate_models else "unknown"),
                 "provider": prov_name,
                 "quota": quota_status_str,
-                "quota_group": resolved_group_id or "unknown",
-                "quota_status": resolved_model_status.value if resolved_model_status else quota_status_str,
-                "quota_windows": quota_windows_trace,
+                "quota_group": trace_group_id,
+                "quota_status": trace_quota_status,
+                "quota_windows": trace_quota_windows,
                 "role_supported": role_supported,
                 "skip_reason": skip_reason,
                 "transport": transport_kind,
@@ -627,6 +718,7 @@ def select_agent(
             selected_model = resolved_model_candidate or desc.default_model
             selected_transport_ref = transport_ref_candidate
             selected_quota_group = resolved_group_id
+            selected_binding_profile_version = getattr(facts, "binding_profile_version", "") if facts else ""
 
             if snapshot:
                 selected_snapshot_ref = f"{snapshot.snapshot_id}@{snapshot.usage_content_hash}"
@@ -665,8 +757,10 @@ def select_agent(
             if t["role_supported"] and t["capability_supported"] and t["transport_allowed"]
         ]
 
+        is_m3_policy = active_policy_version.endswith("-m3") or active_policy_version == "2026-09-m3"
+
         if viable_role_candidates:
-            if is_m3_mode:
+            if is_m3_policy:
                 if all(p in stale_snapshot_candidates for p in viable_role_candidates):
                     raise QuotaUnavailableError(
                         f"All providers supporting role '{validated_role}' failed due to stale usage snapshots",
@@ -691,12 +785,26 @@ def select_agent(
                             "role": validated_role,
                         },
                     )
-            if is_m1_mode and all(
-                prov in quota_exhausted_candidates
-                or any(prov == q.split(":")[0] for q in quota_exhausted_candidates)
-                for prov in viable_role_candidates
-            ):
-                raise QuotaUnavailableError(
+                if all(
+                    prov in quota_exhausted_candidates
+                    or any(prov == q.split(":")[0] for q in quota_exhausted_candidates)
+                    for prov in viable_role_candidates
+                ):
+                    raise QuotaUnavailableError(
+                        f"All providers supporting role '{validated_role}' are quota exhausted or rate limited",
+                        details={
+                            "candidate_trace": candidate_trace,
+                            "exhausted_providers": quota_exhausted_candidates,
+                            "role": validated_role,
+                        },
+                    )
+            elif is_m1_mode:
+                if all(
+                    prov in quota_exhausted_candidates
+                    or any(prov == q.split(":")[0] for q in quota_exhausted_candidates)
+                    for prov in viable_role_candidates
+                ):
+                    raise QuotaUnavailableError(
                         f"All providers supporting role '{validated_role}' are quota exhausted or rate limited",
                         details={
                             "candidate_trace": candidate_trace,
@@ -731,4 +839,5 @@ def select_agent(
         transport_ref=selected_transport_ref,
         candidate_trace=candidate_trace,
         quota_group=selected_quota_group,
+        binding_profile_version=selected_binding_profile_version,
     )

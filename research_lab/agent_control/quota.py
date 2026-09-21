@@ -98,6 +98,10 @@ class QuotaWindowSnapshot:
         }
 
 
+DEFAULT_BINDING_PROFILE_VERSION = "2026-09-m3.v1"
+DEFAULT_BINDING_SOURCE = "versioned_provider_profile"
+
+
 @dataclass(frozen=True)
 class ModelQuotaBinding:
     """Explicit mapping from a canonical model to its underlying quota group."""
@@ -105,9 +109,13 @@ class ModelQuotaBinding:
     provider: str
     model: str
     quota_group_id: str
+    binding_profile_version: str = DEFAULT_BINDING_PROFILE_VERSION
+    binding_source: str = DEFAULT_BINDING_SOURCE
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "binding_profile_version": self.binding_profile_version,
+            "binding_source": self.binding_source,
             "model": self.model,
             "provider": self.provider,
             "quota_group_id": self.quota_group_id,
@@ -147,6 +155,8 @@ class ProviderQuotaFacts:
     captured_at: str
     groups: tuple[QuotaGroupSnapshot, ...]
     model_bindings: tuple[ModelQuotaBinding, ...] = ()
+    binding_profile_version: str = DEFAULT_BINDING_PROFILE_VERSION
+    binding_source: str = DEFAULT_BINDING_SOURCE
     is_stale: bool = False
 
     def __post_init__(self) -> None:
@@ -178,6 +188,8 @@ class ProviderQuotaFacts:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "binding_profile_version": self.binding_profile_version,
+            "binding_source": self.binding_source,
             "captured_at": self.captured_at,
             "groups": [g.to_dict() for g in self.groups],
             "is_stale": self.is_stale,
@@ -187,13 +199,16 @@ class ProviderQuotaFacts:
         }
 
 
-# Default Antigravity model bindings to the shared Gemini quota group
-ANTIGRAVITY_GEMINI_MODELS = (
-    "Gemini 3.8 Flash High",
-    "Gemini 3.8 Flash Medium",
-    "Gemini 3.7 Flash High",
-    "Gemini 3.5 Flash",
-)
+# Versioned model binding profile for Antigravity Gemini Models
+# Semantics: Real-time quota windows from account_usage + Versioned provider model binding profile
+ANTIGRAVITY_BINDING_PROFILE_VERSION = "2026-09-m3.v1"
+ANTIGRAVITY_GEMINI_MODEL_MAP: dict[str, str] = {
+    "Gemini 3.8 Flash High": "gemini-shared",
+    "Gemini 3.8 Flash Medium": "gemini-shared",
+    "Gemini 3.7 Flash High": "gemini-shared",
+    "Gemini 3.5 Flash": "gemini-shared",
+}
+ANTIGRAVITY_GEMINI_MODELS = tuple(ANTIGRAVITY_GEMINI_MODEL_MAP.keys())
 
 
 class AntigravityQuotaNormalizer:
@@ -210,6 +225,7 @@ class AntigravityQuotaNormalizer:
         healthy_threshold: float = 0.30,
         max_age_seconds: float = 300.0,
         current_time: str | datetime.datetime | None = None,
+        binding_profile_version: str = ANTIGRAVITY_BINDING_PROFILE_VERSION,
         custom_model_bindings: Sequence[ModelQuotaBinding] | None = None,
     ) -> ProviderQuotaFacts:
         """Parse and normalize an Antigravity AgentUsageSnapshot into neutral facts."""
@@ -230,19 +246,25 @@ class AntigravityQuotaNormalizer:
                 details={"snapshot_provider": snapshot.provider, "expected_provider": cls.PROVIDER_NAME},
             )
 
-        # 3. Staleness check
+        # 3. Profile version check
+        if not binding_profile_version or binding_profile_version != ANTIGRAVITY_BINDING_PROFILE_VERSION:
+            raise ProviderError(
+                ProviderErrorCode.QUOTA_UNAVAILABLE,
+                f"Unsupported or mismatched binding_profile_version: '{binding_profile_version}'",
+                details={"expected_version": ANTIGRAVITY_BINDING_PROFILE_VERSION, "actual_version": binding_profile_version},
+            )
+
+        # 4. Staleness check
         is_stale = cls.is_snapshot_stale(
             snapshot.captured_at,
             max_age_seconds=max_age_seconds,
             current_time=current_time,
         )
 
-        # 4. Group windows by group/bucket
-        # Antigravity snapshot quota_windows might have window identifiers
+        # 5. Group windows by group/bucket
         parsed_windows: list[QuotaWindowSnapshot] = []
         for raw_w in snapshot.quota_windows:
             rem = raw_w.get("remaining_fraction")
-            # Parse fraction safely
             rem_val: float | None = None
             if rem is not None:
                 try:
@@ -268,28 +290,34 @@ class AntigravityQuotaNormalizer:
         display_name = snapshot.model_group or "Gemini Models"
         group_status = evaluate_group_status(parsed_windows)
 
-        bound_models = tuple(ANTIGRAVITY_GEMINI_MODELS)
+        # Exact model mapping from versioned profile (no fuzzy string matching)
+        bound_models_list: list[str] = [
+            m for m, grp in ANTIGRAVITY_GEMINI_MODEL_MAP.items() if grp == group_id
+        ]
+        bindings: list[ModelQuotaBinding] = [
+            ModelQuotaBinding(
+                provider=cls.PROVIDER_NAME,
+                model=m,
+                quota_group_id=group_id,
+                binding_profile_version=binding_profile_version,
+                binding_source=DEFAULT_BINDING_SOURCE,
+            )
+            for m in bound_models_list
+        ]
+
+        if custom_model_bindings:
+            for b in custom_model_bindings:
+                if b.quota_group_id == group_id and b.model not in bound_models_list:
+                    bound_models_list.append(b.model)
+            bindings.extend(custom_model_bindings)
+
         group = QuotaGroupSnapshot(
             group_id=group_id,
             display_name=display_name,
             status=group_status,
             windows=tuple(parsed_windows),
-            bound_models=bound_models,
+            bound_models=tuple(bound_models_list),
         )
-
-        # Model bindings
-        bindings: list[ModelQuotaBinding] = []
-        for m in bound_models:
-            bindings.append(
-                ModelQuotaBinding(
-                    provider=cls.PROVIDER_NAME,
-                    model=m,
-                    quota_group_id=group_id,
-                )
-            )
-
-        if custom_model_bindings:
-            bindings.extend(custom_model_bindings)
 
         snapshot_ref = f"{snapshot.snapshot_id}@{snapshot.usage_content_hash}"
         return ProviderQuotaFacts(
@@ -298,6 +326,8 @@ class AntigravityQuotaNormalizer:
             captured_at=snapshot.captured_at,
             groups=(group,),
             model_bindings=tuple(bindings),
+            binding_profile_version=binding_profile_version,
+            binding_source=DEFAULT_BINDING_SOURCE,
             is_stale=is_stale,
         )
 

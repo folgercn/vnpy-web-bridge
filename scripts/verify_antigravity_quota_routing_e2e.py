@@ -103,6 +103,8 @@ def main() -> int:
     facts = normalizer.normalize(usage, current_time=usage.captured_at)
     print("[*] Normalized ProviderQuotaFacts:")
     print(f"    - provider: {facts.provider}")
+    print(f"    - binding_profile_version: {facts.binding_profile_version}")
+    print(f"    - binding_source: {facts.binding_source}")
     print(f"    - groups count: {len(facts.groups)}")
     for g in facts.groups:
         print(f"      * group_id: {g.group_id} ({g.display_name}) -> status: {g.status.value}")
@@ -110,8 +112,9 @@ def main() -> int:
             print(f"        - window: {qw.window}, remaining: {qw.remaining_fraction}, status: {qw.status.value}")
     print(f"    - model bindings count: {len(facts.model_bindings)}")
     for b in facts.model_bindings:
-        print(f"      * model: '{b.model}' -> group: '{b.quota_group_id}'")
-    print("[PASS] Quota facts normalization complete.")
+        print(f"      * model: '{b.model}' -> group: '{b.quota_group_id}' (profile: {b.binding_profile_version}, src: {b.binding_source})")
+    assert facts.binding_profile_version == "2026-09-m3.v1", f"Unexpected facts profile: {facts.binding_profile_version}"
+    print("[PASS] Quota facts normalization complete (verified real-time quota windows + versioned provider profile mapping).")
 
     # 7. Register Provider & Set up Context with Real Facts
     registry = ProviderRegistry()
@@ -147,6 +150,7 @@ def main() -> int:
     print(f"    - provider: {route.provider}")
     print(f"    - resolved_model: {route.resolved_model}")
     print(f"    - quota_group: {route.quota_group}")
+    print(f"    - binding_profile_version: {route.binding_profile_version}")
     print(f"    - route_reason_code: {route.route_reason_code}")
     print(f"    - route_reason: {route.route_reason}")
     print(f"    - usage_snapshot_ref: {route.usage_snapshot_ref}")
@@ -154,6 +158,7 @@ def main() -> int:
     # 9. Verify Contract Invariants
     assert route.provider == "antigravity", f"Expected antigravity, got {route.provider}"
     assert route.quota_group == "gemini-shared", f"Expected gemini-shared, got {route.quota_group}"
+    assert route.binding_profile_version == "2026-09-m3.v1", f"Expected profile 2026-09-m3.v1, got {route.binding_profile_version}"
     expected_ref = f"{usage.snapshot_id}@{usage.usage_content_hash}"
     assert route.usage_snapshot_ref == expected_ref, f"Expected {expected_ref}, got {route.usage_snapshot_ref}"
     assert route.route_reason_code in (
