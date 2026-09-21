@@ -42,9 +42,15 @@ class QuotaReader:
             with contextlib.suppress(OSError, json.JSONDecodeError, KeyError):
                 data = json.loads(self.accounts_json.read_text(encoding="utf-8"))
                 active_id = data.get("current_account_id")
+                for acc in data.get("accounts", []):
+                    if acc.get("id") == active_id or acc.get("is_current") is True:
+                        active_email = acc.get("email")
+                        if not active_id:
+                            active_id = acc.get("id")
+                        break
 
-        # 2. Try ~/.gemini/oauth_creds.json for active email
-        if self.oauth_creds_json.exists():
+        # 2. Try ~/.gemini/oauth_creds.json for active email fallback
+        if not active_email and self.oauth_creds_json.exists():
             with contextlib.suppress(OSError, json.JSONDecodeError, KeyError):
                 creds = json.loads(self.oauth_creds_json.read_text(encoding="utf-8"))
                 active_email = creds.get("email")

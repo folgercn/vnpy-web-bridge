@@ -1,8 +1,7 @@
-# ruff: noqa: E402
 """Codex Antigravity Network MCP Server.
 
 Provides a network-accessible FastMCP bridge with multi-account inspection
-(Gemini 3.1 Pro & Weekly limit breakdowns) and seamless Cockpit switching.
+(Gemini 3.1 Pro & Weekly limit breakdowns) and Antigravity-Manager safe switching.
 Designed for autonomous LLM agents (Codex) to inspect quotas and select accounts.
 """
 import argparse
@@ -19,12 +18,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
 
-# Ensure local package is on sys.path
-CURRENT_DIR = Path(__file__).resolve().parent
-if str(CURRENT_DIR) not in sys.path:
-    sys.path.insert(0, str(CURRENT_DIR))
-
-from research_lab.agent_control.antigravity_mcp.cockpit_switcher import CockpitSwitcher
 from research_lab.agent_control.antigravity_mcp.config import (
     AGY_MCP_API_KEY,
     DEFAULT_HOST,
@@ -32,8 +25,13 @@ from research_lab.agent_control.antigravity_mcp.config import (
     DEFAULT_TRANSPORT,
 )
 from research_lab.agent_control.antigravity_mcp.inspectors import ToolInspector
+from research_lab.agent_control.antigravity_mcp.manager_client import ManagerClient
 from research_lab.agent_control.antigravity_mcp.quota_reader import QuotaReader
 from research_lab.agent_control.antigravity_mcp.usage_tracker import UsageTracker
+
+CURRENT_DIR = Path(__file__).resolve().parent
+if str(CURRENT_DIR) not in sys.path:
+    sys.path.insert(0, str(CURRENT_DIR))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,7 +43,7 @@ SERVICE = CURRENT_DIR / "core" / "agy_service.py"
 
 inspector = ToolInspector()
 quota_reader = QuotaReader()
-switcher = CockpitSwitcher()
+manager_client = ManagerClient()
 usage_tracker = UsageTracker()
 
 
@@ -189,7 +187,7 @@ def create_mcp_server():
         instructions=(
             "Network-enabled Antigravity agent bridge for Codex. "
             "Exposes high-precision multi-account quota inspection (Gemini 3.1 Pro, Weekly limits) "
-            "and seamless Cockpit account switching. Codex agents can query list_accounts and "
+            "and safe Antigravity-Manager account switching. Codex agents can query list_accounts and "
             "selectively call switch_account when quotas approach depletion."
         ),
         host=DEFAULT_HOST,
@@ -218,7 +216,11 @@ def create_mcp_server():
                 "accounts": [],
             }
 
-        accounts = quota_reader.list_all_accounts()
+        # Query manager client first; fallback to local quota_reader if manager API is unavailable
+        accounts = await manager_client.list_accounts()
+        if not accounts:
+            accounts = quota_reader.list_all_accounts()
+
         usage_summary = usage_tracker.get_summary()
 
         # Inject task count to each account
@@ -239,25 +241,27 @@ def create_mcp_server():
     @mcp.tool(name="switch_account")
     async def switch_account_tool(account_or_email: str) -> dict:
         """
-        Switch active Antigravity account using Cockpit-Tools.
-        Codex passes an account email (e.g. 'quickcoin2016@gmail.com') or account_id.
-        Performs instant zero-restart credential rotation if Cockpit is running.
+        Safely switch active Antigravity account using Antigravity-Manager.
+        Passes an account email (e.g. 'quickcoin2016@gmail.com') or account_id.
+        Performs safe credential rotation with official app restart (/Applications/Antigravity.app).
         """
         # 1. Capture current active email BEFORE switching
-        before_active = quota_reader.get_current_active_identity()
-        before_email = before_active.get("current_email")
+        before_active = await manager_client.get_current_account()
+        before_email = before_active.get("email") if before_active else None
+        if not before_email:
+            before_local = quota_reader.get_current_active_identity()
+            before_email = before_local.get("current_email")
 
-        success, msg, details = await switcher.switch_account(account_or_email)
+        success, msg, details = await manager_client.switch_account(account_or_email)
         if success:
-            target_email = details.get("email")
-            if not target_email or "@" not in target_email:
-                target_email, _ = switcher.resolve_email_and_id(account_or_email)
+            target_email = details.get("email") or account_or_email
+            target_id = details.get("account_id")
 
             if target_email:
                 await usage_tracker.record_switch(
                     from_email=before_email,
                     to_email=target_email,
-                    account_id=details.get("account_id"),
+                    account_id=target_id,
                     reason="codex_instructed_switch",
                 )
         return {
@@ -270,9 +274,24 @@ def create_mcp_server():
     async def account_usage_tool() -> dict:
         """
         Read the active signed-in account's identity, subscription plan, and every quota bucket
-        from desktop language-server, enriched with multi-account inspection report.
+        from Antigravity-Manager, enriched with multi-account inspection report.
         """
-        usage = await invoke("account_usage", {})
+        current = await manager_client.get_current_account()
+        if current:
+            usage = {
+                "active_email": current.get("email"),
+                "account_id": current.get("account_id"),
+                "name": current.get("name"),
+                "subscription_tier": current.get("quota", {}).get("subscription_tier"),
+                "quota": current.get("quota"),
+                "raw_quota": current.get("raw_quota"),
+            }
+        else:
+            try:
+                usage = await invoke("account_usage", {})
+            except Exception as e:  # noqa: BLE001
+                usage = {"error": str(e), "message": "Failed to read usage from both Manager and desktop RPC"}
+
         cap_report = inspector.get_capabilities_report()
         usage["capabilities_report"] = cap_report
         usage["usage_summary"] = usage_tracker.get_summary()
@@ -289,10 +308,17 @@ def create_mcp_server():
     @mcp.tool(name="tool_status")
     async def tool_status_tool() -> dict:
         """
-        Check health and runtime availability of external tools (Antigravity-Manager & Cockpit-Tools).
-        Informs whether multi-account quota reading and seamless switching are currently active.
+        Check health and runtime availability of Antigravity-Manager.
+        Informs whether multi-account quota reading and safe switching are currently active.
         """
-        return inspector.get_capabilities_report()
+        is_avail, avail_msg = await manager_client.is_available()
+        report = inspector.get_capabilities_report()
+        report["manager_api_status"] = {
+            "available": is_avail,
+            "message": avail_msg,
+            "port": manager_client.get_port(),
+        }
+        return report
 
     @mcp.tool(name="projects")
     async def projects_tool(cwd: str = "") -> dict:
@@ -421,12 +447,14 @@ def create_mcp_server():
 def print_startup_banner():
     """Print clean diagnostic banner regarding external tools status."""
     report = inspector.get_capabilities_report()
+    mgr_avail = report["features"]["multi_account_quota_pool"]
+    mgr_msg = report["antigravity_tools"]["message"]
     print("=" * 70)
-    print("    🚀 Antigravity Network MCP Bridge for Codex")
+    print("    🚀 Antigravity Network MCP Bridge (Powered by Antigravity-Manager)")
     print(f"    Mode: {report['mode']}")
     print("-" * 70)
-    print(f"  * Antigravity-Manager : {'[ON] ' + report['antigravity_tools']['message'] if report['features']['multi_account_quota_pool'] else '[OFF] ' + report['antigravity_tools']['message']}")
-    print(f"  * Cockpit-Tools       : {'[ON] ' + report['cockpit_tools']['message'] if report['features']['seamless_account_switching'] else '[OFF] ' + report['cockpit_tools']['message']}")
+    print(f"  * Antigravity-Manager : {'[ON] ' + mgr_msg if mgr_avail else '[OFF] ' + mgr_msg}")
+    print("  * Account Switch Mode : Safe official restart (/Applications/Antigravity.app)")
     print(f"  * Status Summary      : {report['summary_message']}")
     print("=" * 70)
 

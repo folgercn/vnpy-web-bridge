@@ -9,8 +9,10 @@ VNPY_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
 export PYTHONPATH="${VNPY_ROOT}:${SCRIPT_DIR}:${SCRIPT_DIR}/core:${PYTHONPATH:-}"
 
-PYTHON_BIN="/Users/fujun/.codex/skills/antigravity-delegate/.mcp-venv/bin/python"
-if [[ ! -f "${PYTHON_BIN}" ]]; then
+# 优先使用本地项目虚拟环境
+if [[ -f "${VNPY_ROOT}/.venv/bin/python" ]] && "${VNPY_ROOT}/.venv/bin/python" -c "import mcp" 2>/dev/null; then
+  PYTHON_BIN="${VNPY_ROOT}/.venv/bin/python"
+else
   PYTHON_BIN="python3"
 fi
 
@@ -19,7 +21,7 @@ PORT="${AGY_MCP_PORT:-8765}"
 TRANSPORT="${AGY_MCP_TRANSPORT:-sse}"
 
 echo "======================================================================"
-echo " Starting Antigravity Network MCP Server for Codex..."
+echo " Starting Antigravity Network MCP Server..."
 echo " Python    : ${PYTHON_BIN}"
 echo " Transport : ${TRANSPORT}"
 echo " Bind Host : ${HOST}"
