@@ -120,8 +120,8 @@ class ProjectBinding:
 
 
 def validate_project_binding(
-    task_binding: ProjectBinding | dict[str, Any] | None,
-    expected_binding: ProjectBinding | dict[str, Any] | None = None,
+    task_binding: ProjectBinding | Mapping[str, Any] | None,
+    expected_binding: ProjectBinding | Mapping[str, Any] | None = None,
 ) -> ProjectBinding:
     """Validate project and workspace binding fail-closed.
 
@@ -132,7 +132,7 @@ def validate_project_binding(
 
     if isinstance(task_binding, ProjectBinding):
         tb = task_binding
-    elif isinstance(task_binding, dict):
+    elif isinstance(task_binding, (dict, Mapping)):
         tb = ProjectBinding(
             project_id=str(task_binding.get("project_id", "")),
             workspace_identity=str(task_binding.get("workspace_identity", "")),
@@ -792,6 +792,8 @@ def compute_route_deterministic_id(payload: dict[str, Any]) -> str:
     NOTE (P1-3): route_reason free text is deliberately EXCLUDED from route deterministic identity,
     and preserved strictly in route_content_hash and audit records.
     """
+    if hasattr(payload, "to_dict") and callable(payload.to_dict):
+        payload = payload.to_dict()
     core = {
         "authorization_scope_ref": payload.get("authorization_scope_ref"),
         "authorized_permissions": _clean_for_canonical(payload.get("authorized_permissions")),
@@ -807,6 +809,10 @@ def compute_route_deterministic_id(payload: dict[str, Any]) -> str:
         core["transport_ref"] = str(payload.get("transport_ref"))
     if payload.get("usage_snapshot_ref"):
         core["usage_snapshot_ref"] = str(payload.get("usage_snapshot_ref"))
+    if payload.get("quota_group"):
+        core["quota_group"] = str(payload.get("quota_group"))
+    if payload.get("binding_profile_version"):
+        core["binding_profile_version"] = str(payload.get("binding_profile_version"))
     digest = v2.digest(core)
     return f"route-{digest[:32]}"
 
@@ -848,6 +854,8 @@ class AgentRoute:
     route_reason_code: str = ""
     transport_ref: str = ""
     candidate_trace: tuple[dict[str, Any], ...] = ()
+    quota_group: str = ""
+    binding_profile_version: str = ""
     schema_version: str = "research_lab.agent_route.v1"
     hash_profile: str = HASH_PROFILE
 
@@ -957,6 +965,8 @@ class AgentRoute:
         route_reason_code: str = "",
         transport_ref: str = "",
         candidate_trace: Sequence[dict[str, Any]] = (),
+        quota_group: str = "",
+        binding_profile_version: str = "",
     ) -> AgentRoute:
         validate_role(role)
         val_auth = validate_permissions(authorized_permissions)
@@ -1022,6 +1032,10 @@ class AgentRoute:
             raw["transport_ref"] = str(transport_ref)
         if candidate_trace:
             raw["candidate_trace"] = [_clean_for_canonical(x) for x in candidate_trace]
+        if quota_group:
+            raw["quota_group"] = str(quota_group)
+        if binding_profile_version:
+            raw["binding_profile_version"] = str(binding_profile_version)
 
         route_id = compute_route_deterministic_id(raw)
         raw["route_id"] = route_id
@@ -1042,6 +1056,8 @@ class AgentRoute:
             route_reason_code=route_reason_code,
             transport_ref=transport_ref,
             candidate_trace=tuple(_clean_for_canonical(x) for x in candidate_trace),
+            quota_group=quota_group,
+            binding_profile_version=binding_profile_version,
             schema_version="research_lab.agent_route.v1",
             hash_profile=HASH_PROFILE,
         )
@@ -1068,6 +1084,10 @@ class AgentRoute:
             d["transport_ref"] = self.transport_ref
         if self.candidate_trace:
             d["candidate_trace"] = [_unfreeze_to_dict(x) for x in self.candidate_trace]
+        if self.quota_group:
+            d["quota_group"] = self.quota_group
+        if self.binding_profile_version:
+            d["binding_profile_version"] = self.binding_profile_version
         return d
 
     def __deepcopy__(self, memo: dict[int, Any] | None = None) -> AgentRoute:
@@ -1092,6 +1112,8 @@ class AgentRoute:
             route_reason_code=copied.get("route_reason_code", ""),
             transport_ref=copied.get("transport_ref", ""),
             candidate_trace=tuple(copied.get("candidate_trace") or ()),
+            quota_group=copied.get("quota_group", ""),
+            binding_profile_version=copied.get("binding_profile_version", ""),
             schema_version=copied["schema_version"],
             hash_profile=copied["hash_profile"],
         )
