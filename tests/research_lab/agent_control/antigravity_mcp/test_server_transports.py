@@ -1,4 +1,6 @@
-"""Tests for Antigravity MCP server transports (Network SSE & Local Unix Domain Socket)."""
+import os
+import socket
+import stat
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -177,15 +179,17 @@ def test_run_socket_server_refuses_active_listening_socket():
 
 
 def test_run_socket_server_cleans_up_stale_socket_and_enforces_permissions():
-    """Verify run_socket_server safely unlinks inactive stale socket and sets 0700 dir / 0600 socket."""
+    """Verify run_socket_server safely unlinks inactive stale socket and sets 0700 newly created dir / 0600 socket."""
     import socket
-    import stat
 
     repo_root = Path(__file__).resolve().parents[4]
-    sock_dir = repo_root / "tmp" / "test_stale_sock"
+    sock_dir = repo_root / "tmp" / "test_stale_sock_new_dir"
+    if sock_dir.exists():
+        import shutil
+        shutil.rmtree(sock_dir)
     sock_path = sock_dir / "stale.sock"
 
-    # Create a stale socket: bind then close socket without unlinking
+    # Pre-create a stale socket: bind then close socket without unlinking
     sock_dir.mkdir(parents=True, exist_ok=True)
     dummy = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     dummy.bind(str(sock_path))
@@ -202,13 +206,14 @@ def test_run_socket_server_cleans_up_stale_socket_and_enforces_permissions():
         patch("uvicorn.Config") as mock_config_cls,
     ):
         mock_server = MagicMock()
+        orig_startup = AsyncMock()
+        mock_server.startup = orig_startup
 
         async def mock_serve():
-            # Simulate uvicorn binding socket
+            # Simulate uvicorn binding socket inside startup
             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             s.bind(str(sock_path))
-            import asyncio
-            await asyncio.sleep(0.15)
+            await mock_server.startup()
             # Verify chmod 0600 has been applied
             sock_mode = stat.S_IMODE(sock_path.stat().st_mode)
             assert sock_mode == 0o600
@@ -231,15 +236,66 @@ def test_run_socket_server_cleans_up_stale_socket_and_enforces_permissions():
                 uds=str(sock_path.resolve()),
                 log_level="info",
             )
-
-            # Verify parent directory permission is 0700
-            dir_mode = stat.S_IMODE(sock_dir.stat().st_mode)
-            assert dir_mode == 0o700
         finally:
             if sock_path.exists():
                 sock_path.unlink()
             try:
                 sock_dir.rmdir()
+            except OSError:
+                pass
+
+
+def test_run_socket_server_preserves_existing_parent_directory_permissions():
+    """Verify run_socket_server NEVER chmods an already existing parent directory (e.g. /tmp or shared dir)."""
+    import socket
+    import stat
+
+    repo_root = Path(__file__).resolve().parents[4]
+    existing_parent = repo_root / "tmp" / "existing_shared_dir"
+    existing_parent.mkdir(parents=True, exist_ok=True)
+    # Set existing directory to 0755
+    os.chmod(existing_parent, 0o755)
+    assert stat.S_IMODE(existing_parent.stat().st_mode) == 0o755
+
+    sock_path = existing_parent / "shared.sock"
+
+    mock_mcp = MagicMock()
+    mock_app = MagicMock()
+    mock_mcp.sse_app.return_value = mock_app
+    mock_mcp.settings.log_level = "info"
+
+    with (
+        patch("uvicorn.Server") as mock_server_cls,
+        patch("uvicorn.Config"),
+    ):
+        mock_server = MagicMock()
+        orig_startup = AsyncMock()
+        mock_server.startup = orig_startup
+
+        async def mock_serve():
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.bind(str(sock_path))
+            await mock_server.startup()
+            s.close()
+
+        mock_server.serve = mock_serve
+        mock_server.should_exit = False
+        mock_server_cls.return_value = mock_server
+
+        try:
+            run_socket_server(
+                mcp_server=mock_mcp,
+                socket_path=sock_path,
+                api_key="",
+                require_auth=False,
+            )
+            # CRITICAL: Existing parent directory must REMAIN 0755!
+            assert stat.S_IMODE(existing_parent.stat().st_mode) == 0o755
+        finally:
+            if sock_path.exists():
+                sock_path.unlink()
+            try:
+                existing_parent.rmdir()
             except OSError:
                 pass
 
@@ -261,7 +317,17 @@ def test_run_socket_server_auth_middleware_wrapping():
         patch("uvicorn.Config") as mock_config_cls,
     ):
         mock_server = MagicMock()
-        mock_server.serve = AsyncMock()
+        orig_startup = AsyncMock()
+        mock_server.startup = orig_startup
+
+        async def mock_serve():
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.bind(str(sock_path))
+            await mock_server.startup()
+            s.close()
+
+        mock_server.serve = mock_serve
+        mock_server.should_exit = False
         mock_server_cls.return_value = mock_server
 
         try:
@@ -349,7 +415,6 @@ def test_create_mcp_server_instructions_and_tools():
 
 def test_cleanup_socket_preserves_new_instance_when_inode_changes():
     """Verify _cleanup_socket does not delete a new socket created by another process when inode changes."""
-    import asyncio
     import socket
 
     repo_root = Path(__file__).resolve().parents[4]
@@ -367,12 +432,13 @@ def test_cleanup_socket_preserves_new_instance_when_inode_changes():
         patch("uvicorn.Config"),
     ):
         mock_server = MagicMock()
+        orig_startup = AsyncMock()
+        mock_server.startup = orig_startup
         initial_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 
         async def mock_serve():
             initial_sock.bind(str(sock_path))
-            await asyncio.sleep(0.15)
-            # Socket bound and inode recorded
+            await mock_server.startup()
             initial_sock.close()
 
         mock_server.serve = mock_serve
@@ -390,8 +456,7 @@ def test_cleanup_socket_preserves_new_instance_when_inode_changes():
                 assert mock_atexit.called
                 cleanup_fn = mock_atexit.call_args[0][0]
 
-            # In normal flow, run_socket_server's finally called cleanup_fn on exit.
-            # Now simulate: A NEW process comes in and creates a new socket at the same path!
+            # Simulate: A NEW process comes in and creates a new socket at the same path!
             new_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             new_sock.bind(str(sock_path))
 
@@ -408,3 +473,50 @@ def test_cleanup_socket_preserves_new_instance_when_inode_changes():
                 tmp_dir.rmdir()
             except OSError:
                 pass
+
+
+def test_cleanup_socket_refuses_deletion_if_never_bound():
+    """Verify _cleanup_socket fails-closed: never deletes existing socket if server was never bound (bound_inode is None)."""
+    import socket
+
+    repo_root = Path(__file__).resolve().parents[4]
+    tmp_dir = repo_root / "tmp" / "test_unbound_safety"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    sock_path = tmp_dir / "unbound.sock"
+
+    mock_mcp = MagicMock()
+    with (
+        patch("uvicorn.Server") as mock_server_cls,
+        patch("uvicorn.Config"),
+    ):
+        mock_server = MagicMock()
+        # Simulate server crashing during serve BEFORE startup binds or records inode
+        mock_server.serve = AsyncMock(side_effect=RuntimeError("Startup crashed before bind"))
+        mock_server_cls.return_value = mock_server
+
+        with patch("atexit.register") as mock_atexit:
+            import pytest
+
+            with pytest.raises(RuntimeError, match="Startup crashed"):
+                run_socket_server(
+                    mcp_server=mock_mcp,
+                    socket_path=sock_path,
+                    api_key="",
+                    require_auth=False,
+                )
+            cleanup_fn = mock_atexit.call_args[0][0]
+
+        # Now simulate another process creating a socket file at sock_path
+        dummy = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        dummy.bind(str(sock_path))
+        assert sock_path.exists()
+
+        # Call cleanup_fn - since bound_inode was None, it MUST NOT unlink sock_path!
+        cleanup_fn()
+        assert sock_path.exists()
+        dummy.close()
+        sock_path.unlink()
+        try:
+            tmp_dir.rmdir()
+        except OSError:
+            pass

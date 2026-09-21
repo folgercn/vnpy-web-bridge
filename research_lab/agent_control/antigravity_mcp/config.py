@@ -15,8 +15,9 @@ DEFAULT_TRANSPORT = os.environ.get("AGY_MCP_TRANSPORT", "sse")
 AGY_MCP_API_KEY = os.environ.get("AGY_MCP_API_KEY", "").strip()
 
 # Local Unix Domain Socket (UDS) configuration
-# Default to data/antigravity_mcp.sock; local socket communication is exempt from token by default
-DEFAULT_SOCKET_PATH = Path(os.environ.get("AGY_MCP_SOCKET_PATH", str(DATA_DIR / "antigravity_mcp.sock")))
+# Default to data/run/antigravity_mcp.sock (dedicated isolated runtime directory)
+RUN_DIR = DATA_DIR / "run"
+DEFAULT_SOCKET_PATH = Path(os.environ.get("AGY_MCP_SOCKET_PATH", str(RUN_DIR / "antigravity_mcp.sock")))
 AGY_MCP_SOCKET_AUTH = os.environ.get("AGY_MCP_SOCKET_AUTH", "false").lower() in ("true", "1", "yes")
 
 # External multi-account tools local paths

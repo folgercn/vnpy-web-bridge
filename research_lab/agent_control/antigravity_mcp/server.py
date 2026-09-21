@@ -563,10 +563,22 @@ def run_socket_server(
             "Please specify a shorter path via --socket or AGY_MCP_SOCKET_PATH."
         )
 
-    # Ensure parent directory exists with secure 0700 permissions (avoid relying on umask)
-    socket_path.parent.mkdir(parents=True, exist_ok=True)
-    with contextlib.suppress(OSError):
-        os.chmod(socket_path.parent, 0o700)
+    # Ensure parent directory exists safely:
+    # Only apply 0700 permission to directories newly created by this process.
+    # Never chmod existing parent directories (such as /tmp, system shared dirs, or existing workspace dirs).
+    parent_dir = socket_path.parent
+    newly_created_dirs: list[Path] = []
+    curr = parent_dir
+    while not (curr.exists() or os.path.lexists(curr)):
+        newly_created_dirs.append(curr)
+        if curr == curr.parent:
+            break
+        curr = curr.parent
+
+    parent_dir.mkdir(parents=True, exist_ok=True)
+    for d in newly_created_dirs:
+        with contextlib.suppress(OSError):
+            os.chmod(d, 0o700)
 
     # 1. Probe existing path: refuse non-sockets and refuse active sockets
     if socket_path.exists() or os.path.lexists(socket_path):
@@ -612,16 +624,21 @@ def run_socket_server(
             if not stat.S_ISSOCK(st.st_mode):
                 logger.warning("Skipping cleanup: path '%s' is no longer a socket", socket_path)
                 return
-            if bound_inode[0] is not None:
-                curr_inode = (st.st_dev, st.st_ino)
-                if curr_inode != bound_inode[0]:
-                    logger.warning(
-                        "Skipping cleanup: socket '%s' inode changed (expected %s, got %s); owned by another process",
-                        socket_path,
-                        bound_inode[0],
-                        curr_inode,
-                    )
-                    return
+            # Fail closed: Never delete unless this instance successfully bound and recorded inode
+            if bound_inode[0] is None:
+                logger.warning(
+                    "Skipping cleanup: socket '%s' was never verified or bound by this instance", socket_path
+                )
+                return
+            curr_inode = (st.st_dev, st.st_ino)
+            if curr_inode != bound_inode[0]:
+                logger.warning(
+                    "Skipping cleanup: socket '%s' inode changed (expected %s, got %s); owned by another process",
+                    socket_path,
+                    bound_inode[0],
+                    curr_inode,
+                )
+                return
             socket_path.unlink(missing_ok=True)
             logger.info("Cleaned up Unix Domain Socket: %s", socket_path)
         except OSError as exc:
@@ -632,7 +649,7 @@ def run_socket_server(
     # Disable DNS rebinding protection for local socket transport as UDS does not use DNS
     if hasattr(mcp_server.settings, "transport_security") and mcp_server.settings.transport_security:
         mcp_server.settings.transport_security.enable_dns_rebinding_protection = False
-        if hasattr(mcp_server.settings.transport_security, "allowed_hosts"):
+        if hasattr(mcp_server.settings, "allowed_hosts"):
             mcp_server.settings.transport_security.allowed_hosts.extend(["localhost", "127.0.0.1", ""])
 
     app = mcp_server.sse_app()
@@ -651,6 +668,24 @@ def run_socket_server(
     )
     server = uvicorn.Server(config)
 
+    # Direct lifecycle hook: wrap server.startup to capture bound inode at 0ms and chmod 0600
+    orig_startup = server.startup
+
+    async def _wrapped_startup(sockets: list[socket.socket] | None = None) -> None:
+        await orig_startup(sockets=sockets)
+        if socket_path.exists() or os.path.lexists(socket_path):
+            try:
+                st = os.lstat(socket_path)
+                if stat.S_ISSOCK(st.st_mode):
+                    bound_inode[0] = (st.st_dev, st.st_ino)
+                    with contextlib.suppress(OSError):
+                        os.chmod(socket_path, 0o600)
+                    logger.debug("Bound socket %s with inode %s and chmod 0600", socket_path, bound_inode[0])
+            except OSError as exc:
+                logger.warning("Failed to secure socket %s during startup: %s", socket_path, exc)
+
+    server.startup = _wrapped_startup
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
@@ -663,38 +698,9 @@ def run_socket_server(
         except (NotImplementedError, RuntimeError):
             signal.signal(sig, lambda *_: setattr(server, "should_exit", True))
 
-    async def _serve_and_secure() -> None:
-        serve_task = asyncio.create_task(server.serve())
-
-        async def _inspect_and_secure() -> None:
-            # Poll up to 5 seconds for uvicorn to bind the unix socket
-            for _ in range(50):
-                if server.should_exit or serve_task.done():
-                    break
-                if socket_path.exists() or os.path.lexists(socket_path):
-                    try:
-                        st = os.lstat(socket_path)
-                        if stat.S_ISSOCK(st.st_mode):
-                            bound_inode[0] = (st.st_dev, st.st_ino)
-                            with contextlib.suppress(OSError):
-                                os.chmod(socket_path, 0o600)
-                            logger.debug("Bound socket %s with inode %s and chmod 0600", socket_path, bound_inode[0])
-                            break
-                    except OSError:
-                        pass
-                await asyncio.sleep(0.1)
-
-        secure_task = asyncio.create_task(_inspect_and_secure())
-        try:
-            await serve_task
-        finally:
-            secure_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await secure_task
-
     try:
         logger.info("Starting Codex Antigravity MCP Server (Local Socket) at unix:%s", socket_path)
-        loop.run_until_complete(_serve_and_secure())
+        loop.run_until_complete(server.serve())
     finally:
         _cleanup_socket()
 
