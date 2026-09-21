@@ -1,0 +1,80 @@
+{
+  "aggregate_content_hash": "13a6eb525a223d481a02df86ddc494cf92ac0f850f0cb4df7a2915e612042f54",
+  "aggregation_policy": "deterministic_v1",
+  "all_checks_passed": true,
+  "audit_verification": {
+    "audit_content_hash": "b972d104e5c748b0f14c01457d7373b0929cc839f5149c3f98ceabce13c0d529",
+    "audit_id": "orchaudit-e07792eec1d830ab7e2748ea298cef6f",
+    "recorded_at": "2026-09-21T00:00:00.000000Z",
+    "verified": true
+  },
+  "evidence_schema": "issue573.m7.real_e2e.v1",
+  "is_eligible_for_m6": false,
+  "is_tradable": false,
+  "milestone": 7,
+  "milestone_title": "Multi-Agent Orchestration (Strictly No Nested Agents)",
+  "non_goals_and_boundaries": {
+    "context_isolation_enforced": true,
+    "critic_decision_not_generated": true,
+    "data_researcher_output_is_not_evidence": true,
+    "external_researcher_output_is_not_evidence": true,
+    "nested_delegation_prohibited": true,
+    "research_memory_zero_pollution": true,
+    "trading_authority_granted": false,
+    "worker_to_worker_communication_forbidden": true
+  },
+  "orchestration_engineering_status": "COMPLETED",
+  "orchestration_id": "orch-56691a93b1d9435fd7bf6d271d767053",
+  "project_binding": {
+    "binding_mode": "strict",
+    "project_id": "a173ba08-8e0c-4c26-8604-0d462da55529",
+    "workspace_identity": "<WORKSPACE_ROOT>"
+  },
+  "purpose": "Milestone 7 real local MCP orchestration demonstration",
+  "work_blocks": [
+    {
+      "acceptance_status": "ACCEPTED",
+      "error_code": null,
+      "model": "Gemini 3.8 Flash High",
+      "ordinal": 0,
+      "provenance": {
+        "model": "Gemini 3.8 Flash High",
+        "provider": "antigravity",
+        "provider_job_ref": "7a0b8fb24af49044e56cdc24282e6cc5",
+        "transport_ref": "local_mcp://antigravity-local-desktop"
+      },
+      "provider": "antigravity",
+      "provider_job_ref": "7a0b8fb24af49044e56cdc24282e6cc5",
+      "result_hash": "d431f48e7f150c6c944a734d886813bb9b6a70552472a9925a19199281e9ef25",
+      "role": "data_researcher",
+      "route_id": "route-da7dbb68c711fff76349623a13cd491d",
+      "structured_result_type": "data_research_report",
+      "task_id": "task-66b7aa341be315f673e89525b0a240fb",
+      "terminal_status": "SUCCESS",
+      "transport_ref": "local_mcp://antigravity-local-desktop",
+      "work_block_id": "wb-real-data"
+    },
+    {
+      "acceptance_status": "ACCEPTED",
+      "error_code": null,
+      "model": "Gemini 3.8 Flash High",
+      "ordinal": 1,
+      "provenance": {
+        "model": "Gemini 3.8 Flash High",
+        "provider": "antigravity",
+        "provider_job_ref": "35d18805736b459535610ae782d84bcf",
+        "transport_ref": "local_mcp://antigravity-local-desktop"
+      },
+      "provider": "antigravity",
+      "provider_job_ref": "35d18805736b459535610ae782d84bcf",
+      "result_hash": "2d41ebe83147566e527f2e653d09983f6f915e4bf443263f1d2528254ddc5f63",
+      "role": "external_researcher",
+      "route_id": "route-968ed58590f2d2bad3669367e90a775d",
+      "structured_result_type": "external_literature_summary",
+      "task_id": "task-64594edcac00d1203f9b566f215bba67",
+      "terminal_status": "SUCCESS",
+      "transport_ref": "local_mcp://antigravity-local-desktop",
+      "work_block_id": "wb-real-external"
+    }
+  ]
+}
