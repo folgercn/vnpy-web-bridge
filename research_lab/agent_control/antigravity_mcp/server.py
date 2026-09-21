@@ -201,10 +201,13 @@ def create_mcp_server():
     mcp = FastMCP(
         "antigravity",
         instructions=(
-            "Network-enabled Antigravity agent bridge for Codex. "
-            "Exposes high-precision multi-account quota inspection (Gemini 3.1 Pro, Weekly limits) "
-            "and safe Antigravity-Manager account switching. Codex agents can query list_accounts and "
-            "selectively call switch_account when quotas approach depletion."
+            "Delegate one work block per task_id. submit returns job_id; call watch to hold the connection, "
+            "which streams upstream events via logging notifications and returns progress_update with activity "
+            "snapshots every 60s. On progress_update, read activity and immediately resume watch with the SAME "
+            "job_id and resume.cursor; do not resubmit or message. Raw events remain available through events. "
+            "If watch is unavailable, check status at most once every 180-300s. A disconnected watch never cancels/replays work; "
+            "reconnect to the SAME job. New continuations use message with a new request_id. Desktop must remain running. "
+            "Multi-account quota inspection and safe official switching are powered by Antigravity-Manager."
         ),
         host=DEFAULT_HOST,
         port=DEFAULT_PORT,
@@ -338,7 +341,10 @@ def create_mcp_server():
 
     @mcp.tool(name="projects")
     async def projects_tool(cwd: str = "") -> dict:
-        """List desktop projects, or resolve one absolute worktree to exactly one project."""
+        """
+        List desktop projects, or resolve one absolute worktree to exactly one project.
+        This is read-only. A missing or ambiguous cwd is an error; no default project is selected.
+        """
         return await invoke("projects", {"cwd": cwd})
 
     @mcp.tool(name="submit")
@@ -351,7 +357,11 @@ def create_mcp_server():
         timeout_seconds: float = 600,
         ack_uncertain: bool = False,
     ) -> dict:
-        """Submit an authorized work block to desktop worker."""
+        """
+        Submit an authorized work block, or continue a finished task's SAME desktop conversation.
+        Supply exact scope and acceptance criteria in prompt. Idempotent per task_id/request_id.
+        Returns immediately with a job_id; follow with one watch call.
+        """
         active_email = ""
         with contextlib.suppress(Exception):
             active_info = quota_reader.get_current_active_identity()
@@ -396,7 +406,11 @@ def create_mcp_server():
         timeout_seconds: float = 600,
         ack_uncertain: bool = False,
     ) -> dict:
-        """Continue a completed managed task in its existing desktop conversation."""
+        """
+        Continue a completed managed task in its existing desktop conversation. Uses saved cwd/mode.
+        Active tasks return TASK_BUSY; do not inject an interrupting message. After cancel, inspect
+        evidence before ack_uncertain. Follow new job with one watch call.
+        """
         return await invoke(
             "message",
             {
@@ -410,20 +424,33 @@ def create_mcp_server():
 
     @mcp.tool(name="watch")
     async def watch_tool(job_id: str, ctx: Context, cursor: int = 0, timeout_seconds: float = 1800) -> dict:
-        """Hold this request until completion or timeout. Pushes upstream events via MCP logging notifications."""
+        """
+        Hold this request to monitor work execution. Push full upstream events via MCP logging notifications
+        and state changes via progress notifications. Returns within at most 60 seconds with an activity snapshot.
+        On progress_update: read activity, then immediately call watch with the SAME job_id and resume.cursor.
+        Disconnect does not stop work; resume the same job/cursor. Raw output remains readable with events.
+        """
         progress = 0
 
         async def pushed(page):
-            if getattr(ctx.session, "_agy_log_level", "info") not in ("debug", "info"):
+            try:
+                if getattr(ctx.session, "_agy_log_level", "info") not in ("debug", "info"):
+                    return False
+                await ctx.session.send_log_message(
+                    "info", dict(job_id=job_id, **page), logger="antigravity.upstream", related_request_id=ctx.request_id
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Failed to send log message notification: %s", exc)
                 return False
-            await ctx.session.send_log_message(
-                "info", dict(job_id=job_id, **page), logger="antigravity.upstream", related_request_id=ctx.request_id
-            )
+            return True
 
         async def status_changed(state):
             nonlocal progress
             progress += 1
-            await ctx.report_progress(progress, message=json.dumps(state, ensure_ascii=False))
+            try:
+                await ctx.report_progress(progress, message=json.dumps(state, ensure_ascii=False))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Failed to report progress notification: %s", exc)
 
         return await invoke(
             "watch",
@@ -434,27 +461,54 @@ def create_mcp_server():
 
     @mcp.tool(name="events")
     async def events_tool(job_id: str, cursor: int = 0) -> dict:
-        """Explicit raw event replay/readback."""
+        """
+        Explicit raw event replay/readback. Not a status probe. While executing use watch instead of
+        repeatedly reading pages. Resume byte cursor for all preserved upstream fields.
+        """
         return await invoke("events", {"job_id": job_id, "cursor": cursor})
 
     @mcp.tool(name="wait")
     async def wait_tool(job_id: str, cursor: int = 0, timeout_seconds: float = 25) -> dict:
-        """Legacy explicit event read/wait."""
+        """
+        Legacy explicit event read/wait. Prefer watch for completion; do not loop on this while work runs.
+        Maximum wait is 50 seconds.
+        """
         return await invoke("wait", {"job_id": job_id, "cursor": cursor, "timeout_seconds": timeout_seconds})
 
     @mcp.tool(name="status")
     async def status_tool(job_id: str | None = None) -> dict:
-        """Read a job or shared adapter state without submitting work."""
-        return await invoke("status", {"job_id": job_id})
+        """
+        Read a job or shared adapter state without submitting work. Does not launch the desktop.
+        - When job_id is provided: inspects that job's conversation readiness (readiness: ready/busy/unknown,
+          unfinished_steps count, blocking_job_ids, can_continue boolean).
+        - When job_id is omitted: checks local adapter queues, active tasks and concurrency limits.
+        """
+        res = await invoke("status", {"job_id": job_id})
+        if not job_id and isinstance(res, dict):
+            with contextlib.suppress(Exception):
+                current_acc = await manager_client.get_current_account()
+                if current_acc:
+                    res["active_account"] = {
+                        "email": current_acc.get("email"),
+                        "gemini_5h_fraction": current_acc.get("quota", {}).get("gemini_5h_fraction"),
+                        "gemini_weekly_fraction": current_acc.get("quota", {}).get("gemini_weekly_fraction"),
+                    }
+        return res
 
     @mcp.tool(name="result")
     async def result_tool(job_id: str, offset: int = 0, max_chars: int = 8000) -> dict:
-        """Read the saved final result."""
+        """
+        Read the saved final result of a terminal job; paginate response using next_offset.
+        Does not rerun the task. Contains result_status, issues, recovery, and efficiency metrics.
+        """
         return await invoke("result", {"job_id": job_id, "offset": offset, "max_chars": max_chars})
 
     @mcp.tool(name="cancel")
     async def cancel_tool(job_id: str) -> dict:
-        """Request cancellation only for this bridge-owned job."""
+        """
+        Request cancellation only for this bridge-owned job, including queued jobs.
+        Confirm via wait/result. Never kills the shared desktop backend.
+        """
         return await invoke("cancel", {"job_id": job_id})
 
     return mcp

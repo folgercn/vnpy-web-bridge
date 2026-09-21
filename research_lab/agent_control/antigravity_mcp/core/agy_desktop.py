@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# ruff: noqa: E701, E702
 """Schedule owned tasks against the existing Antigravity desktop backend.
 No CLI workers; no desktop launch/kill; no automatic replay of uncertain turns.
 """

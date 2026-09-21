@@ -28,6 +28,28 @@
    - **本地 Socket 模式 (Local UDS)**：通过本机 Unix Domain Socket（默认 `data/antigravity_mcp.sock`）进行零端口冲突、低开销通信；
    - **安全策略**：本地 Socket 走操作系统文件权限隔离，**默认免 Token（开箱即用）**；网络模式支持 `AGY_MCP_API_KEY` 开启 Bearer Token / `?api_key=` 校验。
 
+5. **实时传输状态与可观测性（Model-visible Progress）**：
+   - **`watch` 60 秒分段活动快照**：每 60 秒返回一次结构化 `progress_update`，携带包含模型轮数（`model_rounds`）、文件读取数（`file_reads`）、编辑步骤（`observed_edit_steps`）与最近活动秒数的 `activity` 快照；
+   - **双通道流式推送**：基于 MCP Logging (`send_log_message`) 推送底层 step 详情，基于 MCP Progress (`report_progress`) 推送状态机跃迁；
+   - **`status(job_id)` 会话就绪态诊断**：穿透 Desktop Trajectory 实时计算未结束步骤（`unfinished_steps`），返回确定性的 `readiness: 'ready' | 'busy' | 'unknown'` 与 `can_continue` 指引。
+
+---
+
+## 标准工作流与工具接口
+
+| 工具名称 | 核心用途 | 调用时机与输入规范 |
+|---|---|---|
+| `account_usage` | 查询当前账号实时配额与周全局额度 | 派单前或周期性只读巡检；免调模型。 |
+| `list_accounts` | 穿透多账号聚合额度池 | 额度紧缺时查询全账号状态以供决策。 |
+| `switch_account` | 官方安全重启切号 | 传入目标邮箱或 ID，安全重启 `/Applications/Antigravity.app` 使新凭据生效。 |
+| `projects` | 目录与项目唯一绑定 | 传入 `cwd="/path/to/repo"`，解析出绑定的项目。 |
+| `submit` | 提交工作块任务 | 传入 `task_id`、`request_id`、`cwd`、`prompt`，立即返回 `job_id`。 |
+| `watch` | 实时观察任务进度 | 传入 `job_id` 与 `cursor`。每 60s 返回一次 `activity` 快照，收到后按 `resume.cursor` 续订。 |
+| `status` | 会话就绪诊断与排队查看 | 无参看全局队列；传入 `job_id` 诊断该任务会话是否 `can_continue`。 |
+| `events` | 显式原始事件读取 | 传入 `cursor`，按字节游标回放未处理的原始流式事件。 |
+| `result` | 终态结果分页读取 | 任务完成后传入 `offset` 分页读取成果，含 `efficiency` 与 `recovery` 证据。 |
+| `cancel` | 取消任务请求 | 仅取消本 bridge 拥有的 job，绝不杀底层桌面共享应用。 |
+
 ---
 
 ## 快速启动

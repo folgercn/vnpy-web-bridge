@@ -201,3 +201,33 @@ def test_print_startup_banner_socket_and_sse(capsys):
     captured_sse = capsys.readouterr().out
     assert "Network SSE (http://127.0.0.1:9999/sse)" in captured_sse
     assert "Token Auth ENABLED" in captured_sse
+
+
+def test_create_mcp_server_instructions_and_tools():
+    """Verify create_mcp_server registers complete tool catalog and instructions."""
+    from research_lab.agent_control.antigravity_mcp.server import create_mcp_server
+
+    mcp = create_mcp_server()
+    assert "Delegate one work block per task_id" in mcp.instructions
+    assert "watch" in mcp.instructions
+    assert "Antigravity-Manager" in mcp.instructions
+
+    # Verify key tools are registered
+    tool_names = set(mcp._tool_manager._tools.keys())
+    expected_tools = {
+        "list_accounts",
+        "switch_account",
+        "account_usage",
+        "account_leaderboard",
+        "tool_status",
+        "projects",
+        "submit",
+        "message",
+        "watch",
+        "events",
+        "wait",
+        "status",
+        "result",
+        "cancel",
+    }
+    assert expected_tools.issubset(tool_names)

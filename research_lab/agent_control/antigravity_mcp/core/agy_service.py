@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# ruff: noqa: E701, E702, F821
 """Reloadable business implementation. One fresh process per MCP call."""
 import asyncio
 import contextlib
