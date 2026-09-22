@@ -1,0 +1,91 @@
+{
+  "evidence_schema": "issue502.stage2.batch_discovery.v3",
+  "generated_at": "2026-09-22T05:25:00.000000Z",
+  "issue": 502,
+  "stage": 2,
+  "milestones": [
+    "B",
+    "C",
+    "D"
+  ],
+  "title": "Astra Batch Discovery + Memory Feedback Engineering & Gate Status Evidence",
+  "project_binding": {
+    "binding_mode": "strict",
+    "project_id": "81ba0c89-c7fc-4028-a3e0-e5fa766a6f50",
+    "workspace_identity": "/Users/fujun/node/vnpy-web-bridge"
+  },
+  "boundaries_and_non_goals": {
+    "production": false,
+    "live_trading_authorized": false,
+    "countable_forward": false,
+    "official_forward_claimed": false,
+    "pure_planning_preserved": true,
+    "nested_agents_prohibited": true,
+    "no_credential_leakage": true,
+    "single_implementer_continuous": true
+  },
+  "gates": {
+    "code_contracts_and_test_suite_gate": {
+      "status": "PASS",
+      "test_count": 17,
+      "passed_count": 17,
+      "lint_status": "PASS",
+      "verified_features": [
+        "Cross-session / view / attempt / task / project_binding fail-closed integrity checks",
+        "Strict universe scope whitelist admission (rejecting uncontrolled aliases like all_futures, commodity_active)",
+        "Per-slot failure isolation for prepare_execution, provider_lookup, submission, result retrieval, strict parse, admission, dedupe",
+        "Deterministic intra-batch and historical deduplication with unverified history handling (NOT_CHECKED, novel_count=0 when unqueried)",
+        "Rigorous funnel partition invariants: requested == admitted + invalid + provider_failed + not_attempted; admitted == exact + related + novel + unverified",
+        "Two-round memory feedback loop with traceable hypothesis-to-memory attribution and concrete scientific diffs",
+        "Idempotent attempt replay and UNCERTAIN/UNKNOWN status handling without blind resubmission"
+      ]
+    },
+    "real_research_data_gate": {
+      "status": "BLOCKED",
+      "gate_passed": false,
+      "reason": "Official historical research dataset not mounted in local repository workspace. Only synthetic fixture (provenance=synthetic_lab_screening_data) exists locally.",
+      "missing_specifications": {
+        "required_symbols": ["RB", "HC"],
+        "required_frequency": "1d",
+        "required_fields": [
+          "timestamp",
+          "symbol",
+          "feature_val",
+          "target_val",
+          "feature_availability_time",
+          "as_of_time",
+          "target_start_time"
+        ],
+        "authoritative_source": "deployments/research-warehouse/m2 (M2 Research Warehouse at /usr/local/libexec/vnpyresearch)",
+        "recovery_entry": "Export verified PIT snapshot from M2 Research Warehouse into an authenticated snapshot path with verifiable SHA-256 and byte-length binding"
+      },
+      "fixture_status": "Marked strictly as TEST/SYNTHETIC fixture (research_lab/tests/fixtures/rb_hc_screening_data.csv). NOT accepted as real research data."
+    },
+    "provider_execution_and_interrupted_batch_audit": {
+      "status": "INTERRUPTED_AND_AUDITED",
+      "provider": "antigravity",
+      "model": "Gemini 3.8 Flash High",
+      "transport_kind": "LOCAL_MCP",
+      "desktop_state": "IDLE 0 (confirmed cancelled via 8b99..., no orphan running processes)",
+      "interrupted_run_summary": {
+        "start_time": "2026-09-22T13:09:57",
+        "cancellation_time": "2026-09-22T13:16:30",
+        "pid": 69096,
+        "round_1_slots_submitted": 10,
+        "round_1_slots_completed": 10,
+        "round_1_screening_memory_entries": 11,
+        "round_2_slots_submitted": 7,
+        "round_2_slots_interrupted": 3,
+        "action_taken": "Audit record preserved; UNKNOWN slots halted without blind retry; no dirty background tasks"
+      }
+    }
+  },
+  "verification_summary": {
+    "code_implementation": "COMPLETE",
+    "regression_tests": "17/17 PASSED",
+    "data_gate": "BLOCKED (awaiting authoritative M2 research dataset)",
+    "milestone_b_status": "CODE_COMPLETE_DATA_GATE_BLOCKED",
+    "milestone_c_status": "CODE_COMPLETE_DATA_GATE_BLOCKED",
+    "milestone_d_status": "DOCUMENTED_AND_ISOLATED"
+  }
+}
