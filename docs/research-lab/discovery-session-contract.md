@@ -43,7 +43,7 @@ class DiscoverySession:
     allowed_universe: tuple[str, ...] | str  # 允许的标的范围 (如 "all_futures", ("RB", "HC"))
     allowed_frequency: str                   # 允许的时间周期 (如 "1d", "5m")
     allowed_signal_families: tuple[str, ...] # 允许的信号族 (如 ("momentum", "mean_reversion"))
-    generation_policy_version: str           # 生成策略版本 (如 "discovery_session_policy.v1")
+    generation_policy_version: str           # 生成策略版本 (支持 "discovery_generation_policy.v1" 与 "alpha_generator_prompt.v1")
     created_at: str                          # 审计时间戳 (默认固定值是可重现占位，不参与语义 identity；调用方可显式传入真实审计时间)
     schema_version: str                      # 契约架构版本 ("research_lab.discovery_session.v1")
     memory_view: InitVar[ResearchMemoryView] # 必需受控记忆视图上下文 (防伪造、重签与内容替换)
@@ -70,8 +70,11 @@ class DiscoverySession:
    - 必需真实上下文：`DiscoverySession.create`、直接 `DiscoverySession(...)` 构造、以及 `from_dict` 均强制要求传入真实的 `ResearchMemoryView` 实例，杜绝脱离受控记忆实例直接反序列化或伪造快照。
    - 全量快照一致性：校验 `memory_view_snapshot_hash`（由视图去除 `generated_at` 后全字段规范计算），有效防范伪造 `view_id`/`content_hash` 重签、内容替换或跨会话替换。
    - 槽位规划时同步执行 `validate_session_memory_view` 全量核验。
-6. **自封签与语义稳定性**：`session_content_hash` 涵盖所有语义定义与约束字段；`created_at` 仅作为审计时间戳（默认固定值为可重现占位，调用方可显式传入真实审计时间，但不参与 Session 语义 identity），确保相同探索目标在不同时刻创建具有严格确定的哈希与 ID。
+6. **自封签与输入规范化稳定性**：
+   - `session_content_hash` 涵盖所有语义定义与约束字段；`created_at` 仅作为审计时间戳（默认固定值为可重现占位，调用方可显式传入真实审计时间，但不参与 Session 语义 identity）。
+   - 统一输入规范化：`objective` 与 `allowed_frequency` 自动 strip 空白；`allowed_universe` 与 `allowed_signal_families` 元素自动 strip 空白并按字典序排序（`tuple(sorted(...))`）规范化存储与序列化。直接构造、`create()` 以及 `from_dict()` 均执行相同规范化，保证相同语义输入（无论元素顺序或空格差异，或未重封反序列化重排）均获得完全相同的 `session_id`、存储、序列化结果与下游 Prompt/Task，消除身份歧义与去重失效。
 7. **容器深度冻结**：所有嵌套映射与序列使用只读代理（`MappingProxyType`）或元组（`tuple`）深度冻结，杜绝属性就地篡改。
+8. **生成策略版本白名单**：`generation_policy_version` 必须处于统一支持的策略集合（`{"discovery_generation_policy.v1", "alpha_generator_prompt.v1"}`），与下游 Milestone 5 单候选请求支持策略保持一致，拒绝任何未知或未注册策略（如 `discovery_session_policy.v1`）。
 
 ---
 
@@ -155,7 +158,7 @@ Session 中配置的探索约束无损穿透至下游请求与任务：
 
 ## 3. 契约验证矩阵与测试证据
 
-本规范在 `tests/research_lab/agent_control/test_agent_control_discovery_session.py` 中实现了正反例、防篡改校验与无副作用 Spy 测试套件（本模块 84 项专项测试，结合 Milestone 5 79 项与 Milestone 4 45 项通过/1 项跳过，相关模块总计 208 项通过、1 项跳过）：
+本规范在 `tests/research_lab/agent_control/test_agent_control_discovery_session.py` 中实现了正反例、防篡改校验与无副作用 Spy 测试套件（本模块 91 项专项测试，结合 Milestone 5 79 项与 Milestone 4 45 项通过/1 项跳过，相关模块总计 215 项通过、1 项跳过）：
 
 | 校验分类 | 场景描述 | 预期行为 / 异常 |
 |---|---|---|
@@ -167,11 +170,13 @@ Session 中配置的探索约束无损穿透至下游请求与任务：
 | **正例：序列化** | 序列化双向无损转换 (`to_dict` / `from_dict`) | 属性 bit-for-bit 完全一致，哈希验证通过 |
 | **正例：确定性** | 确定性重复规划 (Determinism) | 相同输入多次规划结果逐字段一致 |
 | **正例：重试规划** | 槽位重试递增 (`replan_slot_attempt`) | `slot_id` 保持稳定不变，`attempt` 递增，`task_id` 正确区分 |
+| **正例：策略准入** | 支持策略全链路准入 (`discovery_generation_policy.v1`, `alpha_generator_prompt.v1`) | 三入口（create, direct, from_dict）顺利准入并规划出对应策略槽位任务 |
+| **正例：规范化稳定性** | universe/families 乱序、元素空格及未重封 from_dict 重排 | 规范化存储，产生一致 session_id、request 与 task |
 | **反例：预算边界** | 预算越界 (`budget` $\in \{0, 11, -1, 100\}$) | 立即抛出 `DiscoverySessionBudgetError` (Fail-Closed) |
 | **反例：类型强校验** | 预算非严格整数 (`True`, `1.0`, `"5"`, `None`, `[1]`) | 立即抛出 `DiscoverySessionBudgetError` (Fail-Closed) |
 | **反例：目标约束** | 空目标或纯空白目标 (`""`, `"   "`, `"\n\t"`) | 立即抛出 `DiscoverySessionError` |
 | **反例：目标超长** | 目标超长 (> 2,000 字符) | 立即抛出 `DiscoverySessionError` |
-| **反例：策略版本** | 未注册的策略版本 | 立即抛出 `DiscoverySessionError` |
+| **反例：策略白名单** | 未注册策略 (如 `discovery_session_policy.v1`, `unknown.v99`) | 在 create、直接构造、from_dict 三入口均立即拒绝 (Fail-Closed) |
 | **反例：角色校验** | 非 `alpha_generator` 角色 (如 `data_researcher`) | 立即抛出 `PermissionDeniedError` |
 | **反例：权限缺失** | 缺失必要权限 (如缺少 `create_hypothesis`) | 立即抛出 `PermissionDeniedError` |
 | **反例：越权拦截** | 包含越权权限 (如包含 `execute_screening`) | 立即抛出 `PermissionDeniedError` |

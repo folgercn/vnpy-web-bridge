@@ -75,8 +75,6 @@ DISCOVERY_SESSION_SCHEMA_VERSION = "research_lab.discovery_session.v1"
 SUPPORTED_DISCOVERY_POLICIES = frozenset({
     DISCOVERY_POLICY_VERSION,
     PROMPT_POLICY_VERSION,
-    "discovery_session_policy.v1",
-    "discovery_generation_policy.v1",
 })
 SUPPORTED_SCOPE_POLICIES = frozenset({
     "2026-09-m1",
@@ -358,10 +356,11 @@ class DiscoverySession:
         clean_objective = self.objective.strip()
         if not clean_objective:
             raise DiscoverySessionError("objective cannot be empty or whitespace only")
-        if len(self.objective) > MAX_OBJECTIVE_CHARS:
+        if len(clean_objective) > MAX_OBJECTIVE_CHARS:
             raise DiscoverySessionError(
-                f"objective exceeds maximum length of {MAX_OBJECTIVE_CHARS} characters ({len(self.objective)} chars)"
+                f"objective exceeds maximum length of {MAX_OBJECTIVE_CHARS} characters ({len(clean_objective)} chars)"
             )
+        object.__setattr__(self, "objective", clean_objective)
 
         # 3. project_binding: strict validation
         if not isinstance(self.project_binding, Mapping):
@@ -429,28 +428,38 @@ class DiscoverySession:
 
         # 6. allowed_universe
         if isinstance(self.allowed_universe, str):
-            if not self.allowed_universe.strip():
+            clean_univ = self.allowed_universe.strip()
+            if not clean_univ:
                 raise DiscoverySessionError("allowed_universe cannot be empty")
+            object.__setattr__(self, "allowed_universe", clean_univ)
         elif isinstance(self.allowed_universe, (tuple, list)):
-            if not self.allowed_universe or not all(isinstance(x, str) and x.strip() for x in self.allowed_universe):
-                raise DiscoverySessionError("allowed_universe cannot be empty or contain empty entries")
-            object.__setattr__(self, "allowed_universe", tuple(self.allowed_universe))
+            if not self.allowed_universe:
+                raise DiscoverySessionError("allowed_universe cannot be empty")
+            clean_univ_items: list[str] = []
+            for u in self.allowed_universe:
+                if type(u) is not str or not u.strip():
+                    raise DiscoverySessionError(f"allowed_universe elements must be non-empty strings, got {u!r}")
+                clean_univ_items.append(u.strip())
+            object.__setattr__(self, "allowed_universe", tuple(sorted(clean_univ_items)))
         else:
             raise DiscoverySessionError("allowed_universe must be a string or sequence of strings")
 
         # 7. allowed_frequency
         if type(self.allowed_frequency) is not str or not self.allowed_frequency.strip():
             raise DiscoverySessionError(f"allowed_frequency must be a non-empty string, got {self.allowed_frequency!r}")
+        object.__setattr__(self, "allowed_frequency", self.allowed_frequency.strip())
 
         # 8. allowed_signal_families (reject bare strings or non-iterables)
         if not isinstance(self.allowed_signal_families, (tuple, list)) or isinstance(self.allowed_signal_families, (str, bytes)):
             raise DiscoverySessionError(
                 "allowed_signal_families must be a tuple or list of strings, not a bare string"
             )
+        clean_fams: list[str] = []
         for fam in self.allowed_signal_families:
-            if not isinstance(fam, str) or not fam.strip():
+            if type(fam) is not str or not fam.strip():
                 raise DiscoverySessionError("signal family must be a non-empty string")
-        object.__setattr__(self, "allowed_signal_families", tuple(self.allowed_signal_families))
+            clean_fams.append(fam.strip())
+        object.__setattr__(self, "allowed_signal_families", tuple(sorted(clean_fams)))
 
         # 9. generation_policy_version
         if self.generation_policy_version not in SUPPORTED_DISCOVERY_POLICIES:
@@ -472,7 +481,7 @@ class DiscoverySession:
             "memory_view_id": self.memory_view_id,
             "memory_view_ref": self.memory_view_ref,
             "memory_view_snapshot_hash": self.memory_view_snapshot_hash,
-            "objective": clean_objective,
+            "objective": self.objective,
             "project_binding": pb.to_dict(),
             "schema_version": self.schema_version,
         }
@@ -559,6 +568,13 @@ class DiscoverySession:
 
         if type(allowed_frequency) is not str or not allowed_frequency.strip():
             raise DiscoverySessionError(f"allowed_frequency must be a non-empty string, got {allowed_frequency!r}")
+        clean_freq = allowed_frequency.strip()
+
+        if generation_policy_version not in SUPPORTED_DISCOVERY_POLICIES:
+            raise DiscoverySessionError(
+                f"Unsupported generation_policy_version '{generation_policy_version}', "
+                f"supported: {sorted(SUPPORTED_DISCOVERY_POLICIES)}"
+            )
 
         if isinstance(allowed_signal_families, (str, bytes)):
             raise DiscoverySessionError(
@@ -568,16 +584,27 @@ class DiscoverySession:
             raise DiscoverySessionError(
                 f"allowed_signal_families must be a tuple or list, got {type(allowed_signal_families).__name__}"
             )
-        fams = tuple(allowed_signal_families)
+        clean_fams: list[str] = []
+        for fam in allowed_signal_families:
+            if type(fam) is not str or not fam.strip():
+                raise DiscoverySessionError("signal family must be a non-empty string")
+            clean_fams.append(fam.strip())
+        fams = tuple(sorted(clean_fams))
 
         if isinstance(allowed_universe, (str, bytes)):
-            if not allowed_universe.strip():
+            clean_u = allowed_universe.strip()
+            if not clean_u:
                 raise DiscoverySessionError("allowed_universe cannot be empty")
-            univ: tuple[str, ...] | str = allowed_universe.strip()
+            univ: tuple[str, ...] | str = clean_u
         elif isinstance(allowed_universe, (tuple, list)):
             if not allowed_universe:
                 raise DiscoverySessionError("allowed_universe cannot be empty")
-            univ = tuple(allowed_universe)
+            clean_u_list: list[str] = []
+            for u in allowed_universe:
+                if type(u) is not str or not u.strip():
+                    raise DiscoverySessionError(f"allowed_universe elements must be non-empty strings, got {u!r}")
+                clean_u_list.append(u.strip())
+            univ = tuple(sorted(clean_u_list))
         else:
             raise DiscoverySessionError("allowed_universe must be a string or sequence of strings")
 
@@ -585,7 +612,7 @@ class DiscoverySession:
         snapshot_hash = compute_memory_view_snapshot_hash(memory_view)
 
         raw_dict = {
-            "allowed_frequency": allowed_frequency.strip(),
+            "allowed_frequency": clean_freq,
             "allowed_signal_families": fams,
             "allowed_universe": univ,
             "authorized_scope_ref": authorized_scope.to_dict(),
@@ -615,7 +642,7 @@ class DiscoverySession:
             memory_view_snapshot_hash=snapshot_hash,
             candidate_budget=candidate_budget,
             allowed_universe=univ,
-            allowed_frequency=allowed_frequency.strip(),
+            allowed_frequency=clean_freq,
             memory_view=memory_view,
             allowed_signal_families=fams,
             generation_policy_version=generation_policy_version,
@@ -685,12 +712,32 @@ class DiscoverySession:
                 f"Unsupported schema_version '{data['schema_version']}', expected '{DISCOVERY_SESSION_SCHEMA_VERSION}'"
             )
 
-        univ = (
-            tuple(data["allowed_universe"])
-            if isinstance(data["allowed_universe"], list)
-            else data["allowed_universe"]
-        )
-        fams = tuple(data.get("allowed_signal_families", ()))
+        gen_policy = str(data.get("generation_policy_version", DISCOVERY_POLICY_VERSION))
+        if gen_policy not in SUPPORTED_DISCOVERY_POLICIES:
+            raise DiscoverySessionError(
+                f"Unsupported generation_policy_version '{gen_policy}', "
+                f"supported: {sorted(SUPPORTED_DISCOVERY_POLICIES)}"
+            )
+
+        raw_univ = data.get("allowed_universe")
+        if isinstance(raw_univ, (list, tuple)):
+            clean_u_list: list[str] = []
+            for u in raw_univ:
+                if type(u) is not str or not u.strip():
+                    raise DiscoverySessionError(f"allowed_universe elements must be non-empty strings, got {u!r}")
+                clean_u_list.append(u.strip())
+            univ: tuple[str, ...] | str = tuple(sorted(clean_u_list))
+        elif isinstance(raw_univ, str) and raw_univ.strip():
+            univ = raw_univ.strip()
+        else:
+            raise DiscoverySessionError("allowed_universe must be a non-empty string or sequence of strings")
+
+        clean_f_list: list[str] = []
+        for f in data.get("allowed_signal_families", ()):
+            if type(f) is not str or not f.strip():
+                raise DiscoverySessionError("signal family must be a non-empty string")
+            clean_f_list.append(f.strip())
+        fams = tuple(sorted(clean_f_list))
 
         return cls(
             session_id=str(data["session_id"]),
@@ -707,7 +754,7 @@ class DiscoverySession:
             allowed_frequency=data["allowed_frequency"],
             memory_view=memory_view,
             allowed_signal_families=fams,
-            generation_policy_version=str(data.get("generation_policy_version", DISCOVERY_POLICY_VERSION)),
+            generation_policy_version=gen_policy,
             created_at=str(data.get("created_at", CANONICAL_SESSION_TIMESTAMP)),
             schema_version=str(data.get("schema_version", DISCOVERY_SESSION_SCHEMA_VERSION)),
         )

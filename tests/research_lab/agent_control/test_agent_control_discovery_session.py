@@ -25,6 +25,7 @@ from unittest.mock import MagicMock
 import pytest
 from research_lab.agent_control.alpha_generator import (
     DISCOVERY_POLICY_VERSION,
+    PROMPT_POLICY_VERSION,
     AlphaGenerationError,
     AlphaGenerationRequest,
     create_alpha_generation_task,
@@ -324,7 +325,7 @@ def test_discovery_session_creation_maximum_candidates():
     )
 
     assert session.candidate_budget == 10
-    assert session.allowed_universe == ("RB", "HC", "I", "J")
+    assert session.allowed_universe == ("HC", "I", "J", "RB")
     assert session.allowed_signal_families == ("mean_reversion", "order_flow")
 
     slots = plan_candidate_slots(session, view)
@@ -522,12 +523,12 @@ def test_discovery_session_bounds_and_policy_propagation():
         req = slot.request
         task = slot.task
 
-        assert req.allowed_universe == ("AU", "AG")
+        assert req.allowed_universe == ("AG", "AU")
         assert req.allowed_frequency == "30m"
         assert req.allowed_signal_families == ("breakout", "stat_arb")
         assert req.generation_policy_version == DISCOVERY_POLICY_VERSION
 
-        assert "Allowed universe: AU, AG" in task.work_block
+        assert "Allowed universe: AG, AU" in task.work_block
         assert "Allowed frequency: 30m" in task.work_block
         assert "Allowed signal families: breakout, stat_arb" in task.work_block
 
@@ -1522,3 +1523,271 @@ def test_permanent_non_trading_boundaries():
 
     with pytest.raises(PermissionDeniedError, match="Hard invariant violation"):
         _make_scope(permissions=["read_research_memory", "create_hypothesis", "production_trading"])
+
+
+def test_p1_universe_and_families_permutation_planning_identity():
+    """P1: Verify universe and signal families permutations yield identical session identity,
+    identical normalized attributes, and identical PlannedCandidateSlot requests & tasks.
+    """
+    scope = _make_scope()
+    view = _build_authentic_memory_view()
+
+    s1 = DiscoverySession.create(
+        objective="Permutation invariant exploration",
+        memory_view=view,
+        authorized_scope=scope,
+        candidate_budget=2,
+        allowed_universe=("rb", "cu"),
+        allowed_frequency="1d",
+        allowed_signal_families=("trend", "momentum"),
+        created_at=CANONICAL_SESSION_TIMESTAMP,
+    )
+    s2 = DiscoverySession.create(
+        objective="Permutation invariant exploration",
+        memory_view=view,
+        authorized_scope=scope,
+        candidate_budget=2,
+        allowed_universe=("cu", "rb"),
+        allowed_frequency="1d",
+        allowed_signal_families=("momentum", "trend"),
+        created_at=CANONICAL_SESSION_TIMESTAMP,
+    )
+
+    assert s1.session_id == s2.session_id
+    assert s1.session_content_hash == s2.session_content_hash
+    assert s1.allowed_universe == ("cu", "rb")
+    assert s2.allowed_universe == ("cu", "rb")
+    assert s1.allowed_signal_families == ("momentum", "trend")
+    assert s2.allowed_signal_families == ("momentum", "trend")
+    assert s1.to_dict() == s2.to_dict()
+
+    slots1 = plan_candidate_slots(s1, view)
+    slots2 = plan_candidate_slots(s2, view)
+
+    assert len(slots1) == len(slots2) == 2
+    for slot1, slot2 in zip(slots1, slots2):
+        assert slot1.slot_id == slot2.slot_id
+        assert slot1.slot_content_hash == slot2.slot_content_hash
+        assert slot1.request.to_dict() == slot2.request.to_dict()
+        assert slot1.task.task_id == slot2.task.task_id
+        assert slot1.task.work_block == slot2.task.work_block
+        assert slot1.task.to_dict() == slot2.task.to_dict()
+
+
+def test_p1_whitespace_elements_and_direct_constructor_stability():
+    """P1: Verify elements with whitespace and unstripped frequency/objective
+    are canonicalized and plan identical tasks across direct constructor and create.
+    """
+    scope = _make_scope()
+    view = _build_authentic_memory_view()
+
+    s_create = DiscoverySession.create(
+        objective="  Normalized objective with surrounding whitespace  ",
+        memory_view=view,
+        authorized_scope=scope,
+        candidate_budget=1,
+        allowed_universe=("  rb  ", "  cu  "),
+        allowed_frequency=" 1d ",
+        allowed_signal_families=(" trend ", " momentum "),
+        created_at=CANONICAL_SESSION_TIMESTAMP,
+    )
+
+    assert s_create.objective == "Normalized objective with surrounding whitespace"
+    assert s_create.allowed_frequency == "1d"
+    assert s_create.allowed_universe == ("cu", "rb")
+    assert s_create.allowed_signal_families == ("momentum", "trend")
+
+    # Direct constructor with raw whitespace/un-ordered parameters
+    s_direct = DiscoverySession(
+        session_id=s_create.session_id,
+        session_content_hash=s_create.session_content_hash,
+        objective="  Normalized objective with surrounding whitespace  ",
+        project_binding=dict(s_create.project_binding),
+        authorized_scope_ref=dict(s_create.authorized_scope_ref),
+        memory_view_ref=dict(s_create.memory_view_ref),
+        memory_view_id=s_create.memory_view_id,
+        memory_view_content_hash=s_create.memory_view_content_hash,
+        memory_view_snapshot_hash=s_create.memory_view_snapshot_hash,
+        candidate_budget=1,
+        allowed_universe=("rb", "cu"),
+        allowed_frequency=" 1d ",
+        memory_view=view,
+        allowed_signal_families=("trend", "momentum"),
+        generation_policy_version=s_create.generation_policy_version,
+        created_at=s_create.created_at,
+        schema_version=s_create.schema_version,
+    )
+
+    assert s_direct.objective == s_create.objective
+    assert s_direct.allowed_frequency == s_create.allowed_frequency
+    assert s_direct.allowed_universe == s_create.allowed_universe
+    assert s_direct.allowed_signal_families == s_create.allowed_signal_families
+    assert s_direct.to_dict() == s_create.to_dict()
+
+    slot_create = plan_candidate_slots(s_create, view)[0]
+    slot_direct = plan_candidate_slots(s_direct, view)[0]
+
+    assert slot_create.slot_id == slot_direct.slot_id
+    assert slot_create.request.to_dict() == slot_direct.request.to_dict()
+    assert slot_create.task.task_id == slot_direct.task.task_id
+    assert slot_create.task.work_block == slot_direct.task.work_block
+
+
+def test_p1_unresealed_from_dict_reordered_universe_and_families_identity():
+    """P1: Verify from_dict re-ordering without resealing produces canonical storage
+    and exactly identical plan without creating a diverged task.
+    """
+    scope = _make_scope()
+    view = _build_authentic_memory_view()
+
+    s_orig = DiscoverySession.create(
+        objective="Strict from_dict reorder stability",
+        memory_view=view,
+        authorized_scope=scope,
+        candidate_budget=1,
+        allowed_universe=("cu", "rb"),
+        allowed_frequency="1d",
+        allowed_signal_families=("momentum", "trend"),
+        created_at=CANONICAL_SESSION_TIMESTAMP,
+    )
+
+    d_tampered = s_orig.to_dict()
+    # Invert universe and families order, inject whitespace into objective & frequency
+    d_tampered["allowed_universe"] = ["rb", "cu"]
+    d_tampered["allowed_signal_families"] = ["trend", "momentum"]
+    d_tampered["objective"] = "  Strict from_dict reorder stability  "
+    d_tampered["allowed_frequency"] = " 1d "
+    # Do NOT update session_content_hash or session_id
+
+    s_restored = DiscoverySession.from_dict(d_tampered, memory_view=view)
+
+    assert s_restored.session_id == s_orig.session_id
+    assert s_restored.session_content_hash == s_orig.session_content_hash
+    assert s_restored.allowed_universe == ("cu", "rb")
+    assert s_restored.allowed_signal_families == ("momentum", "trend")
+    assert s_restored.objective == "Strict from_dict reorder stability"
+    assert s_restored.allowed_frequency == "1d"
+    assert s_restored.to_dict() == s_orig.to_dict()
+
+    orig_slot = plan_candidate_slots(s_orig, view)[0]
+    restored_slot = plan_candidate_slots(s_restored, view)[0]
+
+    assert restored_slot.slot_id == orig_slot.slot_id
+    assert restored_slot.request.to_dict() == orig_slot.request.to_dict()
+    assert restored_slot.task.task_id == orig_slot.task.task_id
+    assert restored_slot.task.work_block == orig_slot.task.work_block
+
+
+@pytest.mark.parametrize("policy_version", [DISCOVERY_POLICY_VERSION, PROMPT_POLICY_VERSION])
+def test_p2_supported_policies_three_entries_through_to_plan(policy_version):
+    """P2: Verify all genuinely supported policies succeed across all three entries
+    (create, direct constructor, from_dict) and successfully generate valid candidate slots.
+    """
+    scope = _make_scope()
+    view = _build_authentic_memory_view()
+
+    # Entry 1: create factory
+    s_create = DiscoverySession.create(
+        objective=f"Testing supported policy {policy_version}",
+        memory_view=view,
+        authorized_scope=scope,
+        candidate_budget=1,
+        allowed_universe="test_univ",
+        allowed_frequency="1d",
+        generation_policy_version=policy_version,
+        created_at=CANONICAL_SESSION_TIMESTAMP,
+    )
+    slots_create = plan_candidate_slots(s_create, view)
+    assert len(slots_create) == 1
+    assert slots_create[0].request.generation_policy_version == policy_version
+    assert slots_create[0].task.role == "alpha_generator"
+
+    # Entry 2: direct constructor
+    s_direct = DiscoverySession(
+        session_id=s_create.session_id,
+        session_content_hash=s_create.session_content_hash,
+        objective=s_create.objective,
+        project_binding=dict(s_create.project_binding),
+        authorized_scope_ref=dict(s_create.authorized_scope_ref),
+        memory_view_ref=dict(s_create.memory_view_ref),
+        memory_view_id=s_create.memory_view_id,
+        memory_view_content_hash=s_create.memory_view_content_hash,
+        memory_view_snapshot_hash=s_create.memory_view_snapshot_hash,
+        candidate_budget=1,
+        allowed_universe=s_create.allowed_universe,
+        allowed_frequency=s_create.allowed_frequency,
+        memory_view=view,
+        allowed_signal_families=s_create.allowed_signal_families,
+        generation_policy_version=policy_version,
+        created_at=s_create.created_at,
+        schema_version=s_create.schema_version,
+    )
+    slots_direct = plan_candidate_slots(s_direct, view)
+    assert len(slots_direct) == 1
+    assert slots_direct[0].request.generation_policy_version == policy_version
+
+    # Entry 3: from_dict
+    s_from_dict = DiscoverySession.from_dict(s_create.to_dict(), memory_view=view)
+    slots_from_dict = plan_candidate_slots(s_from_dict, view)
+    assert len(slots_from_dict) == 1
+    assert slots_from_dict[0].request.generation_policy_version == policy_version
+
+
+@pytest.mark.parametrize("invalid_policy", ["discovery_session_policy.v1", "unknown_rogue_policy.v99"])
+def test_p2_unsupported_policy_rejected_at_all_three_entries(invalid_policy):
+    """P2: Verify unsupported policies (including unmapped discovery_session_policy.v1)
+    are strictly rejected at create, direct constructor, and from_dict.
+    """
+    scope = _make_scope()
+    view = _build_authentic_memory_view()
+
+    # Entry 1: create
+    with pytest.raises(DiscoverySessionError, match="Unsupported generation_policy_version"):
+        DiscoverySession.create(
+            objective="Reject invalid policy test",
+            memory_view=view,
+            authorized_scope=scope,
+            candidate_budget=1,
+            allowed_universe="test_univ",
+            allowed_frequency="1d",
+            generation_policy_version=invalid_policy,
+        )
+
+    # Valid session for template
+    valid_session = DiscoverySession.create(
+        objective="Template for invalid policy test",
+        memory_view=view,
+        authorized_scope=scope,
+        candidate_budget=1,
+        allowed_universe="test_univ",
+        allowed_frequency="1d",
+        created_at=CANONICAL_SESSION_TIMESTAMP,
+    )
+
+    # Entry 2: direct constructor
+    with pytest.raises(DiscoverySessionError, match="Unsupported generation_policy_version"):
+        DiscoverySession(
+            session_id=valid_session.session_id,
+            session_content_hash=valid_session.session_content_hash,
+            objective=valid_session.objective,
+            project_binding=dict(valid_session.project_binding),
+            authorized_scope_ref=dict(valid_session.authorized_scope_ref),
+            memory_view_ref=dict(valid_session.memory_view_ref),
+            memory_view_id=valid_session.memory_view_id,
+            memory_view_content_hash=valid_session.memory_view_content_hash,
+            memory_view_snapshot_hash=valid_session.memory_view_snapshot_hash,
+            candidate_budget=1,
+            allowed_universe=valid_session.allowed_universe,
+            allowed_frequency=valid_session.allowed_frequency,
+            memory_view=view,
+            allowed_signal_families=valid_session.allowed_signal_families,
+            generation_policy_version=invalid_policy,
+            created_at=valid_session.created_at,
+            schema_version=valid_session.schema_version,
+        )
+
+    # Entry 3: from_dict
+    d_invalid = valid_session.to_dict()
+    d_invalid["generation_policy_version"] = invalid_policy
+    with pytest.raises(DiscoverySessionError, match="Unsupported generation_policy_version"):
+        DiscoverySession.from_dict(d_invalid, memory_view=view)

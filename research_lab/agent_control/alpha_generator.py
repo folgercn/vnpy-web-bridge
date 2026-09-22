@@ -163,29 +163,37 @@ class AlphaGenerationRequest:
                 raise AlphaGenerationError("ordinal must be a strict integer between 1 and 10")
             if self.allowed_universe is not None:
                 if isinstance(self.allowed_universe, str):
-                    if not self.allowed_universe.strip():
+                    clean_univ = self.allowed_universe.strip()
+                    if not clean_univ:
                         raise AlphaGenerationError("allowed_universe cannot be empty")
+                    object.__setattr__(self, "allowed_universe", clean_univ)
                 elif isinstance(self.allowed_universe, (tuple, list)):
                     if not self.allowed_universe or not all(isinstance(x, str) and x.strip() for x in self.allowed_universe):
                         raise AlphaGenerationError("allowed_universe list/tuple cannot be empty or contain empty entries")
-                    object.__setattr__(self, "allowed_universe", tuple(self.allowed_universe))
+                    clean_univ = tuple(sorted(x.strip() for x in self.allowed_universe))
+                    object.__setattr__(self, "allowed_universe", clean_univ)
                 else:
                     raise AlphaGenerationError("allowed_universe must be a string or sequence of strings")
             if self.allowed_frequency is not None:
                 if not isinstance(self.allowed_frequency, str) or not self.allowed_frequency.strip():
                     raise AlphaGenerationError("allowed_frequency must be a non-empty string")
+                object.__setattr__(self, "allowed_frequency", self.allowed_frequency.strip())
             if self.allowed_signal_families is not None:
                 if not isinstance(self.allowed_signal_families, (tuple, list)) or isinstance(self.allowed_signal_families, (str, bytes)):
                     raise AlphaGenerationError("allowed_signal_families must be a tuple or list of strings")
+                clean_fams: list[str] = []
                 for fam in self.allowed_signal_families:
                     if not isinstance(fam, str) or not fam.strip():
                         raise AlphaGenerationError("allowed_signal_families entries must be non-empty strings")
-                object.__setattr__(self, "allowed_signal_families", tuple(self.allowed_signal_families))
+                    clean_fams.append(fam.strip())
+                object.__setattr__(self, "allowed_signal_families", tuple(sorted(clean_fams)))
 
-        if not self.objective.strip() or len(self.objective) > MAX_OBJECTIVE_CHARS:
+        clean_obj = self.objective.strip()
+        if not clean_obj or len(clean_obj) > MAX_OBJECTIVE_CHARS:
             raise AlphaGenerationError(
                 "objective must be non-empty and within the bounded size"
             )
+        object.__setattr__(self, "objective", clean_obj)
         validate_scope_hash(dict(self.authorized_scope_ref))
         if self.authorized_scope_ref.get("role") != "alpha_generator":
             raise PermissionDeniedError("Alpha Generator scope role mismatch")
@@ -473,12 +481,16 @@ def build_alpha_generation_prompt(
     if request.ordinal is not None:
         prompt_lines.append(f"Candidate slot ordinal: {request.ordinal}")
     if request.allowed_universe is not None:
-        univ_str = ", ".join(request.allowed_universe) if isinstance(request.allowed_universe, (list, tuple)) else str(request.allowed_universe)
+        univ_str = (
+            ", ".join(sorted(x.strip() for x in request.allowed_universe))
+            if isinstance(request.allowed_universe, (list, tuple))
+            else str(request.allowed_universe).strip()
+        )
         prompt_lines.append(f"Allowed universe: {univ_str}")
     if request.allowed_frequency is not None:
-        prompt_lines.append(f"Allowed frequency: {request.allowed_frequency}")
+        prompt_lines.append(f"Allowed frequency: {request.allowed_frequency.strip()}")
     if request.allowed_signal_families is not None:
-        fams_str = ", ".join(request.allowed_signal_families)
+        fams_str = ", ".join(sorted(x.strip() for x in request.allowed_signal_families))
         prompt_lines.append(f"Allowed signal families: {fams_str}")
     prompt_lines.append(memory_view.to_prompt_context())
     return "\n".join(prompt_lines)
