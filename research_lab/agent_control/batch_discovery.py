@@ -61,6 +61,7 @@ from research_lab.agent_control.errors import (
     ProviderUnavailableError,
     QuotaUnavailableError,
     ResultAcceptanceError,
+    TamperDetectionError,
 )
 from research_lab.agent_control.handoff import prepare_execution
 from research_lab.agent_control.memory_view import (
@@ -396,6 +397,60 @@ def _extract_raw_output_safe(result: AgentResult) -> str:
     raise ResultAcceptanceError("Accepted provider result has no extractable model output text")
 
 
+def validate_duplicate_lookup_views(
+    candidate: AlphaGenerationCandidate,
+    exact_view: Any,
+    related_view: Any,
+    session: DiscoverySession,
+) -> tuple[bool, str | None]:
+    """Validate that exact and related views are genuine duplicate lookup views for the candidate."""
+    if not isinstance(exact_view, ResearchMemoryView) or not isinstance(related_view, ResearchMemoryView):
+        return False, "Duplicate lookup views must be ResearchMemoryView instances"
+
+    expected_role = getattr(session, "role", None) or (
+        session.authorized_scope_ref.get("role", "alpha_generator")
+        if isinstance(session.authorized_scope_ref, dict)
+        else "alpha_generator"
+    )
+    if exact_view.role != expected_role or related_view.role != expected_role:
+        return False, f"Duplicate views role ({exact_view.role}, {related_view.role}) does not match role '{expected_role}'"
+
+    if dict(exact_view.project_binding) != dict(session.project_binding):
+        return False, "exact_view project_binding does not match active session"
+
+    if dict(related_view.project_binding) != dict(session.project_binding):
+        return False, "related_view project_binding does not match active session"
+
+    dup_cat = ResearchMemoryCategory.DUPLICATE_IDENTITIES.value
+    if dup_cat not in exact_view.categories:
+        return False, f"exact_view categories {exact_view.categories} missing '{dup_cat}'"
+
+    if dup_cat not in related_view.categories:
+        return False, f"related_view categories {related_view.categories} missing '{dup_cat}'"
+
+    # Distinct query views required: content hash vs scientific identity hash
+    if exact_view.view_id == related_view.view_id:
+        return False, "exact_view and related_view have identical view_id; distinct query views required"
+
+    # Check entries in exact_view: must belong to DUPLICATE_IDENTITIES category
+    # If exact duplicate, must match candidate hypothesis_content_hash
+    for entry in exact_view.entries_by_category.get(dup_cat, ()):
+        if entry.category != dup_cat:
+            return False, f"exact_view contains unexpected category entry '{entry.category}'"
+        if entry.duplicate_state == "exact" and entry.hypothesis_content_hash != candidate.hypothesis.hypothesis_content_hash:
+            return False, "exact_view contains exact duplicate entry with mismatching hypothesis_content_hash"
+
+    # Check entries in related_view: must belong to DUPLICATE_IDENTITIES category
+    # If related duplicate, must match candidate scientific_identity_hash
+    for entry in related_view.entries_by_category.get(dup_cat, ()):
+        if entry.category != dup_cat:
+            return False, f"related_view contains unexpected category entry '{entry.category}'"
+        if entry.duplicate_state in ("exact", "related") and entry.scientific_identity_hash != candidate.scientific_identity_hash:
+            return False, "related_view contains related duplicate entry with mismatching scientific_identity_hash"
+
+    return True, None
+
+
 class DiscoveryBatchOrchestrator:
     """Sequential batch discovery orchestrator executing PlannedCandidateSlots fail-closed."""
 
@@ -672,7 +727,7 @@ class DiscoveryBatchOrchestrator:
 
             agent_result = provider.result(handle, prep)
 
-            # Cross-Task & Route verification on agent_result
+            # Cross-Task, Route & Provider Job verification on agent_result
             res_task_id = (
                 agent_result.task_ref.get("task_id")
                 if isinstance(agent_result.task_ref, dict)
@@ -688,16 +743,37 @@ class DiscoveryBatchOrchestrator:
                 if isinstance(agent_result.route_ref, dict)
                 else getattr(agent_result, "provider", None)
             )
+            res_job_ref = getattr(agent_result, "provider_job_ref", None)
 
             if (
                 res_task_id != slot.task.task_id
                 or res_route_id != route.route_id
                 or res_provider != route.provider
+                or res_job_ref != handle.provider_job_ref
             ):
                 raise ResultAcceptanceError(
-                    f"Result task/route ({res_task_id}, {res_route_id}, {res_provider}) "
-                    f"does not match expected ({slot.task.task_id}, {route.route_id}, {route.provider})"
+                    f"Result task/route/job ({res_task_id}, {res_route_id}, {res_provider}, {res_job_ref}) "
+                    f"does not match expected ({slot.task.task_id}, {route.route_id}, {route.provider}, {handle.provider_job_ref})"
                 )
+        except (ResultAcceptanceError, TamperDetectionError) as exc:
+            acc_err = SlotExecutionResult(
+                session_id=session.session_id,
+                slot_id=slot.slot_id,
+                ordinal=slot.ordinal,
+                attempt=slot.attempt,
+                engineering_status=SlotEngineeringStatus.RESULT_NOT_ACCEPTED.value,
+                error_code="RESULT_NOT_ACCEPTED",
+                error_message=str(exc),
+                route_id=route.route_id,
+                provider_job_ref=handle.provider_job_ref,
+                provider=route.provider,
+                model=route.resolved_model,
+                memory_view_id=session.memory_view_id,
+                memory_view_content_hash=session.memory_view_content_hash,
+                slot_content_hash=slot.slot_content_hash,
+            )
+            self._execution_cache[cache_key] = acc_err
+            return acc_err
         except Exception as exc:  # noqa: BLE001
             res_err = SlotExecutionResult(
                 session_id=session.session_id,
@@ -770,7 +846,28 @@ class DiscoveryBatchOrchestrator:
         try:
             raw_text = _extract_raw_output_safe(agent_result)
             parse_alpha_generation_output(raw_text)
-        except (ResultAcceptanceError, AlphaGenerationError) as exc:
+        except (ResultAcceptanceError, TamperDetectionError) as exc:
+            acc_res = SlotExecutionResult(
+                session_id=session.session_id,
+                slot_id=slot.slot_id,
+                ordinal=slot.ordinal,
+                attempt=slot.attempt,
+                engineering_status=SlotEngineeringStatus.RESULT_NOT_ACCEPTED.value,
+                error_code="RESULT_NOT_ACCEPTED",
+                error_message=f"Agent result acceptance check failed: {exc}",
+                route_id=route.route_id,
+                provider_job_ref=handle.provider_job_ref,
+                provider=route.provider,
+                model=route.resolved_model,
+                agent_result_id=agent_result.result_id,
+                agent_result_hash=agent_result.result_content_hash,
+                memory_view_id=session.memory_view_id,
+                memory_view_content_hash=session.memory_view_content_hash,
+                slot_content_hash=slot.slot_content_hash,
+            )
+            self._execution_cache[cache_key] = acc_res
+            return acc_res
+        except (AlphaGenerationError, Exception) as exc:
             p_res = SlotExecutionResult(
                 session_id=session.session_id,
                 slot_id=slot.slot_id,
@@ -871,13 +968,19 @@ class DiscoveryBatchOrchestrator:
         if lookup_fn is not None:
             try:
                 exact_v, related_v = lookup_fn(candidate)
-                candidate_with_hist = apply_duplicate_views(
-                    candidate, exact_view=exact_v, related_view=related_v
+                is_valid, _ = validate_duplicate_lookup_views(
+                    candidate, exact_v, related_v, session
                 )
-                hist_exact = candidate_with_hist.duplicate_status == "EXACT_DUPLICATE"
-                hist_related = candidate_with_hist.duplicate_status == "RELATED_HISTORY"
-                hist_refs = list(candidate_with_hist.duplicate_refs)
-                hist_queried = True
+                if is_valid:
+                    candidate_with_hist = apply_duplicate_views(
+                        candidate, exact_view=exact_v, related_view=related_v
+                    )
+                    hist_exact = candidate_with_hist.duplicate_status == "EXACT_DUPLICATE"
+                    hist_related = candidate_with_hist.duplicate_status == "RELATED_HISTORY"
+                    hist_refs = list(candidate_with_hist.duplicate_refs)
+                    hist_queried = True
+                else:
+                    hist_queried = False
             except Exception:  # noqa: BLE001
                 hist_queried = False
 

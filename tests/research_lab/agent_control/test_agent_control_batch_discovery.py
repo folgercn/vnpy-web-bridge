@@ -37,6 +37,7 @@ from research_lab.agent_control.batch_discovery import (
 )
 from research_lab.agent_control.contracts import (
     AgentPermissionScope,
+    AgentResult,
     TerminalStatus,
 )
 from research_lab.agent_control.discovery_integration import (
@@ -1186,3 +1187,160 @@ def test_uncertain_status_no_blind_retry_and_preserves_slot_result(
         assert batch_result.funnel.provider_failed == 1
         assert batch_result.funnel.invalid == 0
         assert batch_result.funnel.not_attempted == 0
+
+
+def test_bad_result_digest_tamper_detection_isolated_per_slot(
+    test_provider: ContractTestProvider,
+    provider_registry: ProviderRegistry,
+    authorized_scope: AgentPermissionScope,
+    routing_policy: RoutingPolicy,
+    discovery_context: dict[str, Any],
+) -> None:
+    """Milestone B: TamperDetectionError on bad result digest is isolated per slot; remaining slots proceed."""
+    memory: ResearchMemory = discovery_context["memory"]
+    view = _build_test_memory_view(memory, authorized_scope)
+    session = DiscoverySession.create(
+        objective="Test bad result digest isolation",
+        memory_view=view,
+        authorized_scope=authorized_scope,
+        candidate_budget=2,
+        allowed_universe=("RB",),
+        allowed_frequency="1d",
+        allowed_signal_families=("momentum",),
+        project_binding=STANDARD_PROJECT_BINDING,
+        created_at=CANONICAL_SESSION_TIMESTAMP,
+    )
+    planned_slots = plan_candidate_slots(session, view)
+
+    # Configure slot 0 with valid payload
+    output_map = {
+        planned_slots[0].task.task_id: json.dumps(_build_candidate_envelope(title="Slot 0", universe="RB2405")),
+        planned_slots[1].task.task_id: json.dumps(_build_candidate_envelope(title="Slot 1", universe="RB2405")),
+    }
+    configure_provider_output(test_provider, output_map)
+
+    # Tamper slot 0 result content hash
+    orig_result = test_provider.result
+    call_count = {"n": 0}
+
+    def _tampered_result(handle, prep=None):
+        res = orig_result(handle, prep)
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # Corrupt the result content hash
+            object.__setattr__(res, "result_content_hash", "0" * 64)
+        return res
+
+    with mock.patch.object(test_provider, "result", side_effect=_tampered_result):
+        orchestrator = DiscoveryBatchOrchestrator(
+            registry=provider_registry,
+            routing_policy=routing_policy,
+        )
+        batch_result = orchestrator.execute_session(session=session, memory_view=view)
+
+        # Slot 0 failed due to tamper detection, but slot 1 succeeded!
+        assert batch_result.funnel.requested == 2
+        assert batch_result.funnel.attempted == 2
+        assert batch_result.funnel.admitted == 1
+        assert batch_result.funnel.provider_failed == 1
+        assert batch_result.funnel.invalid == 0
+        assert batch_result.funnel.not_attempted == 0
+        assert len(batch_result.admitted_candidates) == 1
+        assert batch_result.slots[0].engineering_status == SlotEngineeringStatus.RESULT_NOT_ACCEPTED.value
+
+
+def test_mismatching_provider_job_ref_rejected_and_isolated(
+    test_provider: ContractTestProvider,
+    provider_registry: ProviderRegistry,
+    authorized_scope: AgentPermissionScope,
+    routing_policy: RoutingPolicy,
+    discovery_context: dict[str, Any],
+) -> None:
+    """Milestone B: AgentResult with mismatching provider_job_ref is rejected via RESULT_NOT_ACCEPTED."""
+    memory: ResearchMemory = discovery_context["memory"]
+    view = _build_test_memory_view(memory, authorized_scope)
+    session = DiscoverySession.create(
+        objective="Test wrong provider job ref rejection",
+        memory_view=view,
+        authorized_scope=authorized_scope,
+        candidate_budget=1,
+        allowed_universe=("RB",),
+        allowed_frequency="1d",
+        allowed_signal_families=("momentum",),
+        project_binding=STANDARD_PROJECT_BINDING,
+        created_at=CANONICAL_SESSION_TIMESTAMP,
+    )
+    envelope = _build_candidate_envelope(title="Slot with wrong job ref", universe="RB2405")
+    configure_provider_output(test_provider, json.dumps(envelope))
+
+    orig_result = test_provider.result
+
+    def _resealed_wrong_job_result(handle, prep=None):
+        res = orig_result(handle, prep)
+        # Create a validly sealed result but with a different provider_job_ref
+        wrong_res = AgentResult.create(
+            task_ref=res.task_ref,
+            route_ref=res.route_ref,
+            provider_job_ref="another-provider-job-ref-999",
+            terminal_status=res.terminal_status,
+            structured_output=res.structured_output,
+            acceptance_status=res.acceptance_status,
+        )
+        return wrong_res
+
+    with mock.patch.object(test_provider, "result", side_effect=_resealed_wrong_job_result):
+        orchestrator = DiscoveryBatchOrchestrator(
+            registry=provider_registry,
+            routing_policy=routing_policy,
+        )
+        batch_result = orchestrator.execute_session(session=session, memory_view=view)
+
+        assert batch_result.funnel.requested == 1
+        assert batch_result.funnel.attempted == 1
+        assert batch_result.funnel.admitted == 0
+        assert batch_result.funnel.provider_failed == 1
+        assert batch_result.slots[0].engineering_status == SlotEngineeringStatus.RESULT_NOT_ACCEPTED.value
+
+
+def test_context_view_cannot_masquerade_as_duplicate_lookup_view(
+    test_provider: ContractTestProvider,
+    provider_registry: ProviderRegistry,
+    authorized_scope: AgentPermissionScope,
+    routing_policy: RoutingPolicy,
+    discovery_context: dict[str, Any],
+) -> None:
+    """Milestone B: Returning initial context view as duplicate lookup is rejected; results in NOT_CHECKED and unverified."""
+    memory: ResearchMemory = discovery_context["memory"]
+    context_view = _build_test_memory_view(memory, authorized_scope)
+    session = DiscoverySession.create(
+        objective="Test sham duplicate view rejection",
+        memory_view=context_view,
+        authorized_scope=authorized_scope,
+        candidate_budget=1,
+        allowed_universe=("RB",),
+        allowed_frequency="1d",
+        allowed_signal_families=("momentum",),
+        project_binding=STANDARD_PROJECT_BINDING,
+        created_at=CANONICAL_SESSION_TIMESTAMP,
+    )
+    envelope = _build_candidate_envelope(title="Candidate with sham view", universe="RB2405")
+    configure_provider_output(test_provider, json.dumps(envelope))
+
+    orchestrator = DiscoveryBatchOrchestrator(
+        registry=provider_registry,
+        routing_policy=routing_policy,
+    )
+
+    # Pass the initial context view as duplicate lookup views (sham)
+    batch_result = orchestrator.execute_session(
+        session=session,
+        memory_view=context_view,
+        duplicate_view_lookup=lambda c: (context_view, context_view),
+    )
+
+    assert batch_result.funnel.requested == 1
+    assert batch_result.funnel.admitted == 1
+    assert batch_result.funnel.novel_count == 0
+    assert batch_result.funnel.unverified_count == 1
+    assert batch_result.slots[0].duplicate_status == "NOT_CHECKED"
+    assert batch_result.admitted_candidates[0].duplicate_status == "NOT_CHECKED"
