@@ -96,8 +96,9 @@ class SlotExecutionResult:
     error_code: str | None = None
     error_message: str | None = None
     candidate: AlphaGenerationCandidate | None = None
-    duplicate_status: str | None = None       # "EXACT_DUPLICATE" | "RELATED_HISTORY" | "NOVEL_WITHIN_VIEW"
+    duplicate_status: str | None = None       # "EXACT_DUPLICATE" | "RELATED_HISTORY" | "NOVEL_WITHIN_VIEW" | "NOT_CHECKED"
     duplicate_refs: tuple[str, ...] = ()
+    duplicate_status_reason: str | None = None# 查重未核验、截断或拒绝时的具体可审计原因
     task_id: str | None = None
     route_id: str | None = None
     provider_job_ref: str | None = None
@@ -116,6 +117,18 @@ class SlotExecutionResult:
     @property
     def error_details(self) -> dict[str, Any]:
         return {"error_code": self.error_code, "error_message": self.error_message}
+```
+
+### 3.3 可验证查重凭据（DuplicateLookupReceipt）契约
+```python
+@dataclass(frozen=True)
+class DuplicateLookupReceipt:
+    hypothesis_content_hash: str              # 严格绑定的候选内容哈希
+    scientific_identity_hash: str             # 严格绑定的科学身份哈希
+    exact_view_id: str                        # 针对 content_hash 查询生成的 exact_view_id
+    related_view_id: str                      # 针对 scientific_hash 查询生成的 related_view_id
+    is_truncated: bool = False                # 视图是否截断
+    queried_source: str = "controlled_memory_store"
 ```
 
 ---
@@ -141,7 +154,7 @@ class DiscoveryBatchFunnel:
     not_attempted: int = 0                     # 未发起的槽位数（如熔断）
 ```
 
-### 4.1 分区恒等式
+### 4.1 分区恒等式与查询覆盖原则
 1. **槽位终态闭包恒等式**：
    $$\text{requested} = \text{admitted} + \text{invalid} + \text{provider\_failed} + \text{not\_attempted}$$
 2. **准入分类完整性恒等式**：
@@ -149,7 +162,10 @@ class DiscoveryBatchFunnel:
 3. **分母定义与未查询隔离规则**：
    - `admitted_rate` 分母为 $\text{requested}$。
    - `exact_duplicate_rate`, `related_rate`, `novel_rate`, `unverified_rate` 分母严格为 $\text{admitted}$（仅对已准入候选评估新颖性）。
-   - **历史未查询严禁标为全新**：未查询历史记忆时，查重状态标记为 `NOT_CHECKED`，计入 `unverified_count`，新颖数（`novel_count`）保持为 0，杜绝将未知事实掩饰为学术新颖。
+   - **历史未查询与空查询严禁冒充全新**：
+     - `ResearchMemoryView` 虽间接哈希 Query 但不直接暴露 Query 对象；外部回调裸 views 无法证明空查询对象为当前候选时，必须 fail-closed 标记为 `NOT_CHECKED`，记录 `duplicate_status_reason`，并计入 `unverified_count`（`novel_count = 0`）。
+     - 批次从自有 `memory_store` 经 `build_duplicate_lookup_views` 执行内部受控查询，或携带完整匹配的 `DuplicateLookupReceipt` 时，方可确认为真实历史覆盖。
+     - **截断视图（`is_truncated=True`）严禁标为全新**：因部分历史条目被截断导致覆盖不全，不能证明候选无历史重复，必须标记为 `NOT_CHECKED` 并记录原因。
    - 禁止将重试次数、尝试计数与最终槽位数混淆。
 
 ---

@@ -1344,3 +1344,171 @@ def test_context_view_cannot_masquerade_as_duplicate_lookup_view(
     assert batch_result.funnel.unverified_count == 1
     assert batch_result.slots[0].duplicate_status == "NOT_CHECKED"
     assert batch_result.admitted_candidates[0].duplicate_status == "NOT_CHECKED"
+
+
+def test_empty_duplicate_views_for_other_candidate_rejected_fail_closed(
+    test_provider: ContractTestProvider,
+    provider_registry: ProviderRegistry,
+    authorized_scope: AgentPermissionScope,
+    routing_policy: RoutingPolicy,
+    discovery_context: dict[str, Any],
+) -> None:
+    """Milestone B: Valid empty views queried for OTHER candidates lack receipt; must be NOT_CHECKED."""
+    memory: ResearchMemory = discovery_context["memory"]
+    context_view = _build_test_memory_view(memory, authorized_scope)
+    session = DiscoverySession.create(
+        objective="Test unverified empty views rejection",
+        memory_view=context_view,
+        authorized_scope=authorized_scope,
+        candidate_budget=1,
+        allowed_universe=("RB",),
+        allowed_frequency="1d",
+        allowed_signal_families=("momentum",),
+        project_binding=STANDARD_PROJECT_BINDING,
+        created_at=CANONICAL_SESSION_TIMESTAMP,
+    )
+    envelope = _build_candidate_envelope(title="Candidate for empty check", universe="RB2405")
+    configure_provider_output(test_provider, json.dumps(envelope))
+
+    # Build valid exact view for 'a'*64 and related view for 'b'*64 on empty memory
+    exact_other = build_research_memory_view(
+        ResearchMemoryQuery(
+            role="alpha_generator",
+            project_binding=session.project_binding,
+            categories=(ResearchMemoryCategory.DUPLICATE_IDENTITIES.value,),
+            hypothesis_content_hash="a" * 64,
+        ),
+        authorized_scope,
+        session.project_binding,
+        memory,
+    )
+    related_other = build_research_memory_view(
+        ResearchMemoryQuery(
+            role="alpha_generator",
+            project_binding=session.project_binding,
+            categories=(ResearchMemoryCategory.DUPLICATE_IDENTITIES.value,),
+            scientific_identity_hash="b" * 64,
+        ),
+        authorized_scope,
+        session.project_binding,
+        memory,
+    )
+    assert exact_other.view_id != related_other.view_id
+    assert exact_other.total_entries == 0
+    assert related_other.total_entries == 0
+
+    orchestrator = DiscoveryBatchOrchestrator(
+        registry=provider_registry,
+        routing_policy=routing_policy,
+    )
+    batch_result = orchestrator.execute_session(
+        session=session,
+        memory_view=context_view,
+        duplicate_view_lookup=lambda c: (exact_other, related_other),
+    )
+
+    assert batch_result.funnel.requested == 1
+    assert batch_result.funnel.admitted == 1
+    assert batch_result.funnel.novel_count == 0
+    assert batch_result.funnel.unverified_count == 1
+    assert batch_result.slots[0].duplicate_status == "NOT_CHECKED"
+    assert batch_result.slots[0].duplicate_status_reason is not None
+    assert "receipt" in batch_result.slots[0].duplicate_status_reason.lower()
+
+
+def test_trusted_internal_memory_store_lookup_yields_novel(
+    test_provider: ContractTestProvider,
+    provider_registry: ProviderRegistry,
+    authorized_scope: AgentPermissionScope,
+    routing_policy: RoutingPolicy,
+    discovery_context: dict[str, Any],
+) -> None:
+    """Milestone B: Orchestrator with memory_store executes trusted duplicate query, proving NOVEL_WITHIN_VIEW."""
+    memory: ResearchMemory = discovery_context["memory"]
+    context_view = _build_test_memory_view(memory, authorized_scope)
+    session = DiscoverySession.create(
+        objective="Test trusted internal memory store lookup",
+        memory_view=context_view,
+        authorized_scope=authorized_scope,
+        candidate_budget=1,
+        allowed_universe=("RB",),
+        allowed_frequency="1d",
+        allowed_signal_families=("momentum",),
+        project_binding=STANDARD_PROJECT_BINDING,
+        created_at=CANONICAL_SESSION_TIMESTAMP,
+    )
+    envelope = _build_candidate_envelope(title="Candidate for novel check", universe="RB2405")
+    configure_provider_output(test_provider, json.dumps(envelope))
+
+    # Orchestrator with trusted memory_store and NO external callback
+    orchestrator = DiscoveryBatchOrchestrator(
+        registry=provider_registry,
+        routing_policy=routing_policy,
+        memory_store=memory,
+    )
+    batch_result = orchestrator.execute_session(
+        session=session,
+        memory_view=context_view,
+        duplicate_view_lookup=None,
+    )
+
+    assert batch_result.funnel.requested == 1
+    assert batch_result.funnel.admitted == 1
+    assert batch_result.funnel.novel_count == 1
+    assert batch_result.funnel.unverified_count == 0
+    assert batch_result.slots[0].duplicate_status == "NOVEL_WITHIN_VIEW"
+    assert batch_result.admitted_candidates[0].duplicate_status == "NOVEL_WITHIN_VIEW"
+
+
+def test_truncated_duplicate_views_cannot_prove_novelty(
+    test_provider: ContractTestProvider,
+    provider_registry: ProviderRegistry,
+    authorized_scope: AgentPermissionScope,
+    routing_policy: RoutingPolicy,
+    discovery_context: dict[str, Any],
+) -> None:
+    """Milestone B: Truncated duplicate lookup views fail closed; cannot prove novelty."""
+    memory: ResearchMemory = discovery_context["memory"]
+    context_view = _build_test_memory_view(memory, authorized_scope)
+    session = DiscoverySession.create(
+        objective="Test truncated duplicate view rejection",
+        memory_view=context_view,
+        authorized_scope=authorized_scope,
+        candidate_budget=1,
+        allowed_universe=("RB",),
+        allowed_frequency="1d",
+        allowed_signal_families=("momentum",),
+        project_binding=STANDARD_PROJECT_BINDING,
+        created_at=CANONICAL_SESSION_TIMESTAMP,
+    )
+    envelope = _build_candidate_envelope(title="Candidate with truncated lookup", universe="RB2405")
+    configure_provider_output(test_provider, json.dumps(envelope))
+
+    orchestrator = DiscoveryBatchOrchestrator(
+        registry=provider_registry,
+        routing_policy=routing_policy,
+        memory_store=memory,
+    )
+
+    from research_lab.agent_control import batch_discovery as bd_mod
+    orig_build = bd_mod.build_duplicate_lookup_views
+
+    def _truncated_build(cand, **kwargs):
+        ex, rel = orig_build(cand, **kwargs)
+        object.__setattr__(ex, "is_truncated", True)
+        return ex, rel
+
+    with mock.patch.object(bd_mod, "build_duplicate_lookup_views", side_effect=_truncated_build):
+        batch_result = orchestrator.execute_session(
+            session=session,
+            memory_view=context_view,
+            duplicate_view_lookup=None,
+        )
+
+    assert batch_result.funnel.requested == 1
+    assert batch_result.funnel.admitted == 1
+    assert batch_result.funnel.novel_count == 0
+    assert batch_result.funnel.unverified_count == 1
+    assert batch_result.slots[0].duplicate_status == "NOT_CHECKED"
+    assert batch_result.slots[0].duplicate_status_reason is not None
+    assert "truncated" in batch_result.slots[0].duplicate_status_reason.lower()
