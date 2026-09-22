@@ -49,10 +49,13 @@ from research_lab.alpha_discovery.hypothesis import (
 from research_lab.contracts import v2
 
 PROMPT_POLICY_VERSION = "alpha_generator_prompt.v1"
+DISCOVERY_POLICY_VERSION = "discovery_generation_policy.v1"
 DEFAULT_AGENT_ORIGIN_TYPE = "astra"
 GENERATION_POLICY_ORIGIN_TYPES = {
     PROMPT_POLICY_VERSION: DEFAULT_AGENT_ORIGIN_TYPE,
+    DISCOVERY_POLICY_VERSION: DEFAULT_AGENT_ORIGIN_TYPE,
 }
+SUPPORTED_GENERATION_POLICIES = frozenset(GENERATION_POLICY_ORIGIN_TYPES.keys())
 GENERATION_SCHEMA_VERSION = "research_lab.alpha_generation.v1"
 MAX_OBJECTIVE_CHARS = 2_000
 MAX_OUTPUT_BYTES = 64 * 1024
@@ -129,18 +132,55 @@ class AlphaGenerationRequest:
     session_id: str | None = None
     slot_id: str | None = None
     ordinal: int | None = None
+    allowed_universe: tuple[str, ...] | str | None = None
+    allowed_frequency: str | None = None
+    allowed_signal_families: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if self.requested_candidate_count != 1:
             raise AlphaGenerationError("Milestone 5 permits exactly one candidate")
-        if self.generation_policy_version != PROMPT_POLICY_VERSION or self.attempt < 1:
-            raise AlphaGenerationError("unsupported prompt policy or attempt")
-        if self.session_id is not None and (not isinstance(self.session_id, str) or not self.session_id.strip()):
-            raise AlphaGenerationError("session_id must be a non-empty string when specified")
-        if self.slot_id is not None and (not isinstance(self.slot_id, str) or not self.slot_id.strip()):
-            raise AlphaGenerationError("slot_id must be a non-empty string when specified")
-        if self.ordinal is not None and (type(self.ordinal) is not int or self.ordinal < 1):
-            raise AlphaGenerationError("ordinal must be a positive integer when specified")
+        if self.generation_policy_version not in SUPPORTED_GENERATION_POLICIES:
+            raise AlphaGenerationError(f"unsupported generation policy {self.generation_policy_version}")
+        if type(self.attempt) is not int or isinstance(self.attempt, bool) or self.attempt < 1:
+            raise AlphaGenerationError("attempt must be a strict positive integer")
+
+        # Session-scoped fields must be provided together as a complete group
+        has_session = self.session_id is not None
+        has_slot = self.slot_id is not None
+        has_ordinal = self.ordinal is not None
+        if (has_session or has_slot or has_ordinal) and not (has_session and has_slot and has_ordinal):
+            raise AlphaGenerationError(
+                "session_id, slot_id, and ordinal must be specified together as a complete group"
+            )
+
+        if has_session:
+            if not isinstance(self.session_id, str) or not self.session_id.startswith("disc-session-"):
+                raise AlphaGenerationError("session_id must be a valid disc-session identifier")
+            if not isinstance(self.slot_id, str) or not self.slot_id.startswith("slot-"):
+                raise AlphaGenerationError("slot_id must be a valid slot identifier")
+            if type(self.ordinal) is not int or isinstance(self.ordinal, bool) or not (1 <= self.ordinal <= 10):
+                raise AlphaGenerationError("ordinal must be a strict integer between 1 and 10")
+            if self.allowed_universe is not None:
+                if isinstance(self.allowed_universe, str):
+                    if not self.allowed_universe.strip():
+                        raise AlphaGenerationError("allowed_universe cannot be empty")
+                elif isinstance(self.allowed_universe, (tuple, list)):
+                    if not self.allowed_universe or not all(isinstance(x, str) and x.strip() for x in self.allowed_universe):
+                        raise AlphaGenerationError("allowed_universe list/tuple cannot be empty or contain empty entries")
+                    object.__setattr__(self, "allowed_universe", tuple(self.allowed_universe))
+                else:
+                    raise AlphaGenerationError("allowed_universe must be a string or sequence of strings")
+            if self.allowed_frequency is not None:
+                if not isinstance(self.allowed_frequency, str) or not self.allowed_frequency.strip():
+                    raise AlphaGenerationError("allowed_frequency must be a non-empty string")
+            if self.allowed_signal_families is not None:
+                if not isinstance(self.allowed_signal_families, (tuple, list)) or isinstance(self.allowed_signal_families, (str, bytes)):
+                    raise AlphaGenerationError("allowed_signal_families must be a tuple or list of strings")
+                for fam in self.allowed_signal_families:
+                    if not isinstance(fam, str) or not fam.strip():
+                        raise AlphaGenerationError("allowed_signal_families entries must be non-empty strings")
+                object.__setattr__(self, "allowed_signal_families", tuple(self.allowed_signal_families))
+
         if not self.objective.strip() or len(self.objective) > MAX_OBJECTIVE_CHARS:
             raise AlphaGenerationError(
                 "objective must be non-empty and within the bounded size"
@@ -182,6 +222,9 @@ class AlphaGenerationRequest:
         session_id: str | None = None,
         slot_id: str | None = None,
         ordinal: int | None = None,
+        allowed_universe: tuple[str, ...] | str | None = None,
+        allowed_frequency: str | None = None,
+        allowed_signal_families: tuple[str, ...] | None = None,
     ) -> AlphaGenerationRequest:
         clean_objective = objective.strip()
         if not clean_objective or len(clean_objective) > MAX_OBJECTIVE_CHARS:
@@ -208,7 +251,9 @@ class AlphaGenerationRequest:
             )
         if dict(authorized_scope.project_binding) != binding:
             raise PermissionDeniedError("Authorized scope project binding mismatch")
-        if generation_policy_version != PROMPT_POLICY_VERSION or attempt < 1:
+        if generation_policy_version not in SUPPORTED_GENERATION_POLICIES or (
+            type(attempt) is not int or isinstance(attempt, bool) or attempt < 1
+        ):
             raise AlphaGenerationError("unsupported prompt policy or attempt")
         return cls(
             objective=clean_objective,
@@ -221,6 +266,9 @@ class AlphaGenerationRequest:
             session_id=session_id,
             slot_id=slot_id,
             ordinal=ordinal,
+            allowed_universe=allowed_universe,
+            allowed_frequency=allowed_frequency,
+            allowed_signal_families=allowed_signal_families,
         )
 
     @property
@@ -240,10 +288,18 @@ class AlphaGenerationRequest:
         }
         if self.session_id is not None:
             d["session_id"] = self.session_id
-        if self.slot_id is not None:
             d["slot_id"] = self.slot_id
-        if self.ordinal is not None:
             d["ordinal"] = self.ordinal
+            if self.allowed_universe is not None:
+                d["allowed_universe"] = (
+                    list(self.allowed_universe)
+                    if isinstance(self.allowed_universe, (tuple, list))
+                    else self.allowed_universe
+                )
+            if self.allowed_frequency is not None:
+                d["allowed_frequency"] = self.allowed_frequency
+            if self.allowed_signal_families is not None:
+                d["allowed_signal_families"] = list(self.allowed_signal_families)
         return d
 
 
@@ -411,6 +467,14 @@ def build_alpha_generation_prompt(
         prompt_lines.append(f"Candidate slot exact ref: {request.slot_id}")
     if request.ordinal is not None:
         prompt_lines.append(f"Candidate slot ordinal: {request.ordinal}")
+    if request.allowed_universe is not None:
+        univ_str = ", ".join(request.allowed_universe) if isinstance(request.allowed_universe, (list, tuple)) else str(request.allowed_universe)
+        prompt_lines.append(f"Allowed universe: {univ_str}")
+    if request.allowed_frequency is not None:
+        prompt_lines.append(f"Allowed frequency: {request.allowed_frequency}")
+    if request.allowed_signal_families is not None:
+        fams_str = ", ".join(request.allowed_signal_families)
+        prompt_lines.append(f"Allowed signal families: {fams_str}")
     prompt_lines.append(memory_view.to_prompt_context())
     return "\n".join(prompt_lines)
 
@@ -437,7 +501,19 @@ def create_alpha_generation_task(
         input_refs.append(
             {
                 "content_hash": v2.digest({
+                    "allowed_frequency": request.allowed_frequency,
+                    "allowed_signal_families": (
+                        sorted(request.allowed_signal_families)
+                        if request.allowed_signal_families
+                        else []
+                    ),
+                    "allowed_universe": (
+                        sorted(request.allowed_universe)
+                        if isinstance(request.allowed_universe, (list, tuple))
+                        else request.allowed_universe
+                    ),
                     "attempt": request.attempt,
+                    "generation_policy_version": request.generation_policy_version,
                     "ordinal": request.ordinal,
                     "slot_id": request.slot_id,
                 }),

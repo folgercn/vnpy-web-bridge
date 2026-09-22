@@ -10,21 +10,26 @@ Guarantees & Invariants:
    - Project Binding: strict non-empty binding matching Scope and Memory View.
    - Authorized Scope: verified least-privilege role 'alpha_generator' with exact
      permissions ('read_research_memory', 'create_hypothesis'), no delegation.
-   - Memory View Reference: exact ID and content hash matching Controlled ResearchMemoryView.
+   - Memory View Reference: exact ID, content hash, role, project_binding, policy,
+     and source_refs matching Controlled ResearchMemoryView.
    - Consistent validation across direct constructor, from_dict deserializer, and create factory.
-   - Deserialization strictly rejects unknown fields.
+   - Deserialization strictly rejects unknown fields and loose type casting.
 2. Controlled Context Extraction:
    - Gaps, NME backlog, failed approaches, recent rejects, and promoted summaries are
      sourced exclusively from the bound Controlled ResearchMemoryView.
    - Explicit representation of empty views (total_entries == 0) and truncated views (is_truncated == True).
+   - Faithful preservation of entry source_refs, source_hashes, and evidence_refs.
    - Zero raw Memory access; zero self-claimed model provenance.
 3. Deterministic Slot Planning (Minimal Split):
    - Plans N candidate slots where N = candidate_budget (1..10).
    - Preserves M5 contract: one candidate = one AlphaGenerationRequest / AgentTask.
    - requested_candidate_count remains strictly 1.
+   - Binds exact allowed_universe, allowed_frequency, allowed_signal_families,
+     and generation_policy_version to each request and task work_block / input_refs.
    - Rebuilding slot produces 100% deterministic, stable identity.
    - Distinct slots within the same session have distinct identities and task IDs.
    - Slot identity is decoupled from execution retry attempt.
+   - PlannedCandidateSlot enforces deep cross-object consistency across slot, request, task, and session.
    - No Provider submit, no Screening execution, no Critic call, no Memory write.
    - Permanent isolation from trading and production authority.
 """
@@ -33,9 +38,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from research_lab.agent_control.alpha_generator import (
+    DISCOVERY_POLICY_VERSION,
     PROMPT_POLICY_VERSION,
     AlphaGenerationRequest,
     create_alpha_generation_task,
@@ -62,10 +69,11 @@ from research_lab.agent_control.memory_view import (
 from research_lab.contracts import v2
 
 DISCOVERY_SESSION_SCHEMA_VERSION = "research_lab.discovery_session.v1"
-DISCOVERY_POLICY_VERSION = "discovery_session_policy.v1"
 SUPPORTED_DISCOVERY_POLICIES = frozenset({
     DISCOVERY_POLICY_VERSION,
     PROMPT_POLICY_VERSION,
+    "discovery_session_policy.v1",
+    "discovery_generation_policy.v1",
 })
 
 MIN_CANDIDATE_BUDGET = 1
@@ -80,6 +88,7 @@ ALLOWED_SESSION_FIELDS = frozenset({
     "objective",
     "project_binding",
     "authorized_scope_ref",
+    "memory_view_ref",
     "memory_view_id",
     "memory_view_content_hash",
     "candidate_budget",
@@ -100,8 +109,60 @@ class DiscoverySessionBudgetError(DiscoverySessionError):
     """Raised when candidate budget violates strict 1-10 integer invariants."""
 
 
+def validate_memory_view_ref(
+    memory_view_ref: Mapping[str, Any],
+    expected_binding: ProjectBinding | Mapping[str, str],
+) -> dict[str, Any]:
+    """Strict validation of the controlled ResearchMemoryView reference."""
+    if not isinstance(memory_view_ref, Mapping):
+        raise DiscoverySessionError(
+            f"memory_view_ref must be a dictionary/mapping, got {type(memory_view_ref).__name__}"
+        )
+    role = memory_view_ref.get("role")
+    if role != "alpha_generator":
+        raise PermissionDeniedError(
+            f"memory_view role must be 'alpha_generator', got '{role}'"
+        )
+    pb = memory_view_ref.get("project_binding")
+    expected_pb = validate_project_binding(expected_binding)
+    if not pb or dict(pb) != expected_pb.to_dict():
+        raise ProjectBindingError(
+            "memory_view project_binding mismatch with session project_binding",
+            details={"memory_view_binding": pb, "session_binding": expected_pb.to_dict()},
+        )
+    view_id = memory_view_ref.get("view_id")
+    if not isinstance(view_id, str) or not view_id.startswith("memview-"):
+        raise DiscoverySessionError(
+            f"memory_view_ref view_id must be a valid memview identifier, got '{view_id}'"
+        )
+    content_hash = memory_view_ref.get("view_content_hash")
+    if not isinstance(content_hash, str) or len(content_hash) != 64:
+        raise DiscoverySessionError(
+            "memory_view_ref view_content_hash must be a valid 64-character SHA-256 hex string"
+        )
+    policy_version = memory_view_ref.get("policy_version")
+    if not isinstance(policy_version, str) or not policy_version.strip():
+        raise DiscoverySessionError("memory_view_ref policy_version must be a non-empty string")
+    source_refs = memory_view_ref.get("source_refs")
+    if source_refs is None or not isinstance(source_refs, (list, tuple)):
+        raise DiscoverySessionError(
+            "memory_view_ref source_refs must be a list or tuple of string record IDs"
+        )
+    return dict(memory_view_ref)
+
+
 def compute_session_content_hash(data: Mapping[str, Any]) -> str:
     """Compute canonical SHA-256 content hash of a DiscoverySession dictionary representation."""
+    raw_budget = data.get("candidate_budget")
+    if type(raw_budget) is not int or isinstance(raw_budget, bool):
+        raise DiscoverySessionBudgetError(
+            f"candidate_budget must be a strict integer, got {type(raw_budget).__name__}"
+        )
+    if raw_budget < MIN_CANDIDATE_BUDGET or raw_budget > MAX_CANDIDATE_BUDGET:
+        raise DiscoverySessionBudgetError(
+            f"candidate_budget must be between {MIN_CANDIDATE_BUDGET} and {MAX_CANDIDATE_BUDGET}, "
+            f"got {raw_budget}"
+        )
     canonical_dict = {
         "allowed_frequency": str(data["allowed_frequency"]),
         "allowed_signal_families": sorted([str(x) for x in data.get("allowed_signal_families", ())]),
@@ -111,11 +172,12 @@ def compute_session_content_hash(data: Mapping[str, Any]) -> str:
             else str(data["allowed_universe"])
         ),
         "authorized_scope_ref": _clean_for_canonical(data["authorized_scope_ref"]),
-        "candidate_budget": data["candidate_budget"],
+        "candidate_budget": raw_budget,
         "created_at": str(data.get("created_at", CANONICAL_SESSION_TIMESTAMP)),
         "generation_policy_version": str(data.get("generation_policy_version", DISCOVERY_POLICY_VERSION)),
         "memory_view_content_hash": str(data["memory_view_content_hash"]),
         "memory_view_id": str(data["memory_view_id"]),
+        "memory_view_ref": _clean_for_canonical(data.get("memory_view_ref", {})),
         "objective": str(data["objective"]).strip(),
         "project_binding": _clean_for_canonical(data["project_binding"]),
         "schema_version": str(data.get("schema_version", DISCOVERY_SESSION_SCHEMA_VERSION)),
@@ -137,6 +199,7 @@ class DiscoverySession:
     objective: str
     project_binding: dict[str, str]
     authorized_scope_ref: dict[str, Any]
+    memory_view_ref: dict[str, Any]
     memory_view_id: str
     memory_view_content_hash: str
     candidate_budget: int
@@ -148,6 +211,12 @@ class DiscoverySession:
     schema_version: str = DISCOVERY_SESSION_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        # 0. schema_version check (strict fail-closed)
+        if self.schema_version != DISCOVERY_SESSION_SCHEMA_VERSION:
+            raise DiscoverySessionError(
+                f"Unsupported schema_version '{self.schema_version}', expected '{DISCOVERY_SESSION_SCHEMA_VERSION}'"
+            )
+
         # 1. candidate_budget: strict integer 1..10 (reject booleans, floats, strings)
         if type(self.candidate_budget) is not int or isinstance(self.candidate_budget, bool):
             raise DiscoverySessionBudgetError(
@@ -160,7 +229,7 @@ class DiscoverySession:
             )
 
         # 2. objective: bounded non-empty string
-        if not isinstance(self.objective, str):
+        if type(self.objective) is not str:
             raise DiscoverySessionError(f"objective must be a string, got {type(self.objective).__name__}")
         clean_objective = self.objective.strip()
         if not clean_objective:
@@ -205,11 +274,22 @@ class DiscoverySession:
                 details={"scope_binding": scope_binding, "session_binding": pb.to_dict()},
             )
 
-        # 5. memory_view references
+        # 5. memory_view_ref & memory_view ID/hash consistency verification
+        validate_memory_view_ref(self.memory_view_ref, pb)
         if not isinstance(self.memory_view_id, str) or not self.memory_view_id.strip():
             raise DiscoverySessionError("memory_view_id must be a non-empty string")
         if not isinstance(self.memory_view_content_hash, str) or len(self.memory_view_content_hash.strip()) != 64:
             raise DiscoverySessionError("memory_view_content_hash must be a valid 64-character SHA-256 string")
+        if self.memory_view_ref.get("view_id") != self.memory_view_id:
+            raise DiscoverySessionError(
+                f"memory_view_ref view_id '{self.memory_view_ref.get('view_id')}' mismatch "
+                f"with session memory_view_id '{self.memory_view_id}'"
+            )
+        if self.memory_view_ref.get("view_content_hash") != self.memory_view_content_hash:
+            raise TamperDetectionError(
+                f"memory_view_ref view_content_hash mismatch: expected {self.memory_view_content_hash}, "
+                f"got {self.memory_view_ref.get('view_content_hash')}"
+            )
 
         # 6. allowed_universe
         if isinstance(self.allowed_universe, str):
@@ -218,6 +298,7 @@ class DiscoverySession:
         elif isinstance(self.allowed_universe, (tuple, list)):
             if not self.allowed_universe or not all(isinstance(x, str) and x.strip() for x in self.allowed_universe):
                 raise DiscoverySessionError("allowed_universe cannot be empty or contain empty entries")
+            object.__setattr__(self, "allowed_universe", tuple(self.allowed_universe))
         else:
             raise DiscoverySessionError("allowed_universe must be a string or sequence of strings")
 
@@ -225,12 +306,15 @@ class DiscoverySession:
         if not isinstance(self.allowed_frequency, str) or not self.allowed_frequency.strip():
             raise DiscoverySessionError("allowed_frequency must be a non-empty string")
 
-        # 8. allowed_signal_families
-        if not isinstance(self.allowed_signal_families, (tuple, list)):
-            raise DiscoverySessionError("allowed_signal_families must be a tuple or list of strings")
+        # 8. allowed_signal_families (reject bare strings or non-iterables)
+        if not isinstance(self.allowed_signal_families, (tuple, list)) or isinstance(self.allowed_signal_families, (str, bytes)):
+            raise DiscoverySessionError(
+                "allowed_signal_families must be a tuple or list of strings, not a bare string"
+            )
         for fam in self.allowed_signal_families:
             if not isinstance(fam, str) or not fam.strip():
                 raise DiscoverySessionError("signal family must be a non-empty string")
+        object.__setattr__(self, "allowed_signal_families", tuple(self.allowed_signal_families))
 
         # 9. generation_policy_version
         if self.generation_policy_version not in SUPPORTED_DISCOVERY_POLICIES:
@@ -250,6 +334,7 @@ class DiscoverySession:
             "generation_policy_version": self.generation_policy_version,
             "memory_view_content_hash": self.memory_view_content_hash,
             "memory_view_id": self.memory_view_id,
+            "memory_view_ref": self.memory_view_ref,
             "objective": clean_objective,
             "project_binding": pb.to_dict(),
             "schema_version": self.schema_version,
@@ -269,9 +354,7 @@ class DiscoverySession:
         # 11. Freeze internal mappings and sequences into immutable representations
         object.__setattr__(self, "project_binding", _freeze_mapping(pb.to_dict()))
         object.__setattr__(self, "authorized_scope_ref", _freeze_mapping(dict(self.authorized_scope_ref)))
-        object.__setattr__(self, "allowed_signal_families", tuple(self.allowed_signal_families))
-        if isinstance(self.allowed_universe, list):
-            object.__setattr__(self, "allowed_universe", tuple(self.allowed_universe))
+        object.__setattr__(self, "memory_view_ref", _freeze_mapping(dict(self.memory_view_ref)))
 
     @classmethod
     def create(
@@ -286,7 +369,7 @@ class DiscoverySession:
         allowed_signal_families: tuple[str, ...] | list[str] = (),
         project_binding: ProjectBinding | Mapping[str, str] | None = None,
         generation_policy_version: str = DISCOVERY_POLICY_VERSION,
-        created_at: str = CANONICAL_SESSION_TIMESTAMP,
+        created_at: str | None = None,
     ) -> DiscoverySession:
         """Create and validate a new DiscoverySession from trusted domain objects."""
         # Cross-validate memory_view role
@@ -316,7 +399,7 @@ class DiscoverySession:
             )
 
         # Clean objective
-        if not isinstance(objective, str):
+        if type(objective) is not str:
             raise DiscoverySessionError(f"objective must be a string, got {type(objective).__name__}")
         clean_obj = objective.strip()
         if not clean_obj:
@@ -333,8 +416,15 @@ class DiscoverySession:
             )
 
         # Normalize universe and signal families
+        if isinstance(allowed_signal_families, (str, bytes)):
+            raise DiscoverySessionError(
+                "allowed_signal_families must be a tuple or list of strings, not a bare string"
+            )
         univ = tuple(allowed_universe) if isinstance(allowed_universe, (list, tuple)) else allowed_universe
         fams = tuple(allowed_signal_families)
+
+        actual_created_at = created_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        view_dict = _clean_for_canonical(memory_view.to_dict())
 
         raw_dict = {
             "allowed_frequency": allowed_frequency,
@@ -342,10 +432,11 @@ class DiscoverySession:
             "allowed_universe": univ,
             "authorized_scope_ref": authorized_scope.to_dict(),
             "candidate_budget": candidate_budget,
-            "created_at": created_at,
+            "created_at": actual_created_at,
             "generation_policy_version": generation_policy_version,
             "memory_view_content_hash": memory_view.view_content_hash,
             "memory_view_id": memory_view.view_id,
+            "memory_view_ref": view_dict,
             "objective": clean_obj,
             "project_binding": pb.to_dict(),
             "schema_version": DISCOVERY_SESSION_SCHEMA_VERSION,
@@ -359,6 +450,7 @@ class DiscoverySession:
             objective=clean_obj,
             project_binding=pb.to_dict(),
             authorized_scope_ref=authorized_scope.to_dict(),
+            memory_view_ref=view_dict,
             memory_view_id=memory_view.view_id,
             memory_view_content_hash=memory_view.view_content_hash,
             candidate_budget=candidate_budget,
@@ -366,17 +458,25 @@ class DiscoverySession:
             allowed_frequency=allowed_frequency,
             allowed_signal_families=fams,
             generation_policy_version=generation_policy_version,
-            created_at=created_at,
+            created_at=actual_created_at,
             schema_version=DISCOVERY_SESSION_SCHEMA_VERSION,
         )
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> DiscoverySession:
-        """Strict fail-closed deserialization rejecting unknown fields."""
-        if not isinstance(data, Mapping):
-            raise DiscoverySessionError(f"DiscoverySession data must be a Mapping, got {type(data).__name__}")
+    def from_dict(
+        cls,
+        data: Mapping[str, Any],
+        *,
+        memory_view: ResearchMemoryView | None = None,
+    ) -> DiscoverySession:
+        """Restore and validate a DiscoverySession from a serialized payload.
 
-        # Check for unknown fields (fail-closed)
+        Enforces strict schema validation, type integrity, and tamper detection.
+        """
+        if not isinstance(data, Mapping):
+            raise DiscoverySessionError(f"payload must be a mapping, got {type(data).__name__}")
+
+        # Check unknown fields
         unknown = set(data.keys()) - ALLOWED_SESSION_FIELDS
         if unknown:
             raise DiscoverySessionError(
@@ -390,6 +490,7 @@ class DiscoverySession:
             "objective",
             "project_binding",
             "authorized_scope_ref",
+            "memory_view_ref",
             "memory_view_id",
             "memory_view_content_hash",
             "candidate_budget",
@@ -402,6 +503,32 @@ class DiscoverySession:
                 f"Missing required DiscoverySession fields: {sorted(missing)}"
             )
 
+        # Strict type checks without loose conversion
+        if type(data["objective"]) is not str:
+            raise DiscoverySessionError(f"objective must be a string, got {type(data['objective']).__name__}")
+        if type(data["candidate_budget"]) is not int or isinstance(data["candidate_budget"], bool):
+            raise DiscoverySessionBudgetError(
+                f"candidate_budget must be a strict integer, got {type(data['candidate_budget']).__name__}"
+            )
+        if not isinstance(data.get("allowed_signal_families", ()), (tuple, list)) or isinstance(data.get("allowed_signal_families"), (str, bytes)):
+            raise DiscoverySessionError("allowed_signal_families must be a tuple or list of strings")
+
+        if data.get("schema_version") and data["schema_version"] != DISCOVERY_SESSION_SCHEMA_VERSION:
+            raise DiscoverySessionError(
+                f"Unsupported schema_version '{data['schema_version']}', expected '{DISCOVERY_SESSION_SCHEMA_VERSION}'"
+            )
+
+        # Cross-validate against real memory view if passed
+        if memory_view is not None:
+            if memory_view.view_id != str(data["memory_view_id"]):
+                raise DiscoverySessionError("memory_view view_id mismatch with payload")
+            if memory_view.view_content_hash != str(data["memory_view_content_hash"]):
+                raise TamperDetectionError("memory_view view_content_hash mismatch with payload")
+            if memory_view.role != "alpha_generator":
+                raise PermissionDeniedError("memory_view role must be 'alpha_generator'")
+            if dict(memory_view.project_binding) != dict(data["project_binding"]):
+                raise ProjectBindingError("memory_view project_binding mismatch with payload")
+
         univ = (
             tuple(data["allowed_universe"])
             if isinstance(data["allowed_universe"], list)
@@ -412,9 +539,10 @@ class DiscoverySession:
         return cls(
             session_id=str(data["session_id"]),
             session_content_hash=str(data["session_content_hash"]),
-            objective=str(data["objective"]),
+            objective=data["objective"],
             project_binding=dict(data["project_binding"]),
             authorized_scope_ref=dict(data["authorized_scope_ref"]),
+            memory_view_ref=dict(data["memory_view_ref"]),
             memory_view_id=str(data["memory_view_id"]),
             memory_view_content_hash=str(data["memory_view_content_hash"]),
             candidate_budget=data["candidate_budget"],
@@ -431,39 +559,23 @@ class DiscoverySession:
         return {
             "allowed_frequency": self.allowed_frequency,
             "allowed_signal_families": list(self.allowed_signal_families),
-            "allowed_universe": list(self.allowed_universe) if isinstance(self.allowed_universe, (tuple, list)) else self.allowed_universe,
+            "allowed_universe": (
+                list(self.allowed_universe)
+                if isinstance(self.allowed_universe, (tuple, list))
+                else self.allowed_universe
+            ),
             "authorized_scope_ref": _unfreeze_to_dict(self.authorized_scope_ref),
             "candidate_budget": self.candidate_budget,
             "created_at": self.created_at,
             "generation_policy_version": self.generation_policy_version,
             "memory_view_content_hash": self.memory_view_content_hash,
             "memory_view_id": self.memory_view_id,
+            "memory_view_ref": _unfreeze_to_dict(self.memory_view_ref),
             "objective": self.objective,
             "project_binding": _unfreeze_to_dict(self.project_binding),
             "schema_version": self.schema_version,
             "session_content_hash": self.session_content_hash,
             "session_id": self.session_id,
-        }
-
-    def _to_canonical_dict(self) -> dict[str, Any]:
-        """Internal canonical representation for hashing."""
-        return {
-            "allowed_frequency": self.allowed_frequency,
-            "allowed_signal_families": sorted([str(x) for x in self.allowed_signal_families]),
-            "allowed_universe": (
-                sorted([str(x) for x in self.allowed_universe])
-                if isinstance(self.allowed_universe, (list, tuple))
-                else str(self.allowed_universe)
-            ),
-            "authorized_scope_ref": _clean_for_canonical(self.authorized_scope_ref),
-            "candidate_budget": self.candidate_budget,
-            "created_at": self.created_at,
-            "generation_policy_version": self.generation_policy_version,
-            "memory_view_content_hash": self.memory_view_content_hash,
-            "memory_view_id": self.memory_view_id,
-            "objective": self.objective.strip(),
-            "project_binding": _clean_for_canonical(self.project_binding),
-            "schema_version": self.schema_version,
         }
 
 
@@ -482,6 +594,7 @@ class SessionMemoryContext:
     recent_rejects: tuple[dict[str, Any], ...]
     promoted_summaries: tuple[dict[str, Any], ...]
     valid_entry_ids: tuple[str, ...]
+    view_source_refs: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -496,6 +609,7 @@ class SessionMemoryContext:
             "valid_entry_ids": list(self.valid_entry_ids),
             "view_content_hash": self.view_content_hash,
             "view_id": self.view_id,
+            "view_source_refs": list(self.view_source_refs),
         }
 
 
@@ -509,12 +623,16 @@ def extract_session_memory_context(memory_view: ResearchMemoryView) -> SessionMe
         for e in entries:
             valid_ids.append(e.entry_id)
             item = {
-                "entry_id": e.entry_id,
-                "hypothesis_id": e.hypothesis_id,
                 "decision": e.decision,
-                "summary": e.summary,
+                "decision_time": e.decision_time,
+                "entry_id": e.entry_id,
+                "evidence_refs": _unfreeze_to_dict(e.evidence_refs),
+                "hypothesis_id": e.hypothesis_id,
                 "scientific_identity_hash": e.scientific_identity_hash,
+                "source_hashes": _unfreeze_to_dict(e.source_hashes),
                 "source_ref": e.view_generated_from,
+                "source_refs": _unfreeze_to_dict(e.source_refs),
+                "summary": e.summary,
             }
             if e.reason_codes:
                 item["reason_codes"] = list(e.reason_codes)
@@ -522,6 +640,12 @@ def extract_session_memory_context(memory_view: ResearchMemoryView) -> SessionMe
                 item["gap_type"] = e.gap_type
             if e.failure_class:
                 item["failure_class"] = e.failure_class
+            if e.strengths:
+                item["strengths"] = list(e.strengths)
+            if e.limitations:
+                item["limitations"] = list(e.limitations)
+            if e.missing_dimensions:
+                item["missing_dimensions"] = list(e.missing_dimensions)
             res.append(item)
         return tuple(res)
 
@@ -549,6 +673,7 @@ def extract_session_memory_context(memory_view: ResearchMemoryView) -> SessionMe
         recent_rejects=rejects,
         promoted_summaries=promoted,
         valid_entry_ids=tuple(sorted(set(valid_ids))),
+        view_source_refs=tuple(memory_view.source_refs),
     )
 
 
@@ -565,6 +690,86 @@ class PlannedCandidateSlot:
     attempt: int
     request: AlphaGenerationRequest
     task: AgentTask
+
+    def __post_init__(self) -> None:
+        # 1. Attempt validation: strict positive integer
+        if type(self.attempt) is not int or isinstance(self.attempt, bool) or self.attempt < 1:
+            raise DiscoverySessionError(f"attempt must be a strict positive integer, got {self.attempt}")
+
+        # 2. Slot index and ordinal validation
+        if type(self.slot_index) is not int or isinstance(self.slot_index, bool) or self.slot_index < 0:
+            raise DiscoverySessionError(f"slot_index must be a non-negative integer, got {self.slot_index}")
+        if type(self.ordinal) is not int or isinstance(self.ordinal, bool) or self.ordinal < 1:
+            raise DiscoverySessionError(f"ordinal must be a positive integer, got {self.ordinal}")
+        if self.ordinal != self.slot_index + 1:
+            raise DiscoverySessionError(
+                f"ordinal mismatch with slot_index: expected {self.slot_index + 1}, got {self.ordinal}"
+            )
+
+        # 3. Deterministic slot identity verification
+        expected_token = v2.digest({
+            "ordinal": self.ordinal,
+            "session_content_hash": self.session_content_hash,
+            "session_id": self.session_id,
+        })[:12]
+        expected_slot_id = f"slot-{self.session_id[:16]}-{self.ordinal:02d}-{expected_token}"
+        if self.slot_id != expected_slot_id:
+            raise TamperDetectionError(
+                f"PlannedCandidateSlot slot_id mismatch: expected '{expected_slot_id}', got '{self.slot_id}'"
+            )
+
+        expected_slot_hash = v2.digest({
+            "ordinal": self.ordinal,
+            "session_id": self.session_id,
+            "slot_id": self.slot_id,
+        })
+        if self.slot_content_hash != expected_slot_hash:
+            raise TamperDetectionError(
+                f"PlannedCandidateSlot slot_content_hash mismatch: expected '{expected_slot_hash}', "
+                f"got '{self.slot_content_hash}'"
+            )
+
+        # 4. Cross-object consistency with AlphaGenerationRequest
+        if not isinstance(self.request, AlphaGenerationRequest):
+            raise DiscoverySessionError(
+                f"request must be an AlphaGenerationRequest, got {type(self.request).__name__}"
+            )
+        if self.request.session_id != self.session_id:
+            raise DiscoverySessionError(
+                f"request.session_id '{self.request.session_id}' mismatch with slot.session_id '{self.session_id}'"
+            )
+        if self.request.slot_id != self.slot_id:
+            raise DiscoverySessionError(
+                f"request.slot_id '{self.request.slot_id}' mismatch with slot.slot_id '{self.slot_id}'"
+            )
+        if self.request.ordinal != self.ordinal:
+            raise DiscoverySessionError(
+                f"request.ordinal '{self.request.ordinal}' mismatch with slot.ordinal '{self.ordinal}'"
+            )
+        if self.request.attempt != self.attempt:
+            raise DiscoverySessionError(
+                f"request.attempt '{self.request.attempt}' mismatch with slot.attempt '{self.attempt}'"
+            )
+        if self.request.requested_candidate_count != 1:
+            raise DiscoverySessionError("request.requested_candidate_count must be strictly 1")
+
+        # 5. Cross-object consistency with AgentTask
+        if not isinstance(self.task, AgentTask):
+            raise DiscoverySessionError(f"task must be an AgentTask, got {type(self.task).__name__}")
+        if self.task.role != "alpha_generator":
+            raise PermissionDeniedError(f"task role must be 'alpha_generator', got '{self.task.role}'")
+        if self.task.objective != self.request.objective:
+            raise DiscoverySessionError("task objective mismatch with request objective")
+
+        # Verify task input_refs binds the exact slot reference
+        slot_input_refs = [
+            r for r in self.task.input_refs
+            if isinstance(r, (dict, Mapping)) and r.get("ref") == self.slot_id
+        ]
+        if not slot_input_refs:
+            raise DiscoverySessionError(
+                f"task input_refs missing reference to slot_id '{self.slot_id}'"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -600,10 +805,22 @@ def plan_candidate_slots(
             f"memory_view view_content_hash mismatch: session={session.memory_view_content_hash}, "
             f"view={memory_view.view_content_hash}"
         )
+    if memory_view.role != "alpha_generator":
+        raise PermissionDeniedError(
+            f"memory_view role must be 'alpha_generator', got '{memory_view.role}'"
+        )
     if dict(session.project_binding) != dict(memory_view.project_binding):
         raise ProjectBindingError(
             f"project_binding mismatch: session={dict(session.project_binding)}, view={dict(memory_view.project_binding)}"
         )
+    expected_policy = session.memory_view_ref.get("policy_version")
+    if expected_policy and memory_view.policy_version != expected_policy:
+        raise DiscoverySessionError(
+            f"memory_view policy_version mismatch: expected {expected_policy}, got {memory_view.policy_version}"
+        )
+    expected_sources = session.memory_view_ref.get("source_refs")
+    if expected_sources is not None and tuple(memory_view.source_refs) != tuple(expected_sources):
+        raise DiscoverySessionError("memory_view source_refs mismatch with session memory_view_ref")
 
     task_created_at = created_at or session.created_at
     slots: list[PlannedCandidateSlot] = []
@@ -625,18 +842,22 @@ def plan_candidate_slots(
         })
 
         # Milestone 5 AlphaGenerationRequest: requested_candidate_count remains strictly 1
+        # Binds allowed_universe, allowed_frequency, allowed_signal_families, and generation_policy_version
         req = AlphaGenerationRequest(
             objective=session.objective,
             memory_view_id=session.memory_view_id,
             memory_view_content_hash=session.memory_view_content_hash,
             project_binding=dict(session.project_binding),
             authorized_scope_ref=dict(session.authorized_scope_ref),
-            generation_policy_version=PROMPT_POLICY_VERSION,
+            generation_policy_version=session.generation_policy_version,
             requested_candidate_count=1,
             attempt=1,
             session_id=session.session_id,
             slot_id=slot_id,
             ordinal=ordinal,
+            allowed_universe=session.allowed_universe,
+            allowed_frequency=session.allowed_frequency,
+            allowed_signal_families=session.allowed_signal_families,
         )
 
         # Build task with deterministic provenance timestamp
@@ -670,8 +891,29 @@ def replan_slot_attempt(
 
     Preserves stable slot_id while updating attempt on the request and task.
     """
-    if attempt < 1:
-        raise DiscoverySessionError(f"attempt must be >= 1, got {attempt}")
+    if type(attempt) is not int or isinstance(attempt, bool) or attempt < 1:
+        raise DiscoverySessionError(f"attempt must be a strict positive integer, got {attempt}")
+    if attempt <= slot.attempt:
+        raise DiscoverySessionError(
+            f"replan attempt must be strictly greater than current attempt {slot.attempt}, got {attempt}"
+        )
+
+    # Cross-validate memory_view with slot's original view reference
+    if memory_view.view_id != slot.request.memory_view_id:
+        raise DiscoverySessionError(
+            f"memory_view view_id mismatch: expected {slot.request.memory_view_id}, got {memory_view.view_id}"
+        )
+    if memory_view.view_content_hash != slot.request.memory_view_content_hash:
+        raise TamperDetectionError(
+            f"memory_view view_content_hash mismatch: expected {slot.request.memory_view_content_hash}, "
+            f"got {memory_view.view_content_hash}"
+        )
+    if memory_view.role != "alpha_generator":
+        raise PermissionDeniedError(
+            f"memory_view role must be 'alpha_generator', got '{memory_view.role}'"
+        )
+    if dict(memory_view.project_binding) != dict(slot.request.project_binding):
+        raise ProjectBindingError("memory_view project_binding mismatch with slot request")
 
     task_created_at = created_at or slot.task.created_at
 
@@ -687,6 +929,9 @@ def replan_slot_attempt(
         session_id=slot.session_id,
         slot_id=slot.slot_id,
         ordinal=slot.ordinal,
+        allowed_universe=slot.request.allowed_universe,
+        allowed_frequency=slot.request.allowed_frequency,
+        allowed_signal_families=slot.request.allowed_signal_families,
     )
     new_task = create_alpha_generation_task(new_req, memory_view, created_at=task_created_at)
 
