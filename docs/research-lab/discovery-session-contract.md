@@ -26,36 +26,40 @@ Discovery Session 是 Astra 自主假说探索周期的首要安全与准入边�
 @dataclass(frozen=True)
 class DiscoverySession:
     session_id: str                          # 确定性 ID: f"disc-session-{content_hash[:32]}"
-    session_content_hash: str                # v2.digest() 规范哈希 (64 字符 hex)
+    session_content_hash: str                # v2.digest() 规范哈希 (64 字符 hex, 排除 created_at)
     objective: str                           # 非空且 <= 2,000 字符的研究目标
     project_binding: dict[str, str]          # 精确匹配的 ProjectBinding
     authorized_scope_ref: dict[str, Any]     # 最小权限 AgentPermissionScope 引用
     memory_view_ref: dict[str, Any]          # 受控 ResearchMemoryView 凭据字典
     memory_view_id: str                      # 引用的 ResearchMemoryView ID
-    memory_view_content_hash: str            # 引用的 ResearchMemoryView 哈希
+    memory_view_content_hash: str            # 引用的 ResearchMemoryView 顶层哈希
+    memory_view_snapshot_hash: str           # 引用的 ResearchMemoryView 全量受控快照摘要 (排除 generated_at)
     candidate_budget: int                    # 严格整数 1..10 (严格拒绝 bool/float/str)
     allowed_universe: tuple[str, ...] | str  # 允许的标的范围 (如 "all_futures", ("RB", "HC"))
     allowed_frequency: str                   # 允许的时间周期 (如 "1d", "5m")
     allowed_signal_families: tuple[str, ...] # 允许的信号族 (如 ("momentum", "mean_reversion"))
     generation_policy_version: str           # 生成策略版本 (如 "discovery_generation_policy.v1")
-    created_at: str                          # 确定性时间戳
+    created_at: str                          # 确定性审计时间戳
     schema_version: str                      # 契约架构版本 ("research_lab.discovery_session.v1")
+    memory_view: InitVar[ResearchMemoryView] # 必需受控记忆视图上下文 (防伪造、重签与内容替换)
 ```
 
 #### 严格准入校验规则 (Fail-Closed)
 1. **预算硬边界**：`candidate_budget` 必须为**严格 Python 整数**（`type(val) is int`，显式拒绝 `bool`、`float`、字符串数字 `"5"`、`None` 或集合），且必须满足 `1 <= candidate_budget <= 10`。违规无条件抛出 `DiscoverySessionBudgetError`。
 2. **目标约束**：`objective` 必须为严格 `str`（禁止对非字符串进行强转或静默转换），非空且非纯空白，长度不得超过 2,000 字符。
-3. **角色与最小权限**：
+3. **角色与最小权限 Access Control**：
+   - 必须通过 `AgentPermissionScope` 真实反序列化与语义校验，强校验 `is_authorized is True`，并限制 `policy_version` 必须处于白名单内。
    - 角色必须严格为 `alpha_generator`。
    - 权限集合必须严格匹配最小权限子集：`{"read_research_memory", "create_hypothesis"}`。任何越权权限（如 `execute_screening`, `write_research_memory`, `invoke_critic`, `read_result_store`）均拒绝。
    - 委派限制：`can_delegate` 必须为 `False`，`max_delegation_depth` 必须为 `0`（严禁嵌套委派）。
    - 权限凭证完整性：`authorized_scope_ref` 必须包含合法的 `scope_content_hash`，并经 `validate_scope_hash` 验证防篡改。
 4. **项目三方对齐**：Session 的 `project_binding`、`authorized_scope_ref.project_binding` 和 `memory_view_ref.project_binding` 必须三方逐字段完全一致，拒绝任何跨项目引用。
-5. **受控记忆视图深度绑定 (P1-1)**：
-   - `memory_view_ref` 必须包含受控视图元数据：`view_id`, `view_content_hash`, `role`, `project_binding`, `policy_version`, `source_refs`。
-   - 三入口统一核验：`DiscoverySession.create`、直接 `DiscoverySession(...)` 构造、以及 `from_dict` 均深度校验记忆视图引用的一致性。
-   - 防重封与跨项目攻击：任何篡改 `role`、伪造 `view_id`/`view_content_hash` 或使用异构项目视图的重封请求均会被强一致性校验拦截。
-6. **自封签与重签拦截**：`session_content_hash` 与 `session_id` 必须由全量规范字典通过 SHA-256 计算得出。反序列化时如果篡改任何内容，或者伪造哈希重签越权内容，均被立即拦截。
+5. **受控记忆视图深度绑定与全量快照摘要**：
+   - `memory_view_ref` 必须包含受控视图元数据：`view_id`, `view_content_hash`, `snapshot_hash`, `role`, `project_binding`, `policy_version`, `source_refs`。
+   - 必需真实上下文：`DiscoverySession.create`、直接 `DiscoverySession(...)` 构造、以及 `from_dict` 均强制要求传入真实的 `ResearchMemoryView` 实例，杜绝脱离受控记忆实例直接反序列化或伪造快照。
+   - 全量快照一致性：校验 `memory_view_snapshot_hash`（由视图去除 `generated_at` 后全字段规范计算），彻底防范伪造 `view_id`/`content_hash` 重签、内容替换或跨会话替换攻击。
+   - 槽位规划时同步执行 `validate_session_memory_view` 全量核验。
+6. **自封签与语义稳定性**：`session_content_hash` 涵盖所有语义定义与约束字段，并显式排除易变系统时钟（`created_at` 仅作为元数据保留），相同探索目标在不同时刻创建具有严格确定的哈希与 ID。反序列化时如果篡改任何内容，或者伪造哈希重签越权内容，均被立即拦截。
 7. **容器深度冻结**：所有嵌套映射与序列使用只读代理（`MappingProxyType`）或元组（`tuple`）深度冻结，杜绝属性就地篡改。
 
 ---
@@ -96,20 +100,24 @@ class PlannedCandidateSlot:
     ordinal: int                          # 1-based 序号 (1 .. budget)
     slot_id: str                          # 稳定逻辑槽位 ID
     slot_content_hash: str                # 槽位防篡改哈希
-    attempt: int                          # 尝试轮次 (从 1 开始)
+    attempt: int                          # 尝试轮次 (从 1 开始严格正整数)
     request: AlphaGenerationRequest       # Milestone 5 单假说请求
     task: AgentTask                       # 对应构建的执行任务
+    session: DiscoverySession             # 真实持有且受控校验的 Session 上下文
 ```
 
 #### 2.3.1 跨对象与防混入校验 (P1-2)
 `PlannedCandidateSlot` 在 `__post_init__` 中执行严格的一致性强校验：
-1. **序号与索引绑定**：`ordinal` 必须严格等于 `slot_index + 1`，且位于 `1 <= ordinal <= 10`。
-2. **轮次严格正整数**：`attempt` 必须为严格 Python 整数（`type(attempt) is int` 且 `attempt >= 1`，显式拒绝 `bool`、`float`、字符串或非正数）。重试规划时必须满足 `attempt > slot.attempt`。
-3. **防混入与跨 Session 校验**：
+1. **真实 Session 上下文绑定**：槽位必须直接持有受控的 `DiscoverySession` 对象，验证 `slot.session_id == session.session_id` 与 `slot.session_content_hash == session.session_content_hash`。
+2. **序号与预算硬约束**：`ordinal` 必须严格等于 `slot_index + 1`，且必须满足 `1 <= ordinal <= session.candidate_budget`（严禁槽位序号超出当前会话预算）。
+3. **轮次严格正整数**：`attempt` 必须为严格 Python 整数（`type(attempt) is int` 且 `attempt >= 1`，显式拒绝 `bool`、`float`、字符串或非正数）。重试规划时必须满足 `attempt > slot.attempt`。
+4. **防混入与跨 Session 校验**：
    - 槽位请求的 `session_id` 必须严格匹配槽位的 `session_id`。
    - 槽位请求的 `slot_id` 必须严格匹配槽位的 `slot_id`。
-   - 槽位任务的 `task.input_refs` 必须包含该槽位的 `slot_id` 及其审计内容哈希，拒绝槽位与任务间或跨会话的错位混入（如使用 `dataclasses.replace` 偷换）。
-4. **M5 字段成组原子校验**：
+   - 槽位任务的 `task.input_refs` 必须包含该槽位的 `slot_id` 及其规范计算的审计内容哈希，拒绝槽位与任务间或跨会话的错位混入（如使用 `dataclasses.replace` 偷换）。
+5. **探索约束全量深度比对**：
+   - 槽位请求中的 `allowed_universe`、`allowed_frequency`、`allowed_signal_families`、`generation_policy_version`、`project_binding`、`memory_view_id`、`memory_view_content_hash` 必须与绑定的 `session` 逐字段完全一致。
+6. **M5 字段成组原子校验**：
    - `AlphaGenerationRequest` 中的 `session_id`, `slot_id`, `ordinal` 必须作为完整不可分割的组（全有或全无）提供。
    - 缺失任意一个字段均抛出 `AlphaGenerationError`。无 session 上下文的独立 M5 请求在序列化中完全不输出这些字段，保证旧版序列化字节级向后兼容。
 
@@ -123,7 +131,7 @@ Session 中配置的探索约束无损穿透至下游请求与任务：
 
 ## 3. 契约验证矩阵与测试证据
 
-本规范在 `tests/research_lab/agent_control/test_agent_control_discovery_session.py` 中实现了完整的正反例与防篡改攻击测试套件（本模块 68 项专项测试，所属 `agent_control` 套件总计 457 项测试全部通过）：
+本规范在 `tests/research_lab/agent_control/test_agent_control_discovery_session.py` 中实现了完整的正反例、防篡改攻击与真实无副作用 Spy 测试套件（本模块 74 项专项测试，所属 `agent_control` 套件总计 463 项测试全部通过）：
 
 | 校验分类 | 场景描述 | 预期行为 / 异常 |
 |---|---|---|
