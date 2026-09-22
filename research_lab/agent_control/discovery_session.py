@@ -187,54 +187,52 @@ def validate_session_memory_view(
         raise TamperDetectionError(
             f"memory_view snapshot digest tampering detected: expected '{expected_snapshot_hash}', actual '{actual_snapshot_hash}'"
         )
+    if "memory_view_ref" in session_data:
+        validate_memory_view_ref(session_data["memory_view_ref"], memory_view)
 
 
 def validate_memory_view_ref(
     memory_view_ref: Mapping[str, Any],
-    expected_binding: ProjectBinding | Mapping[str, str],
+    memory_view: ResearchMemoryView,
 ) -> dict[str, Any]:
-    """Strict validation of the controlled ResearchMemoryView reference structure."""
+    """Strict validation of the controlled ResearchMemoryView reference structure against authentic view."""
     if not isinstance(memory_view_ref, Mapping):
         raise DiscoverySessionError(
             f"memory_view_ref must be a dictionary/mapping, got {type(memory_view_ref).__name__}"
         )
-    role = memory_view_ref.get("role")
-    if role != "alpha_generator":
-        raise PermissionDeniedError(
-            f"memory_view role must be 'alpha_generator', got '{role}'"
-        )
-    pb = memory_view_ref.get("project_binding")
-    expected_pb = validate_project_binding(expected_binding)
-    if not pb or dict(pb) != expected_pb.to_dict():
-        raise ProjectBindingError(
-            "memory_view project_binding mismatch with session project_binding",
-            details={"memory_view_binding": pb, "session_binding": expected_pb.to_dict()},
-        )
-    view_id = memory_view_ref.get("view_id")
-    if not isinstance(view_id, str) or not view_id.startswith("memview-"):
+    if not isinstance(memory_view, ResearchMemoryView):
         raise DiscoverySessionError(
-            f"memory_view_ref view_id must be a valid memview identifier, got '{view_id}'"
+            f"memory_view must be a valid ResearchMemoryView instance, got {type(memory_view).__name__}"
         )
-    content_hash = memory_view_ref.get("view_content_hash")
-    if not isinstance(content_hash, str) or len(content_hash) != 64:
+    expected_ref = build_memory_view_ref(memory_view)
+
+    # 1. Reject unknown or extra fields in memory_view_ref fail-closed
+    actual_keys = set(memory_view_ref.keys())
+    expected_keys = set(expected_ref.keys())
+    extra_keys = sorted(actual_keys - expected_keys)
+    if extra_keys:
         raise DiscoverySessionError(
-            "memory_view_ref view_content_hash must be a valid 64-character SHA-256 hex string"
+            f"memory_view_ref contains unknown or unauthorized fields: {extra_keys}"
         )
-    snapshot_hash = memory_view_ref.get("snapshot_hash")
-    if snapshot_hash is not None:
-        if not isinstance(snapshot_hash, str) or len(snapshot_hash) != 64:
-            raise DiscoverySessionError(
-                "memory_view_ref snapshot_hash must be a valid 64-character SHA-256 hex string"
-            )
-    policy_version = memory_view_ref.get("policy_version")
-    if not isinstance(policy_version, str) or not policy_version.strip():
-        raise DiscoverySessionError("memory_view_ref policy_version must be a non-empty string")
-    source_refs = memory_view_ref.get("source_refs")
-    if source_refs is None or not isinstance(source_refs, (list, tuple)):
+    missing_keys = sorted(expected_keys - actual_keys)
+    if missing_keys:
         raise DiscoverySessionError(
-            "memory_view_ref source_refs must be a list or tuple of string record IDs"
+            f"memory_view_ref is missing required fields: {missing_keys}"
         )
-    return dict(memory_view_ref)
+
+    # 2. Canonical exact comparison with build_memory_view_ref(memory_view)
+    clean_actual = _clean_for_canonical(dict(memory_view_ref))
+    clean_expected = _clean_for_canonical(expected_ref)
+    if clean_actual != clean_expected:
+        diffs = [
+            f"{k} (expected {clean_expected.get(k)!r}, got {clean_actual.get(k)!r})"
+            for k in sorted(expected_keys)
+            if clean_actual.get(k) != clean_expected.get(k)
+        ]
+        raise DiscoverySessionError(
+            f"memory_view_ref mismatch with authentic ResearchMemoryView reference: {'; '.join(diffs)}"
+        )
+    return clean_actual
 
 
 def compute_session_content_hash(data: Mapping[str, Any]) -> str:
@@ -424,24 +422,10 @@ class DiscoverySession:
                 "memory_view_id": self.memory_view_id,
                 "memory_view_content_hash": self.memory_view_content_hash,
                 "memory_view_snapshot_hash": self.memory_view_snapshot_hash,
+                "memory_view_ref": self.memory_view_ref,
             },
             memory_view,
         )
-        validate_memory_view_ref(self.memory_view_ref, pb)
-        if self.memory_view_ref.get("view_id") != self.memory_view_id:
-            raise DiscoverySessionError(
-                f"memory_view_ref view_id '{self.memory_view_ref.get('view_id')}' mismatch "
-                f"with session memory_view_id '{self.memory_view_id}'"
-            )
-        if self.memory_view_ref.get("view_content_hash") != self.memory_view_content_hash:
-            raise TamperDetectionError(
-                f"memory_view_ref view_content_hash mismatch: expected {self.memory_view_content_hash}, "
-                f"got {self.memory_view_ref.get('view_content_hash')}"
-            )
-        if self.memory_view_ref.get("snapshot_hash") and self.memory_view_ref.get("snapshot_hash") != self.memory_view_snapshot_hash:
-            raise TamperDetectionError(
-                "memory_view_ref snapshot_hash mismatch with session memory_view_snapshot_hash"
-            )
 
         # 6. allowed_universe
         if isinstance(self.allowed_universe, str):
@@ -839,13 +823,20 @@ class PlannedCandidateSlot:
     request: AlphaGenerationRequest
     task: AgentTask
     session: DiscoverySession
+    memory_view: ResearchMemoryView
 
     def __post_init__(self) -> None:
-        # 0. Session context verification
+        # 0. Session context and memory view verification
         if not isinstance(self.session, DiscoverySession):
             raise DiscoverySessionError(
                 f"session must be a valid DiscoverySession instance, got {type(self.session).__name__}"
             )
+        if not isinstance(self.memory_view, ResearchMemoryView):
+            raise DiscoverySessionError(
+                f"memory_view must be a valid ResearchMemoryView instance, got {type(self.memory_view).__name__}"
+            )
+        validate_session_memory_view(self.session.to_dict(), self.memory_view)
+
         if self.session_id != self.session.session_id:
             raise DiscoverySessionError(
                 f"slot session_id '{self.session_id}' mismatch with session '{self.session.session_id}'"
@@ -896,7 +887,7 @@ class PlannedCandidateSlot:
                 f"got '{self.slot_content_hash}'"
             )
 
-        # 4. Cross-object consistency with AlphaGenerationRequest (full verification against session)
+        # 4. Cross-object consistency with AlphaGenerationRequest (full expected request reconstruction)
         if not isinstance(self.request, AlphaGenerationRequest):
             raise DiscoverySessionError(
                 f"request must be an AlphaGenerationRequest, got {type(self.request).__name__}"
@@ -920,33 +911,41 @@ class PlannedCandidateSlot:
         if self.request.requested_candidate_count != 1:
             raise DiscoverySessionError("request.requested_candidate_count must be strictly 1")
 
-        # Check bounds and constraints against bound Session
-        if self.request.allowed_universe != self.session.allowed_universe:
-            raise DiscoverySessionError(
-                f"request.allowed_universe {self.request.allowed_universe!r} mismatch with session {self.session.allowed_universe!r}"
-            )
-        if self.request.allowed_frequency != self.session.allowed_frequency:
-            raise DiscoverySessionError(
-                f"request.allowed_frequency '{self.request.allowed_frequency}' mismatch with session '{self.session.allowed_frequency}'"
-            )
-        if tuple(self.request.allowed_signal_families or ()) != tuple(self.session.allowed_signal_families or ()):
-            raise DiscoverySessionError("request.allowed_signal_families mismatch with session")
-        if self.request.generation_policy_version != self.session.generation_policy_version:
-            raise DiscoverySessionError("request.generation_policy_version mismatch with session")
-        if dict(self.request.project_binding) != dict(self.session.project_binding):
-            raise ProjectBindingError("request project_binding mismatch with session project_binding")
-        if self.request.memory_view_id != self.session.memory_view_id:
-            raise DiscoverySessionError("request memory_view_id mismatch with session memory_view_id")
-        if self.request.memory_view_content_hash != self.session.memory_view_content_hash:
-            raise TamperDetectionError("request memory_view_content_hash mismatch with session")
+        expected_request = AlphaGenerationRequest.create(
+            objective=self.session.objective,
+            memory_view=self.memory_view,
+            project_binding=self.session.project_binding,
+            authorized_scope=AgentPermissionScope(**dict(self.session.authorized_scope_ref)),
+            allowed_universe=self.session.allowed_universe,
+            allowed_frequency=self.session.allowed_frequency,
+            allowed_signal_families=self.session.allowed_signal_families,
+            generation_policy_version=self.session.generation_policy_version,
+            session_id=self.session_id,
+            slot_id=self.slot_id,
+            ordinal=self.ordinal,
+            attempt=self.attempt,
+        )
 
-        # 5. Cross-object consistency with AgentTask
+        clean_actual_req = _clean_for_canonical(self.request.to_dict())
+        clean_expected_req = _clean_for_canonical(expected_request.to_dict())
+        if clean_actual_req != clean_expected_req:
+            diff_keys = [
+                k for k in set(clean_actual_req.keys()) | set(clean_expected_req.keys())
+                if clean_actual_req.get(k) != clean_expected_req.get(k)
+            ]
+            diff_details = [
+                f"request.{k} mismatch with session: expected {clean_expected_req.get(k)!r}, got {clean_actual_req.get(k)!r}"
+                for k in sorted(diff_keys)
+            ]
+            raise DiscoverySessionError(
+                f"PlannedCandidateSlot request mismatch with session: {'; '.join(diff_details)}"
+            )
+
+        # 5. Cross-object consistency with AgentTask (full expected task reconstruction)
         if not isinstance(self.task, AgentTask):
             raise DiscoverySessionError(f"task must be an AgentTask, got {type(self.task).__name__}")
         if self.task.role != "alpha_generator":
             raise PermissionDeniedError(f"task role must be 'alpha_generator', got '{self.task.role}'")
-        if self.task.objective != self.request.objective:
-            raise DiscoverySessionError("task objective mismatch with request objective")
 
         # Verify task input_refs binds BOTH memory view and exact slot with valid hash
         mem_input_refs = [
@@ -989,6 +988,26 @@ class PlannedCandidateSlot:
             raise TamperDetectionError(
                 f"task input_refs slot content_hash mismatch: expected '{expected_slot_audit_hash}', "
                 f"got '{slot_input_refs[0].get('content_hash')}'"
+            )
+
+        expected_task = create_alpha_generation_task(
+            expected_request,
+            self.memory_view,
+            created_at=self.task.created_at,
+        )
+        clean_actual_task = _clean_for_canonical(self.task.to_dict())
+        clean_expected_task = _clean_for_canonical(expected_task.to_dict())
+        if clean_actual_task != clean_expected_task:
+            diff_keys = [
+                k for k in set(clean_actual_task.keys()) | set(clean_expected_task.keys())
+                if clean_actual_task.get(k) != clean_expected_task.get(k)
+            ]
+            diff_details = [
+                f"task.{k} mismatch with expected authentic task: expected {clean_expected_task.get(k)!r}, got {clean_actual_task.get(k)!r}"
+                for k in sorted(diff_keys)
+            ]
+            raise TamperDetectionError(
+                f"PlannedCandidateSlot task mismatch with expected authentic task: {'; '.join(diff_details)}"
             )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1060,6 +1079,7 @@ def plan_candidate_slots(
             request=req,
             task=task,
             session=session,
+            memory_view=memory_view,
         )
         slots.append(slot)
 
@@ -1104,4 +1124,5 @@ def replan_slot_attempt(
         attempt=attempt,
         request=req,
         task=task,
+        memory_view=memory_view,
     )

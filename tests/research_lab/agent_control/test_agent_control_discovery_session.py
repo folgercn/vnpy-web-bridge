@@ -84,15 +84,14 @@ def _make_scope(
     pb = project_binding or BINDING
     perms = permissions if permissions is not None else list(REQUIRED_PERMISSIONS)
     scope = authorize(role, perms, pb)
-    if can_delegate or max_delegation_depth > 0 or not is_authorized or policy_version != "2026-09-m1":
+    if not is_authorized or policy_version != "2026-09-m1":
         d = scope.to_dict()
-        d["can_delegate"] = can_delegate
-        d["max_delegation_depth"] = max_delegation_depth
         d["is_authorized"] = is_authorized
         d["policy_version"] = policy_version
         if not is_authorized:
             d["authorized_permissions"] = []
             d["denied_permissions"] = sorted(perms)
+        d["scope_id"] = compute_scope_deterministic_id(d)
         d["scope_content_hash"] = compute_scope_content_hash(d)
         return AgentPermissionScope(**d)
     return scope
@@ -1009,6 +1008,231 @@ def test_reproduction_4_zero_side_effects_with_real_entrypoint_spies(monkeypatch
     assert spy_screening_exec.call_count == 0
     assert spy_critic_eval.call_count == 0
     assert spy_memory_write.call_count == 0
+
+
+def test_reproduction_A_slot_tampered_request_objective_rejected():
+    """Reproduction A: Tampering request.objective while keeping old session MUST FAIL."""
+    scope = _make_scope()
+    view = _build_authentic_memory_view()
+    session = DiscoverySession.create(
+        objective="Original authentic objective",
+        memory_view=view,
+        authorized_scope=scope,
+        candidate_budget=2,
+        allowed_universe="test_univ",
+        allowed_frequency="1d",
+        created_at=CANONICAL_SESSION_TIMESTAMP,
+    )
+    x = plan_candidate_slots(session, view)[0]
+    r = dataclasses.replace(x.request, objective="another objective")
+    t = create_alpha_generation_task(r, view, created_at=x.task.created_at)
+    with pytest.raises(DiscoverySessionError, match="request.objective mismatch with session"):
+        dataclasses.replace(x, request=r, task=t)
+
+
+def test_reproduction_A_slot_tampered_request_scope_rejected():
+    """Reproduction A: Tampering request.authorized_scope_ref while keeping old session MUST FAIL."""
+    scope = _make_scope(policy_version="2026-09-m1")
+    other_scope = _make_scope(policy_version="2026-09-m4")
+    view = _build_authentic_memory_view()
+    session = DiscoverySession.create(
+        objective="Original authentic objective",
+        memory_view=view,
+        authorized_scope=scope,
+        candidate_budget=2,
+        allowed_universe="test_univ",
+        allowed_frequency="1d",
+        created_at=CANONICAL_SESSION_TIMESTAMP,
+    )
+    x = plan_candidate_slots(session, view)[0]
+    r = dataclasses.replace(x.request, authorized_scope_ref=other_scope.to_dict())
+    t = create_alpha_generation_task(r, view, created_at=x.task.created_at)
+    with pytest.raises(DiscoverySessionError, match="request.authorized_scope_ref mismatch with session"):
+        dataclasses.replace(x, request=r, task=t)
+
+
+def test_reproduction_B_slot_tampered_task_work_block_rejected():
+    """Reproduction B: Valid task with tampered work_block MUST FAIL."""
+    scope = _make_scope()
+    view = _build_authentic_memory_view()
+    session = DiscoverySession.create(
+        objective="Authentic session objective",
+        memory_view=view,
+        authorized_scope=scope,
+        candidate_budget=2,
+        allowed_universe="test_univ",
+        allowed_frequency="1d",
+        created_at=CANONICAL_SESSION_TIMESTAMP,
+    )
+    x = plan_candidate_slots(session, view)[0]
+    bad_task = AgentTask.create(
+        role=x.task.role,
+        requested_permissions=list(x.task.requested_permissions),
+        authorized_permissions=list(x.task.authorized_permissions),
+        objective=x.task.objective,
+        work_block="unrelated rogue work block bypass attempt",
+        input_refs=list(x.task.to_dict()["input_refs"]),
+        provider_policy_ref=x.task.provider_policy_ref,
+        project_binding=dict(x.task.project_binding),
+        created_by=x.task.created_by,
+        created_at=x.task.created_at,
+        authorized_scope=scope,
+    )
+    with pytest.raises(TamperDetectionError, match="task.work_block mismatch with expected authentic task"):
+        dataclasses.replace(x, task=bad_task)
+
+
+def test_reproduction_B_slot_tampered_task_provider_policy_rejected():
+    """Reproduction B: Valid task with tampered provider_policy_ref MUST FAIL."""
+    scope = _make_scope()
+    view = _build_authentic_memory_view()
+    session = DiscoverySession.create(
+        objective="Authentic session objective",
+        memory_view=view,
+        authorized_scope=scope,
+        candidate_budget=2,
+        allowed_universe="test_univ",
+        allowed_frequency="1d",
+        created_at=CANONICAL_SESSION_TIMESTAMP,
+    )
+    x = plan_candidate_slots(session, view)[0]
+    bad_task = AgentTask.create(
+        role=x.task.role,
+        requested_permissions=list(x.task.requested_permissions),
+        authorized_permissions=list(x.task.authorized_permissions),
+        objective=x.task.objective,
+        work_block=x.task.work_block,
+        input_refs=list(x.task.to_dict()["input_refs"]),
+        provider_policy_ref="rogue-provider-policy@v1",
+        project_binding=dict(x.task.project_binding),
+        created_by=x.task.created_by,
+        created_at=x.task.created_at,
+        authorized_scope=scope,
+    )
+    with pytest.raises(TamperDetectionError, match="task.provider_policy_ref mismatch with expected authentic task"):
+        dataclasses.replace(x, task=bad_task)
+
+
+def test_reproduction_C_memory_view_ref_tampered_policy_version_rejected():
+    """Reproduction C: Modifying memory_view_ref.policy_version even with resealed hash MUST FAIL."""
+    scope = _make_scope()
+    view = _build_authentic_memory_view()
+    session = DiscoverySession.create(
+        objective="Reproduction C policy tampering test",
+        memory_view=view,
+        authorized_scope=scope,
+        candidate_budget=2,
+        allowed_universe="test_univ",
+        allowed_frequency="1d",
+    )
+    d = session.to_dict()
+    d["memory_view_ref"]["policy_version"] = "unknown"
+    d["session_content_hash"] = compute_session_content_hash(d)
+    d["session_id"] = compute_session_id(d["session_content_hash"])
+    with pytest.raises(DiscoverySessionError, match="memory_view_ref mismatch with authentic ResearchMemoryView reference.*policy_version"):
+        DiscoverySession.from_dict(d, memory_view=view)
+
+
+def test_reproduction_C_memory_view_ref_tampered_source_refs_rejected():
+    """Reproduction C: Modifying memory_view_ref.source_refs even with resealed hash MUST FAIL."""
+    scope = _make_scope()
+    view = _build_authentic_memory_view()
+    session = DiscoverySession.create(
+        objective="Reproduction C source_refs tampering test",
+        memory_view=view,
+        authorized_scope=scope,
+        candidate_budget=2,
+        allowed_universe="test_univ",
+        allowed_frequency="1d",
+    )
+    d = session.to_dict()
+    d["memory_view_ref"]["source_refs"] = ["forged-source-id"]
+    d["session_content_hash"] = compute_session_content_hash(d)
+    d["session_id"] = compute_session_id(d["session_content_hash"])
+    with pytest.raises(DiscoverySessionError, match="memory_view_ref mismatch with authentic ResearchMemoryView reference.*source_refs"):
+        DiscoverySession.from_dict(d, memory_view=view)
+
+
+def test_reproduction_C_memory_view_ref_unknown_nested_field_rejected():
+    """Reproduction C: Injecting unknown nested fields into memory_view_ref MUST FAIL."""
+    scope = _make_scope()
+    view = _build_authentic_memory_view()
+    session = DiscoverySession.create(
+        objective="Reproduction C unknown nested field test",
+        memory_view=view,
+        authorized_scope=scope,
+        candidate_budget=2,
+        allowed_universe="test_univ",
+        allowed_frequency="1d",
+    )
+    d = session.to_dict()
+    d["memory_view_ref"]["rogue_nested_key"] = "malicious_payload"
+    d["session_content_hash"] = compute_session_content_hash(d)
+    d["session_id"] = compute_session_id(d["session_content_hash"])
+    with pytest.raises(DiscoverySessionError, match="memory_view_ref contains unknown or unauthorized fields"):
+        DiscoverySession.from_dict(d, memory_view=view)
+
+
+def test_reproduction_C_memory_view_ref_tampered_categories_rejected():
+    """Reproduction C: Modifying categories in memory_view_ref MUST FAIL."""
+    scope = _make_scope()
+    view = _build_authentic_memory_view()
+    session = DiscoverySession.create(
+        objective="Reproduction C categories test",
+        memory_view=view,
+        authorized_scope=scope,
+        candidate_budget=2,
+        allowed_universe="test_univ",
+        allowed_frequency="1d",
+    )
+    d = session.to_dict()
+    d["memory_view_ref"]["categories"] = ["failed_approaches"]
+    d["session_content_hash"] = compute_session_content_hash(d)
+    d["session_id"] = compute_session_id(d["session_content_hash"])
+    with pytest.raises(DiscoverySessionError, match="memory_view_ref mismatch with authentic ResearchMemoryView reference.*categories"):
+        DiscoverySession.from_dict(d, memory_view=view)
+
+
+def test_reproduction_C_memory_view_ref_tampered_total_entries_or_truncation_rejected():
+    """Reproduction C: Modifying total_entries or is_truncated in memory_view_ref MUST FAIL."""
+    scope = _make_scope()
+    view = _build_authentic_memory_view()
+    session = DiscoverySession.create(
+        objective="Reproduction C count/truncation test",
+        memory_view=view,
+        authorized_scope=scope,
+        candidate_budget=2,
+        allowed_universe="test_univ",
+        allowed_frequency="1d",
+    )
+    d = session.to_dict()
+    d["memory_view_ref"]["total_entries"] = 9999
+    d["session_content_hash"] = compute_session_content_hash(d)
+    d["session_id"] = compute_session_id(d["session_content_hash"])
+    with pytest.raises(DiscoverySessionError, match="memory_view_ref mismatch with authentic ResearchMemoryView reference.*total_entries"):
+        DiscoverySession.from_dict(d, memory_view=view)
+
+
+def test_request_in_place_mutation_prevented_by_deep_freeze():
+    """Verify that AlphaGenerationRequest project_binding and scope are frozen against in-place mutation."""
+    scope = _make_scope()
+    view = _build_authentic_memory_view()
+    session = DiscoverySession.create(
+        objective="In-place mutation defense test",
+        memory_view=view,
+        authorized_scope=scope,
+        candidate_budget=2,
+        allowed_universe="test_univ",
+        allowed_frequency="1d",
+    )
+    x = plan_candidate_slots(session, view)[0]
+    with pytest.raises(TypeError):
+        x.request.project_binding["project_id"] = "tampered_in_place"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        x.request.authorized_scope_ref["role"] = "tampered_role"  # type: ignore[index]
+    d = x.request.to_dict()
+    d["project_binding"]["project_id"] = "modified_copy"
+    assert x.request.project_binding["project_id"] != "modified_copy"
 
 
 def test_session_semantic_reconstruction_stability():

@@ -104,22 +104,25 @@ class PlannedCandidateSlot:
     request: AlphaGenerationRequest       # Milestone 5 单假说请求
     task: AgentTask                       # 对应构建的执行任务
     session: DiscoverySession             # 真实持有且受控校验的 Session 上下文
+    memory_view: ResearchMemoryView       # 必需绑定的真实受控 ResearchMemoryView 实例
 ```
 
-#### 2.3.1 跨对象与防混入校验 (P1-2)
+#### 2.3.1 跨对象与完整重建比对校验 (P1-2)
 `PlannedCandidateSlot` 在 `__post_init__` 中执行严格的一致性强校验：
-1. **真实 Session 上下文绑定**：槽位必须直接持有受控的 `DiscoverySession` 对象，验证 `slot.session_id == session.session_id` 与 `slot.session_content_hash == session.session_content_hash`。
+1. **真实上下文绑定**：槽位必须同时持有受控的 `session: DiscoverySession` 与 `memory_view: ResearchMemoryView`，并调用 `validate_session_memory_view` 验证两者强一致；同时校验 `slot.session_id == session.session_id` 与 `slot.session_content_hash == session.session_content_hash`。
 2. **序号与预算硬约束**：`ordinal` 必须严格等于 `slot_index + 1`，且必须满足 `1 <= ordinal <= session.candidate_budget`（严禁槽位序号超出当前会话预算）。
 3. **轮次严格正整数**：`attempt` 必须为严格 Python 整数（`type(attempt) is int` 且 `attempt >= 1`，显式拒绝 `bool`、`float`、字符串或非正数）。重试规划时必须满足 `attempt > slot.attempt`。
-4. **防混入与跨 Session 校验**：
-   - 槽位请求的 `session_id` 必须严格匹配槽位的 `session_id`。
-   - 槽位请求的 `slot_id` 必须严格匹配槽位的 `slot_id`。
-   - 槽位任务的 `task.input_refs` 必须包含该槽位的 `slot_id` 及其规范计算的审计内容哈希，拒绝槽位与任务间或跨会话的错位混入（如使用 `dataclasses.replace` 偷换）。
-5. **探索约束全量深度比对**：
-   - 槽位请求中的 `allowed_universe`、`allowed_frequency`、`allowed_signal_families`、`generation_policy_version`、`project_binding`、`memory_view_id`、`memory_view_content_hash` 必须与绑定的 `session` 逐字段完全一致。
-6. **M5 字段成组原子校验**：
-   - `AlphaGenerationRequest` 中的 `session_id`, `slot_id`, `ordinal` 必须作为完整不可分割的组（全有或全无）提供。
-   - 缺失任意一个字段均抛出 `AlphaGenerationError`。无 session 上下文的独立 M5 请求在序列化中完全不输出这些字段，保证旧版序列化字节级向后兼容。
+4. **完整 Expected Request 映射重建与比对**：
+   - 使用绑定的 `session`、`memory_view` 与槽位参数纯函数式重建 `expected_request`。
+   - 对比 `self.request.to_dict()` 与 `expected_request.to_dict()` 规范全量字典，包括 `objective`, `authorized_scope_ref`, `project_binding`, `allowed_universe`, `allowed_frequency`, `allowed_signal_families`, `generation_policy_version`, `memory_view_id`, `memory_view_content_hash`, `session_id`, `slot_id`, `ordinal`, `attempt`。
+   - 彻底关闭所有部分字段遗漏风险与使用合法请求重封偷换攻击。
+5. **完整 Expected Task 重建与比对**：
+   - 使用 `create_alpha_generation_task(expected_request, memory_view, created_at=task.created_at)` 重建预期的全量任务。
+   - 对比 `self.task.to_dict()` 与 `expected_task.to_dict()` 规范全量字典，深度核验 `work_block`, `role`, `requested_permissions`, `authorized_permissions`, `objective`, `input_refs` (slot/memory audit hashes), `provider_policy_ref`, `project_binding`, `created_by`。
+   - 彻底关闭仅修改 `work_block` 或任务内部字段的合法重封偷换攻击。
+6. **就地篡改防护（Deep-Freeze）**：
+   - `AlphaGenerationRequest` 的 `project_binding` 与 `authorized_scope_ref` 在构造时深度冻结（`MappingProxyType`），杜绝槽位构造后通过 `x.request.project_binding[...]` 进行就地静默篡改。
+   - `to_dict()` 统一解冻返回可变字典副本，完全保留历史 M5 序列化行为。
 
 #### 2.3.2 约束范围穿透与可审计性 (P1-3)
 Session 中配置的探索约束无损穿透至下游请求与任务：
@@ -131,7 +134,7 @@ Session 中配置的探索约束无损穿透至下游请求与任务：
 
 ## 3. 契约验证矩阵与测试证据
 
-本规范在 `tests/research_lab/agent_control/test_agent_control_discovery_session.py` 中实现了完整的正反例、防篡改攻击与真实无副作用 Spy 测试套件（本模块 74 项专项测试，所属 `agent_control` 套件总计 463 项测试全部通过）：
+本规范在 `tests/research_lab/agent_control/test_agent_control_discovery_session.py` 中实现了完整的正反例、防篡改攻击与真实无副作用 Spy 测试套件（本模块 84 项专项测试，覆盖复现 A/B/C、就地篡改防御与全量边界，相关模块总计 208 项测试全部通过）：
 
 | 校验分类 | 场景描述 | 预期行为 / 异常 |
 |---|---|---|

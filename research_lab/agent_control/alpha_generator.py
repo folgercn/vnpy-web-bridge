@@ -19,6 +19,7 @@ from research_lab.agent_control.contracts import (
     AgentUsageSnapshot,
     ProjectBinding,
     TerminalStatus,
+    _freeze_mapping,
     _unfreeze_to_dict,
     validate_result_hash,
     validate_scope_hash,
@@ -203,6 +204,10 @@ class AlphaGenerationRequest:
             raise AlphaGenerationError(
                 "generation policy has no valid agent origin identity"
             )
+        object.__setattr__(self, "project_binding", _freeze_mapping(self.project_binding))
+        object.__setattr__(
+            self, "authorized_scope_ref", _freeze_mapping(self.authorized_scope_ref)
+        )
 
     @property
     def authoritative_origin_type(self) -> str:
