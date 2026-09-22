@@ -328,6 +328,19 @@ class AlphaGenerationCandidate:
     duplicate_status: str = "NOT_CHECKED"
     duplicate_refs: tuple[str, ...] = ()
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "duplicate_awareness": self.duplicate_awareness,
+            "duplicate_refs": list(self.duplicate_refs),
+            "duplicate_status": self.duplicate_status,
+            "hypothesis": self.hypothesis.model_dump(),
+            "novelty_statement": self.novelty_statement,
+            "rationale": self.rationale,
+            "scientific_identity_hash": self.scientific_identity_hash,
+            "source_context_refs": list(self.source_context_refs),
+            "uncertainty": self.uncertainty,
+        }
+
 
 @dataclass(frozen=True)
 class AlphaGenerationResult:
@@ -687,6 +700,82 @@ def build_duplicate_lookup_views(
     return exact, related
 
 
+UNCONTROLLED_UNIVERSE_ALIASES: frozenset[str] = frozenset({
+    "all_futures",
+    "futures_all",
+    "global_futures",
+    "commodity_active",
+    "active_commodities",
+    "equities",
+    "equity",
+    "crypto",
+    "forex",
+    "fx",
+    "stocks",
+})
+
+
+def _validate_universe_scope(
+    candidate_universe: Any, allowed_universe: tuple[str, ...] | list[str] | str
+) -> None:
+    """Validate candidate hypothesis universe against session allowed_universe fail-closed.
+
+    Only explicit authorized product/contract scopes are permitted.
+    Aliases without controlled expansion are strictly rejected.
+    """
+    if candidate_universe is None:
+        raise AlphaGenerationError("candidate universe is missing")
+
+    if isinstance(candidate_universe, str):
+        symbols = [s.strip() for s in re.split(r"[,;/]+", candidate_universe) if s.strip()]
+        if not symbols:
+            raise AlphaGenerationError("candidate universe string is empty")
+    elif isinstance(candidate_universe, (list, tuple)):
+        if not candidate_universe:
+            raise AlphaGenerationError("candidate universe list is empty")
+        symbols = [str(s).strip() for s in candidate_universe]
+    else:
+        raise AlphaGenerationError(
+            f"unsupported candidate universe type {type(candidate_universe).__name__}"
+        )
+
+    if any(not s for s in symbols):
+        raise AlphaGenerationError("candidate universe contains empty symbol")
+
+    if isinstance(allowed_universe, str):
+        clean_allowed = allowed_universe.strip().lower()
+        if clean_allowed in UNCONTROLLED_UNIVERSE_ALIASES:
+            raise AlphaGenerationError(
+                f"allowed_universe alias '{allowed_universe}' has no controlled expansion; specify explicit authorized scope"
+            )
+        allowed_set = {allowed_universe.strip().upper()}
+    elif isinstance(allowed_universe, (tuple, list)):
+        allowed_set = set()
+        for u in allowed_universe:
+            u_clean = str(u).strip()
+            if u_clean.lower() in UNCONTROLLED_UNIVERSE_ALIASES:
+                raise AlphaGenerationError(
+                    f"allowed_universe alias '{u}' has no controlled expansion; specify explicit authorized scope"
+                )
+            if u_clean:
+                allowed_set.add(u_clean.upper())
+        if not allowed_set:
+            raise AlphaGenerationError("allowed_universe sequence is empty")
+    else:
+        raise AlphaGenerationError("allowed_universe must be string or sequence of strings")
+
+    for s in symbols:
+        s_upper = s.upper()
+        if s_upper in allowed_set:
+            continue
+        m = re.match(r"^([A-Z]+)\d{3,4}$", s_upper)
+        if m and m.group(1) in allowed_set:
+            continue
+        raise AlphaGenerationError(
+            f"candidate universe symbol '{s}' is not in allowed_universe {sorted(allowed_set)}"
+        )
+
+
 def admit_alpha_generation_output(
     raw_output: str,
     *,
@@ -709,6 +798,32 @@ def admit_alpha_generation_output(
             "source_context_refs contains a reference outside the bound Memory View"
         )
     scientific = dict(data["hypothesis"])
+
+    # Execution-side scope admission checks against request constraints
+    if request.allowed_frequency is not None:
+        cand_freq = str(scientific.get("frequency", "")).strip().lower()
+        exp_freq = str(request.allowed_frequency).strip().lower()
+        if cand_freq != exp_freq:
+            raise AlphaGenerationError(
+                f"candidate frequency '{scientific.get('frequency')}' does not match allowed_frequency '{request.allowed_frequency}'"
+            )
+
+    if request.allowed_signal_families is not None and len(request.allowed_signal_families) > 0:
+        cand_family = str(scientific.get("signal_family", "")).strip()
+        allowed_fams = {f.strip() for f in request.allowed_signal_families}
+        if cand_family not in allowed_fams:
+            raise AlphaGenerationError(
+                f"candidate signal_family '{cand_family}' not in allowed_signal_families {sorted(allowed_fams)}"
+            )
+
+    if isinstance(scientific.get("universe"), (list, tuple)):
+        scientific["universe"] = ", ".join(
+            str(s).strip() for s in scientific["universe"] if str(s).strip()
+        )
+
+    if request.allowed_universe is not None:
+        _validate_universe_scope(scientific.get("universe"), request.allowed_universe)
+
     hypothesis_id = (
         "agent-alpha-"
         + v2.digest(
@@ -718,6 +833,7 @@ def admit_alpha_generation_output(
             }
         )[:24]
     )
+
     payload = {
         "schema_version": "research_lab.alpha_hypothesis.v1",
         "hash_profile": "research-json-v1",
@@ -735,7 +851,10 @@ def admit_alpha_generation_output(
         "duplicate_of": None,
     }
     payload["hypothesis_content_hash"] = compute_hypothesis_content_hash(payload)
-    validated = AlphaHypothesis.model_validate(validate_hypothesis(payload))
+    try:
+        validated = AlphaHypothesis.model_validate(validate_hypothesis(payload))
+    except Exception as exc:
+        raise AlphaGenerationError(f"Hypothesis validation failed: {exc}") from exc
     return AlphaGenerationCandidate(
         hypothesis=validated,
         scientific_identity_hash=compute_scientific_identity_hash(

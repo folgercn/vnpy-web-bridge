@@ -230,12 +230,16 @@ class ContractTestProvider:
         effective_req_id = (request_id or "").strip() or f"req-{task.task_id}"
         sub_key = f"{effective_req_id}::{task.task_id}"
 
-        # 5. Payload signature for idempotency
+        task_prompt = task.work_block if task.role == "alpha_generator" else (
+            getattr(task, "prompt", None) or getattr(task, "objective", "")
+        )
         payload_data = {
             "authorized_permissions": sorted(task.authorized_permissions),
             "model": route.resolved_model,
             "project_binding": dict(task.project_binding),
             "objective": getattr(task, "objective", getattr(task, "prompt", "")),
+            "prompt": task_prompt,
+            "work_block": getattr(task, "work_block", ""),
             "provider": self._provider_name,
             "role": task.role,
             "task_id": task.task_id,
