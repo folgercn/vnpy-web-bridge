@@ -328,6 +328,19 @@ class AlphaGenerationCandidate:
     duplicate_status: str = "NOT_CHECKED"
     duplicate_refs: tuple[str, ...] = ()
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "duplicate_awareness": self.duplicate_awareness,
+            "duplicate_refs": list(self.duplicate_refs),
+            "duplicate_status": self.duplicate_status,
+            "hypothesis": self.hypothesis.model_dump(),
+            "novelty_statement": self.novelty_statement,
+            "rationale": self.rationale,
+            "scientific_identity_hash": self.scientific_identity_hash,
+            "source_context_refs": list(self.source_context_refs),
+            "uncertainty": self.uncertainty,
+        }
+
 
 @dataclass(frozen=True)
 class AlphaGenerationResult:

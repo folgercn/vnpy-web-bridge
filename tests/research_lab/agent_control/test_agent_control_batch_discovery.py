@@ -17,6 +17,7 @@ import dataclasses
 import json
 from pathlib import Path
 import re
+from collections.abc import Mapping
 from typing import Any
 
 from unittest import mock
@@ -38,6 +39,7 @@ from research_lab.agent_control.batch_discovery import (
 from research_lab.agent_control.contracts import (
     AgentPermissionScope,
     AgentResult,
+    AgentUsageSnapshot,
     TerminalStatus,
 )
 from research_lab.agent_control.discovery_integration import (
@@ -47,6 +49,7 @@ from research_lab.agent_control.discovery_session import (
     CANONICAL_SESSION_TIMESTAMP,
     DiscoverySession,
     plan_candidate_slots,
+    replan_slot_attempt,
 )
 from research_lab.agent_control.memory_view import (
     ResearchMemoryCategory,
@@ -55,6 +58,7 @@ from research_lab.agent_control.memory_view import (
     build_research_memory_view,
 )
 from research_lab.agent_control.providers.contract_test_provider import (
+    CONTRACT_TEST_DEFAULT_MODEL,
     CONTRACT_TEST_PROVIDER_NAME,
     ContractTestProvider,
 )
@@ -107,6 +111,7 @@ def _build_candidate_envelope(
     frequency: str = "1d",
     holding_horizon: str = "3d",
     target: str = "forward_return_3d",
+    signal_definition: str | None = None,
     source_context_refs: list[str] | None = None,
 ) -> dict[str, Any]:
     return {
@@ -114,7 +119,7 @@ def _build_candidate_envelope(
             "title": title,
             "economic_rationale": "Trend continuation driven by structural inventory shifts.",
             "signal_family": signal_family,
-            "signal_definition": f"positive rolling return over 5 bars on {universe}",
+            "signal_definition": signal_definition or f"positive rolling return over 5 bars on {universe}",
             "source_features": ["close", "high", "low"],
             "target": target,
             "expected_direction": "positive",
@@ -1125,8 +1130,9 @@ def test_execute_memory_feedback_loop_direct_call(
     assert len(loop_result.attribution_records) > 0
     assert loop_result.comparative_summary["attribution"]["total_attributions"] > 0
     first_attr = loop_result.attribution_records[0]
-    assert first_attr.is_conclusive is True
+    assert first_attr.is_conclusive is False
     assert len(first_attr.scientific_diffs) > 0
+    assert loop_result.comparative_summary["attribution"]["conclusive_attributions"] == 0
 
 
 def test_uncertain_status_no_blind_retry_and_preserves_slot_result(
@@ -1621,3 +1627,664 @@ def test_two_rounds_engine_memory_internal_deduplication(
     # In Round 2, memory_store contains Round 1 entries; candidates are evaluated through internal path
     assert loop_res.round_2_batch.funnel.admitted == 2
     assert loop_res.round_2_batch.funnel.unverified_count == 0
+
+
+# =====================================================================
+# PR #589 Review Fixes: 4 P1 + 1 P2 Regressions
+# =====================================================================
+
+def test_pr589_p1_candidate_and_batch_serialization_to_dict(
+    test_provider: ContractTestProvider,
+    provider_registry: ProviderRegistry,
+    authorized_scope: AgentPermissionScope,
+    routing_policy: RoutingPolicy,
+    discovery_context: dict[str, Any],
+) -> None:
+    """PR #589 P1 (4068923944): slot.to_dict() and batch.to_dict() JSON-serializable when candidate exists."""
+    memory: ResearchMemory = discovery_context["memory"]
+    view = _build_test_memory_view(memory, authorized_scope)
+    session = DiscoverySession.create(
+        objective="Serialization test with admitted candidate",
+        memory_view=view,
+        authorized_scope=authorized_scope,
+        candidate_budget=1,
+        allowed_universe=("RB",),
+        allowed_frequency="1d",
+        allowed_signal_families=("momentum",),
+        project_binding=STANDARD_PROJECT_BINDING,
+        created_at=CANONICAL_SESSION_TIMESTAMP,
+    )
+    envelope = _build_candidate_envelope(
+        title="Valid Candidate for Serialization",
+        signal_family="momentum",
+        universe="RB2405",
+        frequency="1d",
+    )
+    configure_provider_output(test_provider, json.dumps(envelope))
+    orchestrator = DiscoveryBatchOrchestrator(
+        registry=provider_registry,
+        routing_policy=routing_policy,
+        memory_store=memory,
+    )
+    batch = orchestrator.execute_session(session=session, memory_view=view)
+    assert batch.funnel.admitted == 1
+    slot = batch.slots[0]
+    assert slot.candidate is not None
+
+    # 1. slot.to_dict()
+    slot_dict = slot.to_dict()
+    assert isinstance(slot_dict, dict)
+    assert slot_dict["candidate"] is not None
+    cand_dict = slot_dict["candidate"]
+    assert "hypothesis" in cand_dict
+    assert "scientific_identity_hash" in cand_dict
+    assert "duplicate_status" in cand_dict
+    assert "duplicate_refs" in cand_dict
+    assert "rationale" in cand_dict
+    assert "novelty_statement" in cand_dict
+    assert "duplicate_awareness" in cand_dict
+    assert "uncertainty" in cand_dict
+    assert "source_context_refs" in cand_dict
+
+    # 2. batch.to_dict()
+    batch_dict = batch.to_dict()
+    assert isinstance(batch_dict, dict)
+    assert len(batch_dict["admitted_candidates"]) == 1
+    assert len(batch_dict["slots"]) == 1
+
+    # 3. JSON serialization roundtrip
+    slot_json = json.dumps(slot_dict)
+    assert isinstance(slot_json, str)
+    batch_json = json.dumps(batch_dict)
+    assert isinstance(batch_json, str)
+
+
+def test_pr589_p1_execute_memory_feedback_loop_with_m3_quota_snapshots(
+    test_provider: ContractTestProvider,
+    provider_registry: ProviderRegistry,
+    authorized_scope: AgentPermissionScope,
+    discovery_context: dict[str, Any],
+) -> None:
+    """PR #589 P1 (4068923949): Per-slot getter, execution clock, TTL expiry, and error isolation under M3."""
+    engine: AlphaDiscoveryEngine = discovery_context["engine"]
+    memory: ResearchMemory = discovery_context["memory"]
+    clean_csv: Path = discovery_context["clean_csv"]
+    clean_binding: dict[str, Any] = discovery_context["clean_binding"]
+
+    m3_policy = RoutingPolicy(
+        role="alpha_generator",
+        policy_version="2026-09-m3",
+        provider_priority=(CONTRACT_TEST_PROVIDER_NAME,),
+        model_quota_bindings={CONTRACT_TEST_PROVIDER_NAME: {CONTRACT_TEST_DEFAULT_MODEL: "default"}},
+    )
+    call_state = {"count": 0}
+
+    def _loop_provider(payload: dict[str, Any]) -> str:
+        call_state["count"] += 1
+        c = call_state["count"]
+        return json.dumps(
+            _build_candidate_envelope(
+                title=f"M3 Quota Signal #{c}",
+                signal_family="momentum",
+                universe="RB2405",
+                frequency="1d",
+            )
+        )
+
+    configure_provider_output(test_provider, _loop_provider)
+    initial_view = _build_test_memory_view(memory, authorized_scope)
+    orchestrator = DiscoveryBatchOrchestrator(
+        registry=provider_registry,
+        routing_policy=m3_policy,
+        memory_store=memory,
+    )
+
+    # A. Without usage_snapshots or getter, under M3 policy, fail-closed with QUOTA_EXHAUSTED (candidate_budget >= 2)
+    res_no_snap = execute_memory_feedback_loop(
+        engine=engine,
+        orchestrator=orchestrator,
+        initial_memory_view=initial_view,
+        authorized_scope=authorized_scope,
+        project_binding=STANDARD_PROJECT_BINDING,
+        objective="M3 Quota without snapshot",
+        allowed_universe=("RB",),
+        allowed_frequency="1d",
+        allowed_signal_families=("momentum",),
+        candidate_budget=2,
+        snapshot_path=clean_csv,
+        dataset_binding=clean_binding,
+        created_at="2026-01-01T00:00:00.000000Z",
+        round_2_created_at="2026-01-02T00:00:00.000000Z",
+    )
+    assert res_no_snap.round_1_batch.funnel.requested == 2
+    assert res_no_snap.round_1_batch.funnel.admitted == 0
+    assert res_no_snap.round_1_batch.funnel.provider_failed == 2
+    assert res_no_snap.round_1_batch.slots[0].engineering_status == SlotEngineeringStatus.QUOTA_EXHAUSTED.value
+    assert res_no_snap.round_1_batch.slots[1].engineering_status == SlotEngineeringStatus.QUOTA_EXHAUSTED.value
+
+    # B. Getter error isolation: getter fails for slot 1, but succeeds for slot 2; batch does not halt
+    getter_call_count = {"n": 0}
+
+    def _faulty_getter(timestamp: str) -> Mapping[str, AgentUsageSnapshot]:
+        getter_call_count["n"] += 1
+        if getter_call_count["n"] == 1:
+            raise RuntimeError("Temporary upstream quota service outage")
+        return {
+            CONTRACT_TEST_PROVIDER_NAME: AgentUsageSnapshot.create(
+                provider=CONTRACT_TEST_PROVIDER_NAME,
+                model_group="default",
+                quota_windows=[{"window": "5h", "remaining_fraction": 1.0}],
+                captured_at=timestamp,
+            )
+        }
+
+    orchestrator_faulty = DiscoveryBatchOrchestrator(
+        registry=provider_registry,
+        routing_policy=m3_policy,
+        memory_store=memory,
+    )
+    session_b = DiscoverySession.create(
+        objective="Faulty getter session",
+        memory_view=initial_view,
+        authorized_scope=authorized_scope,
+        candidate_budget=2,
+        allowed_universe=("RB",),
+        allowed_frequency="1d",
+        allowed_signal_families=("momentum",),
+        project_binding=STANDARD_PROJECT_BINDING,
+        created_at="2026-09-22T08:00:00.000000Z",
+    )
+    batch_b = orchestrator_faulty.execute_session(
+        session_b,
+        initial_view,
+        usage_snapshot_provider=_faulty_getter,
+        clock="2026-09-22T08:00:00.000000Z",
+    )
+    assert batch_b.funnel.requested == 2
+    assert batch_b.funnel.admitted == 1
+    assert batch_b.funnel.provider_failed == 1
+    assert batch_b.slots[0].engineering_status == SlotEngineeringStatus.QUOTA_EXHAUSTED.value
+    assert batch_b.slots[0].error_code == "SNAPSHOT_GETTER_FAILED"
+    assert batch_b.slots[1].engineering_status == SlotEngineeringStatus.COMPLETED.value
+
+    # C. Clock advancing past TTL (300s): Stale snapshot rejected failclosed
+    def stale_getter(_t: str) -> Mapping[str, AgentUsageSnapshot]:
+        return {
+            CONTRACT_TEST_PROVIDER_NAME: AgentUsageSnapshot.create(
+                provider=CONTRACT_TEST_PROVIDER_NAME,
+                model_group="default",
+                quota_windows=[{"window": "5h", "remaining_fraction": 1.0}],
+                captured_at="2026-09-22T09:00:00.000000Z",  # 600s older than clock
+            )
+        }
+    session_c = DiscoverySession.create(
+        objective="Stale TTL session",
+        memory_view=initial_view,
+        authorized_scope=authorized_scope,
+        candidate_budget=2,
+        allowed_universe=("RB",),
+        allowed_frequency="1d",
+        allowed_signal_families=("momentum",),
+        project_binding=STANDARD_PROJECT_BINDING,
+        created_at="2026-09-22T09:10:00.000000Z",
+    )
+    batch_c = orchestrator_faulty.execute_session(
+        session_c,
+        initial_view,
+        usage_snapshot_provider=stale_getter,
+        clock="2026-09-22T09:10:00.000000Z",
+    )
+    assert batch_c.funnel.requested == 2
+    assert batch_c.funnel.admitted == 0
+    assert batch_c.funnel.provider_failed == 2
+    assert "stale" in str(batch_c.slots[0].error_message).lower()
+
+    # D. Stepping execution clock with fresh per-slot getter: 2 rounds, budget >= 2
+    clock_ticks = [
+        "2026-09-22T10:00:00.000000Z",
+        "2026-09-22T10:01:00.000000Z",
+        "2026-09-23T10:00:00.000000Z",
+        "2026-09-23T10:01:00.000000Z",
+        "2026-09-23T10:02:00.000000Z",
+    ]
+    tick_index = {"i": 0}
+
+    def _stepping_clock() -> str:
+        idx = tick_index["i"]
+        tick_index["i"] += 1
+        return clock_ticks[min(idx, len(clock_ticks) - 1)]
+
+    recorded_getter_times: list[str] = []
+
+    def _dynamic_snapshot_provider(timestamp: str) -> Mapping[str, AgentUsageSnapshot]:
+        recorded_getter_times.append(timestamp)
+        return {
+            CONTRACT_TEST_PROVIDER_NAME: AgentUsageSnapshot.create(
+                provider=CONTRACT_TEST_PROVIDER_NAME,
+                model_group="default",
+                quota_windows=[{"window": "5h", "remaining_fraction": 1.0}],
+                captured_at=timestamp,
+            )
+        }
+
+    orchestrator_fresh = DiscoveryBatchOrchestrator(
+        registry=provider_registry,
+        routing_policy=m3_policy,
+        memory_store=memory,
+    )
+    res_with_snap = execute_memory_feedback_loop(
+        engine=engine,
+        orchestrator=orchestrator_fresh,
+        initial_memory_view=initial_view,
+        authorized_scope=authorized_scope,
+        project_binding=STANDARD_PROJECT_BINDING,
+        objective="M3 Quota with fresh snapshot",
+        allowed_universe=("RB",),
+        allowed_frequency="1d",
+        allowed_signal_families=("momentum",),
+        candidate_budget=2,
+        snapshot_path=clean_csv,
+        dataset_binding=clean_binding,
+        usage_snapshot_provider=_dynamic_snapshot_provider,
+        clock=_stepping_clock,
+        created_at="2026-09-22T10:00:00.000000Z",
+        round_2_created_at="2026-09-23T10:00:00.000000Z",
+    )
+    assert res_with_snap.round_1_batch.funnel.admitted == 2
+    assert res_with_snap.round_2_batch.funnel.admitted == 2
+    # Per-slot getter called for every newly executed slot across both rounds
+    assert len(recorded_getter_times) >= 4
+
+    # E. Same-attempt cache replay does NOT invoke snapshot getter
+    cached_slot = res_with_snap.round_1_session
+    planned_slot0 = plan_candidate_slots(cached_slot, initial_view)[0]
+    initial_call_count = len(recorded_getter_times)
+    replayed_res = orchestrator_fresh.execute_slot(
+        session=cached_slot,
+        slot=planned_slot0,
+        memory_view=initial_view,
+        usage_snapshot_provider=_dynamic_snapshot_provider,
+        clock=_stepping_clock,
+    )
+    assert replayed_res.is_replayed is True
+    assert len(recorded_getter_times) == initial_call_count
+
+
+def test_pr589_p1_unresolved_prior_attempt_interlock(
+    test_provider: ContractTestProvider,
+    provider_registry: ProviderRegistry,
+    authorized_scope: AgentPermissionScope,
+    routing_policy: RoutingPolicy,
+    discovery_context: dict[str, Any],
+) -> None:
+    """PR #589 P1 (4068923953): Check unresolved prior attempt before submit; reject before confirmed terminal."""
+    memory: ResearchMemory = discovery_context["memory"]
+    view = _build_test_memory_view(memory, authorized_scope)
+    session = DiscoverySession.create(
+        objective="Unresolved prior attempt test",
+        memory_view=view,
+        authorized_scope=authorized_scope,
+        candidate_budget=1,
+        allowed_universe=("RB",),
+        allowed_frequency="1d",
+        allowed_signal_families=("momentum",),
+        project_binding=STANDARD_PROJECT_BINDING,
+        created_at=CANONICAL_SESSION_TIMESTAMP,
+    )
+    slot1 = plan_candidate_slots(session, view)[0]
+
+    envelope = _build_candidate_envelope(
+        title="Candidate for Attempt Test",
+        signal_family="momentum",
+        universe="RB2405",
+        frequency="1d",
+    )
+    configure_provider_output(test_provider, json.dumps(envelope))
+
+    orig_submit = test_provider.submit
+
+    def _uncertain_submit(task, route, prep, request_id=None):
+        handle = orig_submit(task, route, prep, request_id=request_id)
+        test_provider.set_job_status(handle.provider_job_ref, TerminalStatus.UNCERTAIN.value)
+        return handle
+
+    with mock.patch.object(test_provider, "submit", side_effect=_uncertain_submit):
+        orchestrator = DiscoveryBatchOrchestrator(
+            registry=provider_registry,
+            routing_policy=routing_policy,
+        )
+
+        # Attempt 1 executes and ends in UNCERTAIN
+        res1 = orchestrator.execute_slot(session=session, slot=slot1, memory_view=view)
+        assert res1.engineering_status == SlotEngineeringStatus.PROVIDER_UNCERTAIN.value
+        assert res1.error_code == "PROVIDER_UNCERTAIN"
+
+    # Replan slot to attempt 2
+    slot2 = replan_slot_attempt(slot1, view, attempt=2)
+
+    # 1. Attempt 2 executed while Attempt 1 is still UNCERTAIN -> BLOCKED before submit
+    with mock.patch.object(test_provider, "submit") as mock_sub:
+        res2_blocked = orchestrator.execute_slot(session=session, slot=slot2, memory_view=view)
+        mock_sub.assert_not_called()
+        assert res2_blocked.engineering_status == SlotEngineeringStatus.PROVIDER_UNCERTAIN.value
+        assert res2_blocked.error_code == "PRIOR_ATTEMPT_UNRESOLVED"
+
+    # 2. Status lookup error caught failclosed without crashing
+    orchestrator._execution_cache.pop((session.session_id, slot2.slot_id, 2), None)
+    with mock.patch.object(test_provider, "status", side_effect=RuntimeError("SimNow status disconnected")):
+        res2_error = orchestrator.execute_slot(session=session, slot=slot2, memory_view=view)
+        assert res2_error.engineering_status == SlotEngineeringStatus.PROVIDER_UNCERTAIN.value
+        assert res2_error.error_code == "PRIOR_ATTEMPT_UNRESOLVED"
+        assert "STATUS_LOOKUP_ERROR" in str(res2_error.error_message)
+
+    # 3. Missing saved handle does not fabricate identity and remains blocked
+    orchestrator._execution_cache.pop((session.session_id, slot2.slot_id, 2), None)
+    saved_handle = orchestrator._execution_handles.pop((session.session_id, slot1.slot_id, 1), None)
+    res2_no_handle = orchestrator.execute_slot(session=session, slot=slot2, memory_view=view)
+    assert res2_no_handle.engineering_status == SlotEngineeringStatus.PROVIDER_UNCERTAIN.value
+    assert res2_no_handle.error_code == "PRIOR_ATTEMPT_UNRESOLVED"
+
+    # Restore handle and confirm prior job is terminated (e.g. CANCELLED)
+    if saved_handle:
+        orchestrator._execution_handles[(session.session_id, slot1.slot_id, 1)] = saved_handle
+    test_provider.set_job_status(res1.provider_job_ref, "CANCELLED")
+
+    # 4. Attempt 2 executed after confirmation -> ALLOWED to submit and succeeds
+    orchestrator._execution_cache.pop((session.session_id, slot2.slot_id, 2), None)
+    res2_allowed = orchestrator.execute_slot(session=session, slot=slot2, memory_view=view)
+    assert res2_allowed.engineering_status == SlotEngineeringStatus.COMPLETED.value
+    assert res2_allowed.attempt == 2
+    assert res2_allowed.candidate is not None
+
+
+def test_pr589_p1_conservative_memory_attribution_punctuation_inconclusive(
+    test_provider: ContractTestProvider,
+    provider_registry: ProviderRegistry,
+    authorized_scope: AgentPermissionScope,
+    routing_policy: RoutingPolicy,
+    discovery_context: dict[str, Any],
+) -> None:
+    """PR #589 P1 (4068923957): Punctuation and cosmetic edits in signal_definition remain inconclusive."""
+    engine: AlphaDiscoveryEngine = discovery_context["engine"]
+    memory: ResearchMemory = discovery_context["memory"]
+    clean_csv: Path = discovery_context["clean_csv"]
+    clean_binding: dict[str, Any] = discovery_context["clean_binding"]
+
+    call_state = {"count": 0}
+
+    def _loop_provider(payload: dict[str, Any]) -> str:
+        call_state["count"] += 1
+        c = call_state["count"]
+        # Round 1: Slot 1
+        if c == 1:
+            return json.dumps(
+                _build_candidate_envelope(
+                    title="Round 1 Momentum Baseline",
+                    signal_family="momentum",
+                    universe="RB2405",
+                    frequency="1d",
+                    holding_horizon="3d",
+                )
+            )
+        # Round 2: Citations
+        raw_payload = json.dumps(payload)
+        m = re.findall(r"rmentry-[a-f0-9]+", raw_payload)
+        cited_id = m[0] if m else "rmentry-none"
+
+        # Trailing period edit only
+        base_env = _build_candidate_envelope(
+            title="Round 2 Punctuation Edit Only",
+            signal_family="momentum",
+            universe="RB2405",
+            frequency="1d",
+            holding_horizon="3d",
+            source_context_refs=[cited_id] if m else [],
+        )
+        base_env["hypothesis"]["signal_definition"] += "."
+        return json.dumps(base_env)
+
+    configure_provider_output(test_provider, _loop_provider)
+    initial_view = _build_test_memory_view(memory, authorized_scope)
+
+    orchestrator = DiscoveryBatchOrchestrator(
+        registry=provider_registry,
+        routing_policy=routing_policy,
+        memory_store=memory,
+    )
+    res = execute_memory_feedback_loop(
+        engine=engine,
+        orchestrator=orchestrator,
+        initial_memory_view=initial_view,
+        authorized_scope=authorized_scope,
+        project_binding=STANDARD_PROJECT_BINDING,
+        objective="Attribution punctuation test",
+        allowed_universe=("RB",),
+        allowed_frequency="1d",
+        allowed_signal_families=("momentum",),
+        candidate_budget=1,
+        snapshot_path=clean_csv,
+        dataset_binding=clean_binding,
+        created_at="2026-01-01T00:00:00.000000Z",
+        round_2_created_at="2026-01-02T00:00:00.000000Z",
+    )
+    assert len(res.attribution_records) == 1
+    attr = res.attribution_records[0]
+    assert attr.is_conclusive is False
+    assert len(attr.scientific_diffs) == 0
+    assert len(attr.field_diffs) > 0
+    assert res.comparative_summary["attribution"]["conclusive_attributions"] == 0
+
+
+def test_pr589_p1_conservative_memory_attribution_synonym_rewrite_inconclusive(
+    test_provider: ContractTestProvider,
+    provider_registry: ProviderRegistry,
+    authorized_scope: AgentPermissionScope,
+    routing_policy: RoutingPolicy,
+    discovery_context: dict[str, Any],
+) -> None:
+    """PR #589 P1 (4068923957): Synonym rewrites remain fail-closed inconclusive without verified causal gap proof."""
+    engine: AlphaDiscoveryEngine = discovery_context["engine"]
+    memory: ResearchMemory = discovery_context["memory"]
+    clean_csv: Path = discovery_context["clean_csv"]
+    clean_binding: dict[str, Any] = discovery_context["clean_binding"]
+
+    call_state = {"count": 0}
+
+    def _loop_provider(payload: dict[str, Any]) -> str:
+        call_state["count"] += 1
+        c = call_state["count"]
+        if c == 1:
+            return json.dumps(
+                _build_candidate_envelope(
+                    title="Round 1 Momentum Baseline",
+                    signal_family="momentum",
+                    universe="RB2405",
+                    frequency="1d",
+                    holding_horizon="3d",
+                    signal_definition="positive rolling return over 5 bars on RB2405",
+                )
+            )
+        raw_payload = json.dumps(payload)
+        m = re.findall(r"rmentry-[a-f0-9]+", raw_payload)
+        cited_id = m[0] if m else "rmentry-none"
+        return json.dumps(
+            _build_candidate_envelope(
+                title="Round 2 Synonym Rewrite",
+                signal_family="momentum",
+                universe="RB2405",
+                frequency="1d",
+                holding_horizon="3d",
+                signal_definition="rolling return over 5 bars on RB2405 is positive",
+                source_context_refs=[cited_id] if m else [],
+            )
+        )
+
+    configure_provider_output(test_provider, _loop_provider)
+    initial_view = _build_test_memory_view(memory, authorized_scope)
+
+    orchestrator = DiscoveryBatchOrchestrator(
+        registry=provider_registry,
+        routing_policy=routing_policy,
+        memory_store=memory,
+    )
+    res = execute_memory_feedback_loop(
+        engine=engine,
+        orchestrator=orchestrator,
+        initial_memory_view=initial_view,
+        authorized_scope=authorized_scope,
+        project_binding=STANDARD_PROJECT_BINDING,
+        objective="Attribution synonym test",
+        allowed_universe=("RB",),
+        allowed_frequency="1d",
+        allowed_signal_families=("momentum",),
+        candidate_budget=1,
+        snapshot_path=clean_csv,
+        dataset_binding=clean_binding,
+        created_at="2026-01-01T00:00:00.000000Z",
+        round_2_created_at="2026-01-02T00:00:00.000000Z",
+    )
+    assert len(res.attribution_records) == 1
+    attr = res.attribution_records[0]
+    assert attr.is_conclusive is False
+    assert len(attr.field_diffs) > 0
+    assert res.comparative_summary["attribution"]["conclusive_attributions"] == 0
+
+
+def test_pr589_p1_conservative_memory_attribution_irrelevant_horizon_target_inconclusive(
+    test_provider: ContractTestProvider,
+    provider_registry: ProviderRegistry,
+    authorized_scope: AgentPermissionScope,
+    routing_policy: RoutingPolicy,
+    discovery_context: dict[str, Any],
+) -> None:
+    """PR #589 P1 (4068923957): Irrelevant horizon and target changes remain inconclusive without causal evidence."""
+    engine: AlphaDiscoveryEngine = discovery_context["engine"]
+    memory: ResearchMemory = discovery_context["memory"]
+    clean_csv: Path = discovery_context["clean_csv"]
+    clean_binding: dict[str, Any] = discovery_context["clean_binding"]
+
+    call_state = {"count": 0}
+
+    def _loop_provider(payload: dict[str, Any]) -> str:
+        call_state["count"] += 1
+        c = call_state["count"]
+        if c == 1:
+            return json.dumps(
+                _build_candidate_envelope(
+                    title="Round 1 Momentum Baseline",
+                    signal_family="momentum",
+                    universe="RB2405",
+                    frequency="1d",
+                    holding_horizon="3d",
+                    target="next_day_close",
+                )
+            )
+        raw_payload = json.dumps(payload)
+        m = re.findall(r"rmentry-[a-f0-9]+", raw_payload)
+        cited_id = m[0] if m else "rmentry-none"
+        return json.dumps(
+            _build_candidate_envelope(
+                title="Round 2 Horizon Target Variance",
+                signal_family="momentum",
+                universe="RB2405",
+                frequency="1d",
+                holding_horizon="5d",
+                target="next_day_vwap",
+                source_context_refs=[cited_id] if m else [],
+            )
+        )
+
+    configure_provider_output(test_provider, _loop_provider)
+    initial_view = _build_test_memory_view(memory, authorized_scope)
+
+    orchestrator = DiscoveryBatchOrchestrator(
+        registry=provider_registry,
+        routing_policy=routing_policy,
+        memory_store=memory,
+    )
+    res = execute_memory_feedback_loop(
+        engine=engine,
+        orchestrator=orchestrator,
+        initial_memory_view=initial_view,
+        authorized_scope=authorized_scope,
+        project_binding=STANDARD_PROJECT_BINDING,
+        objective="Attribution horizon target test",
+        allowed_universe=("RB",),
+        allowed_frequency="1d",
+        allowed_signal_families=("momentum",),
+        candidate_budget=1,
+        snapshot_path=clean_csv,
+        dataset_binding=clean_binding,
+        created_at="2026-01-01T00:00:00.000000Z",
+        round_2_created_at="2026-01-02T00:00:00.000000Z",
+    )
+    assert len(res.attribution_records) == 1
+    attr = res.attribution_records[0]
+    assert attr.is_conclusive is False
+    assert len(attr.scientific_diffs) > 0
+    assert len(attr.field_diffs) > 0
+    assert res.comparative_summary["attribution"]["conclusive_attributions"] == 0
+
+
+def test_pr589_p2_cache_replay_dynamic_duplicate_reevaluation(
+    test_provider: ContractTestProvider,
+    provider_registry: ProviderRegistry,
+    authorized_scope: AgentPermissionScope,
+    routing_policy: RoutingPolicy,
+    discovery_context: dict[str, Any],
+) -> None:
+    """PR #589 P2 (4068923968): Cache replay re-evaluates duplicate status against active prior_admitted."""
+    memory: ResearchMemory = discovery_context["memory"]
+    view = _build_test_memory_view(memory, authorized_scope)
+    session = DiscoverySession.create(
+        objective="Cache replay duplicate test",
+        memory_view=view,
+        authorized_scope=authorized_scope,
+        candidate_budget=2,
+        allowed_universe=("RB",),
+        allowed_frequency="1d",
+        allowed_signal_families=("momentum",),
+        project_binding=STANDARD_PROJECT_BINDING,
+        created_at=CANONICAL_SESSION_TIMESTAMP,
+    )
+    slots = plan_candidate_slots(session, view)
+    assert len(slots) == 2
+
+    # Both slots produce identical candidate
+    envelope = _build_candidate_envelope(
+        title="Identical Candidate for Deduplication Test",
+        signal_family="momentum",
+        universe="RB2405",
+        frequency="1d",
+    )
+    configure_provider_output(test_provider, json.dumps(envelope))
+    orchestrator = DiscoveryBatchOrchestrator(
+        registry=provider_registry,
+        routing_policy=routing_policy,
+        memory_store=memory,
+    )
+
+    # 1. Execute slot 1 in isolation first (prior_admitted=())
+    res_slot1_isolated = orchestrator.execute_slot(
+        session=session, slot=slots[1], memory_view=view, prior_admitted=()
+    )
+    assert res_slot1_isolated.engineering_status == SlotEngineeringStatus.COMPLETED.value
+    assert res_slot1_isolated.duplicate_status == "NOVEL_WITHIN_VIEW"
+    assert res_slot1_isolated.is_replayed is False
+
+    # 2. Now execute full session sequentially (slots[0], then slots[1])
+    batch_res = orchestrator.execute_session(session=session, memory_view=view)
+    assert batch_res.funnel.requested == 2
+    assert batch_res.funnel.admitted == 2
+
+    # Slot 0 was executed fresh and admitted as novel
+    assert batch_res.slots[0].duplicate_status == "NOVEL_WITHIN_VIEW"
+    # Slot 1 hit cache replay and dynamically re-evaluated against slot 0 as exact duplicate!
+    assert batch_res.slots[1].is_replayed is True
+    assert batch_res.slots[1].duplicate_status == "EXACT_DUPLICATE"
+
+    # Funnel metrics strictly reflect novel=1, exact=1
+    assert batch_res.funnel.novel_count == 1
+    assert batch_res.funnel.exact_duplicate_count == 1
+    assert batch_res.funnel.related_count == 0
+    assert batch_res.funnel.unverified_count == 0

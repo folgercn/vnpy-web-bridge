@@ -180,25 +180,47 @@ class MemoryFeedbackAttributionRecord:
     predecessor_hypothesis_id: str             # 前序失败/gap 假说 ID
     predecessor_failure_or_gap: str            # 前序具体失败原因/证据缺口
     adaptation_description: str                # 本轮假说针对前序失败的具体改进说明
-    is_conclusive: bool                        # 是否具备确定性科学参数/公式变异证据
+    is_conclusive: bool = False                # 自动流水线在缺少形式化因果验证器前严格保持 False
     scientific_diffs: tuple[str, ...]          # 具体的科学字段差异清单
+    field_diffs: tuple[str, ...]               # 全量字段级文本/结构差异清单
 ```
 
-### 5.3 归因有效性判据
+### 5.3 归因有效性判据与保守审计原则
 - **严格限定 Round 1 条目**：归因引用的前序条目必须且仅能映射到 Round 1 通过 Engine/Critic 真实产生的 Memory Record（通过 `r1_records_by_id` 与 `view2_entries_by_id` 严格解析）。
-- **具体科学差异对比**：显式对比 `signal_definition`、`holding_horizon`、`target`、`source_features`、`signal_family` 与 `parameters` 的前后差异。
-- **无差异明确标注 Inconclusive**：若候选引用了前序条目但并无任何可证实的科学公式或参数差异，系统强制将 `is_conclusive` 设为 `False`，绝不凭模型口头声称判定有效改进。
+- **客观记录字段与科学差异**：对比 `signal_definition`（规范化去除标点和多余空白后）、`holding_horizon`、`target`、`source_features`、`signal_family` 与 `parameters` 的前后差异，存入 `field_diffs` 与 `scientific_diffs`。
+- **Fail-Closed 判定原则（PR #589 P1 纠偏）**：
+  - 本自动入口仅客观记录来源与差异清单。
+  - 由于当前系统尚未具备完备的形式化因果 gap-to-evidence 证据证明引擎，**所有未有可核验因果证据的归因一律判定为 `is_conclusive = False`**，并在 `adaptation_description` 中明确说明证据不足。
+  - 严禁通过关键词/同义词规则推断有效回应缺口；同义改写、标点增减、无关周期/目标变异均保持 `is_conclusive = False`，杜绝伪阳性归因。
 
 ---
 
-## 6. 验证与审计结论
+## 6. PR #589 代码审查专项整改契约（PR 589 Review Fixes）
 
-- **自动化回归测试套件**：`tests/research_lab/agent_control/test_agent_control_batch_discovery.py` 包含 17 项严密回归测试，涵盖顺序批量执行（1 与 10 槽位预算）、执行端范围准入（显式标的白名单、频率、族严格匹配，拒绝 `all_futures` 等未受控别名）、工程故障单槽位隔离、跨 Session/跨 View 拒绝、准备/Lookup 失败隔离、历史未查询严格标记 `NOT_CHECKED` 与漏斗四元/四象限恒等式、重放幂等、批内及历史去重、两轮记忆反馈闭环与可信前后科学差异归因、以及 `UNCERTAIN/UNKNOWN` 状态隔离与防盲重发。
-- **全量回归无破坏**：全部现有 `agent_control` 与 `alpha_discovery` 测试 100% 通过（17 passed）。
-- **中断批次工程审计与副作用核验**：
-  - 2026-09-22 13:09:57 ~ 13:16:32 真实 Provider 批次运行期间，主代理在检测到连接流重连后于 `8b99...` 发出主动 cancel，确认原 PID 69096 已退出，桌面进入 `IDLE 0`，无悬挂后台任务。
-  - 完整核查已提交槽位：Round 1 提交 10 个槽位，10 个槽位均完成并产生 11 条记忆条目；Round 2 提交 7 个槽位，剩余 3 个槽位未提交。
-  - 中断批次作为工程审计记录如实保留，`UNKNOWN` 槽位保持未完成状态，严禁盲目重发。
+针对 PR #589 独立 Code Review 提出的 4 项 P1 与 1 项 P2 问题，完成精确落地与闭环验证：
+
+1. **P1 (4068923944) 候选序列化 `to_dict()` 补齐**：`AlphaGenerationCandidate` 增加严格的 `to_dict()` 方法，解决 `slot.to_dict()` 与 `batch.to_dict()` 序列化崩溃问题，确保 JSON 往返一致性。
+2. **P1 (4068923949) M3 动态时钟与每槽新鲜快照 Getter**：
+   - 批次编排器与反馈循环支持注入 `clock`（动态执行时钟，非固定创建时间）和 `usage_snapshot_provider`（每槽新鲜快照 getter）。
+   - 每个新执行槽位在执行时刻根据当前时钟获取最新配额快照并进行 TTL 判龄（>300s 判定过期并拒绝）。
+   - Getter 异常隔离为单槽位工程失败（`SNAPSHOT_GETTER_FAILED`），不中断批次运行。
+   - 同 attempt 缓存重放直接复用，不重复调用 getter 或重发。
+3. **P1 (4068923953) 未决前序 Attempt 联锁互锁**：
+   - 执行前严格核查前序 attempt 是否处于 `PROVIDER_UNCERTAIN` / `UNKNOWN`。
+   - 严格沿用实际保存的 `_execution_handles`，严禁虚构旧 handle 身份；查询状态异常 fail-closed 拦截，保持 `PRIOR_ATTEMPT_UNRESOLVED` 阻断，仅在确认终态（`CANCELLED/FAILED`）后放行新 attempt。
+4. **P1 (4068923957) 归因差异审计与 Fail-Closed 保守判定**：
+   - 归因记录区分 `field_diffs` 与 `scientific_diffs`，排除标点符号与格式同义干扰。
+   - 自动流水线在缺少可信证据验证器前一律将 `is_conclusive` 设为 `False`，绝不凭关键词猜测或口头声称判定已解决缺口。
+5. **P2 (4068923968) 缓存重放动态查重重估**：
+   - 命中缓存的重放候选直接复用执行/准入结果，但针对当前动态执行上下文传入的 `prior_admitted` 重新评估去重状态，保持漏斗分类指标客观一致。
+
+---
+
+## 7. 验证与审计结论
+
+- **自动化回归测试套件**：`tests/research_lab/agent_control/test_agent_control_batch_discovery.py` 包含 31 项严密回归测试，全部通过（31 passed）。
+- **聚焦测试集全部通过**：Batch Discovery (31) + Discovery Session (18) + Milestone 5 (133) + Milestone 6 (18) + Milestone 8 (42) 共 242 项测试 100% 通过（242 passed）。
+- **代码规范与 Diff 检查**：`ruff check` 与 `git diff --check` 严格零报错通过。
 - **真实研究数据门禁（Data Gate）状态说明**：
   - **当前状态：`BLOCKED`（未通过）**。
   - **根因**：当前本地工作区仅包含测试用合成数据 `research_lab/tests/fixtures/rb_hc_screening_data.csv`（`provenance="synthetic_lab_screening_data"`）。外部真实 RB/HC 期货日线/分时研究数据集需由 M2 Research Warehouse（`/usr/local/libexec/vnpyresearch`）导出并在快照契约中绑定正式 SHA-256。

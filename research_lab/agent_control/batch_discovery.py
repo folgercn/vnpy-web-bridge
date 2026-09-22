@@ -13,6 +13,7 @@ Implements sequential batch execution over PlannedCandidateSlots with:
 from __future__ import annotations
 
 import dataclasses
+from datetime import datetime, timezone
 import time
 from collections import Counter
 from collections.abc import Callable, Mapping
@@ -31,6 +32,7 @@ from research_lab.agent_control.alpha_generator import (
     parse_alpha_generation_output,
 )
 from research_lab.agent_control.contracts import (
+    AgentExecutionHandle,
     AgentPermissionScope,
     AgentResult,
     AgentUsageSnapshot,
@@ -73,6 +75,7 @@ from research_lab.agent_control.memory_view import (
 )
 from research_lab.agent_control.registry import ProviderRegistry
 from research_lab.agent_control.router import select_agent
+from research_lab.agent_control.routing_context import RoutingContext
 from research_lab.agent_control.routing_policy import RoutingPolicy
 from research_lab.alpha_discovery import (
     AlphaDiscoveryEngine,
@@ -457,6 +460,15 @@ def validate_duplicate_lookup_views(
     return True, None
 
 
+def _resolve_clock_time(clock: Callable[[], str] | str | None) -> str:
+    """Resolve current execution clock timestamp ISO string for quota age checks."""
+    if callable(clock):
+        return clock()
+    if isinstance(clock, str) and clock:
+        return clock
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 class DiscoveryBatchOrchestrator:
     """Sequential batch discovery orchestrator executing PlannedCandidateSlots fail-closed."""
 
@@ -468,14 +480,126 @@ class DiscoveryBatchOrchestrator:
         provider_lookup: Callable[[str], Any] | None = None,
         memory_store: Any | None = None,
         audit_trail: DiscoveryBatchAuditTrail | None = None,
+        clock: Callable[[], str] | str | None = None,
+        usage_snapshot_provider: (
+            Callable[[str], Mapping[str, AgentUsageSnapshot]]
+            | Callable[[], Mapping[str, AgentUsageSnapshot]]
+            | None
+        ) = None,
     ) -> None:
         self.registry = registry
         self.routing_policy = routing_policy
         self.provider_lookup = provider_lookup or (lambda name: registry.get(name))
         self.memory_store = memory_store
         self.audit_trail = audit_trail or DiscoveryBatchAuditTrail()
+        self.clock = clock
+        self.usage_snapshot_provider = usage_snapshot_provider
         # Key: (session_id, slot_id, attempt) -> SlotExecutionResult for replay idempotency
         self._execution_cache: dict[tuple[str, str, int], SlotExecutionResult] = {}
+        self._execution_handles: dict[tuple[str, str, int], AgentExecutionHandle] = {}
+
+    def _evaluate_duplicate_status(
+        self,
+        *,
+        candidate: AlphaGenerationCandidate,
+        prior_admitted: tuple[AlphaGenerationCandidate, ...],
+        session: DiscoverySession,
+        created_at: str,
+        scope: AgentPermissionScope,
+        duplicate_view_lookup: (
+            Callable[[AlphaGenerationCandidate], tuple[ResearchMemoryView, ResearchMemoryView]]
+            | None
+        ),
+    ) -> tuple[str, tuple[str, ...], str | None, AlphaGenerationCandidate]:
+        """Evaluate intra-batch and historical duplicate status against current prior_admitted and memory."""
+        batch_exact = any(
+            c.scientific_identity_hash == candidate.scientific_identity_hash
+            or c.hypothesis.hypothesis_content_hash == candidate.hypothesis.hypothesis_content_hash
+            for c in prior_admitted
+        )
+        batch_related = any(
+            compute_structured_key(c.hypothesis.model_dump())
+            == compute_structured_key(candidate.hypothesis.model_dump())
+            for c in prior_admitted
+        )
+
+        hist_exact = False
+        hist_related = False
+        hist_refs: list[str] = []
+        is_internal_covered = False
+        dup_status_reason: str | None = None
+
+        if self.memory_store is not None:
+            # Trusted internal query path: batch orchestrator performs controlled lookup against memory_store
+            try:
+                exact_v, related_v = build_duplicate_lookup_views(
+                    candidate,
+                    memory_store=self.memory_store,
+                    authorized_scope=scope,
+                    project_binding=session.project_binding,
+                    current_time=created_at,
+                )
+                is_valid, val_reason = validate_duplicate_lookup_views(
+                    candidate, exact_v, related_v, session
+                )
+                if is_valid:
+                    candidate_with_hist = apply_duplicate_views(
+                        candidate, exact_view=exact_v, related_view=related_v
+                    )
+                    hist_exact = candidate_with_hist.duplicate_status == "EXACT_DUPLICATE"
+                    hist_related = candidate_with_hist.duplicate_status == "RELATED_HISTORY"
+                    hist_refs = list(candidate_with_hist.duplicate_refs)
+                    is_internal_covered = True
+                else:
+                    dup_status_reason = val_reason
+            except Exception as exc:  # noqa: BLE001
+                dup_status_reason = f"Internal memory store lookup failed: {exc}"
+        elif duplicate_view_lookup is not None:
+            # External callback path: external views cannot prove query targets for empty results; cannot prove novelty
+            try:
+                res = duplicate_view_lookup(candidate)
+                if isinstance(res, tuple) and len(res) >= 2:
+                    exact_v, related_v = res[0], res[1]
+                else:
+                    raise TypeError(f"duplicate_view_lookup returned invalid format: {type(res)}")
+
+                is_valid, val_reason = validate_duplicate_lookup_views(
+                    candidate, exact_v, related_v, session
+                )
+                if is_valid:
+                    candidate_with_hist = apply_duplicate_views(
+                        candidate, exact_view=exact_v, related_view=related_v
+                    )
+                    if candidate_with_hist.duplicate_status in ("EXACT_DUPLICATE", "RELATED_HISTORY"):
+                        hist_exact = candidate_with_hist.duplicate_status == "EXACT_DUPLICATE"
+                        hist_related = candidate_with_hist.duplicate_status == "RELATED_HISTORY"
+                        hist_refs = list(candidate_with_hist.duplicate_refs)
+                    else:
+                        dup_status_reason = (
+                            "External duplicate lookup cannot prove novelty; internal memory store query required"
+                        )
+                else:
+                    dup_status_reason = val_reason
+            except Exception as exc:  # noqa: BLE001
+                dup_status_reason = f"External duplicate lookup failed: {exc}"
+        else:
+            dup_status_reason = "No memory store or duplicate lookup configured"
+
+        if batch_exact or hist_exact:
+            dup_status = "EXACT_DUPLICATE"
+        elif batch_related or hist_related:
+            dup_status = "RELATED_HISTORY"
+        elif is_internal_covered:
+            dup_status = "NOVEL_WITHIN_VIEW"
+        else:
+            dup_status = "NOT_CHECKED"
+
+        admitted_candidate = dataclasses.replace(
+            candidate,
+            duplicate_status=dup_status,
+            duplicate_refs=tuple(sorted(set(hist_refs))),
+        )
+        return dup_status, tuple(sorted(set(hist_refs))), dup_status_reason, admitted_candidate
 
     def execute_slot(
         self,
@@ -484,12 +608,18 @@ class DiscoveryBatchOrchestrator:
         memory_view: ResearchMemoryView,
         *,
         usage_snapshots: Mapping[str, AgentUsageSnapshot] | None = None,
+        usage_snapshot_provider: (
+            Callable[[str], Mapping[str, AgentUsageSnapshot]]
+            | Callable[[], Mapping[str, AgentUsageSnapshot]]
+            | None
+        ) = None,
         prior_admitted: tuple[AlphaGenerationCandidate, ...] = (),
-        duplicate_view_lookup: Callable[
-            [AlphaGenerationCandidate], tuple[ResearchMemoryView, ResearchMemoryView]
-        ]
-        | None = None,
+        duplicate_view_lookup: (
+            Callable[[AlphaGenerationCandidate], tuple[ResearchMemoryView, ResearchMemoryView]]
+            | None
+        ) = None,
         created_at: str = CANONICAL_SESSION_TIMESTAMP,
+        clock: Callable[[], str] | str | None = None,
     ) -> SlotExecutionResult:
         """Execute or replay a single candidate slot with fail-closed engineering gates."""
         # Step 0: Cross-Session & Object Binding Integrity Verification (fail-closed)
@@ -584,9 +714,10 @@ class DiscoveryBatchOrchestrator:
                 slot_content_hash=slot.slot_content_hash,
             )
 
+        scope = AgentPermissionScope(**dict(session.authorized_scope_ref))
         cache_key = (session.session_id, slot.slot_id, slot.attempt)
 
-        # Idempotency / Replay Guard
+        # Idempotency / Replay Guard: Same attempt cache replay does NOT refresh snapshots or re-submit
         if cache_key in self._execution_cache:
             cached_res = self._execution_cache[cache_key]
             if (
@@ -594,10 +725,63 @@ class DiscoveryBatchOrchestrator:
                 and cached_res.session_id == session.session_id
                 and cached_res.memory_view_id == memory_view.view_id
             ):
+                if (
+                    cached_res.candidate is not None
+                    and cached_res.engineering_status == SlotEngineeringStatus.COMPLETED.value
+                ):
+                    dup_status, hist_refs, dup_status_reason, recomputed_candidate = (
+                        self._evaluate_duplicate_status(
+                            candidate=cached_res.candidate,
+                            prior_admitted=prior_admitted,
+                            session=session,
+                            created_at=created_at,
+                            scope=scope,
+                            duplicate_view_lookup=duplicate_view_lookup,
+                        )
+                    )
+                    return dataclasses.replace(
+                        cached_res,
+                        is_replayed=True,
+                        candidate=recomputed_candidate,
+                        duplicate_status=dup_status,
+                        duplicate_refs=hist_refs,
+                        duplicate_status_reason=dup_status_reason,
+                    )
                 return dataclasses.replace(cached_res, is_replayed=True)
 
-        scope = AgentPermissionScope(**dict(session.authorized_scope_ref))
-        snapshots = usage_snapshots or {}
+        # For newly executed slot attempt: resolve execution clock and fresh snapshots
+        active_clock = clock if clock is not None else self.clock
+        slot_execution_time = _resolve_clock_time(active_clock)
+
+        active_snap_getter = (
+            usage_snapshot_provider
+            if usage_snapshot_provider is not None
+            else self.usage_snapshot_provider
+        )
+        if active_snap_getter is not None:
+            try:
+                try:
+                    effective_snapshots = active_snap_getter(slot_execution_time)
+                except TypeError:
+                    effective_snapshots = active_snap_getter()
+            except Exception as exc:  # noqa: BLE001
+                snap_err_res = SlotExecutionResult(
+                    session_id=session.session_id,
+                    slot_id=slot.slot_id,
+                    ordinal=slot.ordinal,
+                    attempt=slot.attempt,
+                    engineering_status=SlotEngineeringStatus.QUOTA_EXHAUSTED.value,
+                    error_code="SNAPSHOT_GETTER_FAILED",
+                    error_message=f"Usage snapshot getter failed for slot '{slot.slot_id}': {exc}",
+                    memory_view_id=session.memory_view_id,
+                    memory_view_content_hash=session.memory_view_content_hash,
+                    slot_content_hash=slot.slot_content_hash,
+                    is_replayed=False,
+                )
+                self._execution_cache[cache_key] = snap_err_res
+                return snap_err_res
+        else:
+            effective_snapshots = usage_snapshots or {}
 
         # Step A: Select route
         try:
@@ -606,14 +790,22 @@ class DiscoveryBatchOrchestrator:
                 for p in self.registry.list()
                 if hasattr(p, "describe")
             ]
+            routing_ctx = RoutingContext(
+                role="alpha_generator",
+                authorized_scope=scope,
+                project_binding=session.project_binding,
+                usage_snapshots=effective_snapshots,
+                current_time=slot_execution_time,
+            )
             route = select_agent(
                 role="alpha_generator",
                 providers=all_descs,
                 authorized_scope=scope,
                 project_binding=session.project_binding,
-                usage_snapshots=snapshots,
+                usage_snapshots=effective_snapshots,
                 registry=self.registry,
                 routing_policy=self.routing_policy,
+                routing_context=routing_ctx,
             )
         except QuotaUnavailableError as exc:
             q_res = SlotExecutionResult(
@@ -686,6 +878,68 @@ class DiscoveryBatchOrchestrator:
             self._execution_cache[cache_key] = p_res
             return p_res
 
+        # Step C: Interlock against unresolved prior attempts on this slot (fail-closed)
+        for prev_att in range(1, slot.attempt):
+            prev_key = (session.session_id, slot.slot_id, prev_att)
+            prev_res = self._execution_cache.get(prev_key)
+            if prev_res is not None and (
+                prev_res.engineering_status == SlotEngineeringStatus.PROVIDER_UNCERTAIN.value
+                or prev_res.error_code in ("PROVIDER_UNCERTAIN", "UNKNOWN", "PRIOR_ATTEMPT_UNRESOLVED")
+            ):
+                is_resolved = False
+                curr_st = "UNKNOWN"
+                # Strictly use actually saved handle, do not fabricate old handle identity
+                prev_handle = self._execution_handles.get(prev_key)
+                if prev_handle is not None:
+                    try:
+                        prev_prov_name = prev_res.provider or (
+                            prev_handle.route_ref.get("provider")
+                            if isinstance(prev_handle.route_ref, dict)
+                            else None
+                        )
+                        prev_prov = (
+                            self.provider_lookup(prev_prov_name)
+                            if prev_prov_name
+                            else None
+                        )
+                        if prev_prov is not None and hasattr(prev_prov, "status"):
+                            curr_st = prev_prov.status(prev_handle)
+                            if curr_st in ("CANCELLED", "FAILED", "TERMINATED", "REJECTED"):
+                                is_resolved = True
+                    except Exception as exc:  # noqa: BLE001
+                        curr_st = f"STATUS_LOOKUP_ERROR: {exc}"
+
+                if not is_resolved:
+                    u_res = SlotExecutionResult(
+                        session_id=session.session_id,
+                        slot_id=slot.slot_id,
+                        ordinal=slot.ordinal,
+                        attempt=slot.attempt,
+                        engineering_status=SlotEngineeringStatus.PROVIDER_UNCERTAIN.value,
+                        error_code="PRIOR_ATTEMPT_UNRESOLVED",
+                        error_message=(
+                            f"Prior attempt {prev_att} for slot '{slot.slot_id}' remains in unresolved "
+                            f"status '{curr_st}'; new attempt blocked"
+                        ),
+                        route_id=route.route_id,
+                        provider=route.provider,
+                        model=route.resolved_model,
+                        memory_view_id=session.memory_view_id,
+                        memory_view_content_hash=session.memory_view_content_hash,
+                        slot_content_hash=slot.slot_content_hash,
+                    )
+                    self._execution_cache[cache_key] = u_res
+                    return u_res
+                else:
+                    self._execution_cache[prev_key] = dataclasses.replace(
+                        prev_res,
+                        engineering_status=SlotEngineeringStatus.AGENT_EXECUTION_FAILED.value,
+                        error_code=f"CONFIRMED_{curr_st}",
+                        error_message=f"Prior attempt confirmed terminated with status '{curr_st}'",
+                    )
+                    if prev_handle is not None:
+                        self._execution_handles[prev_key] = dataclasses.replace(prev_handle, status=curr_st)
+
         # Step C: Submit task
         try:
             handle = provider.submit(
@@ -694,6 +948,7 @@ class DiscoveryBatchOrchestrator:
                 prep,
                 request_id=slot.request.request_id,
             )
+            self._execution_handles[cache_key] = handle
             if handle.task_ref.get("task_id") != slot.task.task_id:
                 raise ProviderError(
                     f"Execution handle task_id '{handle.task_ref.get('task_id')}' does not match '{slot.task.task_id}'",
@@ -781,13 +1036,24 @@ class DiscoveryBatchOrchestrator:
             self._execution_cache[cache_key] = acc_err
             return acc_err
         except Exception as exc:  # noqa: BLE001
+            is_unc = (
+                (isinstance(exc, ProviderError) and exc.code == ProviderErrorCode.EXECUTION_UNCERTAIN)
+                or getattr(exc, "code", None) == "EXECUTION_UNCERTAIN"
+                or "UNCERTAIN" in str(exc)
+            )
+            eng_status = (
+                SlotEngineeringStatus.PROVIDER_UNCERTAIN.value
+                if is_unc
+                else SlotEngineeringStatus.AGENT_EXECUTION_FAILED.value
+            )
+            err_code = "PROVIDER_UNCERTAIN" if is_unc else "RESULT_RETRIEVAL_FAILED"
             res_err = SlotExecutionResult(
                 session_id=session.session_id,
                 slot_id=slot.slot_id,
                 ordinal=slot.ordinal,
                 attempt=slot.attempt,
-                engineering_status=SlotEngineeringStatus.AGENT_EXECUTION_FAILED.value,
-                error_code="RESULT_RETRIEVAL_FAILED",
+                engineering_status=eng_status,
+                error_code=err_code,
                 error_message=f"Provider result retrieval crashed: {exc}",
                 route_id=route.route_id,
                 provider_job_ref=handle.provider_job_ref,
@@ -943,90 +1209,15 @@ class DiscoveryBatchOrchestrator:
             return adm_res
 
         # Step G: Deterministic Deduplication (Intra-batch & Historical Memory)
-        batch_exact = any(
-            c.scientific_identity_hash == candidate.scientific_identity_hash
-            or c.hypothesis.hypothesis_content_hash == candidate.hypothesis.hypothesis_content_hash
-            for c in prior_admitted
-        )
-        batch_related = any(
-            compute_structured_key(c.hypothesis.model_dump())
-            == compute_structured_key(candidate.hypothesis.model_dump())
-            for c in prior_admitted
-        )
-
-        hist_exact = False
-        hist_related = False
-        hist_refs: list[str] = []
-        is_internal_covered = False
-        dup_status_reason: str | None = None
-
-        if self.memory_store is not None:
-            # Trusted internal query path: batch orchestrator performs controlled lookup against memory_store
-            try:
-                exact_v, related_v = build_duplicate_lookup_views(
-                    candidate,
-                    memory_store=self.memory_store,
-                    authorized_scope=scope,
-                    project_binding=session.project_binding,
-                    current_time=created_at,
-                )
-                is_valid, val_reason = validate_duplicate_lookup_views(
-                    candidate, exact_v, related_v, session
-                )
-                if is_valid:
-                    candidate_with_hist = apply_duplicate_views(
-                        candidate, exact_view=exact_v, related_view=related_v
-                    )
-                    hist_exact = candidate_with_hist.duplicate_status == "EXACT_DUPLICATE"
-                    hist_related = candidate_with_hist.duplicate_status == "RELATED_HISTORY"
-                    hist_refs = list(candidate_with_hist.duplicate_refs)
-                    is_internal_covered = True
-                else:
-                    dup_status_reason = val_reason
-            except Exception as exc:  # noqa: BLE001
-                dup_status_reason = f"Internal memory store lookup failed: {exc}"
-        elif duplicate_view_lookup is not None:
-            # External callback path: external views cannot prove query targets for empty results; cannot prove novelty
-            try:
-                res = duplicate_view_lookup(candidate)
-                if isinstance(res, tuple) and len(res) >= 2:
-                    exact_v, related_v = res[0], res[1]
-                else:
-                    raise TypeError(f"duplicate_view_lookup returned invalid format: {type(res)}")
-
-                is_valid, val_reason = validate_duplicate_lookup_views(
-                    candidate, exact_v, related_v, session
-                )
-                if is_valid:
-                    candidate_with_hist = apply_duplicate_views(
-                        candidate, exact_view=exact_v, related_view=related_v
-                    )
-                    if candidate_with_hist.duplicate_status in ("EXACT_DUPLICATE", "RELATED_HISTORY"):
-                        hist_exact = candidate_with_hist.duplicate_status == "EXACT_DUPLICATE"
-                        hist_related = candidate_with_hist.duplicate_status == "RELATED_HISTORY"
-                        hist_refs = list(candidate_with_hist.duplicate_refs)
-                    else:
-                        dup_status_reason = "External duplicate lookup cannot prove novelty; internal memory store query required"
-                else:
-                    dup_status_reason = val_reason
-            except Exception as exc:  # noqa: BLE001
-                dup_status_reason = f"External duplicate lookup failed: {exc}"
-        else:
-            dup_status_reason = "No memory store or duplicate lookup configured"
-
-        if batch_exact or hist_exact:
-            dup_status = "EXACT_DUPLICATE"
-        elif batch_related or hist_related:
-            dup_status = "RELATED_HISTORY"
-        elif is_internal_covered:
-            dup_status = "NOVEL_WITHIN_VIEW"
-        else:
-            dup_status = "NOT_CHECKED"
-
-        admitted_candidate = dataclasses.replace(
-            candidate,
-            duplicate_status=dup_status,
-            duplicate_refs=tuple(sorted(set(hist_refs))),
+        dup_status, hist_refs, dup_status_reason, admitted_candidate = (
+            self._evaluate_duplicate_status(
+                candidate=candidate,
+                prior_admitted=prior_admitted,
+                session=session,
+                created_at=created_at,
+                scope=scope,
+                duplicate_view_lookup=duplicate_view_lookup,
+            )
         )
 
         slot_res = SlotExecutionResult(
@@ -1062,11 +1253,17 @@ class DiscoveryBatchOrchestrator:
         memory_view: ResearchMemoryView,
         *,
         usage_snapshots: Mapping[str, AgentUsageSnapshot] | None = None,
+        usage_snapshot_provider: (
+            Callable[[str], Mapping[str, AgentUsageSnapshot]]
+            | Callable[[], Mapping[str, AgentUsageSnapshot]]
+            | None
+        ) = None,
         duplicate_view_lookup: Callable[
             [AlphaGenerationCandidate], tuple[ResearchMemoryView, ResearchMemoryView]
         ]
         | None = None,
         created_at: str = CANONICAL_SESSION_TIMESTAMP,
+        clock: Callable[[], str] | str | None = None,
         stop_on_quota: bool = False,
     ) -> DiscoveryBatchResult:
         """Execute all planned slots within a DiscoverySession sequentially."""
@@ -1114,9 +1311,11 @@ class DiscoveryBatchOrchestrator:
                 slot=slot,
                 memory_view=memory_view,
                 usage_snapshots=usage_snapshots,
+                usage_snapshot_provider=usage_snapshot_provider,
                 prior_admitted=tuple(batch_admitted),
                 duplicate_view_lookup=duplicate_view_lookup,
                 created_at=created_at,
+                clock=clock,
             )
             slot_results.append(slot_res)
 
@@ -1212,6 +1411,14 @@ class DiscoveryBatchOrchestrator:
         )
 
 
+def _normalize_code_or_text(text: str) -> str:
+    """Normalize text or formula by stripping whitespace, trailing punctuation, and extra spaces."""
+    if not text:
+        return ""
+    t = text.strip().rstrip(".,;:!?")
+    return " ".join(t.split())
+
+
 @dataclass(frozen=True)
 class MemoryFeedbackAttributionRecord:
     """Traceable attribution for a Round 2 candidate citing Round 1 Research Memory."""
@@ -1223,8 +1430,23 @@ class MemoryFeedbackAttributionRecord:
     predecessor_hypothesis_id: str
     predecessor_failure_or_gap: str
     adaptation_description: str
-    is_conclusive: bool = True
+    is_conclusive: bool = False
     scientific_diffs: tuple[str, ...] = ()
+    field_diffs: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "adaptation_description": self.adaptation_description,
+            "candidate_id": self.candidate_id,
+            "cited_decision": self.cited_decision,
+            "cited_memory_entry_id": self.cited_memory_entry_id,
+            "field_diffs": list(self.field_diffs),
+            "is_conclusive": self.is_conclusive,
+            "predecessor_failure_or_gap": self.predecessor_failure_or_gap,
+            "predecessor_hypothesis_id": self.predecessor_hypothesis_id,
+            "scientific_diffs": list(self.scientific_diffs),
+            "signal_family": self.signal_family,
+        }
 
 
 @dataclass(frozen=True)
@@ -1255,9 +1477,16 @@ def execute_memory_feedback_loop(
     candidate_budget: int = 10,
     snapshot_path: Path | str,
     dataset_binding: dict[str, Any] | None = None,
+    usage_snapshots: Mapping[str, AgentUsageSnapshot] | None = None,
+    usage_snapshot_provider: (
+        Callable[[str], Mapping[str, AgentUsageSnapshot]]
+        | Callable[[], Mapping[str, AgentUsageSnapshot]]
+        | None
+    ) = None,
     generation_policy_version: str = DISCOVERY_POLICY_VERSION,
     created_at: str = CANONICAL_SESSION_TIMESTAMP,
     round_2_created_at: str = "2026-01-02T00:00:00.000000Z",
+    clock: Callable[[], str] | str | None = None,
 ) -> MemoryFeedbackLoopResult:
     """Execute complete Milestone C two-round memory feedback loop.
 
@@ -1286,7 +1515,10 @@ def execute_memory_feedback_loop(
     batch_res_1 = orchestrator.execute_session(
         session_1,
         initial_memory_view,
+        usage_snapshots=usage_snapshots,
+        usage_snapshot_provider=usage_snapshot_provider,
         created_at=created_at,
+        clock=clock,
     )
 
     # Integrate admitted candidates through existing AlphaDiscoveryEngine (Screening -> Critic -> Memory)
@@ -1352,7 +1584,10 @@ def execute_memory_feedback_loop(
     batch_res_2 = orchestrator.execute_session(
         session_2,
         memory_view_2,
+        usage_snapshots=usage_snapshots,
+        usage_snapshot_provider=usage_snapshot_provider,
         created_at=round_2_created_at,
+        clock=clock,
     )
 
     # Integrate Round 2 candidates
@@ -1416,36 +1651,58 @@ def execute_memory_feedback_loop(
             pre_rec = r1_match["record"]
             pre_hyp = r1_match["hypothesis"]
 
-            diffs: list[str] = []
+            field_diffs: list[str] = []
+            scientific_diffs: list[str] = []
+
+            # 1. Signal definition comparison (with normalization to strip trailing punctuation/whitespace)
             cand_sig = getattr(cand.hypothesis, "signal_definition", "")
             pre_sig = getattr(pre_hyp, "signal_definition", "")
+            norm_cand_sig = _normalize_code_or_text(cand_sig)
+            norm_pre_sig = _normalize_code_or_text(pre_sig)
             if cand_sig != pre_sig:
-                diffs.append(f"signal_definition updated: '{pre_sig}' -> '{cand_sig}'")
+                field_diffs.append(f"signal_definition text edit: '{pre_sig}' -> '{cand_sig}'")
+                if norm_cand_sig != norm_pre_sig:
+                    scientific_diffs.append(
+                        f"signal_definition modified: '{norm_pre_sig}' -> '{norm_cand_sig}'"
+                    )
 
+            # 2. Holding horizon comparison
             cand_hh = getattr(cand.hypothesis, "holding_horizon", "")
             pre_hh = getattr(pre_hyp, "holding_horizon", "")
             if cand_hh != pre_hh:
-                diffs.append(f"holding_horizon modified: {pre_hh} -> {cand_hh}")
+                field_diffs.append(f"holding_horizon modified: {pre_hh} -> {cand_hh}")
+                scientific_diffs.append(f"holding_horizon modified: {pre_hh} -> {cand_hh}")
 
+            # 3. Target comparison
             cand_target = getattr(cand.hypothesis, "target", "")
             pre_target = getattr(pre_hyp, "target", "")
             if cand_target != pre_target:
-                diffs.append(f"target modified: {pre_target} -> {cand_target}")
+                field_diffs.append(f"target modified: {pre_target} -> {cand_target}")
+                scientific_diffs.append(f"target modified: {pre_target} -> {cand_target}")
 
+            # 4. Source features comparison
             cand_features = set(getattr(cand.hypothesis, "source_features", ()) or ())
             pre_features = set(getattr(pre_hyp, "source_features", ()) or ())
             if cand_features != pre_features:
-                diffs.append(f"source_features modified: {sorted(pre_features)} -> {sorted(cand_features)}")
+                f_diff = f"source_features modified: {sorted(pre_features)} -> {sorted(cand_features)}"
+                field_diffs.append(f_diff)
+                scientific_diffs.append(f_diff)
 
+            # 5. Signal family comparison
             if cand.hypothesis.signal_family != pre_hyp.signal_family:
-                diffs.append(f"family shifted: {pre_hyp.signal_family} -> {cand.hypothesis.signal_family}")
+                fam_diff = f"family shifted: {pre_hyp.signal_family} -> {cand.hypothesis.signal_family}"
+                field_diffs.append(fam_diff)
+                scientific_diffs.append(fam_diff)
 
+            # 6. Parameters comparison
             cand_params = getattr(cand.hypothesis, "parameters", None) or {}
             pre_params = getattr(pre_hyp, "parameters", None) or {}
             if isinstance(cand_params, dict) and isinstance(pre_params, dict):
                 for pk in sorted(set(cand_params.keys()) | set(pre_params.keys())):
                     if cand_params.get(pk) != pre_params.get(pk):
-                        diffs.append(f"parameter '{pk}' modified: {pre_params.get(pk)} -> {cand_params.get(pk)}")
+                        p_diff = f"parameter '{pk}' modified: {pre_params.get(pk)} -> {cand_params.get(pk)}"
+                        field_diffs.append(p_diff)
+                        scientific_diffs.append(p_diff)
 
             fail_or_gap = (
                 "; ".join(pre_rec.reject_reasons)
@@ -1457,18 +1714,24 @@ def execute_memory_feedback_loop(
                 )
             )
 
-            if diffs:
+            # Record audit differences; all attributions without verifiable gap-to-evidence proof are fail-closed inconclusive
+            if not field_diffs:
                 desc = (
-                    f"Adapted hypothesis to address predecessor ({pre_hyp.hypothesis_id}) outcome [{pre_rec.decision}]: "
-                    f"gap='{fail_or_gap[:60]}', concrete diffs=[{'; '.join(diffs)}]"
+                    f"Inconclusive (no diffs): cited predecessor ({pre_hyp.hypothesis_id}) [{pre_rec.decision}] "
+                    "exhibits no field or parameter changes"
                 )
-                is_conclusive = True
+            elif not scientific_diffs:
+                desc = (
+                    f"Inconclusive (no scientific variance): cited predecessor ({pre_hyp.hypothesis_id}) [{pre_rec.decision}] "
+                    f"exhibits only text/formatting changes [{'; '.join(field_diffs)}]; no concrete scientific parameter/horizon/formula changes"
+                )
             else:
                 desc = (
-                    f"Inconclusive: cited predecessor ({pre_hyp.hypothesis_id}) [{pre_rec.decision}] "
-                    "but exhibits no concrete scientific parameter/formula variance"
+                    f"Inconclusive (unverified gap evidence): cited predecessor ({pre_hyp.hypothesis_id}) [{pre_rec.decision}], "
+                    f"gap='{fail_or_gap[:60]}', recorded diffs=[{'; '.join(scientific_diffs)}]; "
+                    "automated attribution cannot formally verify causal gap-to-evidence resolution without external evidence validator"
                 )
-                is_conclusive = False
+            is_conclusive = False
 
             attribution_records.append(
                 MemoryFeedbackAttributionRecord(
@@ -1480,7 +1743,8 @@ def execute_memory_feedback_loop(
                     predecessor_failure_or_gap=fail_or_gap,
                     adaptation_description=desc,
                     is_conclusive=is_conclusive,
-                    scientific_diffs=tuple(diffs),
+                    scientific_diffs=tuple(scientific_diffs),
+                    field_diffs=tuple(field_diffs),
                 )
             )
 
