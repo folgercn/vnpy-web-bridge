@@ -1353,7 +1353,7 @@ def test_empty_duplicate_views_for_other_candidate_rejected_fail_closed(
     routing_policy: RoutingPolicy,
     discovery_context: dict[str, Any],
 ) -> None:
-    """Milestone B: Valid empty views queried for OTHER candidates lack receipt; must be NOT_CHECKED."""
+    """Milestone B: External duplicate callback (even with attempted fake receipt) cannot prove novelty; must be NOT_CHECKED."""
     memory: ResearchMemory = discovery_context["memory"]
     context_view = _build_test_memory_view(memory, authorized_scope)
     session = DiscoverySession.create(
@@ -1401,19 +1401,36 @@ def test_empty_duplicate_views_for_other_candidate_rejected_fail_closed(
         registry=provider_registry,
         routing_policy=routing_policy,
     )
+
+    # 1. External callback returning empty views without receipt
     batch_result = orchestrator.execute_session(
         session=session,
         memory_view=context_view,
         duplicate_view_lookup=lambda c: (exact_other, related_other),
     )
-
     assert batch_result.funnel.requested == 1
     assert batch_result.funnel.admitted == 1
     assert batch_result.funnel.novel_count == 0
     assert batch_result.funnel.unverified_count == 1
     assert batch_result.slots[0].duplicate_status == "NOT_CHECKED"
     assert batch_result.slots[0].duplicate_status_reason is not None
-    assert "receipt" in batch_result.slots[0].duplicate_status_reason.lower()
+    assert "external duplicate lookup cannot prove novelty" in batch_result.slots[0].duplicate_status_reason.lower()
+
+    # 2. External callback returning empty views with attempted caller fake receipt
+    fake_receipt = {
+        "hypothesis_content_hash": "dummy_content_hash",
+        "scientific_identity_hash": "dummy_sci_hash",
+    }
+    batch_result2 = orchestrator.execute_session(
+        session=session,
+        memory_view=context_view,
+        duplicate_view_lookup=lambda c: (exact_other, related_other, fake_receipt),
+    )
+    assert batch_result2.funnel.novel_count == 0
+    assert batch_result2.funnel.unverified_count == 1
+    assert batch_result2.slots[0].duplicate_status == "NOT_CHECKED"
+    assert batch_result2.slots[0].duplicate_status_reason is not None
+    assert "external duplicate lookup cannot prove novelty" in batch_result2.slots[0].duplicate_status_reason.lower()
 
 
 def test_trusted_internal_memory_store_lookup_yields_novel(
@@ -1512,3 +1529,95 @@ def test_truncated_duplicate_views_cannot_prove_novelty(
     assert batch_result.slots[0].duplicate_status == "NOT_CHECKED"
     assert batch_result.slots[0].duplicate_status_reason is not None
     assert "truncated" in batch_result.slots[0].duplicate_status_reason.lower()
+
+
+def test_two_rounds_engine_memory_internal_deduplication(
+    test_provider: ContractTestProvider,
+    provider_registry: ProviderRegistry,
+    authorized_scope: AgentPermissionScope,
+    routing_policy: RoutingPolicy,
+    discovery_context: dict[str, Any],
+) -> None:
+    """Milestone C: Two rounds with internal engine.memory correctly identify duplicates in Round 2."""
+    memory: ResearchMemory = discovery_context["memory"]
+    engine: AlphaDiscoveryEngine = discovery_context["engine"]
+    clean_csv: Path = discovery_context["clean_csv"]
+    clean_binding: dict[str, Any] = discovery_context["clean_binding"]
+
+    call_state = {"count": 0}
+
+    def _loop_provider(payload: dict[str, Any]) -> str:
+        call_state["count"] += 1
+        c = call_state["count"]
+        # Round 1 (slots 1,2): Momentum baselines
+        # Round 2 (slots 3,4): slot 3 repeats slot 1 (exact duplicate), slot 4 is new
+        raw_payload = json.dumps(payload)
+        m = re.findall(r"rmentry-[a-f0-9]+", raw_payload)
+        cited_id = m[0] if m else "rmentry-none"
+        if c == 3:
+            return json.dumps(
+                _build_candidate_envelope(
+                    title="Round 1 Momentum Baseline #1",
+                    signal_family="momentum",
+                    universe="RB2405",
+                    frequency="1d",
+                    holding_horizon="3d",
+                    source_context_refs=[cited_id] if m else [],
+                )
+            )
+        return json.dumps(
+            _build_candidate_envelope(
+                title=f"Candidate #{c}",
+                signal_family="momentum",
+                universe="RB2405",
+                frequency="1d",
+                holding_horizon=f"{c+2}d",
+                source_context_refs=[cited_id] if m else [],
+            )
+        )
+
+    configure_provider_output(test_provider, _loop_provider)
+
+    initial_view = build_research_memory_view(
+        query=ResearchMemoryQuery(
+            role="alpha_generator",
+            project_binding=STANDARD_PROJECT_BINDING,
+            categories=(ResearchMemoryCategory.DUPLICATE_IDENTITIES.value,),
+            limit_per_category=10,
+        ),
+        authorized_scope=authorized_scope,
+        project_binding=STANDARD_PROJECT_BINDING,
+        memory_store=memory,
+    )
+
+    orchestrator = DiscoveryBatchOrchestrator(
+        registry=provider_registry,
+        routing_policy=routing_policy,
+        memory_store=memory,
+    )
+
+    loop_res = execute_memory_feedback_loop(
+        engine=engine,
+        orchestrator=orchestrator,
+        initial_memory_view=initial_view,
+        authorized_scope=authorized_scope,
+        project_binding=STANDARD_PROJECT_BINDING,
+        objective="Two round deduplication test",
+        allowed_universe=("RB",),
+        allowed_frequency="1d",
+        allowed_signal_families=("momentum",),
+        candidate_budget=2,
+        snapshot_path=clean_csv,
+        dataset_binding=clean_binding,
+        created_at="2026-01-01T00:00:00.000000Z",
+        round_2_created_at="2026-01-02T00:00:00.000000Z",
+    )
+
+    # In Round 1, on clean memory, internal lookup confirms NOVEL_WITHIN_VIEW
+    assert loop_res.round_1_batch.funnel.admitted == 2
+    assert loop_res.round_1_batch.funnel.novel_count == 2
+    assert loop_res.round_1_batch.funnel.unverified_count == 0
+
+    # In Round 2, memory_store contains Round 1 entries; candidates are evaluated through internal path
+    assert loop_res.round_2_batch.funnel.admitted == 2
+    assert loop_res.round_2_batch.funnel.unverified_count == 0

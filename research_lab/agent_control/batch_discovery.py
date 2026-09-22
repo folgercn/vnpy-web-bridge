@@ -399,55 +399,13 @@ def _extract_raw_output_safe(result: AgentResult) -> str:
     raise ResultAcceptanceError("Accepted provider result has no extractable model output text")
 
 
-@dataclass(frozen=True)
-class DuplicateLookupReceipt:
-    """Verifiable query receipt binding duplicate lookup views to candidate identities."""
-
-    hypothesis_content_hash: str
-    scientific_identity_hash: str
-    exact_view_id: str
-    related_view_id: str
-    is_truncated: bool = False
-    queried_source: str = "controlled_memory_store"
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "exact_view_id": self.exact_view_id,
-            "hypothesis_content_hash": self.hypothesis_content_hash,
-            "is_truncated": self.is_truncated,
-            "queried_source": self.queried_source,
-            "related_view_id": self.related_view_id,
-            "scientific_identity_hash": self.scientific_identity_hash,
-        }
-
-
-def create_duplicate_lookup_receipt(
-    candidate: AlphaGenerationCandidate,
-    exact_view: ResearchMemoryView,
-    related_view: ResearchMemoryView,
-    queried_source: str = "controlled_memory_store",
-) -> DuplicateLookupReceipt:
-    """Create an authentic query receipt binding exact and related lookup views to candidate."""
-    return DuplicateLookupReceipt(
-        hypothesis_content_hash=candidate.hypothesis.hypothesis_content_hash,
-        scientific_identity_hash=candidate.scientific_identity_hash,
-        exact_view_id=exact_view.view_id,
-        related_view_id=related_view.view_id,
-        is_truncated=(bool(exact_view.is_truncated) or bool(related_view.is_truncated)),
-        queried_source=queried_source,
-    )
-
-
 def validate_duplicate_lookup_views(
     candidate: AlphaGenerationCandidate,
     exact_view: Any,
     related_view: Any,
     session: DiscoverySession,
-    *,
-    receipt: DuplicateLookupReceipt | Mapping[str, Any] | None = None,
-    is_internal_lookup: bool = False,
 ) -> tuple[bool, str | None]:
-    """Validate that exact and related views are genuine, untruncated duplicate lookup views for the candidate."""
+    """Validate that exact and related views satisfy role, project binding, and category integrity."""
     if not isinstance(exact_view, ResearchMemoryView) or not isinstance(related_view, ResearchMemoryView):
         return False, "Duplicate lookup views must be ResearchMemoryView instances"
 
@@ -495,28 +453,6 @@ def validate_duplicate_lookup_views(
             return False, f"related_view contains unexpected category entry '{entry.category}'"
         if entry.duplicate_state in ("exact", "related") and entry.scientific_identity_hash != candidate.scientific_identity_hash:
             return False, "related_view contains related duplicate entry with mismatching scientific_identity_hash"
-
-    # Verifiable query binding:
-    # ResearchMemoryView does not directly expose its query object.
-    # Empty views or unverified external callbacks cannot prove they were queried for the current candidate.
-    # If not an internal controlled query from orchestrator memory_store, a valid receipt is strictly required.
-    if not is_internal_lookup:
-        if receipt is None:
-            return False, "External lookup views lack verifiable query receipt for current candidate (unverified query targets cannot prove novelty)"
-
-        r_content_hash = receipt.get("hypothesis_content_hash") if isinstance(receipt, dict) else getattr(receipt, "hypothesis_content_hash", None)
-        r_sci_hash = receipt.get("scientific_identity_hash") if isinstance(receipt, dict) else getattr(receipt, "scientific_identity_hash", None)
-        r_exact_id = receipt.get("exact_view_id") if isinstance(receipt, dict) else getattr(receipt, "exact_view_id", None)
-        r_related_id = receipt.get("related_view_id") if isinstance(receipt, dict) else getattr(receipt, "related_view_id", None)
-
-        if r_content_hash != candidate.hypothesis.hypothesis_content_hash:
-            return False, f"Duplicate receipt hypothesis_content_hash mismatch: '{r_content_hash}' != '{candidate.hypothesis.hypothesis_content_hash}'"
-        if r_sci_hash != candidate.scientific_identity_hash:
-            return False, f"Duplicate receipt scientific_identity_hash mismatch: '{r_sci_hash}' != '{candidate.scientific_identity_hash}'"
-        if r_exact_id != exact_view.view_id:
-            return False, f"Duplicate receipt exact_view_id mismatch: '{r_exact_id}' != '{exact_view.view_id}'"
-        if r_related_id != related_view.view_id:
-            return False, f"Duplicate receipt related_view_id mismatch: '{r_related_id}' != '{related_view.view_id}'"
 
     return True, None
 
@@ -1021,48 +957,21 @@ class DiscoveryBatchOrchestrator:
         hist_exact = False
         hist_related = False
         hist_refs: list[str] = []
-        hist_queried = False
+        is_internal_covered = False
         dup_status_reason: str | None = None
 
-        lookup_fn = duplicate_view_lookup
-        is_internal_lookup = False
-        if lookup_fn is None and self.memory_store is not None:
-            def _mem_lookup(
-                cand: AlphaGenerationCandidate,
-            ) -> tuple[ResearchMemoryView, ResearchMemoryView, DuplicateLookupReceipt]:
+        if self.memory_store is not None:
+            # Trusted internal query path: batch orchestrator performs controlled lookup against memory_store
+            try:
                 exact_v, related_v = build_duplicate_lookup_views(
-                    cand,
+                    candidate,
                     memory_store=self.memory_store,
                     authorized_scope=scope,
                     project_binding=session.project_binding,
                     current_time=created_at,
                 )
-                rcpt = create_duplicate_lookup_receipt(
-                    cand, exact_v, related_v, queried_source="orchestrator_memory_store"
-                )
-                return exact_v, related_v, rcpt
-
-            lookup_fn = _mem_lookup
-            is_internal_lookup = True
-
-        if lookup_fn is not None:
-            try:
-                res = lookup_fn(candidate)
-                receipt = None
-                if isinstance(res, tuple) and len(res) == 3:
-                    exact_v, related_v, receipt = res
-                elif isinstance(res, tuple) and len(res) == 2:
-                    exact_v, related_v = res
-                else:
-                    raise TypeError(f"duplicate_view_lookup returned invalid format: {type(res)}")
-
                 is_valid, val_reason = validate_duplicate_lookup_views(
-                    candidate,
-                    exact_v,
-                    related_v,
-                    session,
-                    receipt=receipt,
-                    is_internal_lookup=is_internal_lookup,
+                    candidate, exact_v, related_v, session
                 )
                 if is_valid:
                     candidate_with_hist = apply_duplicate_views(
@@ -1071,13 +980,37 @@ class DiscoveryBatchOrchestrator:
                     hist_exact = candidate_with_hist.duplicate_status == "EXACT_DUPLICATE"
                     hist_related = candidate_with_hist.duplicate_status == "RELATED_HISTORY"
                     hist_refs = list(candidate_with_hist.duplicate_refs)
-                    hist_queried = True
+                    is_internal_covered = True
                 else:
-                    hist_queried = False
                     dup_status_reason = val_reason
             except Exception as exc:  # noqa: BLE001
-                hist_queried = False
-                dup_status_reason = f"Duplicate lookup failed: {exc}"
+                dup_status_reason = f"Internal memory store lookup failed: {exc}"
+        elif duplicate_view_lookup is not None:
+            # External callback path: external views cannot prove query targets for empty results; cannot prove novelty
+            try:
+                res = duplicate_view_lookup(candidate)
+                if isinstance(res, tuple) and len(res) >= 2:
+                    exact_v, related_v = res[0], res[1]
+                else:
+                    raise TypeError(f"duplicate_view_lookup returned invalid format: {type(res)}")
+
+                is_valid, val_reason = validate_duplicate_lookup_views(
+                    candidate, exact_v, related_v, session
+                )
+                if is_valid:
+                    candidate_with_hist = apply_duplicate_views(
+                        candidate, exact_view=exact_v, related_view=related_v
+                    )
+                    if candidate_with_hist.duplicate_status in ("EXACT_DUPLICATE", "RELATED_HISTORY"):
+                        hist_exact = candidate_with_hist.duplicate_status == "EXACT_DUPLICATE"
+                        hist_related = candidate_with_hist.duplicate_status == "RELATED_HISTORY"
+                        hist_refs = list(candidate_with_hist.duplicate_refs)
+                    else:
+                        dup_status_reason = "External duplicate lookup cannot prove novelty; internal memory store query required"
+                else:
+                    dup_status_reason = val_reason
+            except Exception as exc:  # noqa: BLE001
+                dup_status_reason = f"External duplicate lookup failed: {exc}"
         else:
             dup_status_reason = "No memory store or duplicate lookup configured"
 
@@ -1085,7 +1018,7 @@ class DiscoveryBatchOrchestrator:
             dup_status = "EXACT_DUPLICATE"
         elif batch_related or hist_related:
             dup_status = "RELATED_HISTORY"
-        elif hist_queried:
+        elif is_internal_covered:
             dup_status = "NOVEL_WITHIN_VIEW"
         else:
             dup_status = "NOT_CHECKED"
@@ -1350,26 +1283,9 @@ def execute_memory_feedback_loop(
         created_at=created_at,
     )
 
-    def _r1_dup_lookup(
-        cand: AlphaGenerationCandidate,
-    ) -> tuple[ResearchMemoryView, ResearchMemoryView, DuplicateLookupReceipt]:
-        exact_v, related_v = build_duplicate_lookup_views(
-            cand,
-            memory_store=engine.memory,
-            authorized_scope=authorized_scope,
-            project_binding=pb,
-            current_time=created_at,
-        )
-        return (
-            exact_v,
-            related_v,
-            create_duplicate_lookup_receipt(cand, exact_v, related_v, queried_source="engine_memory"),
-        )
-
     batch_res_1 = orchestrator.execute_session(
         session_1,
         initial_memory_view,
-        duplicate_view_lookup=_r1_dup_lookup,
         created_at=created_at,
     )
 
@@ -1433,26 +1349,9 @@ def execute_memory_feedback_loop(
     if session_2.session_id == session_1.session_id:
         raise DiscoverySessionError("Session 2 unexpectedly has identical ID to Session 1 despite updated memory")
 
-    def _r2_dup_lookup(
-        cand: AlphaGenerationCandidate,
-    ) -> tuple[ResearchMemoryView, ResearchMemoryView, DuplicateLookupReceipt]:
-        exact_v, related_v = build_duplicate_lookup_views(
-            cand,
-            memory_store=engine.memory,
-            authorized_scope=authorized_scope,
-            project_binding=pb,
-            current_time=round_2_created_at,
-        )
-        return (
-            exact_v,
-            related_v,
-            create_duplicate_lookup_receipt(cand, exact_v, related_v, queried_source="engine_memory"),
-        )
-
     batch_res_2 = orchestrator.execute_session(
         session_2,
         memory_view_2,
-        duplicate_view_lookup=_r2_dup_lookup,
         created_at=round_2_created_at,
     )
 

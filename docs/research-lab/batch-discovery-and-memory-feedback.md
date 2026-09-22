@@ -119,18 +119,6 @@ class SlotExecutionResult:
         return {"error_code": self.error_code, "error_message": self.error_message}
 ```
 
-### 3.3 可验证查重凭据（DuplicateLookupReceipt）契约
-```python
-@dataclass(frozen=True)
-class DuplicateLookupReceipt:
-    hypothesis_content_hash: str              # 严格绑定的候选内容哈希
-    scientific_identity_hash: str             # 严格绑定的科学身份哈希
-    exact_view_id: str                        # 针对 content_hash 查询生成的 exact_view_id
-    related_view_id: str                      # 针对 scientific_hash 查询生成的 related_view_id
-    is_truncated: bool = False                # 视图是否截断
-    queried_source: str = "controlled_memory_store"
-```
-
 ---
 
 ## 4. 真实漏斗分区契约（Funnel Partition Invariants）
@@ -154,7 +142,7 @@ class DiscoveryBatchFunnel:
     not_attempted: int = 0                     # 未发起的槽位数（如熔断）
 ```
 
-### 4.1 分区恒等式与查询覆盖原则
+### 4.1 分区恒等式与受控历史覆盖原则
 1. **槽位终态闭包恒等式**：
    $$\text{requested} = \text{admitted} + \text{invalid} + \text{provider\_failed} + \text{not\_attempted}$$
 2. **准入分类完整性恒等式**：
@@ -162,9 +150,9 @@ class DiscoveryBatchFunnel:
 3. **分母定义与未查询隔离规则**：
    - `admitted_rate` 分母为 $\text{requested}$。
    - `exact_duplicate_rate`, `related_rate`, `novel_rate`, `unverified_rate` 分母严格为 $\text{admitted}$（仅对已准入候选评估新颖性）。
-   - **历史未查询与空查询严禁冒充全新**：
-     - `ResearchMemoryView` 虽间接哈希 Query 但不直接暴露 Query 对象；外部回调裸 views 无法证明空查询对象为当前候选时，必须 fail-closed 标记为 `NOT_CHECKED`，记录 `duplicate_status_reason`，并计入 `unverified_count`（`novel_count = 0`）。
-     - 批次从自有 `memory_store` 经 `build_duplicate_lookup_views` 执行内部受控查询，或携带完整匹配的 `DuplicateLookupReceipt` 时，方可确认为真实历史覆盖。
+   - **历史覆盖与新颖性判定的唯一可信路径**：
+     - 能认定历史查询已完整覆盖且具备判定 `NOVEL_WITHIN_VIEW` 能力的**唯一路径**，是本批次编排器自身持有 `memory_store`（例如显式绑定 `engine.memory`），通过既有 M4 `build_duplicate_lookup_views` 针对当前 candidate 真实发起的内部受控 exact/related 查询。
+     - 外部回调 `duplicate_view_lookup` 不具有证明学术新颖性的能力；因 `ResearchMemoryView` 虽间接哈希 Query 但不直接暴露 Query 对象，外部传入的任何视图均无法证明空查询对象为当前候选。若外部视图未命中确凿重复条目，必须严格 fail-closed 标记为 `NOT_CHECKED`，记录 `duplicate_status_reason = "External duplicate lookup cannot prove novelty; internal memory store query required"`，计入 `unverified_count`（`novel_count = 0`）。
      - **截断视图（`is_truncated=True`）严禁标为全新**：因部分历史条目被截断导致覆盖不全，不能证明候选无历史重复，必须标记为 `NOT_CHECKED` 并记录原因。
    - 禁止将重试次数、尝试计数与最终槽位数混淆。
 
