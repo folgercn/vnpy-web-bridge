@@ -2640,3 +2640,73 @@ def test_pr589_p2_cache_replay_dynamic_duplicate_reevaluation(
     assert batch_res.funnel.exact_duplicate_count == 1
     assert batch_res.funnel.related_count == 0
     assert batch_res.funnel.unverified_count == 0
+
+
+def test_execute_memory_feedback_loop_round_2_callable_clock(
+    test_provider: ContractTestProvider,
+    provider_registry: ProviderRegistry,
+    authorized_scope: AgentPermissionScope,
+    routing_policy: RoutingPolicy,
+    discovery_context: dict[str, Any],
+) -> None:
+    """Verify round_2_created_at callable is evaluated once as a valid string across Memory B, Session, and Batch."""
+    engine: AlphaDiscoveryEngine = discovery_context["engine"]
+    memory: ResearchMemory = discovery_context["memory"]
+    clean_csv: Path = discovery_context["clean_csv"]
+    clean_binding: dict[str, Any] = discovery_context["clean_binding"]
+
+    call_state = {"clock_calls": 0, "provider_calls": 0}
+
+    def _loop_provider(payload: dict[str, Any]) -> str:
+        call_state["provider_calls"] += 1
+        c = call_state["provider_calls"]
+        return json.dumps(
+            _build_candidate_envelope(
+                title=f"Candidate #{c}",
+                signal_family="momentum",
+                universe="RB2405",
+                frequency="1d",
+            )
+        )
+
+    configure_provider_output(test_provider, _loop_provider)
+
+    initial_view = _build_test_memory_view(memory, authorized_scope)
+    orchestrator = DiscoveryBatchOrchestrator(
+        registry=provider_registry,
+        routing_policy=routing_policy,
+        memory_store=memory,
+    )
+
+    expected_r2_ts = "2026-09-29T12:30:45.123456Z"
+
+    def dynamic_r2_clock() -> str:
+        call_state["clock_calls"] += 1
+        return expected_r2_ts
+
+    loop_result = execute_memory_feedback_loop(
+        engine=engine,
+        orchestrator=orchestrator,
+        initial_memory_view=initial_view,
+        authorized_scope=authorized_scope,
+        project_binding=STANDARD_PROJECT_BINDING,
+        objective="Verify round_2_created_at callable evaluation",
+        allowed_universe=("RB",),
+        allowed_frequency="1d",
+        allowed_signal_families=("momentum",),
+        candidate_budget=1,
+        snapshot_path=clean_csv,
+        dataset_binding=clean_binding,
+        created_at="2026-09-29T12:00:00.000000Z",
+        round_2_created_at=dynamic_r2_clock,
+    )
+
+    # 1. Callable was evaluated once
+    assert call_state["clock_calls"] == 1
+    # 2. Round 2 session and batch reflect the evaluated string (not a function object)
+    assert loop_result.round_2_batch.created_at == expected_r2_ts
+    assert isinstance(loop_result.round_2_batch.created_at, str)
+    assert (
+        loop_result.round_2_batch.admitted_candidates[0].hypothesis.provenance.created_at
+        == expected_r2_ts
+    )

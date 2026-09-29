@@ -1541,7 +1541,7 @@ def execute_memory_feedback_loop(
     ) = None,
     generation_policy_version: str = DISCOVERY_POLICY_VERSION,
     created_at: str = CANONICAL_SESSION_TIMESTAMP,
-    round_2_created_at: str = "2026-01-02T00:00:00.000000Z",
+    round_2_created_at: str | Callable[[], str] = "2026-01-02T00:00:00.000000Z",
     clock: Callable[[], str] | str | None = None,
 ) -> MemoryFeedbackLoopResult:
     """Execute complete Milestone C two-round memory feedback loop.
@@ -1594,6 +1594,8 @@ def execute_memory_feedback_loop(
     # ==========================
     # RECONSTRUCT MEMORY B
     # ==========================
+    r2_created_at = round_2_created_at() if callable(round_2_created_at) else round_2_created_at
+
     # Build updated memory view reflecting Round 1 accumulation
     query_2 = ResearchMemoryQuery(
         role="alpha_generator",
@@ -1614,7 +1616,7 @@ def execute_memory_feedback_loop(
         authorized_scope=authorized_scope,
         project_binding=pb,
         memory_store=engine.memory,
-        current_time=round_2_created_at,
+        current_time=r2_created_at,
     )
 
     # ==========================
@@ -1630,7 +1632,7 @@ def execute_memory_feedback_loop(
         allowed_signal_families=allowed_signal_families,
         project_binding=pb,
         generation_policy_version=generation_policy_version,
-        created_at=round_2_created_at,
+        created_at=r2_created_at,
     )
 
     # Verify session 2 has distinct identity and correctly binds memory view 2
@@ -1642,7 +1644,7 @@ def execute_memory_feedback_loop(
         memory_view_2,
         usage_snapshots=usage_snapshots,
         usage_snapshot_provider=usage_snapshot_provider,
-        created_at=round_2_created_at,
+        created_at=r2_created_at,
         clock=clock,
     )
 
