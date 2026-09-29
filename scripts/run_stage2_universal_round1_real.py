@@ -962,34 +962,49 @@ def main() -> None:
 
     if args.resume:
         orig_executed_at = None
+        orig_executed_at_source = None
         if (r1_dir / "session_round_1.json").exists():
             try:
                 s1_data = json.loads((r1_dir / "session_round_1.json").read_text(encoding="utf-8"))
-                orig_executed_at = s1_data.get("created_at")
+                orig_executed_at = s1_data.get("created_at") or (
+                    s1_data.get("session", {}).get("created_at") if isinstance(s1_data.get("session"), dict) else None
+                )
+                if orig_executed_at:
+                    orig_executed_at_source = (
+                        "session_round_1.json:created_at"
+                        if s1_data.get("created_at")
+                        else "session_round_1.json:session.created_at"
+                    )
             except Exception:
                 pass
         if not orig_executed_at and (r1_dir / "batch_result_round_1.json").exists():
             try:
                 b1_data = json.loads((r1_dir / "batch_result_round_1.json").read_text(encoding="utf-8"))
                 orig_executed_at = b1_data.get("created_at")
+                if orig_executed_at:
+                    orig_executed_at_source = "batch_result_round_1.json:created_at"
             except Exception:
                 pass
         if not orig_executed_at and (r1_dir / "ROUND1_FULL_EVIDENCE.json").exists():
             try:
                 e1_data = json.loads((r1_dir / "ROUND1_FULL_EVIDENCE.json").read_text(encoding="utf-8"))
                 orig_executed_at = e1_data.get("executed_at")
+                if orig_executed_at:
+                    orig_executed_at_source = "ROUND1_FULL_EVIDENCE.json:executed_at"
             except Exception:
                 pass
         executed_at_val = orig_executed_at or "unknown"
         resumed_at_val = t_round1
     else:
         executed_at_val = t_round1
+        orig_executed_at_source = "realtime_run_start"
         resumed_at_val = None
 
     full_evidence = {
         "run_id": run_id,
         "round": 1,
         "executed_at": executed_at_val,
+        "executed_at_source": orig_executed_at_source,
         "resumed_at": resumed_at_val,
         "completed_at": t_after_r1,
         "objective": objective,

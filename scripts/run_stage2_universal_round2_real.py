@@ -1061,28 +1061,42 @@ def main() -> None:
 
     if args.resume:
         orig_executed_at = None
+        orig_executed_at_source = None
         if (r2_dir / "session_round_2.json").exists():
             try:
                 s2_data = json.loads((r2_dir / "session_round_2.json").read_text(encoding="utf-8"))
-                orig_executed_at = s2_data.get("created_at")
+                orig_executed_at = s2_data.get("created_at") or (
+                    s2_data.get("session", {}).get("created_at") if isinstance(s2_data.get("session"), dict) else None
+                )
+                if orig_executed_at:
+                    orig_executed_at_source = (
+                        "session_round_2.json:created_at"
+                        if s2_data.get("created_at")
+                        else "session_round_2.json:session.created_at"
+                    )
             except Exception:
                 pass
         if not orig_executed_at and (r2_dir / "batch_result_round_2.json").exists():
             try:
                 b2_data = json.loads((r2_dir / "batch_result_round_2.json").read_text(encoding="utf-8"))
                 orig_executed_at = b2_data.get("created_at")
+                if orig_executed_at:
+                    orig_executed_at_source = "batch_result_round_2.json:created_at"
             except Exception:
                 pass
         if not orig_executed_at and (r2_dir / "ROUND2_FULL_EVIDENCE.json").exists():
             try:
                 e2_data = json.loads((r2_dir / "ROUND2_FULL_EVIDENCE.json").read_text(encoding="utf-8"))
                 orig_executed_at = e2_data.get("executed_at")
+                if orig_executed_at:
+                    orig_executed_at_source = "ROUND2_FULL_EVIDENCE.json:executed_at"
             except Exception:
                 pass
         executed_at_val = orig_executed_at or "unknown"
         resumed_at_val = t_round2
     else:
         executed_at_val = t_round2
+        orig_executed_at_source = "realtime_run_start"
         resumed_at_val = None
 
     # Assemble Full Evidence
@@ -1090,6 +1104,7 @@ def main() -> None:
         "run_id": run_id,
         "round": 2,
         "executed_at": executed_at_val,
+        "executed_at_source": orig_executed_at_source,
         "resumed_at": resumed_at_val,
         "completed_at": t_after_r2,
         "objective": objective,

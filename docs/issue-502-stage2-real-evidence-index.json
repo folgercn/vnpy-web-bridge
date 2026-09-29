@@ -21,7 +21,9 @@
   "objective_identical": true,
   "round_1": {
     "executed_at": "2026-09-29T10:23:57.915302Z",
+    "executed_at_source": "recovered from batch_result_round_1.json:created_at (also matches nested session_round_1.json:session.created_at)",
     "resumed_at": "2026-09-29T10:37:35.869737Z",
+    "resumed_at_source": "ROUND1_FULL_EVIDENCE.json:executed_at (resume report time)",
     "completed_at": "2026-09-29T10:37:35.894964Z",
     "funnel": {
       "admitted": 10,
@@ -67,6 +69,7 @@
   },
   "round_2": {
     "executed_at": "2026-09-29T10:47:06.013681Z",
+    "executed_at_source": "session_round_2.json:session.created_at, batch_result_round_2.json:created_at, ROUND2_FULL_EVIDENCE.json:executed_at (consistent)",
     "completed_at": "2026-09-29T10:53:28.643729Z",
     "funnel": {
       "admitted": 10,
@@ -106,17 +109,22 @@
     "r1_sqlite_unchanged": true
   },
   "memory_effect": {
-    "valid_gap_entry_count": 17,
-    "r2_slots_with_valid_gap_ref": 10,
-    "new_methods_in_each_r2_slot": [
-      "stability_split",
-      "outlier_sensitivity"
-    ],
-    "decision_changed_slots": [
-      4,
-      9
-    ],
-    "attribution_limit": "Same objective conditionally requests two extra methods only when valid Memory B gaps exist; this demonstrates changed evidence demand and executed screening, not autonomous profitability or causality independent of the objective rule."
+    "causal_validity_status": "BLOCKED",
+    "causal_validity_reason": "Because Round 1 target settlement effective times lacked verifiable exchange timestamps (PIT status BLOCKED), Round 1 scientific decisions cannot be verified as scientifically valid ground truth; therefore the historical memory references from R2 to R1 demonstrate structural schema adherence and reference linking in execution facts, but CANNOT prove scientifically valid causal memory feedback effect.",
+    "raw_execution_facts": {
+      "raw_gap_entry_count": 17,
+      "raw_r2_slots_referencing_r1_entries": 10,
+      "new_methods_in_each_r2_slot": [
+        "stability_split",
+        "outlier_sensitivity"
+      ],
+      "decision_changed_slots": [
+        4,
+        9
+      ]
+    },
+    "verified_causal_effect": "BLOCKED",
+    "attribution_limit": "Raw 2x10 execution facts show that Round 2 slots structurally referenced Round 1 gap entries under the conditional objective rule; however, because Round 1 pricing lacked verifiable exchange release time (PIT status BLOCKED), Round 1 scientific records cannot be certified as valid ground truth. Consequently, the historical 2x10 runs cannot prove that scientifically valid Round 1 results causally influenced Round 2."
   },
   "slots": [
     {

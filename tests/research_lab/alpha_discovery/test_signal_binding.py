@@ -83,6 +83,7 @@ def _build_synthetic_source_days() -> list[dict[str, Any]]:
                 "first_seen_at": f"{d}T10:30:00.000000Z",
                 "committed_at": f"{d}T10:40:00.000000Z",
                 "market_effective_time": f"{d}T15:00:00.000000Z",
+                "market_time_authority": "SYNTHETIC_TEST_FIXTURE",
                 "raw_sha256": hashlib.sha256(raw_b).hexdigest(),
                 "raw_bytes": len(raw_b),
                 "raw_relative_path": f"raw/shfe/{d}/data.raw",
@@ -1158,44 +1159,93 @@ def test_backfill_counterexample_and_unverifiable_market_time(tmp_path: Path) ->
     assert not list(out_dir.glob("*.binding.json")), "Must not write metadata when target market time is unverifiable"
 
 
-def test_prior_day_late_arrival_counterexample(tmp_path: Path) -> None:
-    """Reviewer counterexample 2: Lagged feature availability/commit must cover ALL inputs.
-
-    When lookback k >= 1, Day t's feature depends on Day t-k and Day t.
-    If Day t-1 arrived or was committed late (after Day t's as_of_time),
-    Day t's feature is using uncommitted/unavailable historical data -> fail-closed.
-    """
+def test_unverified_market_time_authority_fails_closed(tmp_path: Path) -> None:
+    """Target market time with unverified or self-attested authority fails closed."""
     source_days = _build_synthetic_source_days()
-    # Tamper Day 0 (prev) committed_at to be AFTER Day 1 (cur) committed_at
-    # cur (Day 1) as_of is 2026-09-02T10:40:00.000000Z
-    # Set prev (Day 0) committed_at to 2026-09-02T10:45:00.000000Z
-    late_prev_days = copy.deepcopy(source_days)
-    late_prev_days[0]["committed_at"] = "2026-09-02T10:45:00.000000Z"
+    unverified_days = copy.deepcopy(source_days)
+    for d in unverified_days:
+        d["market_time_authority"] = "SELF_ATTESTED"
 
-    prov_file, prov_sha = _build_synthetic_provenance_file(tmp_path, late_prev_days)
+    prov_file, prov_sha = _build_synthetic_provenance_file(tmp_path, unverified_days)
     hyp = _build_valid_hypothesis(symbol="RB2701")
     spec = parse_and_verify_signal_spec(hyp)
 
-    out_dir = tmp_path / "out_late_prev"
+    out_dir = tmp_path / "out_unverified_auth"
     with pytest.raises(SignalBindingError) as exc_info:
         derive_signal_snapshot(
             spec=spec,
-            source_days=late_prev_days,
+            source_days=unverified_days,
             output_dir=out_dir,
             provenance_path=prov_file,
             provenance_sha256=prov_sha,
         )
-    assert exc_info.value.reason == "INPUT_NOT_COMMITTED_AT_AS_OF"
-    assert not list(out_dir.glob("*.csv")), "Must not write CSV on input commit violation"
+    assert exc_info.value.reason == "UNVERIFIED_MARKET_TIME_AUTHORITY"
+    assert not list(out_dir.glob("*.csv")), "Must not write CSV when market authority is unverified"
+
+
+def test_lagged_inputs_actual_inputs_only_and_counterexample(tmp_path: Path) -> None:
+    """For lookback k > 1, feature math only reads actual inputs (t-k and t).
+
+    1. Positive case: k=2, intermediate day t-1 arrived/committed late (> as_of).
+       Because Day t-1 is not an actual input to math.log(settle[t]/settle[t-2]),
+       the snapshot derives and admits normally.
+    2. Negative case: k=2, actual input Day t-2 committed after as_of -> fails closed
+       with INPUT_NOT_COMMITTED_AT_AS_OF.
+    """
+    source_days = _build_synthetic_source_days()
+
+    # Hypothesis with k=2: momentum log(settlement[t] / settlement[t-2])
+    hyp_k2 = _build_valid_hypothesis(
+        family="momentum",
+        definition="log(settlement[t] / settlement[t-2])",
+        direction="positive",
+        symbol="RB2701",
+    )
+    spec_k2 = parse_and_verify_signal_spec(hyp_k2)
+
+    # 1. Positive case: Intermediate day (index 1, Day 2026-09-02) arrives LATE (12:00 UTC)
+    # Target observation index i=2 (Day 2026-09-03 as_of is 10:40 UTC).
+    # Actual inputs: prev (index 0, Day 2026-09-01) committed at 10:40 <= 10:40.
+    # cur (index 2, Day 2026-09-03) committed at 10:40 <= 10:40.
+    # Intermediate day (index 1) committed at 12:00 > 10:40.
+    intermediate_late_days = copy.deepcopy(source_days)
+    intermediate_late_days[1]["committed_at"] = "2026-09-03T12:00:00.000000Z"
+    intermediate_late_days[1]["first_seen_at"] = "2026-09-03T11:30:00.000000Z"
+
+    prov_pos, prov_pos_sha = _build_synthetic_provenance_file(tmp_path / "pos", intermediate_late_days)
+    out_pos = tmp_path / "out_pos"
+    res_pos = derive_signal_snapshot(
+        spec=spec_k2,
+        source_days=intermediate_late_days,
+        output_dir=out_pos,
+        candidate_identity_hash="test_pos_hash",
+        provenance_path=prov_pos,
+        provenance_sha256=prov_pos_sha,
+    )
+    assert res_pos.row_count > 0
+    assert res_pos.path.exists()
+
+    # 2. Negative case: Actual input day t-2 (index 0) committed LATE (11:00 UTC > 10:40 UTC)
+    actual_late_days = copy.deepcopy(source_days)
+    actual_late_days[0]["committed_at"] = "2026-09-03T11:00:00.000000Z"
+
+    prov_neg, prov_neg_sha = _build_synthetic_provenance_file(tmp_path / "neg", actual_late_days)
+    out_neg = tmp_path / "out_neg"
+    with pytest.raises(SignalBindingError) as exc_neg:
+        derive_signal_snapshot(
+            spec=spec_k2,
+            source_days=actual_late_days,
+            output_dir=out_neg,
+            candidate_identity_hash="test_neg_hash",
+            provenance_path=prov_neg,
+            provenance_sha256=prov_neg_sha,
+        )
+    assert exc_neg.value.reason == "INPUT_NOT_COMMITTED_AT_AS_OF"
+    assert not list(out_neg.glob("*.csv"))
 
 
 def test_reject_negative_expected_direction_at_admission_fail_closed(tmp_path: Path) -> None:
-    """Reviewer finding 3: Under frozen scientific semantics, reject negative expected_direction.
-
-    The screening runner tests positive concordance (same-sign consistency >= 0.50).
-    A candidate with expected_direction='negative' must be rejected at admission,
-    preventing an equivalent economic hypothesis from wrongly receiving a scientific REJECT.
-    """
+    """Reviewer finding 3: Under frozen scientific semantics, reject negative expected_direction."""
     hyp_neg = _build_valid_hypothesis(
         family="reversal",
         definition="log(settlement[t] / settlement[t-1])",
@@ -1209,14 +1259,9 @@ def test_reject_negative_expected_direction_at_admission_fail_closed(tmp_path: P
 def test_malformed_provenance_missing_field_fails_closed_as_admission_failed_with_audit(
     tmp_path: Path,
 ) -> None:
-    """Reviewer finding 4: Hash-matching provenance with missing first_seen_at turns into ADMISSION_FAILED.
-
-    Ensures malformed provenance does NOT raise an uncaught KeyError that crashes the batch,
-    produces zero scientific decision, and records an audit entry.
-    """
+    """Reviewer finding 4: Hash-matching provenance with missing first_seen_at turns into ADMISSION_FAILED."""
     source_days = _build_synthetic_source_days()
     malformed_days = copy.deepcopy(source_days)
-    # Delete first_seen_at from second day
     del malformed_days[1]["first_seen_at"]
 
     prov_file, prov_sha = _build_synthetic_provenance_file(tmp_path, malformed_days)
@@ -1265,8 +1310,174 @@ def test_malformed_provenance_missing_field_fails_closed_as_admission_failed_wit
     assert res.engineering_status == EngineeringStatus.ADMISSION_FAILED.value
     assert res.scientific_decision is None, "Malformed provenance must produce NO scientific decision"
     assert "MALFORMED_PROVENANCE" in (res.error_code or "")
-    # Audit trail contains record
     records = orchestrator.audit_trail.get_records()
     assert len(records) >= 1
     assert records[-1].engineering_status == EngineeringStatus.ADMISSION_FAILED.value
 
+
+def test_malformed_provenance_top_level_list_and_settlement_fails_closed_with_audit(
+    tmp_path: Path,
+) -> None:
+    """P2 Regression: Top-level JSON list or non-dict settlement fails closed to candidate ADMISSION_FAILED.
+
+    Ensures no uncaught AttributeError or TypeError escapes to crash the batch,
+    audit trail records the event, and zero scientific decision is produced.
+    """
+    config = ResearchLabConfig(root=tmp_path)
+    store = ResultStore(config)
+    memory = ResearchMemory(store)
+    engine = AlphaDiscoveryEngine(
+        memory=memory,
+        result_store=store,
+        output_base_dir=tmp_path / "staging",
+    )
+    orchestrator = DiscoveryIntegrationOrchestrator(engine=engine)
+    pb = ProjectBinding(project_id="test", workspace_identity=str(tmp_path))
+
+    hyp = _build_valid_hypothesis(symbol="RB2701")
+    cand = AlphaGenerationCandidate(
+        hypothesis=hyp,
+        scientific_identity_hash=compute_scientific_identity_hash(hyp),
+        rationale="test",
+        source_context_refs=(),
+        novelty_statement="test",
+        duplicate_awareness="test",
+        uncertainty="test",
+    )
+
+    # Structure A: Provenance top-level JSON is a list [...]
+    prov_file_list = tmp_path / "prov_list.json"
+    prov_file_list.write_text('[{"source_days": []}]', encoding="utf-8")
+    sha_list = hashlib.sha256(prov_file_list.read_bytes()).hexdigest()
+
+    res_a = orchestrator.integrate_candidate(
+        candidate=cand,
+        snapshot_path=tmp_path / "dummy.csv",
+        dataset_binding={
+            "provenance_path": str(prov_file_list),
+            "provenance_sha256": sha_list,
+        },
+        project_binding=pb,
+        request_id="req-list-test",
+    )
+    assert res_a.engineering_status == EngineeringStatus.ADMISSION_FAILED.value
+    assert res_a.scientific_decision is None
+    assert "MALFORMED_PROVENANCE" in (res_a.error_code or "")
+
+    # Structure B: source_days has non-dict settlement (e.g. list [3186.0])
+    source_days = _build_synthetic_source_days()
+    malformed_settle_days = copy.deepcopy(source_days)
+    malformed_settle_days[0]["settlement"] = [3186.0]
+
+    prov_file_settle, sha_settle = _build_synthetic_provenance_file(
+        tmp_path / "prov_b", malformed_settle_days
+    )
+    res_b = orchestrator.integrate_candidate(
+        candidate=cand,
+        snapshot_path=tmp_path / "dummy.csv",
+        dataset_binding={
+            "provenance_path": str(prov_file_settle),
+            "provenance_sha256": sha_settle,
+            "source_days": malformed_settle_days,
+        },
+        project_binding=pb,
+        request_id="req-settle-test",
+    )
+    assert res_b.engineering_status == EngineeringStatus.ADMISSION_FAILED.value
+    assert res_b.scientific_decision is None
+    assert "MALFORMED_PROVENANCE" in (res_b.error_code or "")
+
+    # Verify both records are in audit trail
+    records = orchestrator.audit_trail.get_records()
+    assert len(records) >= 2
+    assert all(r.engineering_status == EngineeringStatus.ADMISSION_FAILED.value for r in records[-2:])
+
+
+def test_integration_engine_critic_direction_equivalent_regression(tmp_path: Path) -> None:
+    """Reviewer finding 4 regression: Integration -> Engine -> Critic for equivalent directions.
+
+    1. 'expected_direction=negative', definition='log(settlement[t]/settlement[t-1])'
+       fails closed at admission; Engine, Critic, and Memory are NEVER invoked (0 records).
+    2. Equivalent formulation 'expected_direction=positive', definition='-log(settlement[t]/settlement[t-1])'
+       passes admission on identical data, proceeds through Engine & Critic, and produces 1 Memory record.
+    Preserves frozen scientific thresholds without alteration.
+    """
+    config = ResearchLabConfig(root=tmp_path)
+    store = ResultStore(config)
+    memory = ResearchMemory(store)
+    engine = AlphaDiscoveryEngine(
+        memory=memory,
+        result_store=store,
+        output_base_dir=tmp_path / "staging",
+    )
+    orchestrator = DiscoveryIntegrationOrchestrator(engine=engine)
+    pb = ProjectBinding(project_id="test", workspace_identity=str(tmp_path))
+
+    source_days = _build_synthetic_source_days()
+    prov_file, prov_sha = _build_synthetic_provenance_file(tmp_path / "prov", source_days)
+
+    dataset_binding = {
+        "provenance_path": str(prov_file),
+        "provenance_sha256": prov_sha,
+        "source_days": source_days,
+    }
+
+    # 1. Unsupported negative expected_direction
+    hyp_neg = _build_valid_hypothesis(
+        family="reversal",
+        definition="log(settlement[t] / settlement[t-1])",
+        direction="negative",
+        symbol="RB2701",
+    )
+    cand_neg = AlphaGenerationCandidate(
+        hypothesis=hyp_neg,
+        scientific_identity_hash=compute_scientific_identity_hash(hyp_neg),
+        rationale="test negative",
+        source_context_refs=(),
+        novelty_statement="test",
+        duplicate_awareness="test",
+        uncertainty="test",
+    )
+    res_neg = orchestrator.integrate_candidate(
+        candidate=cand_neg,
+        snapshot_path=tmp_path / "dummy.csv",
+        dataset_binding=dataset_binding,
+        project_binding=pb,
+        request_id="req-neg-test",
+    )
+    assert res_neg.engineering_status == EngineeringStatus.ADMISSION_FAILED.value
+    assert res_neg.scientific_decision is None
+    assert res_neg.error_code == "UNSUPPORTED_EXPECTED_DIRECTION"
+    # Verify zero memory records created for negative candidate
+    assert len(memory.find_by_hypothesis_id(hyp_neg["hypothesis_id"])) == 0
+
+    # 2. Equivalent positive expected_direction with explicit negation
+    hyp_pos = _build_valid_hypothesis(
+        family="reversal",
+        definition="-log(settlement[t] / settlement[t-1])",
+        direction="positive",
+        symbol="RB2701",
+    )
+    cand_pos = AlphaGenerationCandidate(
+        hypothesis=hyp_pos,
+        scientific_identity_hash=compute_scientific_identity_hash(hyp_pos),
+        rationale="test positive equivalent",
+        source_context_refs=(),
+        novelty_statement="test",
+        duplicate_awareness="test",
+        uncertainty="test",
+    )
+    res_pos = orchestrator.integrate_candidate(
+        candidate=cand_pos,
+        snapshot_path=tmp_path / "dummy.csv",
+        dataset_binding=dataset_binding,
+        project_binding=pb,
+        request_id="req-pos-test",
+    )
+    assert res_pos.engineering_status == EngineeringStatus.COMPLETED.value
+    assert res_pos.scientific_decision in ("NEED_MORE_EVIDENCE", "PROMOTE", "REJECT")
+    assert res_pos.error_code is None
+    # Memory record created and verified
+    records_pos = memory.find_by_hypothesis_id(hyp_pos["hypothesis_id"])
+    assert len(records_pos) == 1
+    assert records_pos[0].decision == res_pos.scientific_decision

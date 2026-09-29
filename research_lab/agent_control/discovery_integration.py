@@ -362,8 +362,13 @@ class DiscoveryIntegrationOrchestrator:
                     )
 
                 prov_data = json.loads(prov_bytes.decode("utf-8"))
+                if not isinstance(prov_data, dict):
+                    raise SignalBindingError(
+                        "MALFORMED_PROVENANCE_STRUCTURE",
+                        f"Provenance file content must be a JSON object (dict), got {type(prov_data).__name__}",
+                    )
                 prov_source_days = prov_data.get("source_days")
-                if not prov_source_days:
+                if not isinstance(prov_source_days, (list, tuple)) or not prov_source_days:
                     raise SignalBindingError(
                         "MISSING_SOURCE_DAYS",
                         "No source_days found in verified provenance file",
@@ -402,10 +407,12 @@ class DiscoveryIntegrationOrchestrator:
                 )
                 effective_snapshot_path = derived_res.path
                 effective_dataset_binding = derived_res.dataset_binding
-            except (SignalBindingError, ValueError, KeyError) as exc:
+            except (SignalBindingError, ValueError, KeyError, AttributeError, TypeError, json.JSONDecodeError, OSError) as exc:
                 err_code = getattr(exc, "reason", "BINDING_FAILED")
                 if isinstance(exc, KeyError):
                     err_code = "MALFORMED_PROVENANCE_KEY_ERROR"
+                elif isinstance(exc, (AttributeError, TypeError, json.JSONDecodeError)):
+                    err_code = f"MALFORMED_PROVENANCE_{type(exc).__name__.upper()}"
                 res = DiscoveryIntegrationResult(
                     engineering_status=EngineeringStatus.ADMISSION_FAILED.value,
                     scientific_decision=None,

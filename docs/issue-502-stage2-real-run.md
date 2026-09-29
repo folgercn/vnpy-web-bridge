@@ -28,13 +28,13 @@
 
 逐槽 JSON 索引给出 Provider job、task、候选 identity/content hash、预检报告、派生快照 SHA/字节数、每个 Engine run/evidence、Critic decision/hash、MemoryRecord、私有原文路径和 R2 所用 Memory refs。Round 1 SQLite 在 Round 2 前后 SHA-256 均为 `99bdcdfc7fa443456f0f2bcc99d42d1be04fc015014525c6892a85375dfb5489`；Round 2 复制后另行持久化，累计 100 run、20 MemoryRecord。
 
-## 可追踪的 Memory 影响
+## 可追踪的 Memory 影响与因果有效性界限
 
-Round 1 初始 Memory A 为 0 条；真实 Engine/Critic 产出的 Memory B 为 23 条，View ID `memview-248d8e4d90e20fee62ca71f14d5967ed`，内容哈希 `a18be8a2c7a68231749f33ea36e09a173f97095269bb9f4cb7fa7e464aab8401`。其中 10 条 research gap、7 条 NME backlog 均指出缺少 `stability_split`、`outlier_sensitivity`。相同 objective 在 Memory A 空时要求四种基础方法；在 Memory B 存在这些有效缺口时，要求候选引用准确 `rmentry-*` 并增加两种方法。R2 十份 **原始 Provider JSON** 均引用有效缺口，候选自身提出六种方法；Engine 的 60 个新 run 与 method definition 证明新增方法实际执行，并非后期改写候选或仅增加文字引用。
+- **原始执行事实（已记录的历史运行产物）**：
+  Round 1 初始 Memory A 为 0 条；历史 Engine/Critic 运行产出 Memory B 计 23 条，View ID `memview-248d8e4d90e20fee62ca71f14d5967ed`，内容哈希 `a18be8a2c7a68231749f33ea36e09a173f97095269bb9f4cb7fa7e464aab8401`。其中 10 条 research gap、7 条 NME backlog 记载缺少 `stability_split`、`outlier_sensitivity`。相同 objective 在 Memory A 空时要求四种基础方法；在存在缺口条目时，按规则要求候选引用具体 `rmentry-*` 并增加两种方法。R2 十份 **原始 Provider JSON** 均引用了这些条目，候选自身提出六种方法；Engine 的 60 个新 run 证明新增方法在执行层实际运行。例如槽 04 与 09 的反转 k=1 候选因新增稳定性分段实测风险从 NEED_MORE_EVIDENCE 转为 REJECT。
 
-例如槽 04：R1 的 RB2701 反转 k=1 经 16 行物理计算、四个 run 后为 NEED_MORE_EVIDENCE，记录 `rmrec-agent-alpha-f1549c737fed6dcc27bb7552-rev.1-1-5bfb2c79602f`；Memory B 的 `rmentry-169d2f09dff1f71cc4446851` 和 `rmentry-27d7e6c709a90ce410176319` 记录缺失的稳定性与离群点证据，且均出现在 R2 原始候选引用中。R2 为同一公式实际执行六个 run，稳定性分段相关性差 `0.7848 >= 0.50`，Critic 因新增的实测风险从 NEED_MORE_EVIDENCE 转为 REJECT。槽 09 的 HC2701 反转 k=1 经 `rmentry-c211423dcabbb6ab9a384312` / `rmentry-2e5328a9ba4040673219bed9` 发生相同证据需求变化，实测分段差 `0.7768 >= 0.50` 后转为 REJECT。两轮缺失证据由四项降至两项，但 `cost_sensitivity` 与样本不足仍未解决。
-
-此处证明的是**受控 Memory 改变候选提出的证据需求，并且新增方法被实际执行**。条件规则本身写在相同 objective 中，故不能将此归因为模型自发学习，也不声称盈利改善、交易可用或生产验收。本轮没有把自动比较强行标为 `is_conclusive=True`，供人工按原始链路复核。
+- **因果有效性状态（严格界定为 BLOCKED）**：
+  因第一轮目标合约结算价的时间戳仅有库摄取时间，缺乏交易所可验证的撮合/结算生效时间戳（Stage 2 PIT 验证保持 **BLOCKED**），第一轮的科学裁决与产生的 17 条缺口记录在科学层面**无法确立为经受住时间因果检验的真实基准**。因此，旧 2×10 实测数据只能证明在工程执行与提示词驱动层面，第二轮槽位结构性地消费了第一轮留存的条目；但**绝不能证明**首轮“有效科学结果”对第二轮产生了经受住因果检验的科学影响。当前可验收的 Memory 因果有效性严格保持 **BLOCKED**。未将自动比较标为 `is_conclusive=True`，严禁借此宣称策略具备实盘学习能力或因果有效性。
 
 ## 复核入口与停止点
 

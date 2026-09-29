@@ -40,6 +40,9 @@ SUPPORTED_LOOKBACKS = (1, 2, 3)
 SUPPORTED_SOURCE_FEATURES = ("settlement", "settlement_price")
 CANONICAL_TARGET_DEFINITION = "log(settlement[t+2] / settlement[t+1])"
 IMPLEMENTATION_VERSION = "research_lab.signal_binding.v1"
+SUPPORTED_MARKET_TIME_AUTHORITIES = frozenset(
+    {"SHFE_OFFICIAL", "EXCHANGE_ANNOUNCEMENT", "AUDITED_EXCHANGE_FEED", "SYNTHETIC_TEST_FIXTURE"}
+)
 
 _ISO_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|\+00:00)$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -449,6 +452,11 @@ def derive_signal_snapshot(
                     "MALFORMED_PROVENANCE_SOURCE_DAY",
                     f"source_day[{idx}] missing required field '{field}': {d}",
                 )
+        if not isinstance(d["settlement"], dict):
+            raise SignalBindingError(
+                "MALFORMED_PROVENANCE_SETTLEMENT",
+                f"source_day[{idx}] 'settlement' must be a dict, got {type(d['settlement']).__name__}",
+            )
 
     # Ensure source days are sorted strictly by trading day
     sorted_days = sorted(source_days, key=lambda d: str(d["day"]))
@@ -498,13 +506,32 @@ def derive_signal_snapshot(
                 "using ingestion first_seen_at as target_start_time is strictly forbidden",
             )
 
+        auth_start = next_day.get("market_time_authority")
+        auth_end = end.get("market_time_authority")
+        if (
+            not auth_start
+            or not auth_end
+            or auth_start not in SUPPORTED_MARKET_TIME_AUTHORITIES
+            or auth_end not in SUPPORTED_MARKET_TIME_AUTHORITIES
+        ):
+            raise SignalBindingError(
+                "UNVERIFIED_MARKET_TIME_AUTHORITY",
+                f"Day {next_day['day']} / {end['day']}: target market time lacks verified exchange authority "
+                f"(start_authority='{auth_start}', end_authority='{auth_end}'). "
+                f"Self-attested or unverified timestamps are strictly forbidden. "
+                f"Supported authorities: {sorted(SUPPORTED_MARKET_TIME_AUTHORITIES)}",
+            )
+
         t_as_of = str(cur["committed_at"])
         dt_as_of = parse_strict_utc_iso8601(t_as_of, "cur.committed_at")
 
-        # Lagged feature availability and commit check across all actual inputs in window [i - k, i]
+        # Lagged feature availability and commit check across actual inputs for this feature.
+        # For momentum/reversal with lookback k, the feature formula is math.log(settle_cur / settle_prev)
+        # where cur is sorted_days[i] and prev is sorted_days[i - k].
+        # Intermediate days in (i - k, i) are NOT inputs to this feature; only check actual inputs.
+        actual_input_days = [prev, cur] if k > 0 else [cur]
         input_avail_times: list[datetime] = []
-        for j in range(i - k, i + 1):
-            in_d = sorted_days[j]
+        for in_d in actual_input_days:
             dt_in_avail = parse_strict_utc_iso8601(in_d["first_seen_at"], f"day[{in_d['day']}].first_seen_at")
             dt_in_commit = parse_strict_utc_iso8601(in_d["committed_at"], f"day[{in_d['day']}].committed_at")
             if dt_in_avail > dt_as_of:
@@ -550,10 +577,18 @@ def derive_signal_snapshot(
             )
 
         # Retrieve settlement prices strictly for target product
-        settle_cur = cur.get("settlement", {}).get(prod_key)
-        settle_prev = prev.get("settlement", {}).get(prod_key)
-        settle_next = next_day.get("settlement", {}).get(prod_key)
-        settle_end = end.get("settlement", {}).get(prod_key)
+        for s_day in (prev, cur, next_day, end):
+            s_map = s_day.get("settlement")
+            if not isinstance(s_map, dict):
+                raise SignalBindingError(
+                    "MALFORMED_PROVENANCE_SETTLEMENT",
+                    f"Day {s_day.get('day')}: 'settlement' must be a dict, got {type(s_map).__name__}",
+                )
+
+        settle_cur = cur["settlement"].get(prod_key)
+        settle_prev = prev["settlement"].get(prod_key)
+        settle_next = next_day["settlement"].get(prod_key)
+        settle_end = end["settlement"].get(prod_key)
 
         if not all(isinstance(p, (int, float)) and p > 0 for p in (settle_cur, settle_prev, settle_next, settle_end)):
             raise SignalBindingError(
