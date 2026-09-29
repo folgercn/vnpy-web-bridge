@@ -1,0 +1,535 @@
+{
+  "schema": "issue502.stage2.run_audit.v1",
+  "issue": 502,
+  "base_merge_commit": "3b674d95c0c9b8e6168ac93fce5a2c3cf2bccada",
+  "status": "BLOCKED",
+  "snapshot": {
+    "sha256": "4361c48f79345855457d633b962a3ea6975171242a770518c32d89945942624d",
+    "bytes": 19489,
+    "rows": 32,
+    "source_trade_days": 19,
+    "symbols": [
+      "RB2701",
+      "HC2701"
+    ],
+    "frequency": "1d",
+    "feature": "same-contract settlement return scalar",
+    "candidate_signal_match_count": 0
+  },
+  "run": {
+    "provider": "antigravity",
+    "model": "Gemini 3.8 Flash High",
+    "round_1_session": "disc-session-d66",
+    "round_2_session": "disc-session-761",
+    "round_1_memory_view": "memview-f7a5d2c7345502ddd",
+    "round_2_memory_view": "memview-66cc3a7444d238423",
+    "actual_wall_time_cst": {
+      "round_1": "2026-09-29 12:02:03–12:04:40",
+      "round_2": "2026-09-29 12:06:23–12:09:27"
+    },
+    "recorded_session_time_error": {
+      "round_1": "2026-09-22T05:00:00Z",
+      "round_2": "2026-09-22T05:30:00Z"
+    }
+  },
+  "funnels": {
+    "round_1": {
+      "requested": 10,
+      "attempted": 10,
+      "admitted": 10,
+      "invalid": 0,
+      "provider_failed": 0,
+      "exact": 0,
+      "related": 0,
+      "novel": 10
+    },
+    "round_2": {
+      "requested": 10,
+      "attempted": 10,
+      "admitted": 10,
+      "invalid": 0,
+      "provider_failed": 0,
+      "exact": 0,
+      "related": 1,
+      "novel": 9
+    }
+  },
+  "memory_attribution": {
+    "total_refs": 21,
+    "conclusive": 0,
+    "scope": "prompt-and-proposal influence observed; scientific improvement unverified"
+  },
+  "result_store_current": {
+    "research_memory_records": 20,
+    "v2_result_runs": 60,
+    "round_2_integration_persisted": false
+  },
+  "extra_provider_tasks": {
+    "probe": 1,
+    "cancelled_rerun_round_1": 2,
+    "replay_zero_submit_proven": false
+  },
+  "slots": [
+    {
+      "round": 1,
+      "slot": 1,
+      "attempt": 1,
+      "provider": "antigravity",
+      "provider_task_id": "task-de9dbc43dd09b205dcdf4dafa206b6ae",
+      "provider_status": "TURN_COMPLETE",
+      "admission": "ADMITTED",
+      "dedupe": "NOVEL",
+      "title": "Normalized Three-Day Price Mean Reversion on Ferrous Futures",
+      "signal_family": "reversal",
+      "source_features": [
+        "close",
+        "high",
+        "low"
+      ],
+      "memory_refs": [],
+      "snapshot_support": "UNVERIFIED",
+      "scientific_result": "UNVERIFIED",
+      "integration_evidence": "R1_RECONSTRUCTED_IN_CURRENT_STORE_BUT_SIGNAL_UNMAPPED"
+    },
+    {
+      "round": 1,
+      "slot": 2,
+      "attempt": 1,
+      "provider": "antigravity",
+      "provider_task_id": "task-61cf00a4169e1c86fb907e4e99c62fef",
+      "provider_status": "TURN_COMPLETE",
+      "admission": "ADMITTED",
+      "dedupe": "NOVEL",
+      "title": "Daily range-normalized close location value reversal for RB and HC futures",
+      "signal_family": "reversal",
+      "source_features": [
+        "daily_close",
+        "daily_high",
+        "daily_low"
+      ],
+      "memory_refs": [],
+      "snapshot_support": "UNVERIFIED",
+      "scientific_result": "UNVERIFIED",
+      "integration_evidence": "R1_RECONSTRUCTED_IN_CURRENT_STORE_BUT_SIGNAL_UNMAPPED"
+    },
+    {
+      "round": 1,
+      "slot": 3,
+      "attempt": 1,
+      "provider": "antigravity",
+      "provider_task_id": "task-9f101f1cad9d44c1dff195b7fc33a33a",
+      "provider_status": "TURN_COMPLETE",
+      "admission": "ADMITTED",
+      "dedupe": "NOVEL",
+      "title": "Five-Day Volatility-Normalized Price Reversal in Ferrous Futures",
+      "signal_family": "reversal",
+      "source_features": [
+        "close",
+        "daily_return"
+      ],
+      "memory_refs": [],
+      "snapshot_support": "UNVERIFIED",
+      "scientific_result": "UNVERIFIED",
+      "integration_evidence": "R1_RECONSTRUCTED_IN_CURRENT_STORE_BUT_SIGNAL_UNMAPPED"
+    },
+    {
+      "round": 1,
+      "slot": 4,
+      "attempt": 1,
+      "provider": "antigravity",
+      "provider_task_id": "task-8a8f5a5f152b0b4737d91035da4afc85",
+      "provider_status": "TURN_COMPLETE",
+      "admission": "ADMITTED",
+      "dedupe": "NOVEL",
+      "title": "Daily Range-Expansion Short-Term Mean Reversion in Ferrous Futures",
+      "signal_family": "reversal",
+      "source_features": [
+        "close",
+        "open",
+        "high",
+        "low",
+        "average_true_range_20d"
+      ],
+      "memory_refs": [],
+      "snapshot_support": "UNVERIFIED",
+      "scientific_result": "UNVERIFIED",
+      "integration_evidence": "R1_RECONSTRUCTED_IN_CURRENT_STORE_BUT_SIGNAL_UNMAPPED"
+    },
+    {
+      "round": 1,
+      "slot": 5,
+      "attempt": 1,
+      "provider": "antigravity",
+      "provider_task_id": "task-08ccbac34b51230cf3df65e6b089f892",
+      "provider_status": "TURN_COMPLETE",
+      "admission": "ADMITTED",
+      "dedupe": "NOVEL",
+      "title": "Volume-Conditioned 3-Day Normalized Price Reversal on Daily RB and HC Futures",
+      "signal_family": "reversal",
+      "source_features": [
+        "daily_close",
+        "daily_volume",
+        "ts_std_return_20d",
+        "ts_mean_volume_20d"
+      ],
+      "memory_refs": [],
+      "snapshot_support": "UNVERIFIED",
+      "scientific_result": "UNVERIFIED",
+      "integration_evidence": "R1_RECONSTRUCTED_IN_CURRENT_STORE_BUT_SIGNAL_UNMAPPED"
+    },
+    {
+      "round": 1,
+      "slot": 6,
+      "attempt": 1,
+      "provider": "antigravity",
+      "provider_task_id": "task-ce0b069ffb8af123221b902e86709ae2",
+      "provider_status": "TURN_COMPLETE",
+      "admission": "ADMITTED",
+      "dedupe": "NOVEL",
+      "title": "Volume-Scaled Range Exhaustion Daily Reversal in Ferrous Futures",
+      "signal_family": "reversal",
+      "source_features": [
+        "close",
+        "high",
+        "low",
+        "volume"
+      ],
+      "memory_refs": [],
+      "snapshot_support": "UNVERIFIED",
+      "scientific_result": "UNVERIFIED",
+      "integration_evidence": "R1_RECONSTRUCTED_IN_CURRENT_STORE_BUT_SIGNAL_UNMAPPED"
+    },
+    {
+      "round": 1,
+      "slot": 7,
+      "attempt": 1,
+      "provider": "antigravity",
+      "provider_task_id": "task-f4eb4209539152a4c81c2beab783d633",
+      "provider_status": "TURN_COMPLETE",
+      "admission": "ADMITTED",
+      "dedupe": "NOVEL",
+      "title": "Volume-Weighted Price Stretch Short-Term Reversal for RB and HC",
+      "signal_family": "reversal",
+      "source_features": [
+        "close",
+        "high",
+        "low",
+        "volume",
+        "open_interest"
+      ],
+      "memory_refs": [],
+      "snapshot_support": "UNVERIFIED",
+      "scientific_result": "UNVERIFIED",
+      "integration_evidence": "R1_RECONSTRUCTED_IN_CURRENT_STORE_BUT_SIGNAL_UNMAPPED"
+    },
+    {
+      "round": 1,
+      "slot": 8,
+      "attempt": 1,
+      "provider": "antigravity",
+      "provider_task_id": "task-e6434fe7724d4416e93cca43adf48f94",
+      "provider_status": "TURN_COMPLETE",
+      "admission": "ADMITTED",
+      "dedupe": "NOVEL",
+      "title": "Open interest expansion scaled short-term price reversal for RB and HC",
+      "signal_family": "reversal",
+      "source_features": [
+        "daily_close",
+        "daily_high",
+        "daily_low",
+        "daily_open_interest",
+        "daily_volume"
+      ],
+      "memory_refs": [],
+      "snapshot_support": "UNVERIFIED",
+      "scientific_result": "UNVERIFIED",
+      "integration_evidence": "R1_RECONSTRUCTED_IN_CURRENT_STORE_BUT_SIGNAL_UNMAPPED"
+    },
+    {
+      "round": 1,
+      "slot": 9,
+      "attempt": 1,
+      "provider": "antigravity",
+      "provider_task_id": "task-ce0fc1d0ceb9e328588e5610cf307d16",
+      "provider_status": "TURN_COMPLETE",
+      "admission": "ADMITTED",
+      "dedupe": "NOVEL",
+      "title": "Open Interest Weighted Short-Term Trend Momentum on Ferrous Futures",
+      "signal_family": "momentum",
+      "source_features": [
+        "daily_close",
+        "daily_open_interest"
+      ],
+      "memory_refs": [],
+      "snapshot_support": "UNVERIFIED",
+      "scientific_result": "UNVERIFIED",
+      "integration_evidence": "R1_RECONSTRUCTED_IN_CURRENT_STORE_BUT_SIGNAL_UNMAPPED"
+    },
+    {
+      "round": 1,
+      "slot": 10,
+      "attempt": 1,
+      "provider": "antigravity",
+      "provider_task_id": "task-877319191b17bdd7dde5391d6e1378f2",
+      "provider_status": "TURN_COMPLETE",
+      "admission": "ADMITTED",
+      "dedupe": "NOVEL",
+      "title": "Volume-Conditioned Multi-Day Price Reversal for Ferrous Futures",
+      "signal_family": "reversal",
+      "source_features": [
+        "close",
+        "volume"
+      ],
+      "memory_refs": [],
+      "snapshot_support": "UNVERIFIED",
+      "scientific_result": "UNVERIFIED",
+      "integration_evidence": "R1_RECONSTRUCTED_IN_CURRENT_STORE_BUT_SIGNAL_UNMAPPED"
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "attempt": 1,
+      "provider": "antigravity",
+      "provider_task_id": "task-1dfce125170f4739b5d01b466575feb0",
+      "provider_status": "TURN_COMPLETE",
+      "admission": "ADMITTED",
+      "dedupe": "NOVEL",
+      "title": "Volatility-Standardized Volume-Weighted 3-Day Short-Term Reversal Factor",
+      "signal_family": "reversal",
+      "source_features": [
+        "Close",
+        "High",
+        "Low",
+        "Volume"
+      ],
+      "memory_refs": [
+        "rmentry-6101122fd66a54a382df49df",
+        "rmentry-b91fa2017fb073f069ae6fbe",
+        "rmentry-468c167d08ccbf62e11025a7"
+      ],
+      "snapshot_support": "UNVERIFIED",
+      "scientific_result": "UNVERIFIED",
+      "integration_evidence": "R2_NOT_PERSISTED_IN_CURRENT_STORE"
+    },
+    {
+      "round": 2,
+      "slot": 2,
+      "attempt": 1,
+      "provider": "antigravity",
+      "provider_task_id": "task-80295259ec7753a155fdd853c869760e",
+      "provider_status": "TURN_COMPLETE",
+      "admission": "ADMITTED",
+      "dedupe": "NOVEL",
+      "title": "Volatility-Normalized Short-Term Return Reversal for Ferrous Futures",
+      "signal_family": "reversal",
+      "source_features": [
+        "close",
+        "high",
+        "low",
+        "open",
+        "volume"
+      ],
+      "memory_refs": [
+        "rmentry-468c167d08ccbf62e11025a7",
+        "rmentry-b91fa2017fb073f069ae6fbe"
+      ],
+      "snapshot_support": "UNVERIFIED",
+      "scientific_result": "UNVERIFIED",
+      "integration_evidence": "R2_NOT_PERSISTED_IN_CURRENT_STORE"
+    },
+    {
+      "round": 2,
+      "slot": 3,
+      "attempt": 1,
+      "provider": "antigravity",
+      "provider_task_id": "task-c69e9bd04ed43249e7fa28e867b49419",
+      "provider_status": "TURN_COMPLETE",
+      "admission": "ADMITTED",
+      "dedupe": "NOVEL",
+      "title": "Normalized Short-Term Return Reversal with Volatility Scaling for Ferrous Futures",
+      "signal_family": "reversal",
+      "source_features": [
+        "close",
+        "high",
+        "low"
+      ],
+      "memory_refs": [
+        "rmentry-468c167d08ccbf62e11025a7",
+        "rmentry-b91fa2017fb073f069ae6fbe"
+      ],
+      "snapshot_support": "UNVERIFIED",
+      "scientific_result": "UNVERIFIED",
+      "integration_evidence": "R2_NOT_PERSISTED_IN_CURRENT_STORE"
+    },
+    {
+      "round": 2,
+      "slot": 4,
+      "attempt": 1,
+      "provider": "antigravity",
+      "provider_task_id": "task-1142da91936432a9564b8d7866e8daa2",
+      "provider_status": "TURN_COMPLETE",
+      "admission": "ADMITTED",
+      "dedupe": "NOVEL",
+      "title": "Standardized 3-Day Return Reversal with Volume-Expansion Conditioning on RB and HC Futures",
+      "signal_family": "reversal",
+      "source_features": [
+        "close",
+        "volume"
+      ],
+      "memory_refs": [
+        "rmentry-468c167d08ccbf62e11025a7",
+        "rmentry-b91fa2017fb073f069ae6fbe"
+      ],
+      "snapshot_support": "UNVERIFIED",
+      "scientific_result": "UNVERIFIED",
+      "integration_evidence": "R2_NOT_PERSISTED_IN_CURRENT_STORE"
+    },
+    {
+      "round": 2,
+      "slot": 5,
+      "attempt": 1,
+      "provider": "antigravity",
+      "provider_task_id": "task-577e5b1f12b8123a1fa2d7955eec27ac",
+      "provider_status": "TURN_COMPLETE",
+      "admission": "ADMITTED",
+      "dedupe": "NOVEL",
+      "title": "Volume-Weighted Range-Normalized 5-Day Reversal Factor",
+      "signal_family": "reversal",
+      "source_features": [
+        "close",
+        "high",
+        "low",
+        "volume"
+      ],
+      "memory_refs": [
+        "rmentry-6101122fd66a54a382df49df",
+        "rmentry-b91fa2017fb073f069ae6fbe"
+      ],
+      "snapshot_support": "UNVERIFIED",
+      "scientific_result": "UNVERIFIED",
+      "integration_evidence": "R2_NOT_PERSISTED_IN_CURRENT_STORE"
+    },
+    {
+      "round": 2,
+      "slot": 6,
+      "attempt": 1,
+      "provider": "antigravity",
+      "provider_task_id": "task-6b524a457cd34ec4e33369151c383c0f",
+      "provider_status": "TURN_COMPLETE",
+      "admission": "ADMITTED",
+      "dedupe": "RELATED",
+      "title": "Volatility-Adjusted Short-Term Mean Reversal with Volume Conditioning on RB and HC",
+      "signal_family": "reversal",
+      "source_features": [
+        "close",
+        "high",
+        "low",
+        "volume"
+      ],
+      "memory_refs": [
+        "rmentry-6101122fd66a54a382df49df",
+        "rmentry-b91fa2017fb073f069ae6fbe"
+      ],
+      "snapshot_support": "UNVERIFIED",
+      "scientific_result": "UNVERIFIED",
+      "integration_evidence": "R2_NOT_PERSISTED_IN_CURRENT_STORE"
+    },
+    {
+      "round": 2,
+      "slot": 7,
+      "attempt": 1,
+      "provider": "antigravity",
+      "provider_task_id": "task-94e0e80acf7063d79ddbceda78fd4f98",
+      "provider_status": "TURN_COMPLETE",
+      "admission": "ADMITTED",
+      "dedupe": "NOVEL",
+      "title": "Open Interest Conditioned Short-Term Price Deviation Reversal on Ferrous Futures",
+      "signal_family": "reversal",
+      "source_features": [
+        "close",
+        "open_interest",
+        "volume"
+      ],
+      "memory_refs": [
+        "rmentry-b91fa2017fb073f069ae6fbe",
+        "rmentry-6101122fd66a54a382df49df"
+      ],
+      "snapshot_support": "UNVERIFIED",
+      "scientific_result": "UNVERIFIED",
+      "integration_evidence": "R2_NOT_PERSISTED_IN_CURRENT_STORE"
+    },
+    {
+      "round": 2,
+      "slot": 8,
+      "attempt": 1,
+      "provider": "antigravity",
+      "provider_task_id": "task-62b65faf5696a05056d302e9ed2946e5",
+      "provider_status": "TURN_COMPLETE",
+      "admission": "ADMITTED",
+      "dedupe": "NOVEL",
+      "title": "Volume-Confirmed Volatility-Scaled 5-Day Momentum",
+      "signal_family": "momentum",
+      "source_features": [
+        "close",
+        "volume"
+      ],
+      "memory_refs": [
+        "rmentry-6101122fd66a54a382df49df",
+        "rmentry-b91fa2017fb073f069ae6fbe"
+      ],
+      "snapshot_support": "UNVERIFIED",
+      "scientific_result": "UNVERIFIED",
+      "integration_evidence": "R2_NOT_PERSISTED_IN_CURRENT_STORE"
+    },
+    {
+      "round": 2,
+      "slot": 9,
+      "attempt": 1,
+      "provider": "antigravity",
+      "provider_task_id": "task-3bfab6daf5266b96536ba9ba024f214c",
+      "provider_status": "TURN_COMPLETE",
+      "admission": "ADMITTED",
+      "dedupe": "NOVEL",
+      "title": "Open Interest Conditioned Residual Price Reversal in RB and HC",
+      "signal_family": "reversal",
+      "source_features": [
+        "close",
+        "high",
+        "low",
+        "open_interest",
+        "volume"
+      ],
+      "memory_refs": [
+        "rmentry-6101122fd66a54a382df49df",
+        "rmentry-b91fa2017fb073f069ae6fbe"
+      ],
+      "snapshot_support": "UNVERIFIED",
+      "scientific_result": "UNVERIFIED",
+      "integration_evidence": "R2_NOT_PERSISTED_IN_CURRENT_STORE"
+    },
+    {
+      "round": 2,
+      "slot": 10,
+      "attempt": 1,
+      "provider": "antigravity",
+      "provider_task_id": "task-1e37dde6043a13b2875e0abd1e39cde6",
+      "provider_status": "TURN_COMPLETE",
+      "admission": "ADMITTED",
+      "dedupe": "NOVEL",
+      "title": "Volatility-Normalized 5-Day Price Reversal on Steel Futures",
+      "signal_family": "reversal",
+      "source_features": [
+        "daily_close",
+        "daily_high",
+        "daily_low"
+      ],
+      "memory_refs": [
+        "rmentry-468c167d08ccbf62e11025a7",
+        "rmentry-b91fa2017fb073f069ae6fbe"
+      ],
+      "snapshot_support": "UNVERIFIED",
+      "scientific_result": "UNVERIFIED",
+      "integration_evidence": "R2_NOT_PERSISTED_IN_CURRENT_STORE"
+    }
+  ]
+}

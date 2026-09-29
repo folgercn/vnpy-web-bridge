@@ -14,6 +14,7 @@ Validates:
 from __future__ import annotations
 
 import copy
+from datetime import datetime, timezone
 import shutil
 import subprocess
 import sys
@@ -541,3 +542,61 @@ def test_11_replay_instructions_match_real_cli_and_e2e(base_task: dict[str, Any]
     assert res_nofile.returncode != 0
     assert "Task file not found" in res_nofile.stderr
     assert not (tmp_path / "cli_nofile").exists()
+
+
+def test_12_screening_timing_and_limitations_contracts(base_task: dict[str, Any], base_spec: dict[str, Any], tmp_path: Path):
+    """Verify runtime UTC timing default, clock injection, and parameters.limitations handling without keyword sniffing."""
+    # 1. Default execution timing uses current UTC time and enforces completed_at >= started_at
+    task_default = copy.deepcopy(base_task)
+    spec_default = copy.deepcopy(base_spec)
+    # Set provenance containing "m2 custody" to prove substring sniffing is eliminated
+    spec_default["dataset_requirements"]["provenance"] = "m2_custody_warehouse_test"
+    task_default["data_requirements"]["provenance"] = "m2_custody_warehouse_test"
+    task_default["task_content_hash"] = compute_task_hash(task_default)
+    spec_default["task_content_hash"] = task_default["task_content_hash"]
+    spec_default["spec_content_hash"] = compute_spec_hash(spec_default)
+
+    bundle_default = tmp_path / "bundle_default"
+    t_before = datetime.now(timezone.utc)
+    run_statistical_screening(task_default, spec_default, FIXTURE_PATH, bundle_default)
+    t_after = datetime.now(timezone.utc)
+
+    run_meta = v2.parse((bundle_default / "run.json").read_bytes())
+    dataset_meta = v2.parse((bundle_default / "dataset_metadata.json").read_bytes())
+
+    t_start = v2.time_value(run_meta["timing"]["started_at"])
+    t_end = v2.time_value(run_meta["timing"]["completed_at"])
+    assert t_start <= t_end
+    # Ensure timing is within execution window (not hardcoded historical timestamp like 2026-09-19)
+    assert t_before.timestamp() - 5.0 <= t_start.timestamp() <= t_after.timestamp() + 5.0
+    # No keyword sniffing: provenance had "m2 custody", but without parameters.limitations it strictly defaults to synthetic
+    assert dataset_meta["limitations"] == "Synthetic screening test data."
+
+    # 2. Clock injection is respected
+    t_fixed = "2026-09-29T12:00:00.000000Z"
+    bundle_clock = tmp_path / "bundle_clock"
+    run_statistical_screening(task_default, spec_default, FIXTURE_PATH, bundle_clock, clock=t_fixed)
+    run_clock = v2.parse((bundle_clock / "run.json").read_bytes())
+    assert run_clock["timing"]["started_at"] == t_fixed
+    assert run_clock["timing"]["completed_at"] == t_fixed
+
+    # 3. Parameters limitations is respected as caller-declared metadata
+    task_custom = copy.deepcopy(base_task)
+    spec_custom = copy.deepcopy(base_spec)
+    spec_custom["parameters"] = {"limitations": "Caller-declared exploratory parameter constraints."}
+    spec_custom["spec_content_hash"] = compute_spec_hash(spec_custom)
+
+    bundle_custom = tmp_path / "bundle_custom"
+    run_statistical_screening(task_custom, spec_custom, FIXTURE_PATH, bundle_custom)
+    meta_custom = v2.parse((bundle_custom / "dataset_metadata.json").read_bytes())
+    assert meta_custom["limitations"] == "Caller-declared exploratory parameter constraints."
+
+    # 4. Fail-closed on reversed timing (completed_at < started_at)
+    with pytest.raises(ValueError, match="Invalid execution timing order"):
+        run_statistical_screening(
+            task_default,
+            spec_default,
+            FIXTURE_PATH,
+            tmp_path / "bundle_bad_clock",
+            clock=("2026-09-29T12:00:00.000000Z", "2026-09-29T11:00:00.000000Z"),
+        )

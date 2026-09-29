@@ -7,6 +7,7 @@ and produces verified ExperimentRun, ArtifactManifest, and ResultEvidence record
 from __future__ import annotations
 
 import csv
+from datetime import datetime, timezone
 import math
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,30 @@ from uuid import uuid4
 
 from research_lab.contracts import statistical_screening_definition as ssd
 from research_lab.contracts import v2
+
+
+def _format_utc_timestamp(dt_or_str: Any) -> str:
+    if isinstance(dt_or_str, datetime):
+        if dt_or_str.tzinfo is None:
+            dt_or_str = dt_or_str.replace(tzinfo=timezone.utc)
+        else:
+            dt_or_str = dt_or_str.astimezone(timezone.utc)
+        return dt_or_str.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    if isinstance(dt_or_str, str):
+        try:
+            v2.time_value(dt_or_str)
+            return dt_or_str
+        except Exception:
+            try:
+                dt = datetime.fromisoformat(dt_or_str.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                else:
+                    dt = dt.astimezone(timezone.utc)
+                return dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            except Exception as exc:
+                raise ValueError(f"Invalid timestamp format: {dt_or_str!r}") from exc
+    raise TypeError(f"Expected datetime or ISO string for timestamp, got {type(dt_or_str).__name__}")
 
 
 def _compute_pearson(x_vals: list[float], y_vals: list[float]) -> float | None:
@@ -53,8 +78,35 @@ def run_statistical_screening(
     *,
     copy_snapshot: bool = True,
     _inject_failure: str | None = None,
+    clock: Any = None,
 ) -> Path:
     """Execute deterministic statistical screening experiment and output verified v2 bundle."""
+    # Sampling started_at at function entry
+    # (clock injection parameter is reserved strictly for deterministic testing)
+    if clock is not None:
+        if callable(clock):
+            c_val = clock()
+            if isinstance(c_val, (tuple, list)) and len(c_val) == 2:
+                started_at = _format_utc_timestamp(c_val[0])
+                injected_completed_at = _format_utc_timestamp(c_val[1])
+            else:
+                started_at = _format_utc_timestamp(c_val)
+                injected_completed_at = started_at
+        elif isinstance(clock, (tuple, list)) and len(clock) == 2:
+            started_at = _format_utc_timestamp(clock[0])
+            injected_completed_at = _format_utc_timestamp(clock[1])
+        else:
+            started_at = _format_utc_timestamp(clock)
+            injected_completed_at = started_at
+
+        if v2.time_value(injected_completed_at) < v2.time_value(started_at):
+            raise ValueError(
+                f"Invalid execution timing order: completed_at ({injected_completed_at}) < started_at ({started_at})"
+            )
+    else:
+        started_at = _format_utc_timestamp(datetime.now(timezone.utc))
+        injected_completed_at = None
+
     out_dir = Path(output_dir).resolve()
     snap_p = Path(snapshot_path).resolve()
 
@@ -149,8 +201,6 @@ def run_statistical_screening(
     run_id = f"run-screening-{uuid4().hex[:16]}"
     manifest_id = f"manifest-{run_id}"
     evidence_id = f"evidence-{run_id}"
-    started_at = "2026-09-19T00:00:00.000000Z"
-    completed_at = "2026-09-19T00:00:01.000000Z"
 
     # Determine execution status
     if _inject_failure is not None:
@@ -204,7 +254,28 @@ def run_statistical_screening(
 
     # 4. Generate payloads according to status
     # dataset_metadata
-    time_range = spec_req.get("time_range", {"start": started_at, "end": completed_at})
+    timestamps = [row.get("timestamp") for row in reader if row.get("timestamp")]
+    default_time_range = (
+        {"start": min(timestamps), "end": max(timestamps)}
+        if timestamps
+        else {"start": started_at, "end": started_at}
+    )
+    time_range = spec_req.get("time_range") or task_req.get("time_range") or default_time_range
+
+    # Caller may supply explicit limitations via spec/task parameters.
+    # The Runner records this as an explicit caller-declared statement;
+    # the Runner performs no external verification of real-world veracity.
+    raw_limitations = (
+        (spec.get("parameters", {}).get("limitations") if isinstance(spec.get("parameters"), dict) else None)
+        or (task.get("parameters", {}).get("limitations") if isinstance(task.get("parameters"), dict) else None)
+    )
+    if isinstance(raw_limitations, list):
+        dataset_limitations = "; ".join(str(x) for x in raw_limitations)
+    elif isinstance(raw_limitations, str) and raw_limitations.strip():
+        dataset_limitations = raw_limitations.strip()
+    else:
+        dataset_limitations = "Synthetic screening test data."
+
     dataset_metadata = {
         "profile": ssd.PROFILE_NAME,
         "snapshot_locator": "materials/snapshot.csv" if copy_snapshot else spec_req["snapshot_locator"],
@@ -214,7 +285,7 @@ def run_statistical_screening(
         "time_range": time_range,
         "sample_count": len(reader),
         "provenance": spec_req["provenance"],
-        "limitations": "Synthetic screening test data.",
+        "limitations": dataset_limitations,
     }
     (out_dir / "dataset_metadata.json").write_bytes(v2.canonical(dataset_metadata).encode("utf-8"))
 
@@ -602,6 +673,16 @@ def run_statistical_screening(
                 "version": "rev.1",
             },
         })
+
+    # Timing resolution for completed_at: sampled right before final run assembly
+    if injected_completed_at is not None:
+        completed_at = injected_completed_at
+    else:
+        completed_at = _format_utc_timestamp(datetime.now(timezone.utc))
+        if v2.time_value(completed_at) < v2.time_value(started_at):
+            raise ValueError(
+                f"Invalid execution timing order: completed_at ({completed_at}) < started_at ({started_at})"
+            )
 
     # Run record
     run_record = {
