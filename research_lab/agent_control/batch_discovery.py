@@ -882,20 +882,44 @@ class DiscoveryBatchOrchestrator:
         for prev_att in range(1, slot.attempt):
             prev_key = (session.session_id, slot.slot_id, prev_att)
             prev_res = self._execution_cache.get(prev_key)
-            if prev_res is not None and (
-                prev_res.engineering_status == SlotEngineeringStatus.PROVIDER_UNCERTAIN.value
-                or prev_res.error_code in ("PROVIDER_UNCERTAIN", "UNKNOWN", "PRIOR_ATTEMPT_UNRESOLVED")
-            ):
+            prev_handle = self._execution_handles.get(prev_key)
+
+            # Determine whether this prior attempt must be checked for termination confirmation
+            needs_check = False
+            if prev_handle is not None:
+                # If an execution handle exists, unless the prior attempt completed successfully,
+                # we MUST confirm the handle has reached a terminal status on the provider.
+                if prev_res is None or prev_res.engineering_status != SlotEngineeringStatus.COMPLETED.value:
+                    needs_check = True
+            elif prev_res is not None:
+                # If no handle was saved, but the cached result indicates an unresolved or uncertain state,
+                # it cannot be confirmed terminal without a handle and must be checked (fail-closed).
+                if (
+                    prev_res.engineering_status == SlotEngineeringStatus.PROVIDER_UNCERTAIN.value
+                    or prev_res.error_code in ("PROVIDER_UNCERTAIN", "UNKNOWN", "PRIOR_ATTEMPT_UNRESOLVED")
+                ):
+                    needs_check = True
+            else:
+                # Neither handle nor cached result exists for this prior attempt.
+                # In a strict fail-closed model, an unrecorded prior attempt must block subsequent attempts.
+                needs_check = True
+
+            if needs_check:
                 is_resolved = False
                 curr_st = "UNKNOWN"
-                # Strictly use actually saved handle, do not fabricate old handle identity
-                prev_handle = self._execution_handles.get(prev_key)
                 if prev_handle is not None:
+                    curr_st = prev_handle.status
+                    if curr_st in ("CANCELLED", "FAILED", "TERMINATED", "REJECTED"):
+                        is_resolved = True
                     try:
-                        prev_prov_name = prev_res.provider or (
-                            prev_handle.route_ref.get("provider")
-                            if isinstance(prev_handle.route_ref, dict)
-                            else None
+                        prev_prov_name = (
+                            (prev_res.provider if prev_res is not None else None)
+                            or (
+                                prev_handle.route_ref.get("provider")
+                                if isinstance(prev_handle.route_ref, dict)
+                                else None
+                            )
+                            or route.provider
                         )
                         prev_prov = (
                             self.provider_lookup(prev_prov_name)
@@ -903,11 +927,15 @@ class DiscoveryBatchOrchestrator:
                             else None
                         )
                         if prev_prov is not None and hasattr(prev_prov, "status"):
-                            curr_st = prev_prov.status(prev_handle)
-                            if curr_st in ("CANCELLED", "FAILED", "TERMINATED", "REJECTED"):
+                            remote_st = prev_prov.status(prev_handle)
+                            curr_st = remote_st
+                            if remote_st in ("CANCELLED", "FAILED", "TERMINATED", "REJECTED"):
                                 is_resolved = True
+                            else:
+                                is_resolved = False
                     except Exception as exc:  # noqa: BLE001
-                        curr_st = f"STATUS_LOOKUP_ERROR: {exc}"
+                        if not is_resolved:
+                            curr_st = f"STATUS_LOOKUP_ERROR: {exc}"
 
                 if not is_resolved:
                     u_res = SlotExecutionResult(
@@ -927,16 +955,21 @@ class DiscoveryBatchOrchestrator:
                         memory_view_id=session.memory_view_id,
                         memory_view_content_hash=session.memory_view_content_hash,
                         slot_content_hash=slot.slot_content_hash,
+                        is_replayed=False,
                     )
-                    self._execution_cache[cache_key] = u_res
+                    # NOTE: Do NOT store u_res in self._execution_cache[cache_key]!
+                    # Blocking on gate preconditions is a transient evaluation, not an irreversible execution result.
+                    # Once prior job reaches terminal status (e.g. CANCELLED), a subsequent execute_slot call
+                    # can re-evaluate the gate and proceed to submit.
                     return u_res
                 else:
-                    self._execution_cache[prev_key] = dataclasses.replace(
-                        prev_res,
-                        engineering_status=SlotEngineeringStatus.AGENT_EXECUTION_FAILED.value,
-                        error_code=f"CONFIRMED_{curr_st}",
-                        error_message=f"Prior attempt confirmed terminated with status '{curr_st}'",
-                    )
+                    if prev_res is not None:
+                        self._execution_cache[prev_key] = dataclasses.replace(
+                            prev_res,
+                            engineering_status=SlotEngineeringStatus.AGENT_EXECUTION_FAILED.value,
+                            error_code=f"CONFIRMED_{curr_st}",
+                            error_message=f"Prior attempt confirmed terminated with status '{curr_st}'",
+                        )
                     if prev_handle is not None:
                         self._execution_handles[prev_key] = dataclasses.replace(prev_handle, status=curr_st)
 

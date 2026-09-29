@@ -1968,33 +1968,215 @@ def test_pr589_p1_unresolved_prior_attempt_interlock(
         mock_sub.assert_not_called()
         assert res2_blocked.engineering_status == SlotEngineeringStatus.PROVIDER_UNCERTAIN.value
         assert res2_blocked.error_code == "PRIOR_ATTEMPT_UNRESOLVED"
+        assert res2_blocked.is_replayed is False
 
-    # 2. Status lookup error caught failclosed without crashing
-    orchestrator._execution_cache.pop((session.session_id, slot2.slot_id, 2), None)
+    # 2. Status lookup error caught failclosed without crashing (no private cache popping needed)
     with mock.patch.object(test_provider, "status", side_effect=RuntimeError("SimNow status disconnected")):
         res2_error = orchestrator.execute_slot(session=session, slot=slot2, memory_view=view)
         assert res2_error.engineering_status == SlotEngineeringStatus.PROVIDER_UNCERTAIN.value
         assert res2_error.error_code == "PRIOR_ATTEMPT_UNRESOLVED"
         assert "STATUS_LOOKUP_ERROR" in str(res2_error.error_message)
+        assert res2_error.is_replayed is False
 
-    # 3. Missing saved handle does not fabricate identity and remains blocked
-    orchestrator._execution_cache.pop((session.session_id, slot2.slot_id, 2), None)
+    # 3. Missing saved handle does not fabricate identity and remains blocked (no private cache popping needed)
     saved_handle = orchestrator._execution_handles.pop((session.session_id, slot1.slot_id, 1), None)
     res2_no_handle = orchestrator.execute_slot(session=session, slot=slot2, memory_view=view)
     assert res2_no_handle.engineering_status == SlotEngineeringStatus.PROVIDER_UNCERTAIN.value
     assert res2_no_handle.error_code == "PRIOR_ATTEMPT_UNRESOLVED"
+    assert res2_no_handle.is_replayed is False
 
     # Restore handle and confirm prior job is terminated (e.g. CANCELLED)
     if saved_handle:
         orchestrator._execution_handles[(session.session_id, slot1.slot_id, 1)] = saved_handle
     test_provider.set_job_status(res1.provider_job_ref, "CANCELLED")
 
-    # 4. Attempt 2 executed after confirmation -> ALLOWED to submit and succeeds
-    orchestrator._execution_cache.pop((session.session_id, slot2.slot_id, 2), None)
+    # 4. Attempt 2 executed after confirmation -> ALLOWED to submit and succeeds via public API
     res2_allowed = orchestrator.execute_slot(session=session, slot=slot2, memory_view=view)
     assert res2_allowed.engineering_status == SlotEngineeringStatus.COMPLETED.value
     assert res2_allowed.attempt == 2
     assert res2_allowed.candidate is not None
+    assert res2_allowed.is_replayed is False
+
+    # 5. Attempt 2 replayed -> returns cached result with zero additional submits
+    with mock.patch.object(test_provider, "submit") as mock_sub_replay:
+        res2_replayed = orchestrator.execute_slot(session=session, slot=slot2, memory_view=view)
+        mock_sub_replay.assert_not_called()
+        assert res2_replayed.is_replayed is True
+        assert res2_replayed.engineering_status == SlotEngineeringStatus.COMPLETED.value
+        assert res2_replayed.candidate == res2_allowed.candidate
+
+
+def test_pr589_p1_interlock_result_exception_keeps_job_unresolved_until_confirmed(
+    test_provider: ContractTestProvider,
+    provider_registry: ProviderRegistry,
+    authorized_scope: AgentPermissionScope,
+    routing_policy: RoutingPolicy,
+    discovery_context: dict[str, Any],
+) -> None:
+    """PR #589 P1 (4069246809): Result retrieval exception must NOT be treated as confirmed terminal.
+
+    Attempt 2 remains blocked while provider job is UNCERTAIN, and cleanly recovers once CANCELLED/FAILED.
+    Zero private cache manipulation used.
+    """
+    memory: ResearchMemory = discovery_context["memory"]
+    view = _build_test_memory_view(memory, authorized_scope)
+    session = DiscoverySession.create(
+        objective="Result exception unresolved prior attempt test",
+        memory_view=view,
+        authorized_scope=authorized_scope,
+        candidate_budget=1,
+        allowed_universe=("RB",),
+        allowed_frequency="1d",
+        allowed_signal_families=("momentum",),
+        project_binding=STANDARD_PROJECT_BINDING,
+        created_at=CANONICAL_SESSION_TIMESTAMP,
+    )
+    slot1 = plan_candidate_slots(session, view)[0]
+
+    envelope = _build_candidate_envelope(
+        title="Candidate for Result Failure Test",
+        signal_family="momentum",
+        universe="RB2405",
+        frequency="1d",
+    )
+    configure_provider_output(test_provider, json.dumps(envelope))
+
+    orig_submit = test_provider.submit
+
+    def _uncertain_submit(task, route, prep, request_id=None):
+        handle = orig_submit(task, route, prep, request_id=request_id)
+        test_provider.set_job_status(handle.provider_job_ref, TerminalStatus.UNCERTAIN.value)
+        return handle
+
+    orchestrator = DiscoveryBatchOrchestrator(
+        registry=provider_registry,
+        routing_policy=routing_policy,
+    )
+
+    # Attempt 1: submit succeeds (status UNCERTAIN), but result retrieval throws exception
+    with (
+        mock.patch.object(test_provider, "submit", side_effect=_uncertain_submit),
+        mock.patch.object(test_provider, "result", side_effect=RuntimeError("temporary result endpoint failure")),
+    ):
+        res1 = orchestrator.execute_slot(session=session, slot=slot1, memory_view=view)
+        assert res1.engineering_status == SlotEngineeringStatus.AGENT_EXECUTION_FAILED.value
+        assert res1.error_code == "RESULT_RETRIEVAL_FAILED"
+        assert res1.provider_job_ref is not None
+
+    # Verify provider job is still UNCERTAIN
+    saved_h1 = orchestrator._execution_handles[(session.session_id, slot1.slot_id, 1)]
+    assert test_provider.status(saved_h1) == TerminalStatus.UNCERTAIN.value
+
+    # Replan slot to attempt 2
+    slot2 = replan_slot_attempt(slot1, view, attempt=2)
+
+    # 1. Attempt 2 called via public API -> MUST BE BLOCKED before submit because job is still UNCERTAIN
+    with mock.patch.object(test_provider, "submit") as mock_sub:
+        res2_blocked = orchestrator.execute_slot(session=session, slot=slot2, memory_view=view)
+        mock_sub.assert_not_called()
+        assert res2_blocked.engineering_status == SlotEngineeringStatus.PROVIDER_UNCERTAIN.value
+        assert res2_blocked.error_code == "PRIOR_ATTEMPT_UNRESOLVED"
+        assert "remains in unresolved status 'UNCERTAIN'" in res2_blocked.error_message
+        assert res2_blocked.is_replayed is False
+
+    # 2. Confirm prior job is CANCELLED on provider
+    test_provider.set_job_status(res1.provider_job_ref, "CANCELLED")
+
+    # 3. Call Attempt 2 again via public API (no cache popping) -> successfully submits exactly once!
+    res2_allowed = orchestrator.execute_slot(session=session, slot=slot2, memory_view=view)
+    assert res2_allowed.engineering_status == SlotEngineeringStatus.COMPLETED.value
+    assert res2_allowed.attempt == 2
+    assert res2_allowed.candidate is not None
+    assert res2_allowed.is_replayed is False
+
+    # 4. Call Attempt 2 a third time via public API -> replays from cache with zero additional submits
+    with mock.patch.object(test_provider, "submit") as mock_sub_replay:
+        res2_replayed = orchestrator.execute_slot(session=session, slot=slot2, memory_view=view)
+        mock_sub_replay.assert_not_called()
+        assert res2_replayed.is_replayed is True
+        assert res2_replayed.engineering_status == SlotEngineeringStatus.COMPLETED.value
+        assert res2_replayed.candidate == res2_allowed.candidate
+
+
+def test_pr589_p1_interlock_unresolved_to_confirmed_failed_allows_single_submit_and_replay(
+    test_provider: ContractTestProvider,
+    provider_registry: ProviderRegistry,
+    authorized_scope: AgentPermissionScope,
+    routing_policy: RoutingPolicy,
+    discovery_context: dict[str, Any],
+) -> None:
+    """PR #589 P1 (4069246809): Prior attempt unresolved -> blocked -> confirmed FAILED -> single submit -> replay zero submit."""
+    memory: ResearchMemory = discovery_context["memory"]
+    view = _build_test_memory_view(memory, authorized_scope)
+    session = DiscoverySession.create(
+        objective="Confirmed failed unresolved prior attempt test",
+        memory_view=view,
+        authorized_scope=authorized_scope,
+        candidate_budget=1,
+        allowed_universe=("RB",),
+        allowed_frequency="1d",
+        allowed_signal_families=("momentum",),
+        project_binding=STANDARD_PROJECT_BINDING,
+        created_at=CANONICAL_SESSION_TIMESTAMP,
+    )
+    slot1 = plan_candidate_slots(session, view)[0]
+
+    envelope = _build_candidate_envelope(
+        title="Candidate for Confirmed Failed Test",
+        signal_family="momentum",
+        universe="RB2405",
+        frequency="1d",
+    )
+    configure_provider_output(test_provider, json.dumps(envelope))
+
+    orig_submit = test_provider.submit
+    submit_calls = []
+
+    def _tracking_submit(task, route, prep, request_id=None):
+        submit_calls.append((task.task_id, getattr(task, "attempt", 1)))
+        handle = orig_submit(task, route, prep, request_id=request_id)
+        # Attempt 1 initially sets UNCERTAIN
+        if len(submit_calls) == 1:
+            test_provider.set_job_status(handle.provider_job_ref, TerminalStatus.UNCERTAIN.value)
+        return handle
+
+    orchestrator = DiscoveryBatchOrchestrator(
+        registry=provider_registry,
+        routing_policy=routing_policy,
+    )
+
+    with (
+        mock.patch.object(test_provider, "submit", side_effect=_tracking_submit),
+        mock.patch.object(test_provider, "result", side_effect=RuntimeError("temporary result endpoint failure")),
+    ):
+        res1 = orchestrator.execute_slot(session=session, slot=slot1, memory_view=view)
+        assert res1.engineering_status == SlotEngineeringStatus.AGENT_EXECUTION_FAILED.value
+        assert res1.error_code == "RESULT_RETRIEVAL_FAILED"
+        assert len(submit_calls) == 1
+
+    slot2 = replan_slot_attempt(slot1, view, attempt=2)
+
+    with mock.patch.object(test_provider, "submit", side_effect=_tracking_submit):
+        # 1. Attempt 2 blocked while Attempt 1 is UNCERTAIN -> submit_calls remains 1
+        res2_blocked = orchestrator.execute_slot(session=session, slot=slot2, memory_view=view)
+        assert res2_blocked.engineering_status == SlotEngineeringStatus.PROVIDER_UNCERTAIN.value
+        assert res2_blocked.error_code == "PRIOR_ATTEMPT_UNRESOLVED"
+        assert len(submit_calls) == 1
+
+        # 2. Confirm prior job is FAILED on provider
+        test_provider.set_job_status(res1.provider_job_ref, "FAILED")
+
+        # 3. Call Attempt 2 again -> submits once, submit_calls becomes 2
+        res2_success = orchestrator.execute_slot(session=session, slot=slot2, memory_view=view)
+        assert res2_success.engineering_status == SlotEngineeringStatus.COMPLETED.value
+        assert res2_success.attempt == 2
+        assert len(submit_calls) == 2
+
+        # 4. Call Attempt 2 again -> replayed from cache, submit_calls remains 2
+        res2_replay = orchestrator.execute_slot(session=session, slot=slot2, memory_view=view)
+        assert res2_replay.is_replayed is True
+        assert res2_replay.engineering_status == SlotEngineeringStatus.COMPLETED.value
+        assert len(submit_calls) == 2
 
 
 def test_pr589_p1_conservative_memory_attribution_punctuation_inconclusive(
