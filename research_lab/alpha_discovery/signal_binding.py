@@ -277,10 +277,12 @@ def parse_and_verify_signal_spec(
         )
 
     expected_dir = _clean_str(validated_data.get("expected_direction")).lower()
-    if expected_dir not in ("positive", "negative"):
+    if expected_dir != "positive":
         raise SignalBindingError(
-            "INVALID_DIRECTION",
-            f"Expected direction '{expected_dir}' must be 'positive' or 'negative'",
+            "UNSUPPORTED_EXPECTED_DIRECTION",
+            f"Expected direction '{expected_dir}' is unsupported; screening runner evaluates positive concordance, "
+            "so all hypotheses must formulate signals with expected_direction='positive' "
+            "(use explicit negation '-log(...)' or inverted ratio 'log(prev/cur)' for reversal)",
         )
 
     sig_def = _clean_str(validated_data.get("signal_definition"))
@@ -296,11 +298,6 @@ def parse_and_verify_signal_spec(
                 f"Signal definition '{sig_def}' is not a supported momentum log return ratio",
             )
         lookback_k = int(m_match.group(1))
-        if expected_dir != "positive":
-            raise SignalBindingError(
-                "DIRECTION_MISMATCH",
-                f"Momentum log settlement ratio requires expected_direction='positive', got '{expected_dir}'",
-            )
         formula_id = f"log_settlement_momentum_k{lookback_k}"
         is_negated = False
 
@@ -309,36 +306,24 @@ def parse_and_verify_signal_spec(
         neg_match = _PAT_REVERSAL_NEG.match(sig_def)
         # Check Option B: inverted ratio: log(settlement[t-k] / settlement[t]) with expected_direction='positive'
         inv_match = _PAT_REVERSAL_INVERTED.match(sig_def)
-        # Check Option C: standard ratio: log(settlement[t] / settlement[t-k]) with expected_direction='negative'
+        # Check if caller attempted un-negated ratio with expected_direction='negative' or 'positive'
         std_match = _PAT_MOMENTUM.match(sig_def) or _PAT_MOMENTUM_FUNC.match(sig_def)
 
         if neg_match:
             lookback_k = int(neg_match.group(1))
-            if expected_dir != "positive":
-                raise SignalBindingError(
-                    "DIRECTION_MISMATCH",
-                    f"Explicitly negated reversal '-log(...)' requires expected_direction='positive', got '{expected_dir}'",
-                )
             is_negated = True
             formula_id = f"log_settlement_reversal_neg_k{lookback_k}"
         elif inv_match:
             lookback_k = int(inv_match.group(1))
-            if expected_dir != "positive":
-                raise SignalBindingError(
-                    "DIRECTION_MISMATCH",
-                    f"Inverted ratio reversal 'log(prev/cur)' requires expected_direction='positive', got '{expected_dir}'",
-                )
             is_negated = True
             formula_id = f"log_settlement_reversal_inv_k{lookback_k}"
         elif std_match:
-            lookback_k = int(std_match.group(1))
-            if expected_dir != "negative":
-                raise SignalBindingError(
-                    "DIRECTION_MISMATCH",
-                    f"Standard ratio reversal 'log(cur/prev)' requires expected_direction='negative', got '{expected_dir}'",
-                )
-            is_negated = False
-            formula_id = f"log_settlement_reversal_dir_neg_k{lookback_k}"
+            raise SignalBindingError(
+                "UNSUPPORTED_REVERSAL_REPRESENTATION",
+                f"Reversal definition '{sig_def}' lacks negation or inverted ratio; "
+                "Runner direction_consistency requires same-sign concordance with target; "
+                "formulate reversal as '-log(cur/prev)' or 'log(prev/cur)' with expected_direction='positive'",
+            )
         else:
             raise SignalBindingError(
                 "UNSUPPORTED_FORMULA",
@@ -451,6 +436,20 @@ def derive_signal_snapshot(
             f"Source days count ({len(source_days)}) < required minimum ({spec.min_history_required}) for k={spec.lookback_k}",
         )
 
+    REQUIRED_SOURCE_DAY_FIELDS = ("day", "first_seen_at", "committed_at", "raw_sha256", "settlement")
+    for idx, d in enumerate(source_days):
+        if not isinstance(d, dict):
+            raise SignalBindingError(
+                "MALFORMED_PROVENANCE_SOURCE_DAY",
+                f"source_day[{idx}] must be a dict, got {type(d).__name__}",
+            )
+        for field in REQUIRED_SOURCE_DAY_FIELDS:
+            if field not in d or d[field] is None:
+                raise SignalBindingError(
+                    "MALFORMED_PROVENANCE_SOURCE_DAY",
+                    f"source_day[{idx}] missing required field '{field}': {d}",
+                )
+
     # Ensure source days are sorted strictly by trading day
     sorted_days = sorted(source_days, key=lambda d: str(d["day"]))
     # Verify no duplicate trading days and validate trading day format
@@ -488,21 +487,56 @@ def derive_signal_snapshot(
                 f"Trading days must strictly increase: {d_prev} < {d_cur} < {d_next} < {d_end}",
             )
 
-        t_avail = str(cur["first_seen_at"])
-        t_as_of = str(cur["committed_at"])
-        t_tgt_start = str(next_day["first_seen_at"])
-        t_tgt_end = str(end["first_seen_at"])
+        # Target timing must come from verifiable market/settlement effective time.
+        # Ingestion first_seen_at / committed_at cannot masquerade as market target start/end time.
+        tgt_market_start = next_day.get("market_effective_time") or next_day.get("settlement_effective_time")
+        tgt_market_end = end.get("market_effective_time") or end.get("settlement_effective_time")
+        if not tgt_market_start or not tgt_market_end:
+            raise SignalBindingError(
+                "UNVERIFIABLE_TARGET_MARKET_TIME",
+                f"Day {next_day['day']} / {end['day']}: source provenance lacks verifiable market or settlement effective time; "
+                "using ingestion first_seen_at as target_start_time is strictly forbidden",
+            )
 
-        dt_avail = parse_strict_utc_iso8601(t_avail, "cur.first_seen_at")
+        t_as_of = str(cur["committed_at"])
         dt_as_of = parse_strict_utc_iso8601(t_as_of, "cur.committed_at")
-        dt_tgt_start = parse_strict_utc_iso8601(t_tgt_start, "next_day.first_seen_at")
-        dt_tgt_end = parse_strict_utc_iso8601(t_tgt_end, "end.first_seen_at")
+
+        # Lagged feature availability and commit check across all actual inputs in window [i - k, i]
+        input_avail_times: list[datetime] = []
+        for j in range(i - k, i + 1):
+            in_d = sorted_days[j]
+            dt_in_avail = parse_strict_utc_iso8601(in_d["first_seen_at"], f"day[{in_d['day']}].first_seen_at")
+            dt_in_commit = parse_strict_utc_iso8601(in_d["committed_at"], f"day[{in_d['day']}].committed_at")
+            if dt_in_avail > dt_as_of:
+                if in_d["day"] == cur["day"]:
+                    raise SignalBindingError(
+                        "TEMPORAL_ORDER_VIOLATION",
+                        f"Day {cur['day']}: feature_availability_time ({dt_in_avail.isoformat()}) > as_of_time ({dt_as_of.isoformat()})",
+                    )
+                raise SignalBindingError(
+                    "INPUT_NOT_AVAILABLE_AT_AS_OF",
+                    f"Day {cur['day']}: input day {in_d['day']} first_seen_at ({dt_in_avail.isoformat()}) > as_of_time ({dt_as_of.isoformat()})",
+                )
+            if dt_in_commit > dt_as_of:
+                raise SignalBindingError(
+                    "INPUT_NOT_COMMITTED_AT_AS_OF",
+                    f"Day {cur['day']}: input day {in_d['day']} committed_at ({dt_in_commit.isoformat()}) > as_of_time ({dt_as_of.isoformat()})",
+                )
+            input_avail_times.append(dt_in_avail)
+
+        dt_max_avail = max(input_avail_times)
+        t_avail = dt_max_avail.isoformat().replace("+00:00", "Z")
+
+        t_tgt_start = str(tgt_market_start)
+        t_tgt_end = str(tgt_market_end)
+        dt_tgt_start = parse_strict_utc_iso8601(t_tgt_start, "next_day.market_effective_time")
+        dt_tgt_end = parse_strict_utc_iso8601(t_tgt_end, "end.market_effective_time")
 
         # Temporal checks using real datetime objects
-        if dt_avail > dt_as_of:
+        if dt_max_avail > dt_as_of:
             raise SignalBindingError(
                 "TEMPORAL_ORDER_VIOLATION",
-                f"Day {cur['day']}: feature_availability_time ({dt_avail.isoformat()}) > as_of_time ({dt_as_of.isoformat()})",
+                f"Day {cur['day']}: feature_availability_time ({dt_max_avail.isoformat()}) > as_of_time ({dt_as_of.isoformat()})",
             )
         if dt_as_of >= dt_tgt_start:
             raise SignalBindingError(

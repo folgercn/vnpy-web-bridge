@@ -8,7 +8,9 @@
     "provenance_sha256": "e3d6b6b74d8b6617455bcccf7d6eeed3e4f5fbfe8eca1216f40ad03006725354",
     "original_32_row_csv_sha256": "4361c48f79345855457d633b962a3ea6975171242a770518c32d89945942624d",
     "original_32_row_csv_bytes": 19489,
-    "time_semantics": "as_of=t custody commit; feature first_seen_at <= as_of; target starts at t+1 first_seen_at; historical availability is not claimed earlier than recorded first_seen_at",
+    "time_semantics": "as_of=t custody commit; feature first_seen_at <= as_of; target timing in real M2 custody lacks verified market effective time; warehouse ingestion first_seen_at cannot masquerade as market target start time",
+    "stage2_pit_status": "BLOCKED",
+    "stage2_pit_block_reason": "UNVERIFIABLE_TARGET_MARKET_TIME: Real M2 warehouse custody provenance records ingestion timestamps (first_seen_at, committed_at) but lacks verifiable market or settlement effective times for t+1/t+2. Using ingestion first_seen_at as market target_start_time is strictly forbidden fail-closed. Real 2x10 slots cannot claim verified market PIT pass.",
     "limitations": [
       "Source signatures not cryptographically verified by exporter",
       "Only 19 source days; 14-16 derived rows per candidate; overlapping labels and cross-symbol dependence",
@@ -18,7 +20,8 @@
   "objective_sha256": "00454c65a766a540dc9a188af154b7c85e601f552f4a80716b8a1c8450d3e4e4",
   "objective_identical": true,
   "round_1": {
-    "executed_at": "2026-09-29T10:37:35.869737Z",
+    "executed_at": "2026-09-29T10:23:57.915302Z",
+    "resumed_at": "2026-09-29T10:37:35.869737Z",
     "completed_at": "2026-09-29T10:37:35.894964Z",
     "funnel": {
       "admitted": 10,

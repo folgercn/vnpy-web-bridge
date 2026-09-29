@@ -6,7 +6,7 @@
 
 - 来源：M2 Research Warehouse 已提交的 SHFE 日结算数据；精确合约 RB2701、HC2701，19 个源交易日（2026-08-31 至 2026-09-24），频率 1d。私有来源记录 `.git/issue502-stage2-real-data/snapshot-provenance.json` 的 SHA-256 为 `e3d6b6b74d8b6617455bcccf7d6eeed3e4f5fbfe8eca1216f40ad03006725354`；原 32 行快照 SHA-256 为 `4361c48f79345855457d633b962a3ea6975171242a770518c32d89945942624d`，19,489 字节。
 - 仅接纳同合约结算价动量 `log(settlement[t] / settlement[t-k])` 与反转 `-log(settlement[t] / settlement[t-k])`，`k=1..3`；本轮十槽使用下表的十个定义。目标固定为同合约 `log(settlement[t+2] / settlement[t+1])`。派生样本按 k 分别为 16、15、14 行；未补造 warm-up、缺值或合约滚动行。
-- 每行取 t 日源数据的 `first_seen_at` 作为特征可得时间，t 日 `committed_at` 作为 as-of，t+1 日 `first_seen_at` 作为目标起始时间。实际 UTC 执行晚于源截止只是附加检查；逐行 `feature_availability <= as_of < target_start` 和交易日顺序均在计算后、进入 Engine 前验证。独立审查还从来源结算价重算了两轮各 152 行的特征与目标值。来源 exporter 未对原始签名做密码学验证，不能据此主张更早的历史可得性。
+- 时间与 PIT 状态（纠正为 **BLOCKED**）：经独立核验，M2 Research Warehouse 原始提交记录仅包含入库摄取时间戳（`first_seen_at`、`committed_at`），缺乏可验证的 t+1/t+2 市场交易或结算生效时间戳。按审查契约，管道摄取时间不得冒充市场时间；在来源未提供可验证市场生效时间前，真实数据的 Stage 2 PIT 验证严格保持 **BLOCKED**（fail-closed，不杜撰市场时间，不宣称既有 2×10 PIT 通过）。既有 2×10 槽位的原始产物与 Memory 影响矩阵完整保留，供复核受控 Memory 驱动证据需求变化，但受影响范围明确为：不得将其主张为已通过市场时间因果验证的实盘信号。
 - 候选科学字段中的公式、参数、方向、目标窗口须通过确定性解析；不支持定义、错绑、无来源或 PIT 失败在 Critic/Memory 前阻断。派生 CSV 的 SHA、字节数、样本数与源摘要逐槽记录。
 
 ## 两轮漏斗与逐槽位结果

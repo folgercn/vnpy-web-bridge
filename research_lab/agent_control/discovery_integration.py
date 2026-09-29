@@ -298,6 +298,9 @@ class DiscoveryIntegrationOrchestrator:
             if isinstance(candidate, AlphaGenerationCandidate)
             else candidate
         )
+        if isinstance(hyp_obj, dict):
+            hyp_obj = AlphaHypothesis.model_validate(hyp_obj)
+
         # Deep defensive copy to guarantee candidate immutability and exact hash profile
         dump_with = hyp_obj.model_dump()
         if compute_hypothesis_content_hash(dump_with) == hyp_obj.hypothesis_content_hash:
@@ -399,8 +402,10 @@ class DiscoveryIntegrationOrchestrator:
                 )
                 effective_snapshot_path = derived_res.path
                 effective_dataset_binding = derived_res.dataset_binding
-            except (SignalBindingError, ValueError) as exc:
+            except (SignalBindingError, ValueError, KeyError) as exc:
                 err_code = getattr(exc, "reason", "BINDING_FAILED")
+                if isinstance(exc, KeyError):
+                    err_code = "MALFORMED_PROVENANCE_KEY_ERROR"
                 res = DiscoveryIntegrationResult(
                     engineering_status=EngineeringStatus.ADMISSION_FAILED.value,
                     scientific_decision=None,

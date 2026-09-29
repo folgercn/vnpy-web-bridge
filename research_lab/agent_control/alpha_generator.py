@@ -453,7 +453,7 @@ def build_alpha_generation_prompt(
         "duplicate_awareness": "non-empty string",
         "hypothesis": {
             "economic_rationale": "non-empty string without result claims",
-            "expected_direction": "positive or negative",
+            "expected_direction": "positive",
             "falsification_conditions": ["one or more non-empty strings"],
             "frequency": "non-empty string",
             "holding_horizon": "non-empty string",
@@ -525,7 +525,7 @@ def build_alpha_generation_prompt(
             "4. Allowed target: strictly 'log(settlement[t+2] / settlement[t+1])' (1-day forward execution return entered at day t+1 settlement).",
             "5. Supported mathematical formulas (6 exact canonical formulas for k in {1, 2, 3}):",
             "   - Momentum (expected_direction='positive'): 'log(settlement[t] / settlement[t-1])', 'log(settlement[t] / settlement[t-2])', 'log(settlement[t] / settlement[t-3])'",
-            "   - Reversal (expected_direction='positive'): '-log(settlement[t] / settlement[t-1])', '-log(settlement[t] / settlement[t-2])', '-log(settlement[t] / settlement[t-3])' (or positive ratio with expected_direction='negative')",
+            "   - Reversal (expected_direction='positive'): '-log(settlement[t] / settlement[t-1])', '-log(settlement[t] / settlement[t-2])', '-log(settlement[t] / settlement[t-3])' (or inverted ratio 'log(settlement[t-k] / settlement[t])' with expected_direction='positive'; negative expected_direction is unsupported)",
             "6. Strictly unsupported: multi-column features (volume, open_interest, high, low, open, close, ATR, vwap, spread), intraday bars/OHLCV, custom rolling indicators, or unlisted formulas are strictly rejected.",
             "------------------------------------------------",
         ])

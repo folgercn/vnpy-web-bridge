@@ -960,10 +960,37 @@ def main() -> None:
         flush=True,
     )
 
+    if args.resume:
+        orig_executed_at = None
+        if (r1_dir / "session_round_1.json").exists():
+            try:
+                s1_data = json.loads((r1_dir / "session_round_1.json").read_text(encoding="utf-8"))
+                orig_executed_at = s1_data.get("created_at")
+            except Exception:
+                pass
+        if not orig_executed_at and (r1_dir / "batch_result_round_1.json").exists():
+            try:
+                b1_data = json.loads((r1_dir / "batch_result_round_1.json").read_text(encoding="utf-8"))
+                orig_executed_at = b1_data.get("created_at")
+            except Exception:
+                pass
+        if not orig_executed_at and (r1_dir / "ROUND1_FULL_EVIDENCE.json").exists():
+            try:
+                e1_data = json.loads((r1_dir / "ROUND1_FULL_EVIDENCE.json").read_text(encoding="utf-8"))
+                orig_executed_at = e1_data.get("executed_at")
+            except Exception:
+                pass
+        executed_at_val = orig_executed_at or "unknown"
+        resumed_at_val = t_round1
+    else:
+        executed_at_val = t_round1
+        resumed_at_val = None
+
     full_evidence = {
         "run_id": run_id,
         "round": 1,
-        "executed_at": t_round1,
+        "executed_at": executed_at_val,
+        "resumed_at": resumed_at_val,
         "completed_at": t_after_r1,
         "objective": objective,
         "objective_sha256": obj_sha,

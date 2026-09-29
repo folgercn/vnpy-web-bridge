@@ -1059,11 +1059,38 @@ def main() -> None:
         )
     print(f"  -> Verified R1 SQLite store remained 100% immutable (SHA: {r1_sqlite_sha_before[:16]}...)", flush=True)
 
+    if args.resume:
+        orig_executed_at = None
+        if (r2_dir / "session_round_2.json").exists():
+            try:
+                s2_data = json.loads((r2_dir / "session_round_2.json").read_text(encoding="utf-8"))
+                orig_executed_at = s2_data.get("created_at")
+            except Exception:
+                pass
+        if not orig_executed_at and (r2_dir / "batch_result_round_2.json").exists():
+            try:
+                b2_data = json.loads((r2_dir / "batch_result_round_2.json").read_text(encoding="utf-8"))
+                orig_executed_at = b2_data.get("created_at")
+            except Exception:
+                pass
+        if not orig_executed_at and (r2_dir / "ROUND2_FULL_EVIDENCE.json").exists():
+            try:
+                e2_data = json.loads((r2_dir / "ROUND2_FULL_EVIDENCE.json").read_text(encoding="utf-8"))
+                orig_executed_at = e2_data.get("executed_at")
+            except Exception:
+                pass
+        executed_at_val = orig_executed_at or "unknown"
+        resumed_at_val = t_round2
+    else:
+        executed_at_val = t_round2
+        resumed_at_val = None
+
     # Assemble Full Evidence
     full_evidence = {
         "run_id": run_id,
         "round": 2,
-        "executed_at": t_round2,
+        "executed_at": executed_at_val,
+        "resumed_at": resumed_at_val,
         "completed_at": t_after_r2,
         "objective": objective,
         "objective_sha256": obj_sha,
