@@ -2179,6 +2179,176 @@ def test_pr589_p1_interlock_unresolved_to_confirmed_failed_allows_single_submit_
         assert len(submit_calls) == 2
 
 
+def test_pr589_p2_interlock_completed_with_parse_failed_allows_next_attempt_and_replays(
+    test_provider: ContractTestProvider,
+    provider_registry: ProviderRegistry,
+    authorized_scope: AgentPermissionScope,
+    routing_policy: RoutingPolicy,
+    discovery_context: dict[str, Any],
+) -> None:
+    """PR #589 P2 (4129168693): Prior job COMPLETED on provider with PARSE_FAILED candidate;
+
+    allows explicit next attempt, preserves original failure record, and replays idempotently with zero private cache popping.
+    """
+    memory: ResearchMemory = discovery_context["memory"]
+    view = _build_test_memory_view(memory, authorized_scope)
+    session = DiscoverySession.create(
+        objective="Completed job parse failed allows next attempt test",
+        memory_view=view,
+        authorized_scope=authorized_scope,
+        candidate_budget=1,
+        allowed_universe=("RB",),
+        allowed_frequency="1d",
+        allowed_signal_families=("momentum",),
+        project_binding=STANDARD_PROJECT_BINDING,
+        created_at=CANONICAL_SESSION_TIMESTAMP,
+    )
+    slot1 = plan_candidate_slots(session, view)[0]
+
+    # Attempt 1: output is invalid JSON -> PARSE_FAILED
+    configure_provider_output(test_provider, "invalid-json-candidate-output")
+
+    orig_submit = test_provider.submit
+    submit_calls = []
+
+    def _tracking_submit(task, route, prep, request_id=None):
+        submit_calls.append(task.task_id)
+        return orig_submit(task, route, prep, request_id=request_id)
+
+    orchestrator = DiscoveryBatchOrchestrator(
+        registry=provider_registry,
+        routing_policy=routing_policy,
+    )
+
+    with mock.patch.object(test_provider, "submit", side_effect=_tracking_submit):
+        # 1. Attempt 1 executed -> ends in PARSE_FAILED, provider job status is COMPLETED
+        res1 = orchestrator.execute_slot(session=session, slot=slot1, memory_view=view)
+        assert res1.engineering_status == SlotEngineeringStatus.PARSE_FAILED.value
+        assert res1.error_code == "STRICT_PARSE_FAILED"
+        assert len(submit_calls) == 1
+
+        saved_h1 = orchestrator._execution_handles[(session.session_id, slot1.slot_id, 1)]
+        assert test_provider.status(saved_h1) == "COMPLETED"
+
+        # Configure valid candidate output for Attempt 2
+        envelope_valid = _build_candidate_envelope(
+            title="Candidate for Parse Failed Recovery",
+            signal_family="momentum",
+            universe="RB2405",
+            frequency="1d",
+        )
+        configure_provider_output(test_provider, json.dumps(envelope_valid))
+
+        slot2 = replan_slot_attempt(slot1, view, attempt=2)
+
+        # 2. Attempt 2 executed via public API -> MUST BE ALLOWED to submit and succeeds
+        res2 = orchestrator.execute_slot(session=session, slot=slot2, memory_view=view)
+        assert res2.engineering_status == SlotEngineeringStatus.COMPLETED.value
+        assert res2.attempt == 2
+        assert res2.candidate is not None
+        assert res2.is_replayed is False
+        assert len(submit_calls) == 2
+
+        # Verify Attempt 1 record is preserved (not overwritten to AGENT_EXECUTION_FAILED)
+        cached_res1 = orchestrator._execution_cache[(session.session_id, slot1.slot_id, 1)]
+        assert cached_res1.engineering_status == SlotEngineeringStatus.PARSE_FAILED.value
+        assert cached_res1.error_code == "STRICT_PARSE_FAILED"
+
+        # 3. Attempt 2 replayed via public API -> returns cached result with zero additional submits
+        res2_replay = orchestrator.execute_slot(session=session, slot=slot2, memory_view=view)
+        assert res2_replay.is_replayed is True
+        assert res2_replay.engineering_status == SlotEngineeringStatus.COMPLETED.value
+        assert len(submit_calls) == 2
+
+
+def test_pr589_p2_interlock_completed_with_scope_mismatch_allows_next_attempt_and_replays(
+    test_provider: ContractTestProvider,
+    provider_registry: ProviderRegistry,
+    authorized_scope: AgentPermissionScope,
+    routing_policy: RoutingPolicy,
+    discovery_context: dict[str, Any],
+) -> None:
+    """PR #589 P2 (4129168693): Prior job COMPLETED on provider with SCOPE_MISMATCH candidate;
+
+    allows explicit next attempt, preserves original failure record, and replays idempotently with zero private cache popping.
+    """
+    memory: ResearchMemory = discovery_context["memory"]
+    view = _build_test_memory_view(memory, authorized_scope)
+    session = DiscoverySession.create(
+        objective="Completed job scope mismatch allows next attempt test",
+        memory_view=view,
+        authorized_scope=authorized_scope,
+        candidate_budget=1,
+        allowed_universe=("RB",),
+        allowed_frequency="1d",
+        allowed_signal_families=("momentum",),
+        project_binding=STANDARD_PROJECT_BINDING,
+        created_at=CANONICAL_SESSION_TIMESTAMP,
+    )
+    slot1 = plan_candidate_slots(session, view)[0]
+
+    # Attempt 1: output is AAPL which is outside allowed universe ("RB") -> SCOPE_MISMATCH
+    envelope_aapl = _build_candidate_envelope(
+        title="Candidate AAPL Mismatch",
+        signal_family="momentum",
+        universe="AAPL",
+        frequency="1d",
+    )
+    configure_provider_output(test_provider, json.dumps(envelope_aapl))
+
+    orig_submit = test_provider.submit
+    submit_calls = []
+
+    def _tracking_submit(task, route, prep, request_id=None):
+        submit_calls.append(task.task_id)
+        return orig_submit(task, route, prep, request_id=request_id)
+
+    orchestrator = DiscoveryBatchOrchestrator(
+        registry=provider_registry,
+        routing_policy=routing_policy,
+    )
+
+    with mock.patch.object(test_provider, "submit", side_effect=_tracking_submit):
+        # 1. Attempt 1 executed -> ends in SCOPE_MISMATCH, provider job status is COMPLETED
+        res1 = orchestrator.execute_slot(session=session, slot=slot1, memory_view=view)
+        assert res1.engineering_status == SlotEngineeringStatus.SCOPE_MISMATCH.value
+        assert res1.error_code == "SCOPE_MISMATCH"
+        assert len(submit_calls) == 1
+
+        saved_h1 = orchestrator._execution_handles[(session.session_id, slot1.slot_id, 1)]
+        assert test_provider.status(saved_h1) == "COMPLETED"
+
+        # Configure valid RB candidate output for Attempt 2
+        envelope_rb = _build_candidate_envelope(
+            title="Candidate RB2405 Valid",
+            signal_family="momentum",
+            universe="RB2405",
+            frequency="1d",
+        )
+        configure_provider_output(test_provider, json.dumps(envelope_rb))
+
+        slot2 = replan_slot_attempt(slot1, view, attempt=2)
+
+        # 2. Attempt 2 executed via public API -> MUST BE ALLOWED to submit and succeeds
+        res2 = orchestrator.execute_slot(session=session, slot=slot2, memory_view=view)
+        assert res2.engineering_status == SlotEngineeringStatus.COMPLETED.value
+        assert res2.attempt == 2
+        assert res2.candidate is not None
+        assert res2.is_replayed is False
+        assert len(submit_calls) == 2
+
+        # Verify Attempt 1 record is preserved (not overwritten to AGENT_EXECUTION_FAILED)
+        cached_res1 = orchestrator._execution_cache[(session.session_id, slot1.slot_id, 1)]
+        assert cached_res1.engineering_status == SlotEngineeringStatus.SCOPE_MISMATCH.value
+        assert cached_res1.error_code == "SCOPE_MISMATCH"
+
+        # 3. Attempt 2 replayed via public API -> returns cached result with zero additional submits
+        res2_replay = orchestrator.execute_slot(session=session, slot=slot2, memory_view=view)
+        assert res2_replay.is_replayed is True
+        assert res2_replay.engineering_status == SlotEngineeringStatus.COMPLETED.value
+        assert len(submit_calls) == 2
+
+
 def test_pr589_p1_conservative_memory_attribution_punctuation_inconclusive(
     test_provider: ContractTestProvider,
     provider_registry: ProviderRegistry,

@@ -909,8 +909,6 @@ class DiscoveryBatchOrchestrator:
                 curr_st = "UNKNOWN"
                 if prev_handle is not None:
                     curr_st = prev_handle.status
-                    if curr_st in ("CANCELLED", "FAILED", "TERMINATED", "REJECTED"):
-                        is_resolved = True
                     try:
                         prev_prov_name = (
                             (prev_res.provider if prev_res is not None else None)
@@ -931,11 +929,25 @@ class DiscoveryBatchOrchestrator:
                             curr_st = remote_st
                             if remote_st in ("CANCELLED", "FAILED", "TERMINATED", "REJECTED"):
                                 is_resolved = True
+                            elif remote_st == "COMPLETED" and prev_res is not None and prev_res.engineering_status in (
+                                SlotEngineeringStatus.PARSE_FAILED.value,
+                                SlotEngineeringStatus.SCOPE_MISMATCH.value,
+                                SlotEngineeringStatus.ADMISSION_FAILED.value,
+                            ):
+                                is_resolved = True
                             else:
                                 is_resolved = False
+                        elif curr_st in ("CANCELLED", "FAILED", "TERMINATED", "REJECTED"):
+                            is_resolved = True
+                        elif curr_st == "COMPLETED" and prev_res is not None and prev_res.engineering_status in (
+                            SlotEngineeringStatus.PARSE_FAILED.value,
+                            SlotEngineeringStatus.SCOPE_MISMATCH.value,
+                            SlotEngineeringStatus.ADMISSION_FAILED.value,
+                        ):
+                            is_resolved = True
                     except Exception as exc:  # noqa: BLE001
-                        if not is_resolved:
-                            curr_st = f"STATUS_LOOKUP_ERROR: {exc}"
+                        is_resolved = False
+                        curr_st = f"STATUS_LOOKUP_ERROR: {exc}"
 
                 if not is_resolved:
                     u_res = SlotExecutionResult(
@@ -963,14 +975,25 @@ class DiscoveryBatchOrchestrator:
                     # can re-evaluate the gate and proceed to submit.
                     return u_res
                 else:
-                    if prev_res is not None:
+                    # If prior attempt was in an uncertain/unresolved state and now confirmed terminal (e.g. CANCELLED/FAILED),
+                    # update its cached record to confirmed failure.
+                    # CRITICAL: If prior attempt already recorded a definitive outcome (such as PARSE_FAILED, SCOPE_MISMATCH,
+                    # ADMISSION_FAILED), PRESERVE the original failure record!
+                    if (
+                        prev_res is not None
+                        and prev_res.engineering_status in (
+                            SlotEngineeringStatus.PROVIDER_UNCERTAIN.value,
+                            SlotEngineeringStatus.AGENT_EXECUTION_FAILED.value,
+                        )
+                        and curr_st in ("CANCELLED", "FAILED", "TERMINATED", "REJECTED")
+                    ):
                         self._execution_cache[prev_key] = dataclasses.replace(
                             prev_res,
                             engineering_status=SlotEngineeringStatus.AGENT_EXECUTION_FAILED.value,
                             error_code=f"CONFIRMED_{curr_st}",
                             error_message=f"Prior attempt confirmed terminated with status '{curr_st}'",
                         )
-                    if prev_handle is not None:
+                    if prev_handle is not None and prev_handle.status != curr_st:
                         self._execution_handles[prev_key] = dataclasses.replace(prev_handle, status=curr_st)
 
         # Step C: Submit task
