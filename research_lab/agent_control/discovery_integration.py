@@ -54,6 +54,11 @@ from research_lab.alpha_discovery import (
     ResearchMemoryRecord,
     compute_hypothesis_content_hash,
 )
+from research_lab.alpha_discovery.signal_binding import (
+    SignalBindingError,
+    derive_signal_snapshot,
+    parse_and_verify_signal_spec,
+)
 from research_lab.contracts import v2
 
 TRADABLE_AUTHORITY: bool = False
@@ -255,9 +260,11 @@ class DiscoveryIntegrationOrchestrator:
         engine: AlphaDiscoveryEngine,
         *,
         audit_trail: DiscoveryIntegrationAuditTrail | None = None,
+        allow_synthetic_passthrough: bool = False,
     ) -> None:
         self.engine = engine
         self.audit_trail = audit_trail or DiscoveryIntegrationAuditTrail()
+        self.allow_synthetic_passthrough = allow_synthetic_passthrough
 
     def integrate_candidate(
         self,
@@ -302,12 +309,127 @@ class DiscoveryIntegrationOrchestrator:
         hyp_hash = hyp_dict["hypothesis_content_hash"]
         sci_hash = hyp_obj.scientific_identity_hash
 
+        # Strict caller isolation: synthetic bypass is ONLY allowed when orchestrator is explicitly
+        # instantiated with allow_synthetic_passthrough=True.
+        # Any caller-controlled parameters inside dataset_binding (e.g. mode, provenance, allow_synthetic_passthrough)
+        # MUST NEVER be trusted to bypass validation.
+        is_synthetic_direct = bool(self.allow_synthetic_passthrough)
+        effective_snapshot_path = Path(snapshot_path).resolve()
+        effective_dataset_binding = dataset_binding
+
+        if not is_synthetic_direct:
+            try:
+                # 1. Fail-closed parse and verify candidate mathematical specification against whitelist
+                spec = parse_and_verify_signal_spec(hyp_dict)
+
+                # 2. Unconditional provenance requirement: must supply provenance_path and expected provenance_sha256
+                if not isinstance(dataset_binding, dict):
+                    raise SignalBindingError(
+                        "MISSING_DATASET_BINDING",
+                        "Real candidate signal binding requires dictionary dataset_binding with provenance details",
+                    )
+
+                prov_path = dataset_binding.get("provenance_path")
+                expected_prov_sha = dataset_binding.get("provenance_sha256")
+
+                if not prov_path:
+                    raise SignalBindingError(
+                        "MISSING_PROVENANCE_PATH",
+                        "Real candidate signal binding strictly requires provenance_path in dataset_binding",
+                    )
+                if not expected_prov_sha:
+                    raise SignalBindingError(
+                        "MISSING_PROVENANCE_SHA",
+                        "Real candidate signal binding strictly requires provenance_sha256 digest in dataset_binding",
+                    )
+
+                p_file = Path(prov_path).resolve()
+                if not p_file.exists():
+                    raise SignalBindingError(
+                        "MISSING_PROVENANCE_FILE",
+                        f"Declared provenance file does not exist: {p_file}",
+                    )
+
+                prov_bytes = p_file.read_bytes()
+                actual_prov_sha = v2.sha(prov_bytes)
+                if actual_prov_sha != expected_prov_sha:
+                    raise SignalBindingError(
+                        "PROVENANCE_HASH_MISMATCH",
+                        f"Provenance file at {prov_path} SHA256 {actual_prov_sha} does not match expected {expected_prov_sha}",
+                    )
+
+                prov_data = json.loads(prov_bytes.decode("utf-8"))
+                prov_source_days = prov_data.get("source_days")
+                if not prov_source_days:
+                    raise SignalBindingError(
+                        "MISSING_SOURCE_DAYS",
+                        "No source_days found in verified provenance file",
+                    )
+
+                # If caller also provided source_days directly, enforce item-by-item exact match
+                caller_source_days = dataset_binding.get("source_days")
+                if caller_source_days is not None:
+                    if caller_source_days != prov_source_days:
+                        raise SignalBindingError(
+                            "SOURCE_DAYS_MISMATCH",
+                            "Caller-supplied source_days does not match canonical verified provenance content",
+                        )
+
+                # Always use canonical verified source_days from provenance
+                source_days = prov_source_days
+
+                # Derive single-contract candidate snapshot (never overwrite existing files)
+                base_derived_dir = Path(self.engine.output_base_dir) / "derived_snapshots"
+                expected_csv_name = f"snapshot_{spec.symbol.lower()}_{spec.formula_id}_{sci_hash[:16]}.csv"
+                derived_dir = base_derived_dir
+                if (derived_dir / expected_csv_name).exists():
+                    sub_tag = f"{hyp_id}_{task_id or request_id or hyp_hash[:8]}"
+                    derived_dir = base_derived_dir / sub_tag
+                    idx = 2
+                    while (derived_dir / expected_csv_name).exists():
+                        derived_dir = base_derived_dir / f"{sub_tag}_{idx}"
+                        idx += 1
+                derived_res = derive_signal_snapshot(
+                    spec=spec,
+                    source_days=source_days,
+                    output_dir=derived_dir,
+                    candidate_identity_hash=sci_hash,
+                    provenance_path=p_file,
+                    provenance_sha256=actual_prov_sha,
+                )
+                effective_snapshot_path = derived_res.path
+                effective_dataset_binding = derived_res.dataset_binding
+            except (SignalBindingError, ValueError) as exc:
+                err_code = getattr(exc, "reason", "BINDING_FAILED")
+                res = DiscoveryIntegrationResult(
+                    engineering_status=EngineeringStatus.ADMISSION_FAILED.value,
+                    scientific_decision=None,
+                    error_code=err_code,
+                    error_message=f"Deterministic signal binding rejected [{err_code}]: {exc}",
+                    request_id=request_id,
+                    task_id=task_id,
+                    route_id=route_id,
+                    provider_job_ref=provider_job_ref,
+                    provider=provider,
+                    model=model,
+                    agent_result_id=agent_result_id,
+                    agent_result_hash=agent_result_hash,
+                    hypothesis_id=hyp_id,
+                    hypothesis_content_hash=hyp_hash,
+                    scientific_identity_hash=sci_hash,
+                    admitted_hypothesis=hyp_obj,
+                    critic_decision=None,
+                    project_binding=binding,
+                )
+                self.audit_trail.append(DiscoveryIntegrationAuditRecord.create(res))
+                return res
+
         # Run through existing deterministic AlphaDiscoveryEngine with global exception boundary
         try:
             item_result: DiscoveryItemResult = self.engine.run_single(
                 hypothesis_input=hyp_dict,
-                snapshot_path=snapshot_path,
-                dataset_binding=dataset_binding,
+                snapshot_path=effective_snapshot_path,
+                dataset_binding=effective_dataset_binding,
                 auto_supplemental=auto_supplemental,
             )
         except Exception as exc:  # noqa: BLE001

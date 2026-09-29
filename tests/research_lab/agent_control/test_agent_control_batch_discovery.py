@@ -240,7 +240,7 @@ def discovery_context(tmp_path: Path) -> dict[str, Any]:
         output_base_dir=staging_dir,
         clean_temp_output=False,
     )
-    orchestrator = DiscoveryIntegrationOrchestrator(engine=engine)
+    orchestrator = DiscoveryIntegrationOrchestrator(engine=engine, allow_synthetic_passthrough=True)
 
     fields = [
         "timestamp",
@@ -778,7 +778,9 @@ def test_memory_feedback_loop_two_rounds_with_attribution(
     assert len(batch_r1.admitted_candidates) == 10
 
     # Hand off Round 1 candidates to AlphaDiscoveryEngine
-    integration_orchestrator = DiscoveryIntegrationOrchestrator(engine=engine)
+    integration_orchestrator = DiscoveryIntegrationOrchestrator(
+        engine=engine, allow_synthetic_passthrough=True
+    )
     created_memory_records = []
     for slot_res in batch_r1.slots:
         c = slot_res.candidate
@@ -1120,6 +1122,7 @@ def test_execute_memory_feedback_loop_direct_call(
         dataset_binding=clean_binding,
         created_at="2026-01-01T00:00:00.000000Z",
         round_2_created_at="2026-01-02T00:00:00.000000Z",
+        allow_synthetic_passthrough=True,
     )
 
     assert isinstance(loop_result, MemoryFeedbackLoopResult)
@@ -1617,6 +1620,7 @@ def test_two_rounds_engine_memory_internal_deduplication(
         dataset_binding=clean_binding,
         created_at="2026-01-01T00:00:00.000000Z",
         round_2_created_at="2026-01-02T00:00:00.000000Z",
+        allow_synthetic_passthrough=True,
     )
 
     # In Round 1, on clean memory, internal lookup confirms NOVEL_WITHIN_VIEW
@@ -1755,6 +1759,7 @@ def test_pr589_p1_execute_memory_feedback_loop_with_m3_quota_snapshots(
         dataset_binding=clean_binding,
         created_at="2026-01-01T00:00:00.000000Z",
         round_2_created_at="2026-01-02T00:00:00.000000Z",
+        allow_synthetic_passthrough=True,
     )
     assert res_no_snap.round_1_batch.funnel.requested == 2
     assert res_no_snap.round_1_batch.funnel.admitted == 0
@@ -1889,6 +1894,7 @@ def test_pr589_p1_execute_memory_feedback_loop_with_m3_quota_snapshots(
         clock=_stepping_clock,
         created_at="2026-09-22T10:00:00.000000Z",
         round_2_created_at="2026-09-23T10:00:00.000000Z",
+        allow_synthetic_passthrough=True,
     )
     assert res_with_snap.round_1_batch.funnel.admitted == 2
     assert res_with_snap.round_2_batch.funnel.admitted == 2
@@ -2418,6 +2424,7 @@ def test_pr589_p1_conservative_memory_attribution_punctuation_inconclusive(
         dataset_binding=clean_binding,
         created_at="2026-01-01T00:00:00.000000Z",
         round_2_created_at="2026-01-02T00:00:00.000000Z",
+        allow_synthetic_passthrough=True,
     )
     assert len(res.attribution_records) == 1
     attr = res.attribution_records[0]
@@ -2494,6 +2501,7 @@ def test_pr589_p1_conservative_memory_attribution_synonym_rewrite_inconclusive(
         dataset_binding=clean_binding,
         created_at="2026-01-01T00:00:00.000000Z",
         round_2_created_at="2026-01-02T00:00:00.000000Z",
+        allow_synthetic_passthrough=True,
     )
     assert len(res.attribution_records) == 1
     attr = res.attribution_records[0]
@@ -2569,6 +2577,7 @@ def test_pr589_p1_conservative_memory_attribution_irrelevant_horizon_target_inco
         dataset_binding=clean_binding,
         created_at="2026-01-01T00:00:00.000000Z",
         round_2_created_at="2026-01-02T00:00:00.000000Z",
+        allow_synthetic_passthrough=True,
     )
     assert len(res.attribution_records) == 1
     attr = res.attribution_records[0]
@@ -2699,6 +2708,7 @@ def test_execute_memory_feedback_loop_round_2_callable_clock(
         dataset_binding=clean_binding,
         created_at="2026-09-29T12:00:00.000000Z",
         round_2_created_at=dynamic_r2_clock,
+        allow_synthetic_passthrough=True,
     )
 
     # 1. Callable was evaluated once
