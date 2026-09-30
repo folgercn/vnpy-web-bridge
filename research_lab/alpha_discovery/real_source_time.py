@@ -35,6 +35,8 @@ PRODUCT_RULES = {
 }
 MANIFEST_KEY_SHA256 = "1fa9fb478128e8a41fdb4893ecb9704d24ec29c61032d086f58d9560a95ab77f"
 CALENDAR_KEY_SHA256 = "fc22e285a2c303b5383b7b49b35b429837dc7eb0f88112ee35f19ad355fe2340"
+MANIFEST_KEY_FILE_SHA256 = "a22f24acb303a43c86d101f075bcffaed754c82ae50eff6fb4377cd131463102"
+CALENDAR_KEY_FILE_SHA256 = "65b9b97c1ada630e26c63751ff5daa300250ffe3f2377775d3fea1433db06b39"
 CALENDAR_SHA256 = "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291"
 PILOT_FIRST_DAY = date(2026, 8, 31)
 PILOT_LAST_DAY = date(2026, 9, 24)
@@ -95,8 +97,8 @@ def _verify_shfe_settlement_days(
     _require_sha(official / "shfe-trading-rules-202606.docx", SHFE_RULE_SHA256, "SHFE trading rules")
     for filename, digest in PRODUCT_RULES.values():
         _require_sha(official / filename, digest, "SHFE product rules")
-    _require_sha(root / "libexec/manifest-public-key.b64", "a22f24acb303a43c86d101f075bcffaed754c82ae50eff6fb4377cd131463102", "M2 manifest public key")
-    _require_sha(root / "libexec/calendar-public-key.b64", "65b9b97c1ada630e26c63751ff5daa300250ffe3f2377775d3fea1433db06b39", "M2 calendar public key")
+    _require_sha(root / "libexec/manifest-public-key.b64", MANIFEST_KEY_FILE_SHA256, "M2 manifest public key")
+    _require_sha(root / "libexec/calendar-public-key.b64", CALENDAR_KEY_FILE_SHA256, "M2 calendar public key")
 
     registry = load_registry(root / "libexec/source-registry-v1.json")
     manifest_key = load_public_key(root / "libexec/manifest-public-key.b64")
@@ -174,7 +176,14 @@ def _verify_shfe_settlement_days(
         observation_raw = read_regular_strict(observation_path, "M2 SHFE observation receipt")
         observation = parse_json_strict(observation_raw, "M2 SHFE observation receipt")
         expected_url = registry.source(SOURCE_ID).endpoint_template.replace("{yyyymmdd}", day.strftime("%Y%m%d"))
-        if observation_raw != canonical_json_line(observation) or observation.get("observation_id") != observation_id(observation):
+        body_id = observation.get("observation_id")
+        if (
+            observation_raw != canonical_json_line(observation)
+            or body_id != observation_id(observation)
+            or body_id != shfe_receipt["observation_id"]
+            or body_id != observation_path.stem
+            or body_id not in revision["observation_ids"]
+        ):
             raise RealSourceEvidenceError("OBSERVATION_RECEIPT_MISMATCH", key)
         if (
             observation.get("source_url") != expected_url
@@ -207,6 +216,8 @@ def _verify_shfe_settlement_days(
         ):
             raise RealSourceEvidenceError("SOURCE_OBSERVATION_ORDER", key)
         raw = read_regular_strict(custody / revision["raw_relative_path"], "SHFE original daily file")
+        if len(raw) != revision["raw_bytes"] or hashlib.sha256(raw).hexdigest() != revision["raw_sha256"]:
+            raise RealSourceEvidenceError("SOURCE_EVIDENCE_MISMATCH", f"{key} parsed raw differs from signed revision")
         source = parse_json_strict(raw, "SHFE original daily file")
         if source.get("report_date") != day.strftime("%Y%m%d"):
             raise RealSourceEvidenceError("SOURCE_DAY_MISMATCH", key)

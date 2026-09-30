@@ -21,6 +21,11 @@ Both use the unchanged target `log(settlement[t+2]/settlement[t+1])`. All 19 off
 
 ## Authorized replay and limits
 
+This optional real-source path requires a Unix platform with `fcntl` and
+`cryptography==48.0.0`, as documented in the [standalone installation instructions](../research_lab/README.md).
+Missing capabilities block admission with `REAL_SOURCE_DEPENDENCY_UNAVAILABLE`;
+ordinary Alpha Discovery imports and non-real-source calls remain usable.
+
 The reviewer with access to the private evidence copy can set `EVIDENCE_ROOT` to the original checkout's `.git/issue502-stage2-real-data` directory and run:
 
 ```sh

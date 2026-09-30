@@ -30,10 +30,6 @@ from research_lab.alpha_discovery.hypothesis import (
     validate_hypothesis,
 )
 from research_lab.contracts import v2
-from research_lab.alpha_discovery.real_source_time import (
-    RealSourceEvidenceError,
-    verify_shfe_settlement_days,
-)
 
 SUPPORTED_SYMBOLS = ("RB2701", "HC2701")
 SYMBOL_PRODUCT_MAP = {"RB2701": "rb_f", "HC2701": "hc_f"}
@@ -469,6 +465,18 @@ def derive_signal_snapshot(
             raise SignalBindingError("MALFORMED_PROVENANCE_SOURCE_DAY", "real source days must be objects")
         if any(d.get("market_effective_time") or d.get("settlement_effective_time") or d.get("market_time_authority") for d in source_days):
             raise SignalBindingError("UNVERIFIED_MARKET_TIME_AUTHORITY", "real source provenance must not self-attest a market time")
+        try:
+            from research_lab.alpha_discovery.real_source_time import (
+                RealSourceEvidenceError,
+                verify_shfe_settlement_days,
+            )
+        except ModuleNotFoundError as exc:
+            if exc.name != "fcntl" and (exc.name or "").split(".")[0] != "cryptography":
+                raise
+            raise SignalBindingError(
+                "REAL_SOURCE_DEPENDENCY_UNAVAILABLE",
+                "Real-source verification requires cryptography and a Unix platform with fcntl",
+            ) from exc
         try:
             real_days = verify_shfe_settlement_days(
                 source_days,
