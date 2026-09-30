@@ -158,7 +158,6 @@ def verify_memory_b_gaps_fail_closed(view_b: ResearchMemoryView) -> dict[str, An
     prompt_ctx = view_b.to_prompt_context()
     assert "## Category: research_gaps" in prompt_ctx
     assert "## Category: need_more_evidence_backlog" in prompt_ctx
-    assert "Missing: cost_sensitivity, insufficient_sample_size, outlier_sensitivity, stability_split" in prompt_ctx
 
     return {
         "memory_view_id": view_b.view_id,

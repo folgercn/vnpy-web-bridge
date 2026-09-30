@@ -1011,13 +1011,18 @@ class DiscoveryBatchOrchestrator:
                     code=ProviderErrorCode.EXECUTION_FAILED,
                 )
         except Exception as exc:  # noqa: BLE001
+            uncertain = isinstance(exc, ProviderError) and exc.code == ProviderErrorCode.EXECUTION_UNCERTAIN
+            accepted_handle = getattr(exc, "execution_handle", None) or self._execution_handles.get(cache_key)
+            if isinstance(accepted_handle, AgentExecutionHandle):
+                self._execution_handles[cache_key] = accepted_handle
             s_res = SlotExecutionResult(
                 session_id=session.session_id,
                 slot_id=slot.slot_id,
                 ordinal=slot.ordinal,
                 attempt=slot.attempt,
-                engineering_status=SlotEngineeringStatus.AGENT_EXECUTION_FAILED.value,
-                error_code="SUBMISSION_FAILED",
+                engineering_status=(SlotEngineeringStatus.PROVIDER_UNCERTAIN.value if uncertain else SlotEngineeringStatus.AGENT_EXECUTION_FAILED.value),
+                error_code="PROVIDER_UNCERTAIN" if uncertain else "SUBMISSION_FAILED",
+                provider_job_ref=getattr(accepted_handle, "provider_job_ref", None),
                 error_message=f"Provider submit crashed: {exc}",
                 route_id=route.route_id,
                 provider=route.provider,
@@ -1341,6 +1346,8 @@ class DiscoveryBatchOrchestrator:
         attempted_count = 0
         generated_count = 0
         quota_blocked = False
+        block_code = "BATCH_QUOTA_BLOCKED"
+        block_message = "Execution skipped because prior slot encountered quota exhaustion"
 
         for slot in planned_slots:
             cache_key = (session.session_id, slot.slot_id, slot.attempt)
@@ -1352,8 +1359,8 @@ class DiscoveryBatchOrchestrator:
                     ordinal=slot.ordinal,
                     attempt=slot.attempt,
                     engineering_status=SlotEngineeringStatus.NOT_ATTEMPTED.value,
-                    error_code="BATCH_QUOTA_BLOCKED",
-                    error_message="Execution skipped because prior slot encountered quota exhaustion",
+                    error_code=block_code,
+                    error_message=block_message,
                     memory_view_id=session.memory_view_id,
                     memory_view_content_hash=session.memory_view_content_hash,
                     slot_content_hash=slot.slot_content_hash,
@@ -1374,6 +1381,10 @@ class DiscoveryBatchOrchestrator:
                 clock=clock,
             )
             slot_results.append(slot_res)
+            if slot_res.engineering_status == SlotEngineeringStatus.PROVIDER_UNCERTAIN.value:
+                quota_blocked = True
+                block_code = "BATCH_PROVIDER_UNCERTAIN"
+                block_message = "Execution skipped pending reconciliation of an uncertain Provider job"
 
             if slot_res.engineering_status == SlotEngineeringStatus.COMPLETED.value and slot_res.candidate:
                 attempted_count += 1

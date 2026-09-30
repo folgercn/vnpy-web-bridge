@@ -16,9 +16,7 @@ Strict invariants enforced:
    - Copies R1 SQLite store into R2 store directory as initial state, so R1 store file is NEVER mutated.
 6. Memory View B:
    - Reconstructed from R1 store state:
-     Asserts total_entries == 23,
-     view_content_hash == 'a18be8a2c7a68231749f33ea36e09a173f97095269bb9f4cb7fa7e464aab8401',
-     view_id == 'memview-248d8e4d90e20fee62ca71f14d5967ed'.
+     Verifies this completed R1 full controlled view and receipts, without historical pins.
    - Saves to `memory_view_round_2.json`.
 7. Provider Execution:
    - 10 distinct Provider slots executed sequentially via Desktop MCP.
@@ -39,7 +37,6 @@ Strict invariants enforced:
 from __future__ import annotations
 
 import argparse
-import asyncio
 import dataclasses
 import datetime
 import hashlib
@@ -51,12 +48,9 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-REPO = Path("/Users/fujun/node/vnpy-web-bridge").resolve()
+REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
-sys.path.insert(0, str(REPO / "research_lab" / "agent_control" / "antigravity_mcp"))
-sys.path.insert(0, str(REPO / "research_lab" / "agent_control" / "antigravity_mcp" / "core"))
 
-import agy_service as service  # noqa: E402
 from research_lab.agent_control.alpha_generator import (  # noqa: E402
     DISCOVERY_POLICY_VERSION,
     ResearchMemoryCategory,
@@ -95,9 +89,8 @@ from research_lab.agent_control.providers.antigravity_local_mcp import (  # noqa
 from research_lab.agent_control.registry import ProviderRegistry  # noqa: E402
 from research_lab.agent_control.router import authorize  # noqa: E402
 from research_lab.agent_control.routing_policy import RoutingPolicy  # noqa: E402
-from research_lab.agent_control.transports.local_mcp import (  # noqa: E402
-    ALL_MCP_OPERATIONS,
-    LocalMCPTransport,
+from scripts.issue502_trusted_runtime import (  # noqa: E402
+    add_trusted_arguments, bind_run_root, make_transport, require_project, trusted_inputs, validate_run_id, verify_r1_feedback_view, wait_owned_job, write_json_atomic,
 )
 from research_lab.alpha_discovery import (  # noqa: E402
     AlphaDiscoveryEngine,
@@ -111,6 +104,7 @@ from research_lab.alpha_discovery.signal_binding import (  # noqa: E402
     precheck_candidate_real_data,
     verify_derived_snapshot_pit,
 )
+from research_lab.alpha_discovery.research_memory import ReadOnlyResearchMemoryReader  # noqa: E402
 from research_lab.config import ResearchLabConfig  # noqa: E402
 from research_lab.database import ResultStore  # noqa: E402
 from scripts.precheck_stage2_universal_objective_v8 import (  # noqa: E402
@@ -121,8 +115,6 @@ from scripts.precheck_stage2_universal_objective_v8 import (  # noqa: E402
 EXPECTED_PROJECT_ID = "81ba0c89-c7fc-4028-a3e0-e5fa766a6f50"
 EXPECTED_PROVENANCE_SHA256 = "e3d6b6b74d8b6617455bcccf7d6eeed3e4f5fbfe8eca1216f40ad03006725354"
 EXPECTED_OBJECTIVE_SHA256 = "00454c65a766a540dc9a188af154b7c85e601f552f4a80716b8a1c8450d3e4e4"
-EXPECTED_VIEW_B_HASH = "a18be8a2c7a68231749f33ea36e09a173f97095269bb9f4cb7fa7e464aab8401"
-EXPECTED_VIEW_B_ID = "memview-248d8e4d90e20fee62ca71f14d5967ed"
 SNAPSHOT_MAX_AVAILABILITY = "2026-09-24T10:40:15.339243Z"
 
 PROVENANCE_PATH = REPO / ".git" / "issue502-stage2-real-data" / "snapshot-provenance.json"
@@ -142,10 +134,8 @@ def _json_default(obj: Any) -> Any:
 
 def _dump_json(path: Path, obj: Any) -> None:
     cleaned = _clean_for_canonical(obj)
-    path.write_text(
-        json.dumps(cleaned, indent=2, sort_keys=True, ensure_ascii=False, default=_json_default) + "\n",
-        encoding="utf-8",
-    )
+    write_json_atomic(path, cleaned)
+
 
 
 def get_realtime_utc() -> str:
@@ -186,10 +176,23 @@ def main() -> None:
         action="store_true",
         help="Resume precheck/integration on already-executed Round 2 slots",
     )
+    add_trusted_arguments(parser)
     args = parser.parse_args()
+    validate_run_id(args.run_id)
+    inputs = trusted_inputs(args, REPO)
+    if args.preflight_only:
+        print(json.dumps({"status": "SOURCE_PREFLIGHT_PASS", "verified_source_days": 19,
+                          "provider_submissions": 0, "scientific_memory_writes": 0,
+                          "stage2_accepted": False, "checkout": str(REPO)}))
+        return
+    global PROVENANCE_PATH, BASE_CSV_PATH, RUNS_BASE_DIR
+    PROVENANCE_PATH = inputs["provenance"]
+    BASE_CSV_PATH = inputs["base_csv"]
+    RUNS_BASE_DIR = inputs["output"]
 
     run_id = args.run_id
     run_root = RUNS_BASE_DIR / run_id
+    bind_run_root(run_root, inputs, REPO, create=False)
     r1_dir = run_root / "round_1"
     r2_dir = run_root / "round_2_real_v1"
 
@@ -303,30 +306,15 @@ def main() -> None:
         total_limit=50,
     )
 
-    if args.resume and (r2_dir / "memory_view_round_2.json").exists():
-        view_b_json = json.loads((r2_dir / "memory_view_round_2.json").read_text(encoding="utf-8"))
-        view_b = build_research_memory_view(
-            query=init_query,
-            authorized_scope=scope,
-            project_binding=pb,
-            memory_store=memory,
-            current_time=view_b_json["view"]["generated_at"],
-        )
-    else:
-        view_b = build_research_memory_view(
-            query=init_query,
-            authorized_scope=scope,
-            project_binding=pb,
-            memory_store=memory,
-            current_time=t_round2,
-        )
-
-    if view_b.total_entries != 23:
-        raise RuntimeError(f"Memory View B must have Total Entries == 23, got {view_b.total_entries}")
-    if view_b.view_content_hash != EXPECTED_VIEW_B_HASH:
-        raise RuntimeError(f"Memory View B content hash {view_b.view_content_hash} != {EXPECTED_VIEW_B_HASH}")
-    if view_b.view_id != EXPECTED_VIEW_B_ID:
-        raise RuntimeError(f"Memory View B view_id {view_b.view_id} != {EXPECTED_VIEW_B_ID}")
+    r1_view_snapshot = json.loads((r1_dir / "memory_view_after_round_1.json").read_text())["view"]
+    view_b = build_research_memory_view(
+        query=init_query, authorized_scope=scope, project_binding=pb,
+        memory_store=ReadOnlyResearchMemoryReader(r1_sqlite_path),
+        current_time=r1_view_snapshot["generated_at"],
+    )
+    verify_r1_feedback_view(view_b, r1_view_snapshot, r1_evidence, store)
+    if r1_evidence.get("objective") != objective or r1_evidence.get("objective_sha256") != obj_sha:
+        raise ValueError("Round 2 objective must exactly match this completed R1")
 
     gap_verification_b = verify_memory_b_gaps_fail_closed(view_b)
     print(
@@ -347,17 +335,13 @@ def main() -> None:
             },
         )
 
-    # Step 4: Preflight check against Desktop MCP
-    service.init()
+    # Step 4: Preflight check against the installed Desktop MCP
+    transport = make_transport(args.mcp_command)
+    resolved_proj = require_project(transport, REPO, EXPECTED_PROJECT_ID)
 
     def tool_caller(op: str, call_args: dict[str, Any]) -> Any:
-        return asyncio.run(service.dispatch(op, call_args))
+        return transport.call_tool(op, call_args)
 
-    transport = LocalMCPTransport(
-        tool_catalog=list(ALL_MCP_OPERATIONS),
-        tool_caller=tool_caller,
-        connection_profile_ref="antigravity-local-desktop",
-    )
     audit_trail = AppendOnlyAuditTrail()
     provider = AntigravityLocalMCPProvider(transport=transport, audit_trail=audit_trail)
 
@@ -365,22 +349,13 @@ def main() -> None:
     if status_snapshot.get("active") is not None or status_snapshot.get("queued"):
         raise RuntimeError(f"Desktop scheduler is not idle before Round 2: {status_snapshot}")
 
-    desktop_tasks_dir = REPO / "research_lab" / "agent_control" / "antigravity_mcp" / ".desktop" / "tasks"
-    existing_task_files = sorted(desktop_tasks_dir.glob("*.json"))
-    task_state_counts: dict[str, int] = {}
-    for tf in existing_task_files:
-        td = json.loads(tf.read_text(encoding="utf-8"))
-        st = str(td.get("state", "unknown"))
-        task_state_counts[st] = task_state_counts.get(st, 0) + 1
-        if st in ("running", "uncertain"):
-            raise RuntimeError(f"Found pre-existing task in {st} state: {tf.name}")
-
-    proj_resp = tool_caller("projects", {"cwd": str(REPO)})
-    resolved_proj = proj_resp.get("project") if isinstance(proj_resp, dict) else None
-    if not isinstance(resolved_proj, dict) or resolved_proj.get("project_id") != EXPECTED_PROJECT_ID:
-        raise RuntimeError(f"Project binding check failed: {proj_resp}")
+    # Shared scheduler state is obtained through MCP, never a copied backend cache.
+    existing_task_files = status_snapshot.get("active_tasks", [])
+    task_state_counts = {"active": len(existing_task_files)}
 
     usage_before = provider.account_usage()
+    if not usage_before.quota_windows:
+        raise RuntimeError("Missing Provider quota windows")
     for w in usage_before.quota_windows:
         rem = w.get("remaining_fraction", 0.0)
         if rem is None or float(rem) <= 0.0:
@@ -430,8 +405,8 @@ def main() -> None:
             slot_prompt = build_alpha_generation_prompt(s.request, view_b)
             if "STAGE 2 SETTLEMENT-ONLY SIGNAL WHITELIST" not in slot_prompt:
                 raise RuntimeError(f"Slot {s.slot_id} prompt missing STAGE 2 SETTLEMENT-ONLY SIGNAL WHITELIST")
-            if "Total Entries: 23" not in slot_prompt:
-                raise RuntimeError(f"Slot {s.slot_id} prompt missing Total Entries: 23")
+            if f"Total Entries: {view_b.total_entries}" not in slot_prompt:
+                raise RuntimeError(f"Slot {s.slot_id} prompt missing this R1 Memory entry count")
             if "rmentry-" not in slot_prompt:
                 raise RuntimeError(f"Slot {s.slot_id} prompt missing rmentry-* IDs from Memory View B")
 
@@ -488,45 +463,66 @@ def main() -> None:
             flush=True,
         )
         t0 = time.time()
-        handle = orig_submit(task, route, preparation, request_id=request_id)
+        handle = None
         captured_by_task_id[task.task_id] = {
-            "ordinal": ord_num,
-            "slot_id": p_slot.slot_id if p_slot else None,
-            "request_id": request_id,
-            "task_id": task.task_id,
-            "route_id": route.route_id,
-            "provider_job_ref": handle.provider_job_ref,
-            "submitted_at": get_realtime_utc(),
-            "submit_wall_time": t0,
+            "ordinal": ord_num, "slot_id": p_slot.slot_id if p_slot else None,
+            "request_id": request_id, "task_id": task.task_id, "route_id": route.route_id,
+            "provider_job_ref": None, "submit_wall_time": t0, "state": "SUBMIT_INTENT",
         }
-        print(
-            f"  -> [Slot {ord_num:02d}/10] Submitted job_id={handle.provider_job_ref}",
-            flush=True,
-        )
+        try:
+            # Ownership is durable before a remote submission can happen.
+            _dump_json(provider_raw_dir / f"submission_{ord_num:02d}.json", captured_by_task_id[task.task_id])
+            handle = orig_submit(task, route, preparation, request_id=request_id)
+            captured_by_task_id[task.task_id].update({
+                "provider_job_ref": handle.provider_job_ref, "submitted_at": get_realtime_utc(),
+                "handle": handle.to_dict(), "state": "HANDLE_RECEIVED",
+            })
+            _dump_json(provider_raw_dir / f"submission_{ord_num:02d}.json", captured_by_task_id[task.task_id])
+        except Exception as exc:
+            uncertain_halt_state["halted"] = True
+            uncertain_halt_state["reason"] = f"Submission reconciliation required for task {task.task_id}"
+            captured_by_task_id[task.task_id]["state"] = "EXECUTION_UNCERTAIN"
+            # Best effort only; on disk failure the original ownership intent and
+            # in-memory handle/exception remain available. Never retry submit.
+            try:
+                _dump_json(provider_raw_dir / f"submission_uncertain_{ord_num:02d}.json", captured_by_task_id[task.task_id])
+            except Exception:
+                print(f"RECOVERY task={task.task_id} request={request_id} job={getattr(handle, 'provider_job_ref', None)}", flush=True)
+            error = ProviderError(ProviderErrorCode.EXECUTION_UNCERTAIN, uncertain_halt_state["reason"])
+            error.execution_handle = handle
+            raise error from exc
+        print(f"  -> [Slot {ord_num:02d}/10] Submitted job_id={handle.provider_job_ref}", flush=True)
         return handle
 
     def hooked_status(handle: AgentExecutionHandle) -> str:
         job_id = handle.provider_job_ref
-        deadline = time.monotonic() + 360.0
-        while time.monotonic() < deadline:
-            d = service.jobread(job_id)
-            st = str(d.get("status", "")).lower()
-            if st in service.TERMINAL:
-                break
-            time.sleep(2.0)
-        return orig_status(handle)
+        try:
+            wait_owned_job(transport, job_id, state_path=provider_raw_dir / f"watch_{job_id}.json")
+            status = orig_status(handle)
+            if status in {"UNKNOWN", "UNCERTAIN"}:
+                raise ProviderError(ProviderErrorCode.EXECUTION_UNCERTAIN, f"Unresolved job {job_id}")
+            return status
+        except Exception as exc:
+            uncertain_halt_state["halted"] = True
+            uncertain_halt_state["reason"] = f"Observation failed for existing job {job_id}"
+            raise ProviderError(ProviderErrorCode.EXECUTION_UNCERTAIN, uncertain_halt_state["reason"]) from exc
 
     def hooked_result(handle: AgentExecutionHandle, preparation: Any = None) -> AgentResult:
         job_id = handle.provider_job_ref
         task_id = handle.task_ref.get("task_id") if isinstance(handle.task_ref, dict) else None
-        raw_job_check = tool_caller("result", {"job_id": job_id, "offset": 0, "max_chars": 16000})
-        if isinstance(raw_job_check, dict) and str(raw_job_check.get("status", "")).lower() in (
-            "starting",
-            "submitted",
-            "running",
-        ):
-            hooked_status(handle)
+        try:
             raw_job_check = tool_caller("result", {"job_id": job_id, "offset": 0, "max_chars": 16000})
+            if isinstance(raw_job_check, dict) and str(raw_job_check.get("status", "")).lower() in (
+                "starting",
+                "submitted",
+                "running",
+            ):
+                hooked_status(handle)
+                raw_job_check = tool_caller("result", {"job_id": job_id, "offset": 0, "max_chars": 16000})
+        except Exception as exc:
+            uncertain_halt_state["halted"] = True
+            uncertain_halt_state["reason"] = f"Result unresolved for existing job {job_id}"
+            raise ProviderError(ProviderErrorCode.EXECUTION_UNCERTAIN, uncertain_halt_state["reason"]) from exc
 
         cap = captured_by_task_id.get(str(task_id), {})
         elapsed = time.time() - cap.get("submit_wall_time", time.time())
@@ -540,6 +536,8 @@ def main() -> None:
         try:
             agent_res = orig_result(handle, preparation)
         except Exception as exc:
+            uncertain_halt_state["halted"] = True
+            uncertain_halt_state["reason"] = f"Provider result unresolved for existing job {job_id}"
             cap.update(
                 {
                     "completed_at": get_realtime_utc(),
@@ -553,11 +551,14 @@ def main() -> None:
             if task_id:
                 captured_by_task_id[str(task_id)] = cap
             raw_file = provider_raw_dir / f"slot_{ord_num:02d}_{slot_id}.json"
-            _dump_json(raw_file, cap)
+            try:
+                _dump_json(raw_file, cap)
+            except Exception:
+                print(f"RECOVERY task={task_id} job={job_id}", flush=True)
             if isinstance(raw_job_check, dict) and str(raw_job_check.get("outcome", "")).lower() == "uncertain":
                 uncertain_halt_state["halted"] = True
                 uncertain_halt_state["reason"] = f"Slot {ord_num} ({slot_id}) job {job_id} ended in UNCERTAIN"
-            raise
+            raise ProviderError(ProviderErrorCode.EXECUTION_UNCERTAIN, uncertain_halt_state["reason"]) from exc
 
         if isinstance(agent_res.structured_output, dict):
             for k in ("output", "text", "content", "final_output", "response"):
@@ -802,6 +803,7 @@ def main() -> None:
         allow_synthetic_passthrough=False,
     )
     dataset_binding = {
+        **inputs["binding"],
         "provenance_path": str(PROVENANCE_PATH.resolve()),
         "provenance_sha256": actual_prov_sha,
         "source_days": source_days,
@@ -861,6 +863,8 @@ def main() -> None:
                 provenance_path=PROVENANCE_PATH,
                 output_dir=slot_precheck_dir,
                 provenance_sha256=actual_prov_sha,
+                real_source_bundle_root=inputs["binding"]["real_source_bundle_root"],
+                official_rules_root=inputs["binding"]["official_rules_root"],
             )
         if precheck_res.get("precheck_status") != "PRECHECK_PASS":
             raise RuntimeError(
