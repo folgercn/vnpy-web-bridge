@@ -30,6 +30,7 @@ from research_lab.agent_control.contracts import ProjectBinding
 from research_lab.agent_control.discovery_integration import (
     DiscoveryIntegrationOrchestrator,
     EngineeringStatus,
+    recover_round_execution_timing,
 )
 from research_lab.alpha_discovery import (
     AlphaDiscoveryEngine,
@@ -1873,3 +1874,161 @@ def test_real_m2_custody_data_fails_closed_without_market_effective_time(tmp_pat
     assert res.scientific_decision is None
     assert res.error_code == "UNVERIFIABLE_TARGET_MARKET_TIME"
     assert len(memory.find_by_hypothesis_id(hyp["hypothesis_id"])) == 0
+
+
+def test_recover_round_execution_timing_100_percent_coverage(tmp_path: Path) -> None:
+    """100% complete coverage across declared run_refs recovers max immutable completion time."""
+    records = []
+    expected_times = []
+    for s_idx in range(2):
+        s_runs = []
+        s_receipts = []
+        for r_idx in range(2):
+            run_id = f"run-test-{s_idx}-{r_idx}"
+            c_time = f"2026-09-29T10:0{s_idx}:0{r_idx}.000000Z"
+            expected_times.append(c_time)
+
+            bundle_dir = tmp_path / run_id
+            bundle_dir.mkdir(parents=True, exist_ok=True)
+            run_json = bundle_dir / "run.json"
+            run_json.write_text(
+                json.dumps({
+                    "run": {"run_id": run_id, "object_id": run_id},
+                    "timing": {"completed_at": c_time},
+                }),
+                encoding="utf-8",
+            )
+
+            s_runs.append({"run_id": run_id, "content_hash": "a" * 64})
+            s_receipts.append({
+                "run": {"object_id": run_id},
+                "bundle_location": str(bundle_dir),
+            })
+        records.append({
+            "ordinal": s_idx,
+            "run_refs": s_runs,
+            "verified_result_store_receipts": s_receipts,
+        })
+
+    completed_at, source = recover_round_execution_timing(records)
+    assert completed_at == max(expected_times)
+    assert source == "recovered from immutable result store execution receipts (latest run.json:timing.completed_at)"
+
+
+def test_recover_round_execution_timing_missing_receipt_returns_unknown_and_orphan_cannot_rescue(
+    tmp_path: Path,
+) -> None:
+    """Missing even one receipt returns 'unknown'; orphan/old run.json on disk cannot rescue."""
+    records = []
+    # 2 runs declared in slot 0, but only 1 receipt provided
+    run_0 = "run-covered-0"
+    run_1 = "run-missing-receipt-1"
+
+    b_dir_0 = tmp_path / run_0
+    b_dir_0.mkdir(parents=True, exist_ok=True)
+    (b_dir_0 / "run.json").write_text(
+        json.dumps({
+            "run": {"run_id": run_0, "object_id": run_0},
+            "timing": {"completed_at": "2026-09-29T10:00:00.000000Z"},
+        }),
+        encoding="utf-8",
+    )
+
+    # Orphan run.json created in an unreferenced directory (simulating glob rescue attempt)
+    orphan_dir = tmp_path / "orphan_runs"
+    orphan_dir.mkdir(parents=True, exist_ok=True)
+    (orphan_dir / "run.json").write_text(
+        json.dumps({
+            "run": {"run_id": run_1, "object_id": run_1},
+            "timing": {"completed_at": "2026-09-29T10:59:59.000000Z"},
+        }),
+        encoding="utf-8",
+    )
+
+    records.append({
+        "ordinal": 0,
+        "run_refs": [
+            {"run_id": run_0, "content_hash": "a" * 64},
+            {"run_id": run_1, "content_hash": "b" * 64},
+        ],
+        "verified_result_store_receipts": [
+            {"run": {"object_id": run_0}, "bundle_location": str(b_dir_0)},
+            # run_1 receipt intentionally omitted!
+        ],
+    })
+
+    completed_at, source = recover_round_execution_timing(records)
+    assert completed_at == "unknown"
+    assert "missing verified receipt for declared run_ref(s)" in source
+    assert run_1 in source
+    # Must NOT have picked up orphan_dir timestamp
+    assert "10:59:59" not in completed_at
+
+
+def test_recover_round_execution_timing_invalid_or_missing_timing_returns_unknown(tmp_path: Path) -> None:
+    """Non-UTC, missing, or malformed timing.completed_at fails closed to unknown."""
+    run_id = "run-bad-timing"
+    b_dir = tmp_path / run_id
+    b_dir.mkdir(parents=True, exist_ok=True)
+    (b_dir / "run.json").write_text(
+        json.dumps({
+            "run": {"run_id": run_id, "object_id": run_id},
+            "timing": {"completed_at": "2026-09-29 10:00:00"},  # Invalid: missing Z/offset and T
+        }),
+        encoding="utf-8",
+    )
+
+    records = [{
+        "ordinal": 0,
+        "run_refs": [{"run_id": run_id}],
+        "verified_result_store_receipts": [{"run": {"object_id": run_id}, "bundle_location": str(b_dir)}],
+    }]
+
+    completed_at, source = recover_round_execution_timing(records)
+    assert completed_at == "unknown"
+    assert "invalid timing.completed_at format" in source
+
+
+def test_recover_round_execution_timing_duplicate_run_ref_returns_unknown(tmp_path: Path) -> None:
+    """Duplicate run_id declaration fails closed to unknown."""
+    run_id = "run-dup-id"
+    records = [
+        {
+            "ordinal": 0,
+            "run_refs": [{"run_id": run_id}],
+            "verified_result_store_receipts": [],
+        },
+        {
+            "ordinal": 1,
+            "run_refs": [{"run_id": run_id}],
+            "verified_result_store_receipts": [],
+        },
+    ]
+    completed_at, source = recover_round_execution_timing(records)
+    assert completed_at == "unknown"
+    assert "duplicate run_ref declared across slots" in source
+
+
+def test_recover_round_execution_timing_real_r1_and_r2_receipts_regression() -> None:
+    """Existing real Round 1 (40 runs) and Round 2 (60 runs) receipts maintain 100% verification with zero regression."""
+    r1_path = Path("artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/ROUND1_FULL_EVIDENCE.json")
+    if r1_path.exists():
+        r1_data = json.loads(r1_path.read_text(encoding="utf-8"))
+        integrations = r1_data.get("integrations", [])
+        assert len(integrations) == 10
+        total_runs = sum(len(item.get("run_refs", [])) for item in integrations)
+        assert total_runs == 40
+        c_at, src = recover_round_execution_timing(integrations)
+        assert c_at == "2026-09-29T10:35:07.281286Z"
+        assert src == "recovered from immutable result store execution receipts (latest run.json:timing.completed_at)"
+
+    r2_path = Path("artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/ROUND2_FULL_EVIDENCE.json")
+    if r2_path.exists():
+        r2_data = json.loads(r2_path.read_text(encoding="utf-8"))
+        integrations = r2_data.get("integrations", [])
+        assert len(integrations) == 10
+        total_runs = sum(len(item.get("run_refs", [])) for item in integrations)
+        assert total_runs == 60
+        c_at, src = recover_round_execution_timing(integrations)
+        assert c_at == "2026-09-29T10:53:19.031509Z"
+        assert src == "recovered from immutable result store execution receipts (latest run.json:timing.completed_at)"

@@ -59,6 +59,7 @@ from research_lab.alpha_discovery.signal_binding import (
     SyntheticTestEvidence,
     derive_signal_snapshot,
     parse_and_verify_signal_spec,
+    parse_strict_utc_iso8601,
 )
 from research_lab.contracts import v2
 
@@ -824,3 +825,149 @@ class DiscoveryIntegrationOrchestrator:
             agent_result_hash=generation_result.agent_result_content_hash,
             auto_supplemental=auto_supplemental,
         )
+
+
+def recover_round_execution_timing(
+    integration_records: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> tuple[str, str]:
+    """Recover execution completion timestamp from verified result store receipts.
+
+    Strict Invariants:
+    1. 1:1 binding between every declared run_ref and its verified receipt.
+    2. Zero directory-globbing / loose filesystem scanning.
+    3. timing.completed_at validated as strict UTC ISO8601.
+    4. Only returns max(completed_at) on 100% complete coverage across all declared run_refs.
+    5. Fails closed to ('unknown', reason) on any missing, duplicate, corrupt,
+       or unverified receipt.
+    """
+    if not integration_records:
+        return "unknown", "no integration records provided"
+
+    declared_run_ids: list[str] = []
+    seen_declared_run_ids: set[str] = set()
+
+    for slot_idx, record in enumerate(integration_records):
+        if not isinstance(record, dict):
+            return "unknown", f"malformed integration record at slot {slot_idx}: expected dict"
+        run_refs = record.get("run_refs")
+        if run_refs is None:
+            continue
+        if not isinstance(run_refs, (list, tuple)):
+            return "unknown", f"malformed run_refs at slot {slot_idx}: expected list or tuple"
+        for r_idx, ref in enumerate(run_refs):
+            if isinstance(ref, dict):
+                rid = ref.get("run_id") or ref.get("object_id")
+            elif isinstance(ref, str):
+                rid = ref
+            else:
+                return "unknown", f"malformed run_ref at slot {slot_idx}[{r_idx}]: {ref!r}"
+
+            if not rid or not isinstance(rid, str) or not rid.strip():
+                return "unknown", f"invalid run_id in declared run_ref at slot {slot_idx}[{r_idx}]"
+
+            if rid in seen_declared_run_ids:
+                return "unknown", f"duplicate run_ref declared across slots: {rid}"
+            seen_declared_run_ids.add(rid)
+            declared_run_ids.append(rid)
+
+    if not declared_run_ids:
+        return "unknown", "no declared run_refs found in integration records"
+
+    receipt_by_run_id: dict[str, dict[str, Any]] = {}
+    for slot_idx, record in enumerate(integration_records):
+        receipts = record.get("verified_result_store_receipts")
+        if not receipts:
+            continue
+        if not isinstance(receipts, (list, tuple)):
+            return (
+                "unknown",
+                f"malformed verified_result_store_receipts at slot {slot_idx}: expected list or tuple",
+            )
+
+        for rc_idx, rc in enumerate(receipts):
+            if not isinstance(rc, dict):
+                return "unknown", f"malformed receipt at slot {slot_idx}[{rc_idx}]: expected dict"
+
+            rc_run = rc.get("run")
+            if isinstance(rc_run, dict):
+                rc_rid = rc_run.get("object_id") or rc_run.get("run_id")
+            elif isinstance(rc_run, str):
+                rc_rid = rc_run
+            else:
+                rc_rid = rc.get("run_id")
+
+            if not rc_rid or not isinstance(rc_rid, str) or not rc_rid.strip():
+                return "unknown", f"receipt missing valid run object_id at slot {slot_idx}[{rc_idx}]"
+
+            if rc_rid in receipt_by_run_id:
+                return "unknown", f"duplicate verified receipt declared for run_id: {rc_rid}"
+
+            receipt_by_run_id[rc_rid] = rc
+
+    missing_receipts = [rid for rid in declared_run_ids if rid not in receipt_by_run_id]
+    if missing_receipts:
+        return (
+            "unknown",
+            f"missing verified receipt for declared run_ref(s): {missing_receipts[:3]} "
+            f"(missing {len(missing_receipts)}/{len(declared_run_ids)})",
+        )
+
+    unmatched_receipts = [rid for rid in receipt_by_run_id if rid not in seen_declared_run_ids]
+    if unmatched_receipts:
+        return (
+            "unknown",
+            f"unmatched verified receipt(s) not in declared run_refs: {unmatched_receipts[:3]}",
+        )
+
+    verified_completed_times: list[str] = []
+    for rid in declared_run_ids:
+        rc = receipt_by_run_id[rid]
+        b_loc = rc.get("bundle_location")
+        if not b_loc or not isinstance(b_loc, (str, Path)):
+            return "unknown", f"verified receipt for {rid} missing bundle_location"
+
+        bundle_path = Path(b_loc)
+        run_file = bundle_path / "run.json"
+        if not run_file.exists() or not run_file.is_file():
+            return "unknown", f"missing run.json at verified bundle_location for {rid}: {run_file}"
+
+        try:
+            run_data = json.loads(run_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return "unknown", f"corrupt or unreadable run.json for {rid}: {exc}"
+
+        if not isinstance(run_data, dict):
+            return "unknown", f"corrupt run.json for {rid}: expected JSON object"
+
+        run_info = run_data.get("run")
+        if isinstance(run_info, dict):
+            file_rid = run_info.get("run_id") or run_info.get("object_id")
+            if file_rid and file_rid != rid:
+                return "unknown", f"run.json run_id mismatch for {rid}: found {file_rid}"
+
+        timing = run_data.get("timing")
+        if not isinstance(timing, dict):
+            return "unknown", f"run.json missing timing object for {rid}"
+
+        c_at = timing.get("completed_at")
+        if not c_at or not isinstance(c_at, str) or not c_at.strip():
+            return "unknown", f"run.json missing timing.completed_at for {rid}"
+
+        try:
+            parse_strict_utc_iso8601(c_at)
+        except Exception as exc:
+            return "unknown", f"invalid timing.completed_at format for {rid}: {c_at!r} ({exc})"
+
+        verified_completed_times.append(c_at)
+
+    if len(verified_completed_times) != len(declared_run_ids) or len(declared_run_ids) == 0:
+        return (
+            "unknown",
+            f"incomplete receipt coverage: {len(verified_completed_times)}/{len(declared_run_ids)}",
+        )
+
+    max_c_at = max(verified_completed_times)
+    source_desc = (
+        "recovered from immutable result store execution receipts (latest run.json:timing.completed_at)"
+    )
+    return max_c_at, source_desc

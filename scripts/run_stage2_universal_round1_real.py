@@ -69,6 +69,7 @@ from research_lab.agent_control.contracts import (  # noqa: E402
 )
 from research_lab.agent_control.discovery_integration import (  # noqa: E402
     DiscoveryIntegrationOrchestrator,
+    recover_round_execution_timing,
 )
 from research_lab.agent_control.discovery_session import (  # noqa: E402
     DiscoverySession,
@@ -1001,37 +1002,7 @@ def main() -> None:
         resumed_at_val = None
 
     # Recover execution completion time from immutable execution receipts
-    receipt_completed_times = []
-    for integ in integration_records:
-        receipts = integ.get("verified_result_store_receipts") or []
-        for rc in receipts:
-            b_loc = rc.get("bundle_location")
-            if b_loc:
-                r_file = Path(b_loc) / "run.json"
-                if r_file.exists():
-                    try:
-                        rd = json.loads(r_file.read_text(encoding="utf-8"))
-                        c_at = rd.get("timing", {}).get("completed_at")
-                        if c_at:
-                            receipt_completed_times.append(c_at)
-                    except Exception:
-                        pass
-    if not receipt_completed_times:
-        for rf in r1_dir.glob("**/run.json"):
-            try:
-                rd = json.loads(rf.read_text(encoding="utf-8"))
-                c_at = rd.get("timing", {}).get("completed_at")
-                if c_at:
-                    receipt_completed_times.append(c_at)
-            except Exception:
-                pass
-
-    if receipt_completed_times:
-        completed_at_val = max(receipt_completed_times)
-        completed_at_source_val = "recovered from immutable result store execution receipts (latest run.json:timing.completed_at)"
-    else:
-        completed_at_val = "unknown"
-        completed_at_source_val = "execution receipts missing timing.completed_at"
+    completed_at_val, completed_at_source_val = recover_round_execution_timing(integration_records)
 
     full_evidence = {
         "run_id": run_id,

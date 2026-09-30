@@ -78,6 +78,7 @@ from research_lab.agent_control.discovery_integration import (
     DiscoveryIntegrationOrchestrator,
     DiscoveryIntegrationResult,
     EngineeringStatus,
+    recover_round_execution_timing,
 )
 from research_lab.agent_control.discovery_session import (
     CANONICAL_SESSION_TIMESTAMP,
@@ -361,6 +362,7 @@ __all__ = [
     "parse_alpha_generation_output",
     "plan_candidate_slots",
     "prepare_execution",
+    "recover_round_execution_timing",
     "replan_slot_attempt",
     "select_agent",
     "send_worker_message",
