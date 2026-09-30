@@ -1002,7 +1002,9 @@ def main() -> None:
         resumed_at_val = None
 
     # Recover execution completion time from immutable execution receipts
-    completed_at_val, completed_at_source_val = recover_round_execution_timing(integration_records)
+    completed_at_val, completed_at_source_val = recover_round_execution_timing(
+        integration_records, result_store=store
+    )
 
     full_evidence = {
         "run_id": run_id,

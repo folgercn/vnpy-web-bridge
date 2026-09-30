@@ -19,6 +19,7 @@ Core Invariants:
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -829,21 +830,26 @@ class DiscoveryIntegrationOrchestrator:
 
 def recover_round_execution_timing(
     integration_records: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    result_store: Any | None = None,
 ) -> tuple[str, str]:
     """Recover execution completion timestamp from verified result store receipts.
 
     Strict Invariants:
     1. 1:1 binding between every declared run_ref and its verified receipt.
-    2. Zero directory-globbing / loose filesystem scanning.
-    3. timing.completed_at validated as strict UTC ISO8601.
-    4. Only returns max(completed_at) on 100% complete coverage across all declared run_refs.
-    5. Fails closed to ('unknown', reason) on any missing, duplicate, corrupt,
-       or unverified receipt.
+    2. When result_store is supplied (e.g. during execution or resume), re-query and
+       cryptographically verify each declared run_ref via ResultStore.query_v2_runs(run_id=..., verify=True)
+       rather than blindly trusting literal cached receipts in integration JSON.
+    3. Validate run_ref content_hash, receipt.run identity, and run.json top-level
+       run_id/run_content_hash against bundle inventory SHA256.
+    4. timing.completed_at validated as strict UTC ISO8601.
+    5. Only returns max(completed_at) on 100% complete coverage across all declared run_refs.
+    6. Fails closed to ('unknown', reason) on any missing, duplicate, corrupt, unverified,
+       or mismatched receipt; zero directory-globbing / loose filesystem scanning.
     """
     if not integration_records:
         return "unknown", "no integration records provided"
 
-    declared_run_ids: list[str] = []
+    declared_runs: list[tuple[str, str | None]] = []
     seen_declared_run_ids: set[str] = set()
 
     for slot_idx, record in enumerate(integration_records):
@@ -857,8 +863,10 @@ def recover_round_execution_timing(
         for r_idx, ref in enumerate(run_refs):
             if isinstance(ref, dict):
                 rid = ref.get("run_id") or ref.get("object_id")
+                chash = ref.get("content_hash") or ref.get("run_content_hash")
             elif isinstance(ref, str):
                 rid = ref
+                chash = None
             else:
                 return "unknown", f"malformed run_ref at slot {slot_idx}[{r_idx}]: {ref!r}"
 
@@ -868,60 +876,89 @@ def recover_round_execution_timing(
             if rid in seen_declared_run_ids:
                 return "unknown", f"duplicate run_ref declared across slots: {rid}"
             seen_declared_run_ids.add(rid)
-            declared_run_ids.append(rid)
+            declared_runs.append((rid, chash))
 
-    if not declared_run_ids:
+    if not declared_runs:
         return "unknown", "no declared run_refs found in integration records"
 
     receipt_by_run_id: dict[str, dict[str, Any]] = {}
-    for slot_idx, record in enumerate(integration_records):
-        receipts = record.get("verified_result_store_receipts")
-        if not receipts:
-            continue
-        if not isinstance(receipts, (list, tuple)):
+    if result_store is not None:
+        for rid, _ in declared_runs:
+            try:
+                matched = result_store.query_v2_runs(run_id=rid, verify=True)
+            except Exception as exc:
+                return "unknown", f"ResultStore verification failed for {rid}: {exc}"
+            if not matched or len(matched) != 1:
+                return (
+                    "unknown",
+                    f"ResultStore query_v2_runs returned {len(matched) if matched else 0} receipts for {rid}",
+                )
+            receipt_by_run_id[rid] = matched[0]
+    else:
+        for slot_idx, record in enumerate(integration_records):
+            receipts = record.get("verified_result_store_receipts")
+            if not receipts:
+                continue
+            if not isinstance(receipts, (list, tuple)):
+                return (
+                    "unknown",
+                    f"malformed verified_result_store_receipts at slot {slot_idx}: expected list or tuple",
+                )
+
+            for rc_idx, rc in enumerate(receipts):
+                if not isinstance(rc, dict):
+                    return "unknown", f"malformed receipt at slot {slot_idx}[{rc_idx}]: expected dict"
+
+                rc_run = rc.get("run")
+                if isinstance(rc_run, dict):
+                    rc_rid = rc_run.get("object_id") or rc_run.get("run_id")
+                elif isinstance(rc_run, str):
+                    rc_rid = rc_run
+                else:
+                    rc_rid = rc.get("run_id")
+
+                if not rc_rid or not isinstance(rc_rid, str) or not rc_rid.strip():
+                    return "unknown", f"receipt missing valid run object_id at slot {slot_idx}[{rc_idx}]"
+
+                if rc_rid in receipt_by_run_id:
+                    return "unknown", f"duplicate verified receipt declared for run_id: {rc_rid}"
+
+                receipt_by_run_id[rc_rid] = rc
+
+        missing_receipts = [rid for rid, _ in declared_runs if rid not in receipt_by_run_id]
+        if missing_receipts:
             return (
                 "unknown",
-                f"malformed verified_result_store_receipts at slot {slot_idx}: expected list or tuple",
+                f"missing verified receipt for declared run_ref(s): {missing_receipts[:3]} "
+                f"(missing {len(missing_receipts)}/{len(declared_runs)})",
             )
 
-        for rc_idx, rc in enumerate(receipts):
-            if not isinstance(rc, dict):
-                return "unknown", f"malformed receipt at slot {slot_idx}[{rc_idx}]: expected dict"
-
-            rc_run = rc.get("run")
-            if isinstance(rc_run, dict):
-                rc_rid = rc_run.get("object_id") or rc_run.get("run_id")
-            elif isinstance(rc_run, str):
-                rc_rid = rc_run
-            else:
-                rc_rid = rc.get("run_id")
-
-            if not rc_rid or not isinstance(rc_rid, str) or not rc_rid.strip():
-                return "unknown", f"receipt missing valid run object_id at slot {slot_idx}[{rc_idx}]"
-
-            if rc_rid in receipt_by_run_id:
-                return "unknown", f"duplicate verified receipt declared for run_id: {rc_rid}"
-
-            receipt_by_run_id[rc_rid] = rc
-
-    missing_receipts = [rid for rid in declared_run_ids if rid not in receipt_by_run_id]
-    if missing_receipts:
-        return (
-            "unknown",
-            f"missing verified receipt for declared run_ref(s): {missing_receipts[:3]} "
-            f"(missing {len(missing_receipts)}/{len(declared_run_ids)})",
-        )
-
-    unmatched_receipts = [rid for rid in receipt_by_run_id if rid not in seen_declared_run_ids]
-    if unmatched_receipts:
-        return (
-            "unknown",
-            f"unmatched verified receipt(s) not in declared run_refs: {unmatched_receipts[:3]}",
-        )
+        unmatched_receipts = [rid for rid in receipt_by_run_id if rid not in seen_declared_run_ids]
+        if unmatched_receipts:
+            return (
+                "unknown",
+                f"unmatched verified receipt(s) not in declared run_refs: {unmatched_receipts[:3]}",
+            )
 
     verified_completed_times: list[str] = []
-    for rid in declared_run_ids:
-        rc = receipt_by_run_id[rid]
+    for rid, declared_hash in declared_runs:
+        rc = receipt_by_run_id.get(rid)
+        if not rc:
+            return "unknown", f"missing verified receipt for {rid}"
+
+        rc_run = rc.get("run")
+        if not isinstance(rc_run, dict):
+            return "unknown", f"receipt missing run dict for {rid}"
+        rc_rid = rc_run.get("object_id") or rc_run.get("run_id")
+        if rc_rid != rid:
+            return "unknown", f"receipt run object_id mismatch: declared {rid}, receipt has {rc_rid}"
+        rc_hash = rc_run.get("content_hash") or rc_run.get("run_content_hash")
+        if declared_hash and rc_hash and declared_hash != rc_hash:
+            return (
+                "unknown",
+                f"content_hash mismatch between run_ref and receipt for {rid}: {declared_hash} != {rc_hash}",
+            )
+
         b_loc = rc.get("bundle_location")
         if not b_loc or not isinstance(b_loc, (str, Path)):
             return "unknown", f"verified receipt for {rid} missing bundle_location"
@@ -931,19 +968,62 @@ def recover_round_execution_timing(
         if not run_file.exists() or not run_file.is_file():
             return "unknown", f"missing run.json at verified bundle_location for {rid}: {run_file}"
 
+        inventory = rc.get("bundle_file_sha256")
+        if not isinstance(inventory, dict):
+            return "unknown", f"receipt for {rid} missing bundle_file_sha256 inventory"
+        expected_run_json_sha = inventory.get("run.json")
+        if not expected_run_json_sha:
+            return "unknown", f"receipt for {rid} missing run.json in bundle_file_sha256 inventory"
+
         try:
-            run_data = json.loads(run_file.read_text(encoding="utf-8"))
+            raw_bytes = run_file.read_bytes()
+        except Exception as exc:
+            return "unknown", f"failed to read run.json for {rid}: {exc}"
+
+        actual_sha = hashlib.sha256(raw_bytes).hexdigest()
+        if actual_sha != expected_run_json_sha:
+            return (
+                "unknown",
+                f"run.json sha256 mismatch against receipt bundle inventory for {rid}: "
+                f"expected {expected_run_json_sha}, got {actual_sha}",
+            )
+
+        try:
+            run_data = json.loads(raw_bytes.decode("utf-8"))
         except Exception as exc:
             return "unknown", f"corrupt or unreadable run.json for {rid}: {exc}"
 
         if not isinstance(run_data, dict):
             return "unknown", f"corrupt run.json for {rid}: expected JSON object"
 
-        run_info = run_data.get("run")
-        if isinstance(run_info, dict):
-            file_rid = run_info.get("run_id") or run_info.get("object_id")
-            if file_rid and file_rid != rid:
-                return "unknown", f"run.json run_id mismatch for {rid}: found {file_rid}"
+        # Protocol v2 run.json top-level run_id
+        file_rid = run_data.get("run_id")
+        if not file_rid:
+            nested_run = run_data.get("run")
+            if isinstance(nested_run, dict):
+                file_rid = nested_run.get("run_id") or nested_run.get("object_id")
+        if file_rid != rid:
+            return "unknown", f"run.json top-level run_id mismatch for {rid}: found {file_rid}"
+
+        # Protocol v2 run.json top-level run_content_hash
+        file_hash = run_data.get("run_content_hash")
+        if not file_hash:
+            nested_run = run_data.get("run")
+            if isinstance(nested_run, dict):
+                file_hash = nested_run.get("content_hash") or nested_run.get("run_content_hash")
+
+        if declared_hash and file_hash and declared_hash != file_hash:
+            return (
+                "unknown",
+                f"run.json run_content_hash mismatch with declared run_ref for {rid}: "
+                f"expected {declared_hash}, got {file_hash}",
+            )
+        if rc_hash and file_hash and rc_hash != file_hash:
+            return (
+                "unknown",
+                f"run.json run_content_hash mismatch with receipt for {rid}: "
+                f"expected {rc_hash}, got {file_hash}",
+            )
 
         timing = run_data.get("timing")
         if not isinstance(timing, dict):
@@ -960,10 +1040,10 @@ def recover_round_execution_timing(
 
         verified_completed_times.append(c_at)
 
-    if len(verified_completed_times) != len(declared_run_ids) or len(declared_run_ids) == 0:
+    if len(verified_completed_times) != len(declared_runs) or len(declared_runs) == 0:
         return (
             "unknown",
-            f"incomplete receipt coverage: {len(verified_completed_times)}/{len(declared_run_ids)}",
+            f"incomplete receipt coverage: {len(verified_completed_times)}/{len(declared_runs)}",
         )
 
     max_c_at = max(verified_completed_times)

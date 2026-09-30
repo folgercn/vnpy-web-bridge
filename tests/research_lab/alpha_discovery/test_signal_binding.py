@@ -1891,18 +1891,21 @@ def test_recover_round_execution_timing_100_percent_coverage(tmp_path: Path) -> 
             bundle_dir = tmp_path / run_id
             bundle_dir.mkdir(parents=True, exist_ok=True)
             run_json = bundle_dir / "run.json"
-            run_json.write_text(
-                json.dumps({
-                    "run": {"run_id": run_id, "object_id": run_id},
-                    "timing": {"completed_at": c_time},
-                }),
-                encoding="utf-8",
-            )
+            content_hash = "a" * 64
+            run_payload = {
+                "run_id": run_id,
+                "run_content_hash": content_hash,
+                "timing": {"completed_at": c_time},
+            }
+            raw_bytes = json.dumps(run_payload).encode("utf-8")
+            run_json.write_bytes(raw_bytes)
+            run_json_sha = hashlib.sha256(raw_bytes).hexdigest()
 
-            s_runs.append({"run_id": run_id, "content_hash": "a" * 64})
+            s_runs.append({"run_id": run_id, "content_hash": content_hash})
             s_receipts.append({
-                "run": {"object_id": run_id},
+                "run": {"object_id": run_id, "content_hash": content_hash},
                 "bundle_location": str(bundle_dir),
+                "bundle_file_sha256": {"run.json": run_json_sha},
             })
         records.append({
             "ordinal": s_idx,
@@ -1913,6 +1916,98 @@ def test_recover_round_execution_timing_100_percent_coverage(tmp_path: Path) -> 
     completed_at, source = recover_round_execution_timing(records)
     assert completed_at == max(expected_times)
     assert source == "recovered from immutable result store execution receipts (latest run.json:timing.completed_at)"
+
+
+def test_recover_round_execution_timing_rejects_top_level_run_id_mismatch_and_bundle_sha_counterexample(
+    tmp_path: Path,
+) -> None:
+    """Reviewer counterexample: spoofed run.json top-level run_id, invalid bundle SHA, or hash mismatch fails closed."""
+    # Counterexample A: bundle_file_sha256['run.json']='0'*64 mismatch, top-level run_id='different-run'
+    b_dir = tmp_path / "spoof_bundle"
+    b_dir.mkdir(parents=True, exist_ok=True)
+    r_file = b_dir / "run.json"
+    spoofed_bytes = json.dumps({
+        "run_id": "different-run",
+        "run_content_hash": "c" * 64,
+        "timing": {"completed_at": "2026-09-29T23:59:59.000000Z"},
+    }).encode("utf-8")
+    r_file.write_bytes(spoofed_bytes)
+
+    spoofed_rec = [{
+        "run_refs": [{"run_id": "declared-run", "content_hash": "d" * 64}],
+        "verified_result_store_receipts": [{
+            "run": {"object_id": "declared-run", "content_hash": "d" * 64},
+            "bundle_location": str(b_dir),
+            "bundle_file_sha256": {"run.json": "0" * 64},
+        }],
+    }]
+    cat, src = recover_round_execution_timing(spoofed_rec)
+    assert cat == "unknown"
+    assert "run.json sha256 mismatch against receipt bundle inventory" in src
+    assert "23:59:59" not in cat
+
+    # Counterexample B: bundle_file_sha256 matches actual file, but run.json top-level run_id='different-run'
+    real_file_sha = hashlib.sha256(spoofed_bytes).hexdigest()
+    spoofed_rec[0]["verified_result_store_receipts"][0]["bundle_file_sha256"]["run.json"] = real_file_sha
+    cat, src = recover_round_execution_timing(spoofed_rec)
+    assert cat == "unknown"
+    assert "run.json top-level run_id mismatch for declared-run: found different-run" in src
+
+    # Counterexample C: run_id matches, but run_content_hash mismatches declared run_ref
+    r_file.write_bytes(json.dumps({
+        "run_id": "declared-run",
+        "run_content_hash": "f" * 64,
+        "timing": {"completed_at": "2026-09-29T23:59:59.000000Z"},
+    }).encode("utf-8"))
+    spoofed_rec[0]["verified_result_store_receipts"][0]["bundle_file_sha256"]["run.json"] = hashlib.sha256(
+        r_file.read_bytes()
+    ).hexdigest()
+    cat, src = recover_round_execution_timing(spoofed_rec)
+    assert cat == "unknown"
+    assert "run_content_hash mismatch with declared run_ref" in src
+
+
+def test_recover_round_execution_timing_with_result_store_refuses_cached_receipts_tampering(
+    tmp_path: Path,
+) -> None:
+    """When result_store is supplied on resume, cached receipts in JSON are never trusted literally."""
+    r1_dir = Path("artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1")
+    if not (r1_dir / "ROUND1_FULL_EVIDENCE.json").exists():
+        pytest.skip("Real R1 artifacts not present")
+
+    r1_store = ResultStore(ResearchLabConfig(root=r1_dir / "store"))
+    r1_data = json.loads((r1_dir / "ROUND1_FULL_EVIDENCE.json").read_text(encoding="utf-8"))
+    integrations = r1_data.get("integrations", [])
+
+    # Tamper with cached verified_result_store_receipts in integration JSON
+    tampered_integrations = copy.deepcopy(integrations)
+    fake_bundle = tmp_path / "fake_bundle"
+    fake_bundle.mkdir(parents=True, exist_ok=True)
+    (fake_bundle / "run.json").write_text(
+        json.dumps({
+            "run_id": "fake-run",
+            "run_content_hash": "0" * 64,
+            "timing": {"completed_at": "2099-01-01T00:00:00.000000Z"},
+        }),
+        encoding="utf-8",
+    )
+    for item in tampered_integrations:
+        item["verified_result_store_receipts"] = [{
+            "run": {"object_id": "fake-run", "content_hash": "0" * 64},
+            "bundle_location": str(fake_bundle),
+            "bundle_file_sha256": {"run.json": hashlib.sha256((fake_bundle / "run.json").read_bytes()).hexdigest()},
+        }]
+
+    # With result_store=r1_store: authentic receipts are re-queried, tampered cache is ignored
+    c_at, src = recover_round_execution_timing(tampered_integrations, result_store=r1_store)
+    assert c_at == "2026-09-29T10:35:07.281286Z"
+    assert "2099" not in c_at
+
+    # If run_refs declare a non-existent run_id, result_store re-query fails closed to unknown
+    tampered_integrations[0]["run_refs"].append({"run_id": "run-non-existent-9999"})
+    c_at_bad, src_bad = recover_round_execution_timing(tampered_integrations, result_store=r1_store)
+    assert c_at_bad == "unknown"
+    assert "ResultStore query_v2_runs returned 0 receipts" in src_bad
 
 
 def test_recover_round_execution_timing_missing_receipt_returns_unknown_and_orphan_cannot_rescue(
@@ -1926,20 +2021,20 @@ def test_recover_round_execution_timing_missing_receipt_returns_unknown_and_orph
 
     b_dir_0 = tmp_path / run_0
     b_dir_0.mkdir(parents=True, exist_ok=True)
-    (b_dir_0 / "run.json").write_text(
-        json.dumps({
-            "run": {"run_id": run_0, "object_id": run_0},
-            "timing": {"completed_at": "2026-09-29T10:00:00.000000Z"},
-        }),
-        encoding="utf-8",
-    )
+    r_bytes = json.dumps({
+        "run_id": run_0,
+        "run_content_hash": "a" * 64,
+        "timing": {"completed_at": "2026-09-29T10:00:00.000000Z"},
+    }).encode("utf-8")
+    (b_dir_0 / "run.json").write_bytes(r_bytes)
 
     # Orphan run.json created in an unreferenced directory (simulating glob rescue attempt)
     orphan_dir = tmp_path / "orphan_runs"
     orphan_dir.mkdir(parents=True, exist_ok=True)
     (orphan_dir / "run.json").write_text(
         json.dumps({
-            "run": {"run_id": run_1, "object_id": run_1},
+            "run_id": run_1,
+            "run_content_hash": "b" * 64,
             "timing": {"completed_at": "2026-09-29T10:59:59.000000Z"},
         }),
         encoding="utf-8",
@@ -1952,7 +2047,11 @@ def test_recover_round_execution_timing_missing_receipt_returns_unknown_and_orph
             {"run_id": run_1, "content_hash": "b" * 64},
         ],
         "verified_result_store_receipts": [
-            {"run": {"object_id": run_0}, "bundle_location": str(b_dir_0)},
+            {
+                "run": {"object_id": run_0, "content_hash": "a" * 64},
+                "bundle_location": str(b_dir_0),
+                "bundle_file_sha256": {"run.json": hashlib.sha256(r_bytes).hexdigest()},
+            },
             # run_1 receipt intentionally omitted!
         ],
     })
@@ -1970,18 +2069,21 @@ def test_recover_round_execution_timing_invalid_or_missing_timing_returns_unknow
     run_id = "run-bad-timing"
     b_dir = tmp_path / run_id
     b_dir.mkdir(parents=True, exist_ok=True)
-    (b_dir / "run.json").write_text(
-        json.dumps({
-            "run": {"run_id": run_id, "object_id": run_id},
-            "timing": {"completed_at": "2026-09-29 10:00:00"},  # Invalid: missing Z/offset and T
-        }),
-        encoding="utf-8",
-    )
+    raw_bytes = json.dumps({
+        "run_id": run_id,
+        "run_content_hash": "a" * 64,
+        "timing": {"completed_at": "2026-09-29 10:00:00"},  # Invalid: missing Z/offset and T
+    }).encode("utf-8")
+    (b_dir / "run.json").write_bytes(raw_bytes)
 
     records = [{
         "ordinal": 0,
-        "run_refs": [{"run_id": run_id}],
-        "verified_result_store_receipts": [{"run": {"object_id": run_id}, "bundle_location": str(b_dir)}],
+        "run_refs": [{"run_id": run_id, "content_hash": "a" * 64}],
+        "verified_result_store_receipts": [{
+            "run": {"object_id": run_id, "content_hash": "a" * 64},
+            "bundle_location": str(b_dir),
+            "bundle_file_sha256": {"run.json": hashlib.sha256(raw_bytes).hexdigest()},
+        }],
     }]
 
     completed_at, source = recover_round_execution_timing(records)
@@ -2018,9 +2120,16 @@ def test_recover_round_execution_timing_real_r1_and_r2_receipts_regression() -> 
         assert len(integrations) == 10
         total_runs = sum(len(item.get("run_refs", [])) for item in integrations)
         assert total_runs == 40
+
+        # Test both offline receipt recovery and ResultStore re-verification
         c_at, src = recover_round_execution_timing(integrations)
         assert c_at == "2026-09-29T10:35:07.281286Z"
         assert src == "recovered from immutable result store execution receipts (latest run.json:timing.completed_at)"
+
+        r1_store = ResultStore(ResearchLabConfig(root=r1_path.parent / "store"))
+        c_at_store, src_store = recover_round_execution_timing(integrations, result_store=r1_store)
+        assert c_at_store == "2026-09-29T10:35:07.281286Z"
+        assert src_store == "recovered from immutable result store execution receipts (latest run.json:timing.completed_at)"
 
     r2_path = Path("artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/ROUND2_FULL_EVIDENCE.json")
     if r2_path.exists():
@@ -2029,6 +2138,12 @@ def test_recover_round_execution_timing_real_r1_and_r2_receipts_regression() -> 
         assert len(integrations) == 10
         total_runs = sum(len(item.get("run_refs", [])) for item in integrations)
         assert total_runs == 60
+
         c_at, src = recover_round_execution_timing(integrations)
         assert c_at == "2026-09-29T10:53:19.031509Z"
         assert src == "recovered from immutable result store execution receipts (latest run.json:timing.completed_at)"
+
+        r2_store = ResultStore(ResearchLabConfig(root=r2_path.parent / "store"))
+        c_at_store, src_store = recover_round_execution_timing(integrations, result_store=r2_store)
+        assert c_at_store == "2026-09-29T10:53:19.031509Z"
+        assert src_store == "recovered from immutable result store execution receipts (latest run.json:timing.completed_at)"
