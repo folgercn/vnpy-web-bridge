@@ -29,7 +29,6 @@ Strict invariants enforced:
 from __future__ import annotations
 
 import argparse
-import asyncio
 import dataclasses
 import datetime
 import hashlib
@@ -41,12 +40,9 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-REPO = Path("/Users/fujun/node/vnpy-web-bridge").resolve()
+REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
-sys.path.insert(0, str(REPO / "research_lab" / "agent_control" / "antigravity_mcp"))
-sys.path.insert(0, str(REPO / "research_lab" / "agent_control" / "antigravity_mcp" / "core"))
 
-import agy_service as service  # noqa: E402
 from research_lab.agent_control.alpha_generator import (  # noqa: E402
     DISCOVERY_POLICY_VERSION,
     ResearchMemoryCategory,
@@ -85,9 +81,8 @@ from research_lab.agent_control.providers.antigravity_local_mcp import (  # noqa
 from research_lab.agent_control.registry import ProviderRegistry  # noqa: E402
 from research_lab.agent_control.router import authorize  # noqa: E402
 from research_lab.agent_control.routing_policy import RoutingPolicy  # noqa: E402
-from research_lab.agent_control.transports.local_mcp import (  # noqa: E402
-    ALL_MCP_OPERATIONS,
-    LocalMCPTransport,
+from scripts.issue502_trusted_runtime import (  # noqa: E402
+    add_trusted_arguments, bind_run_root, make_transport, require_project, trusted_inputs, validate_run_id, wait_owned_job,
 )
 from research_lab.alpha_discovery import (  # noqa: E402
     AlphaDiscoveryEngine,
@@ -186,7 +181,19 @@ def main() -> None:
         action="store_true",
         help="Resume Precheck & Integration from completed batch_result_round_1.json without resubmitting Provider slots",
     )
+    add_trusted_arguments(parser)
     args = parser.parse_args()
+    validate_run_id(args.run_id)
+    inputs = trusted_inputs(args, REPO)
+    if args.preflight_only:
+        print(json.dumps({"status": "SOURCE_PREFLIGHT_PASS", "verified_source_days": 19,
+                          "provider_submissions": 0, "scientific_memory_writes": 0,
+                          "stage2_accepted": False, "checkout": str(REPO)}))
+        return
+    global PROVENANCE_PATH, BASE_CSV_PATH, RUNS_BASE_DIR
+    PROVENANCE_PATH = inputs["provenance"]
+    BASE_CSV_PATH = inputs["base_csv"]
+    RUNS_BASE_DIR = inputs["output"]
 
     run_id = _validate_safe_run_id(args.run_id)
     RUNS_BASE_DIR.mkdir(parents=True, exist_ok=True)
@@ -219,6 +226,8 @@ def main() -> None:
         store_root.mkdir(parents=False, exist_ok=False)
         engine_workspace.mkdir(parents=False, exist_ok=False)
 
+    bind_run_root(run_root, inputs, REPO, create=not args.resume)
+
     # Save exact runner script copy
     shutil.copy2(Path(__file__).resolve(), r1_dir / "run_stage2_round1_universal_real.py")
 
@@ -249,17 +258,13 @@ def main() -> None:
     (r1_dir / "objective_round_1.sha256").write_text(f"{obj_sha}  objective_round_1.txt\n", encoding="utf-8")
     print(f"  -> Universal Objective verified (SHA256: {obj_sha}, len: {len(objective)})", flush=True)
 
-    # Initialize MCP service & transport
-    service.init()
+    # Use the installed MCP boundary; no copied Desktop backend
+    transport = make_transport(args.mcp_command)
+    resolved_proj = require_project(transport, REPO, EXPECTED_PROJECT_ID)
 
     def tool_caller(op: str, call_args: dict[str, Any]) -> Any:
-        return asyncio.run(service.dispatch(op, call_args))
+        return transport.call_tool(op, call_args)
 
-    transport = LocalMCPTransport(
-        tool_catalog=list(ALL_MCP_OPERATIONS),
-        tool_caller=tool_caller,
-        connection_profile_ref="antigravity-local-desktop",
-    )
     audit_trail = AppendOnlyAuditTrail()
     provider = AntigravityLocalMCPProvider(transport=transport, audit_trail=audit_trail)
 
@@ -268,22 +273,13 @@ def main() -> None:
     if status_snapshot.get("active") is not None or status_snapshot.get("queued"):
         raise RuntimeError(f"Desktop scheduler is not idle before Round 1: {status_snapshot}")
 
-    desktop_tasks_dir = REPO / "research_lab" / "agent_control" / "antigravity_mcp" / ".desktop" / "tasks"
-    existing_task_files = sorted(desktop_tasks_dir.glob("*.json"))
-    task_state_counts: dict[str, int] = {}
-    for tf in existing_task_files:
-        td = json.loads(tf.read_text(encoding="utf-8"))
-        st = str(td.get("state", "unknown"))
-        task_state_counts[st] = task_state_counts.get(st, 0) + 1
-        if st in ("running", "uncertain"):
-            raise RuntimeError(f"Found pre-existing task in {st} state: {tf.name}")
-
-    proj_resp = tool_caller("projects", {"cwd": str(REPO)})
-    resolved_proj = proj_resp.get("project") if isinstance(proj_resp, dict) else None
-    if not isinstance(resolved_proj, dict) or resolved_proj.get("project_id") != EXPECTED_PROJECT_ID:
-        raise RuntimeError(f"Project binding check failed: {proj_resp}")
+    # Shared scheduler state is obtained through MCP, never a copied backend cache.
+    existing_task_files = status_snapshot.get("active_tasks", [])
+    task_state_counts = {"active": len(existing_task_files)}
 
     usage_before = provider.account_usage()
+    if not usage_before.quota_windows:
+        raise RuntimeError("Missing Provider quota windows")
     for w in usage_before.quota_windows:
         rem = w.get("remaining_fraction", 0.0)
         if rem is None or float(rem) <= 0.0:
@@ -484,6 +480,8 @@ def main() -> None:
             "submitted_at": get_realtime_utc(),
             "submit_wall_time": t0,
         }
+        _dump_json(provider_raw_dir / f"submission_{ord_num:02d}.json",
+                   {**captured_by_task_id[task.task_id], "handle": handle.to_dict()})
         print(
             f"  -> [Slot {ord_num:02d}/10] Submitted job_id={handle.provider_job_ref}",
             flush=True,
@@ -492,13 +490,12 @@ def main() -> None:
 
     def hooked_status(handle: AgentExecutionHandle) -> str:
         job_id = handle.provider_job_ref
-        deadline = time.monotonic() + 360.0
-        while time.monotonic() < deadline:
-            d = service.jobread(job_id)
-            st = str(d.get("status", "")).lower()
-            if st in service.TERMINAL:
-                break
-            time.sleep(2.0)
+        try:
+            wait_owned_job(transport, job_id)
+        except ProviderError:
+            uncertain_halt_state["halted"] = True
+            uncertain_halt_state["reason"] = f"Observation failed for existing job {job_id}"
+            raise
         return orig_status(handle)
 
     def hooked_result(handle: AgentExecutionHandle, preparation: Any = None) -> AgentResult:
@@ -782,6 +779,7 @@ def main() -> None:
         allow_synthetic_passthrough=False,
     )
     dataset_binding = {
+        **inputs["binding"],
         "provenance_path": str(PROVENANCE_PATH.resolve()),
         "provenance_sha256": actual_prov_sha,
         "source_days": source_days,
@@ -809,6 +807,8 @@ def main() -> None:
                 provenance_path=PROVENANCE_PATH,
                 output_dir=slot_precheck_dir,
                 provenance_sha256=actual_prov_sha,
+                real_source_bundle_root=inputs["binding"]["real_source_bundle_root"],
+                official_rules_root=inputs["binding"]["official_rules_root"],
             )
         if precheck_res.get("precheck_status") != "PRECHECK_PASS":
             raise RuntimeError(
@@ -1037,12 +1037,12 @@ def main() -> None:
 
     print(
         f"\n======================================================\n"
-        f"Round 1 REAL BATCH DISCOVERY COMPLETED SUCCESSFULLY!\n"
+        f"Round 1 execution report (Stage 2 acceptance requires independent review)\n"
         f"Run Root: {r1_dir}\n"
         f"Objective SHA256: {obj_sha}\n"
         f"Admitted: {funnel_dict['admitted']}/{funnel_dict['requested']}\n"
-        f"Precheck: 10/10 PASS\n"
-        f"Protocol v2 Runs: {len(integration_records) * 4}\n"
+        f"Precheck records: {len(integration_records)}/{funnel_dict['requested']}\n"
+        f"Protocol v2 Runs: {sum(len(item.get('run_refs', [])) for item in integration_records)}\n"
         f"Memory B Entries: {view_b.total_entries}\n"
         f"Evidence: {r1_dir / 'ROUND1_FULL_EVIDENCE.json'}\n"
         f"======================================================\n",
