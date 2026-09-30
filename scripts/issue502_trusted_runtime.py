@@ -8,9 +8,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
+from research_lab.agent_control.contracts import _clean_for_canonical
 from research_lab.agent_control.errors import ProviderError, ProviderErrorCode
 from research_lab.agent_control.transports.local_mcp import LocalMCPTransport
 from research_lab.alpha_discovery.real_source_time import verify_shfe_settlement_days
@@ -88,20 +90,48 @@ def require_project(transport: LocalMCPTransport, repo: Path, project_id: str) -
     return project
 
 
-def wait_owned_job(transport: LocalMCPTransport, job_id: str, *, max_updates: int = 6) -> None:
-    """Observe the same owned job; timeout never submits, cancels or retries it."""
+def wait_owned_job(transport: LocalMCPTransport, job_id: str, *, max_updates: int = 6,
+                   state_path: Path | None = None) -> None:
+    """Keep a durable cursor even when a notification precedes a lost response."""
     cursor = 0
-    for _ in range(max_updates):
-        response = transport.call_tool("watch", {"job_id": job_id, "cursor": cursor,
-                                                  "timeout_seconds": 60}, timeout_seconds=70)
-        if not isinstance(response, dict):
-            raise RuntimeError("Invalid watch response; preserve the same job for recovery")
-        resume = response.get("resume", {})
-        cursor = resume.get("cursor", response.get("cursor", cursor))
-        if response.get("status") in {"completed", "failed", "cancelled", "worker_lost"}:
-            return
+    if state_path is not None and state_path.exists():
+        state = json.loads(state_path.read_text())
+        if state.get("job_id") != job_id or type(state.get("cursor")) is not int or state["cursor"] < 0:
+            raise ProviderError(ProviderErrorCode.EXECUTION_UNCERTAIN, "Invalid owned watch checkpoint")
+        cursor = state["cursor"]
+
+    def save_cursor(value: Any) -> None:
+        nonlocal cursor
+        if type(value) is not int or value < cursor:
+            raise ProviderError(ProviderErrorCode.EXECUTION_UNCERTAIN, "Invalid/regressed watch cursor")
+        cursor = value
+        if state_path is not None:
+            # Atomic replacement keeps the previous cursor intact on a failed write.
+            write_json_atomic(state_path, {"job_id": job_id, "cursor": cursor})
+
+    def notification(message: dict) -> None:
+        data = message.get("params", {}).get("data")
+        if isinstance(data, dict) and data.get("job_id") == job_id and "cursor" in data:
+            save_cursor(data["cursor"])
+
+    try:
+        for _ in range(max_updates):
+            response = transport.call_tool("watch", {"job_id": job_id, "cursor": cursor,
+                                                      "timeout_seconds": 60}, timeout_seconds=70,
+                                           on_notification=notification)
+            if not isinstance(response, dict):
+                raise ValueError("Invalid watch response")
+            resume = response.get("resume", {})
+            if not isinstance(resume, dict) or resume.get("job_id", job_id) != job_id:
+                raise ValueError("Watch response belongs to another job")
+            save_cursor(resume.get("cursor", response.get("cursor", cursor)))
+            if response.get("status") in {"completed", "failed", "cancelled", "worker_lost"}:
+                return
+    except Exception as exc:
+        raise ProviderError(ProviderErrorCode.EXECUTION_UNCERTAIN,
+                            f"Observation unresolved for job {job_id} at cursor {cursor}") from exc
     raise ProviderError(ProviderErrorCode.EXECUTION_UNCERTAIN,
-                        f"Job {job_id} is not terminal; recover this job without resubmission")
+                        f"Job {job_id} is not terminal at cursor {cursor}; recover without resubmission")
 
 
 def bind_run_root(root: Path, inputs: dict[str, Any], repo: Path, *, create: bool) -> None:
@@ -114,3 +144,49 @@ def bind_run_root(root: Path, inputs: dict[str, Any], repo: Path, *, create: boo
             json.dump(expected, stream, sort_keys=True, indent=2)
     elif json.loads(marker.read_text(encoding="utf-8")) != expected:
         raise ValueError("Existing run belongs to different source inputs or checkout")
+
+
+def verify_r1_feedback_view(view: Any, persisted: dict, evidence: dict, store: Any) -> None:
+    """Bind the next session to verified receipts and this R1's full controlled view."""
+    observed = view.to_dict()
+    expected = dict(persisted)
+    observed.pop("generated_at", None)
+    expected.pop("generated_at", None)
+    if _clean_for_canonical(observed) != _clean_for_canonical(expected):
+        raise ValueError("Memory View B differs from this completed R1 snapshot")
+    summary = evidence["post_r1_memory_view"]
+    for name, value in (("view_id", view.view_id), ("content_hash", view.view_content_hash),
+                        ("total_entries", view.total_entries)):
+        if summary.get(name) != value:
+            raise ValueError("R1 evidence and controlled Memory View disagree")
+    if evidence.get("round") != 1 or evidence.get("funnel", {}).get("requested") != 10:
+        raise ValueError("Memory feedback must originate from this R1 ten-slot batch")
+    slots = evidence.get("slots", [])
+    if sorted(slot.get("ordinal", -1) for slot in slots) != list(range(1, 11)):
+        raise ValueError("R1 per-slot provenance is incomplete")
+    if any(slot.get("engineering_status") == "PROVIDER_UNCERTAIN" for slot in slots):
+        raise ValueError("R1 contains unresolved Provider ownership")
+    integrations = evidence.get("integrations", [])
+    if not integrations:
+        raise ValueError("R1 has no verified scientific integrations")
+    for record in integrations:
+        if record.get("engineering_status") != "COMPLETED" or not record.get("run_refs"):
+            raise ValueError("R1 scientific integration incomplete")
+        for ref in record["run_refs"]:
+            receipts = store.query_v2_runs(run_id=ref["run_id"], verify=True)
+            if len(receipts) != 1:
+                raise ValueError("R1 run receipt missing or ambiguous")
+
+
+def write_json_atomic(path: Path, payload: Any) -> None:
+    """Keep the previous ownership record when an accepted-handle write fails."""
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as stream:
+            json.dump(payload, stream, indent=2, sort_keys=True, ensure_ascii=False)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)

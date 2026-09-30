@@ -70,3 +70,25 @@ whitespace checks passed. The real installed stdio tools were discovered, but
 `projects(cwd)` for the isolated checkout returned `PROJECT_NOT_FOUND`.
 No new Provider task was submitted. #502 remains OPEN and Stage 2 acceptance
 remains pending; #500, #586 and #587 have not started.
+
+### #593 review corrections
+
+The stdio transport now correlates exact JSON-RPC request IDs and reads complete
+frames until the matching response. Notifications update a durable same-job watch
+cursor; unrelated responses cannot complete a request. EOF, timeout, malformed
+frames and tool errors fail closed. The regression peer uses the actual installed
+FastMCP library, emits a notification before its response, and never submits a
+model job.
+
+Submission ownership intent is atomically persisted before submit. A lost submit
+response, accepted-handle persistence failure or unresolved first result halts the
+actual batch: later slots are not attempted, ownership is classified uncertain,
+and submit is never retried. Two-slot regressions exercise both runner hooks
+through DiscoveryBatchOrchestrator.
+
+Round 2 rebuilds the controlled view from the current round 1 database opened
+read-only, checks its persisted view and evidence summary, and verifies each run
+receipt. Historical view IDs, hashes, entry counts and fixed missing-dimension
+text are no longer prerequisites. Required structured stability/outlier gaps
+remain enforced. Contract fixtures exercise this boundary only; they do not count
+as either real Provider round or scientific acceptance.

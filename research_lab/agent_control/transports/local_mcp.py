@@ -17,6 +17,7 @@ import json
 import os
 import select
 import subprocess
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -230,7 +231,7 @@ class LocalMCPTransport:
                 self._command,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
                 text=True,
             )
         except Exception as e:
@@ -253,23 +254,20 @@ class LocalMCPTransport:
             }
             proc.stdin.write(json.dumps(init_req) + "\n")
             proc.stdin.flush()
-            init_line = self._readline_with_timeout(proc, 10.0)
-            if not init_line:
-                raise ProviderUnavailableError("MCP server process closed before initialize response")
-            init_resp = json.loads(init_line)
+            deadline = time.monotonic() + 10.0
+            init_resp = self._read_response(proc, 1, deadline)
             if "error" in init_resp:
                 raise ProviderUnavailableError(
                     f"MCP server initialize error: {init_resp['error'].get('message')}"
                 )
 
+            self._send_initialized(proc)
+
             # 2. tools/list
             tools_req = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
             proc.stdin.write(json.dumps(tools_req) + "\n")
             proc.stdin.flush()
-            tools_line = self._readline_with_timeout(proc, 10.0)
-            if not tools_line:
-                raise ProviderUnavailableError("MCP server process closed before tools/list response")
-            tools_resp = json.loads(tools_line)
+            tools_resp = self._read_response(proc, 2, deadline)
             if "error" in tools_resp:
                 raise ProviderUnavailableError(
                     f"MCP server tools/list error: {tools_resp['error'].get('message')}"
@@ -291,15 +289,59 @@ class LocalMCPTransport:
                 proc.kill()
 
     @staticmethod
+    def _send_initialized(proc: subprocess.Popen) -> None:
+        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+        proc.stdin.flush()
+
+    @staticmethod
     def _readline_with_timeout(proc: subprocess.Popen, timeout_seconds: float) -> str:
-        """Read a line from stdout with fail-closed timeout detection using select."""
+        """Read complete UTF-8 frames without TextIO prefetch or partial-line hangs."""
         if proc.stdout is None:
             return ""
-        rlist, _, _ = select.select([proc.stdout], [], [], max(0.01, timeout_seconds))
-        if not rlist:
-            cmd = proc.args if hasattr(proc, "args") else "mcp"
-            raise subprocess.TimeoutExpired(cmd, timeout_seconds)
-        return proc.stdout.readline()
+        deadline = time.monotonic() + max(0, timeout_seconds)
+        buffer = getattr(proc, "_mcp_frame_buffer", b"")
+        while True:
+            if b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                proc._mcp_frame_buffer = buffer
+                return line.decode("utf-8")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([proc.stdout], [], [], remaining)[0]:
+                raise subprocess.TimeoutExpired(proc.args, timeout_seconds)
+            chunk = os.read(proc.stdout.fileno(), 65536)
+            if not chunk:
+                if buffer:
+                    raise ValueError("MCP EOF inside an incomplete JSON-RPC frame")
+                return ""
+            buffer += chunk
+            if len(buffer) > 4 * 1024 * 1024:
+                raise ValueError("MCP response frame exceeds size limit")
+
+    @classmethod
+    def _read_response(cls, proc: subprocess.Popen, request_id: int, deadline: float, on_notification=None) -> dict:
+        """Ignore notifications/unrelated responses; accept only the exact request ID."""
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(proc.args, 0)
+            line = cls._readline_with_timeout(proc, remaining)
+            if not line:
+                raise EOFError("MCP EOF before matching JSON-RPC response")
+            message = json.loads(line)
+            if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
+                raise ValueError("Invalid MCP JSON-RPC frame")
+            if "id" not in message and isinstance(message.get("method"), str):
+                if on_notification is not None:
+                    on_notification(message)
+                continue
+            if "method" in message:
+                raise ValueError("Unsupported MCP server request")
+            if "result" not in message and "error" not in message:
+                raise ValueError("MCP response has neither result nor error")
+            # bool and numeric/string aliases cannot match our integer request ID.
+            if type(message.get("id")) is not int or message["id"] != request_id:
+                continue
+            return message
 
     def call_tool(
         self,
@@ -307,6 +349,7 @@ class LocalMCPTransport:
         arguments: dict[str, Any] | None = None,
         *,
         timeout_seconds: float = 60.0,
+        on_notification: Callable[[dict], None] | None = None,
     ) -> Any:
         """Invoke an MCP tool by its abstract operation name, resolved dynamically."""
         resolver = self.discover_tools()
@@ -330,13 +373,14 @@ class LocalMCPTransport:
                 f"Cannot execute tool '{tool_name}': no tool_caller or stdio command configured"
             )
 
-        return self._execute_stdio_call(tool_name, args, timeout_seconds=timeout_seconds)
+        return self._execute_stdio_call(tool_name, args, timeout_seconds=timeout_seconds, on_notification=on_notification)
 
     def _execute_stdio_call(
         self,
         tool_name: str,
         arguments: dict[str, Any],
         timeout_seconds: float,
+        on_notification: Callable[[dict], None] | None = None,
     ) -> Any:
         """Perform a single tools/call invocation over a managed stdio process."""
         proc = None
@@ -345,7 +389,7 @@ class LocalMCPTransport:
                 self._command,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
                 text=True,
             )
             # 1. initialize
@@ -361,9 +405,11 @@ class LocalMCPTransport:
             }
             proc.stdin.write(json.dumps(init_req) + "\n")
             proc.stdin.flush()
-            init_line = self._readline_with_timeout(proc, timeout_seconds)
-            if not init_line:
-                raise ProviderUnavailableError("MCP server process terminated unexpectedly on initialize")
+            deadline = time.monotonic() + timeout_seconds
+            init_response = self._read_response(proc, 1, deadline)
+            if "error" in init_response:
+                raise ProviderUnavailableError("MCP initialize returned an error")
+            self._send_initialized(proc)
 
             # 2. tools/call
             call_req = {
@@ -375,14 +421,7 @@ class LocalMCPTransport:
             proc.stdin.write(json.dumps(call_req) + "\n")
             proc.stdin.flush()
 
-            call_line = self._readline_with_timeout(proc, timeout_seconds)
-            if not call_line:
-                raise ProviderError(
-                    ProviderErrorCode.EXECUTION_UNCERTAIN,
-                    f"MCP connection lost while awaiting result for tool '{tool_name}'",
-                )
-
-            resp = json.loads(call_line)
+            resp = self._read_response(proc, 2, deadline, on_notification)
             if "error" in resp:
                 err_data = resp["error"]
                 err_msg = err_data.get("message", "Unknown MCP error")
@@ -392,7 +431,10 @@ class LocalMCPTransport:
                     details={"tool_name": tool_name, "error": err_data},
                 )
 
-            result_obj = resp.get("result", {})
+            result_obj = resp["result"]
+            if isinstance(result_obj, dict) and result_obj.get("isError") is True:
+                raise ProviderError(ProviderErrorCode.EXECUTION_FAILED,
+                                    f"MCP tool '{tool_name}' returned isError=true")
             return parse_mcp_response_content(result_obj)
 
         except subprocess.TimeoutExpired as e:

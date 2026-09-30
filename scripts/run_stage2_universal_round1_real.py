@@ -82,7 +82,7 @@ from research_lab.agent_control.registry import ProviderRegistry  # noqa: E402
 from research_lab.agent_control.router import authorize  # noqa: E402
 from research_lab.agent_control.routing_policy import RoutingPolicy  # noqa: E402
 from scripts.issue502_trusted_runtime import (  # noqa: E402
-    add_trusted_arguments, bind_run_root, make_transport, require_project, trusted_inputs, validate_run_id, wait_owned_job,
+    add_trusted_arguments, bind_run_root, make_transport, require_project, trusted_inputs, validate_run_id, wait_owned_job, write_json_atomic,
 )
 from research_lab.alpha_discovery import (  # noqa: E402
     AlphaDiscoveryEngine,
@@ -125,10 +125,8 @@ def _json_default(obj: Any) -> Any:
 
 def _dump_json(path: Path, obj: Any) -> None:
     cleaned = _clean_for_canonical(obj)
-    path.write_text(
-        json.dumps(cleaned, indent=2, sort_keys=True, ensure_ascii=False, default=_json_default) + "\n",
-        encoding="utf-8",
-    )
+    write_json_atomic(path, cleaned)
+
 
 
 def get_realtime_utc() -> str:
@@ -469,42 +467,62 @@ def main() -> None:
             flush=True,
         )
         t0 = time.time()
-        handle = orig_submit(task, route, preparation, request_id=request_id)
+        handle = None
         captured_by_task_id[task.task_id] = {
-            "ordinal": ord_num,
-            "slot_id": p_slot.slot_id if p_slot else None,
-            "request_id": request_id,
-            "task_id": task.task_id,
-            "route_id": route.route_id,
-            "provider_job_ref": handle.provider_job_ref,
-            "submitted_at": get_realtime_utc(),
-            "submit_wall_time": t0,
+            "ordinal": ord_num, "slot_id": p_slot.slot_id if p_slot else None,
+            "request_id": request_id, "task_id": task.task_id, "route_id": route.route_id,
+            "provider_job_ref": None, "submit_wall_time": t0, "state": "SUBMIT_INTENT",
         }
-        _dump_json(provider_raw_dir / f"submission_{ord_num:02d}.json",
-                   {**captured_by_task_id[task.task_id], "handle": handle.to_dict()})
-        print(
-            f"  -> [Slot {ord_num:02d}/10] Submitted job_id={handle.provider_job_ref}",
-            flush=True,
-        )
+        try:
+            # Ownership is durable before a remote submission can happen.
+            _dump_json(provider_raw_dir / f"submission_{ord_num:02d}.json", captured_by_task_id[task.task_id])
+            handle = orig_submit(task, route, preparation, request_id=request_id)
+            captured_by_task_id[task.task_id].update({
+                "provider_job_ref": handle.provider_job_ref, "submitted_at": get_realtime_utc(),
+                "handle": handle.to_dict(), "state": "HANDLE_RECEIVED",
+            })
+            _dump_json(provider_raw_dir / f"submission_{ord_num:02d}.json", captured_by_task_id[task.task_id])
+        except Exception as exc:
+            uncertain_halt_state["halted"] = True
+            uncertain_halt_state["reason"] = f"Submission reconciliation required for task {task.task_id}"
+            captured_by_task_id[task.task_id]["state"] = "EXECUTION_UNCERTAIN"
+            # Best effort only; on disk failure the original ownership intent and
+            # in-memory handle/exception remain available. Never retry submit.
+            try:
+                _dump_json(provider_raw_dir / f"submission_uncertain_{ord_num:02d}.json", captured_by_task_id[task.task_id])
+            except Exception:
+                print(f"RECOVERY task={task.task_id} request={request_id} job={getattr(handle, 'provider_job_ref', None)}", flush=True)
+            error = ProviderError(ProviderErrorCode.EXECUTION_UNCERTAIN, uncertain_halt_state["reason"])
+            error.execution_handle = handle
+            raise error from exc
+        print(f"  -> [Slot {ord_num:02d}/10] Submitted job_id={handle.provider_job_ref}", flush=True)
         return handle
 
     def hooked_status(handle: AgentExecutionHandle) -> str:
         job_id = handle.provider_job_ref
         try:
-            wait_owned_job(transport, job_id)
-        except ProviderError:
+            wait_owned_job(transport, job_id, state_path=provider_raw_dir / f"watch_{job_id}.json")
+            status = orig_status(handle)
+            if status in {"UNKNOWN", "UNCERTAIN"}:
+                raise ProviderError(ProviderErrorCode.EXECUTION_UNCERTAIN, f"Unresolved job {job_id}")
+            return status
+        except Exception as exc:
             uncertain_halt_state["halted"] = True
             uncertain_halt_state["reason"] = f"Observation failed for existing job {job_id}"
-            raise
-        return orig_status(handle)
+            raise ProviderError(ProviderErrorCode.EXECUTION_UNCERTAIN, uncertain_halt_state["reason"]) from exc
 
     def hooked_result(handle: AgentExecutionHandle, preparation: Any = None) -> AgentResult:
         job_id = handle.provider_job_ref
         task_id = handle.task_ref.get("task_id") if isinstance(handle.task_ref, dict) else None
-        raw_job_check = tool_caller("result", {"job_id": job_id, "offset": 0, "max_chars": 16000})
-        if isinstance(raw_job_check, dict) and str(raw_job_check.get("status", "")).lower() in ("starting", "submitted", "running"):
-            hooked_status(handle)
+        try:
             raw_job_check = tool_caller("result", {"job_id": job_id, "offset": 0, "max_chars": 16000})
+            if isinstance(raw_job_check, dict) and str(raw_job_check.get("status", "")).lower() in ("starting", "submitted", "running"):
+                hooked_status(handle)
+                raw_job_check = tool_caller("result", {"job_id": job_id, "offset": 0, "max_chars": 16000})
+        except Exception as exc:
+            uncertain_halt_state["halted"] = True
+            uncertain_halt_state["reason"] = f"Result unresolved for existing job {job_id}"
+            raise ProviderError(ProviderErrorCode.EXECUTION_UNCERTAIN, uncertain_halt_state["reason"]) from exc
 
         cap = captured_by_task_id.get(str(task_id), {})
         elapsed = time.time() - cap.get("submit_wall_time", time.time())
@@ -518,6 +536,8 @@ def main() -> None:
         try:
             agent_res = orig_result(handle, preparation)
         except Exception as exc:
+            uncertain_halt_state["halted"] = True
+            uncertain_halt_state["reason"] = f"Provider result unresolved for existing job {job_id}"
             cap.update(
                 {
                     "completed_at": get_realtime_utc(),
@@ -531,11 +551,14 @@ def main() -> None:
             if task_id:
                 captured_by_task_id[str(task_id)] = cap
             raw_file = provider_raw_dir / f"slot_{ord_num:02d}_{slot_id}.json"
-            _dump_json(raw_file, cap)
+            try:
+                _dump_json(raw_file, cap)
+            except Exception:
+                print(f"RECOVERY task={task_id} job={job_id}", flush=True)
             if isinstance(raw_job_check, dict) and str(raw_job_check.get("outcome", "")).lower() == "uncertain":
                 uncertain_halt_state["halted"] = True
                 uncertain_halt_state["reason"] = f"Slot {ord_num} ({slot_id}) job {job_id} ended in UNCERTAIN"
-            raise
+            raise ProviderError(ProviderErrorCode.EXECUTION_UNCERTAIN, uncertain_halt_state["reason"]) from exc
 
         if isinstance(agent_res.structured_output, dict):
             for k in ("output", "text", "content", "final_output", "response"):
