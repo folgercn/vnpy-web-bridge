@@ -40,9 +40,33 @@ SUPPORTED_LOOKBACKS = (1, 2, 3)
 SUPPORTED_SOURCE_FEATURES = ("settlement", "settlement_price")
 CANONICAL_TARGET_DEFINITION = "log(settlement[t+2] / settlement[t+1])"
 IMPLEMENTATION_VERSION = "research_lab.signal_binding.v1"
-SUPPORTED_MARKET_TIME_AUTHORITIES = frozenset(
-    {"SHFE_OFFICIAL", "EXCHANGE_ANNOUNCEMENT", "AUDITED_EXCHANGE_FEED", "SYNTHETIC_TEST_FIXTURE"}
-)
+
+
+@dataclass(frozen=True)
+class SyntheticTestEvidence:
+    """Explicit, test-dedicated source evidence for offline mathematical and regression unit tests.
+
+    Cannot be activated via caller-supplied strings in source_days or provenance JSON.
+    Must be explicitly instantiated and passed in memory by authorized test code.
+    """
+
+    fixture_id: str
+    description: str = ""
+
+
+AUTHORIZED_SYNTHETIC_FIXTURE_IDS = frozenset({
+    "synthetic-offline-test-fixture-v1",
+})
+
+# Canonical SHA-256 digests of authorized fixed synthetic offline unit-test fixtures.
+# Real warehouse custody or arbitrary caller datasets can NEVER match these digests.
+KNOWN_SYNTHETIC_SOURCE_DIGESTS = frozenset({
+    "d05c1cdaae6b51e8661d2177b50c1207981f6cb877e7f1630dcf9cb758247480",  # Canonical 7-day hand-computable fixture
+    "85ea09167dcb48f97c4e3aac17805e659d66554747006fe86a4b5c33733cbf0a",  # Temporal leak negative fixture 1
+    "b85765889ffc0c90adedc4d9199747bb55d9b9cb0f9d41210922c7c7d50f98e2",  # Target overlap negative fixture 2
+    "f459823038e0feb5f3d9c0998923ea14fc86da50874876ce5fba757c8a222d6b",  # Lagged intermediate late fixture (positive)
+    "f6df0f26144ba388fa89995cfa3cf867abcc7d496d8e3dda9e7daea3c0a77816",  # Lagged actual input late fixture (negative)
+})
 
 _ISO_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|\+00:00)$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -373,6 +397,7 @@ def derive_signal_snapshot(
     candidate_identity_hash: str | None = None,
     provenance_path: Path | str | None = None,
     provenance_sha256: str | None = None,
+    synthetic_test_evidence: SyntheticTestEvidence | None = None,
 ) -> DerivedSnapshotResult:
     """Derive deterministic, verified Protocol v2 CSV snapshot strictly for a single contract.
 
@@ -506,20 +531,58 @@ def derive_signal_snapshot(
                 "using ingestion first_seen_at as target_start_time is strictly forbidden",
             )
 
-        auth_start = next_day.get("market_time_authority")
-        auth_end = end.get("market_time_authority")
-        if (
-            not auth_start
-            or not auth_end
-            or auth_start not in SUPPORTED_MARKET_TIME_AUTHORITIES
-            or auth_end not in SUPPORTED_MARKET_TIME_AUTHORITIES
-        ):
+        # Fail-closed market time verification:
+        # Self-attested market_effective_time or self-labeled authority strings in untrusted provenance
+        # (e.g. SHFE_OFFICIAL, EXCHANGE_ANNOUNCEMENT) without an independent verifiable exchange source are strictly rejected.
+        auth_claimed = next_day.get("market_time_authority") or end.get("market_time_authority")
+        if auth_claimed and auth_claimed != "SYNTHETIC_TEST_FIXTURE":
             raise SignalBindingError(
                 "UNVERIFIED_MARKET_TIME_AUTHORITY",
-                f"Day {next_day['day']} / {end['day']}: target market time lacks verified exchange authority "
-                f"(start_authority='{auth_start}', end_authority='{auth_end}'). "
-                f"Self-attested or unverified timestamps are strictly forbidden. "
-                f"Supported authorities: {sorted(SUPPORTED_MARKET_TIME_AUTHORITIES)}",
+                f"Day {next_day['day']} / {end['day']}: provenance claims market_time_authority='{auth_claimed}', "
+                "but self-attested authority strings without independent verifiable exchange source are strictly forbidden.",
+            )
+
+        if synthetic_test_evidence is None:
+            if auth_claimed == "SYNTHETIC_TEST_FIXTURE":
+                raise SignalBindingError(
+                    "UNVERIFIED_MARKET_TIME_AUTHORITY",
+                    f"Day {next_day['day']} / {end['day']}: provenance claims 'SYNTHETIC_TEST_FIXTURE' in untrusted data, "
+                    "but no authorized SyntheticTestEvidence was provided; string switches in data are strictly forbidden.",
+                )
+            raise SignalBindingError(
+                "UNVERIFIABLE_TARGET_MARKET_TIME",
+                f"Day {next_day['day']} / {end['day']}: source provenance lacks independent verifiable market time source; "
+                "self-attested market_effective_time is unverified and strictly forbidden fail-closed.",
+            )
+
+        if auth_claimed != "SYNTHETIC_TEST_FIXTURE":
+            raise SignalBindingError(
+                "UNVERIFIED_MARKET_TIME_AUTHORITY",
+                f"Day {next_day['day']} / {end['day']}: synthetic test derivation requires market_time_authority='SYNTHETIC_TEST_FIXTURE', "
+                f"got auth_claimed='{auth_claimed}'.",
+            )
+
+        if not isinstance(synthetic_test_evidence, SyntheticTestEvidence):
+            raise SignalBindingError(
+                "UNAUTHORIZED_SYNTHETIC_FIXTURE",
+                f"Invalid synthetic_test_evidence type: expected SyntheticTestEvidence, got {type(synthetic_test_evidence).__name__}",
+            )
+        if synthetic_test_evidence.fixture_id not in AUTHORIZED_SYNTHETIC_FIXTURE_IDS:
+            raise SignalBindingError(
+                "UNAUTHORIZED_SYNTHETIC_FIXTURE",
+                f"Unauthorized synthetic test fixture ID '{synthetic_test_evidence.fixture_id}'. "
+                f"Caller-chosen or arbitrary fixture IDs are strictly forbidden. "
+                f"Authorized IDs: {sorted(AUTHORIZED_SYNTHETIC_FIXTURE_IDS)}",
+            )
+        source_days_canonical_sha = hashlib.sha256(
+            json.dumps(source_days, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if source_days_canonical_sha not in KNOWN_SYNTHETIC_SOURCE_DIGESTS:
+            raise SignalBindingError(
+                "UNAUTHORIZED_SYNTHETIC_FIXTURE",
+                f"Synthetic test evidence is strictly restricted to known fixed offline unit test fixtures. "
+                f"Source dataset digest '{source_days_canonical_sha}' is not an authorized test fixture. "
+                "Real or arbitrary datasets cannot bypass market time verification via SyntheticTestEvidence.",
             )
 
         t_as_of = str(cur["committed_at"])
@@ -747,6 +810,8 @@ def derive_signal_snapshot(
             "Historical availability cannot be claimed prior to recorded first_seen_at.",
         ],
     }
+    if synthetic_test_evidence is not None:
+        metadata["synthetic_test_fixture_id"] = synthetic_test_evidence.fixture_id
 
     meta_bytes = json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode("utf-8")
     try:
@@ -830,6 +895,7 @@ def precheck_candidate_real_data(
     output_dir: Path | str,
     *,
     provenance_sha256: str | None = None,
+    synthetic_test_evidence: SyntheticTestEvidence | None = None,
 ) -> dict[str, Any]:
     """Execute complete Phase A deterministic binding and row-by-row PIT precheck.
 
@@ -885,6 +951,7 @@ def precheck_candidate_real_data(
         candidate_identity_hash=sci_hash,
         provenance_path=prov_p,
         provenance_sha256=actual_prov_sha,
+        synthetic_test_evidence=synthetic_test_evidence,
     )
 
     # Step 3: Verify row-by-row PIT evidence

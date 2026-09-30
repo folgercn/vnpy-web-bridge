@@ -31,6 +31,7 @@ from research_lab.alpha_discovery.hypothesis import (  # noqa: E402
 from research_lab.alpha_discovery.research_memory import ResearchMemory  # noqa: E402
 from research_lab.alpha_discovery.signal_binding import (  # noqa: E402
     CANONICAL_TARGET_DEFINITION,
+    SyntheticTestEvidence,
     derive_signal_snapshot,
     parse_and_verify_signal_spec,
     verify_derived_snapshot_pit,
@@ -62,6 +63,7 @@ def generate_phase_a_precheck(
     run_id: str | None = None,
     runs_base_dir: Path | str | None = None,
     provenance_path: Path | str | None = None,
+    synthetic_test_evidence: SyntheticTestEvidence | None = None,
 ) -> Path:
     """Generate complete Phase A precheck evidence into an immutable, isolated run directory.
 
@@ -166,6 +168,7 @@ def generate_phase_a_precheck(
             candidate_identity_hash=sci_hash,
             provenance_path=prov_p,
             provenance_sha256=prov_sha,
+            synthetic_test_evidence=synthetic_test_evidence,
         )
 
         # 3. Row-by-row PIT verification

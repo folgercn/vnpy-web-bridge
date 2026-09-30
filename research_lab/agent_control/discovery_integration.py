@@ -56,6 +56,7 @@ from research_lab.alpha_discovery import (
 )
 from research_lab.alpha_discovery.signal_binding import (
     SignalBindingError,
+    SyntheticTestEvidence,
     derive_signal_snapshot,
     parse_and_verify_signal_spec,
 )
@@ -261,10 +262,12 @@ class DiscoveryIntegrationOrchestrator:
         *,
         audit_trail: DiscoveryIntegrationAuditTrail | None = None,
         allow_synthetic_passthrough: bool = False,
+        synthetic_test_evidence: SyntheticTestEvidence | None = None,
     ) -> None:
         self.engine = engine
         self.audit_trail = audit_trail or DiscoveryIntegrationAuditTrail()
         self.allow_synthetic_passthrough = allow_synthetic_passthrough
+        self.synthetic_test_evidence = synthetic_test_evidence
 
     def integrate_candidate(
         self,
@@ -404,6 +407,7 @@ class DiscoveryIntegrationOrchestrator:
                     candidate_identity_hash=sci_hash,
                     provenance_path=p_file,
                     provenance_sha256=actual_prov_sha,
+                    synthetic_test_evidence=self.synthetic_test_evidence,
                 )
                 effective_snapshot_path = derived_res.path
                 effective_dataset_binding = derived_res.dataset_binding

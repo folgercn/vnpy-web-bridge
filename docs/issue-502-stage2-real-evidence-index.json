@@ -10,7 +10,7 @@
     "original_32_row_csv_bytes": 19489,
     "time_semantics": "as_of=t custody commit; feature first_seen_at <= as_of; target timing in real M2 custody lacks verified market effective time; warehouse ingestion first_seen_at cannot masquerade as market target start time",
     "stage2_pit_status": "BLOCKED",
-    "stage2_pit_block_reason": "UNVERIFIABLE_TARGET_MARKET_TIME: Real M2 warehouse custody provenance records ingestion timestamps (first_seen_at, committed_at) but lacks verifiable market or settlement effective times for t+1/t+2. Using ingestion first_seen_at as market target_start_time is strictly forbidden fail-closed. Real 2x10 slots cannot claim verified market PIT pass.",
+    "stage2_pit_block_reason": "UNVERIFIABLE_TARGET_MARKET_TIME: The archived provenance and exported snapshot lack verifiable market or settlement effective times for t+1/t+2. Using ingestion first_seen_at as market target_start_time is strictly forbidden fail-closed. Real 2x10 slots cannot claim verified market PIT pass.",
     "limitations": [
       "Source signatures not cryptographically verified by exporter",
       "Only 19 source days; 14-16 derived rows per candidate; overlapping labels and cross-symbol dependence",
@@ -22,9 +22,11 @@
   "round_1": {
     "executed_at": "2026-09-29T10:23:57.915302Z",
     "executed_at_source": "recovered from batch_result_round_1.json:created_at (also matches nested session_round_1.json:session.created_at)",
+    "completed_at": "2026-09-29T10:35:07.281286Z",
+    "completed_at_source": "recovered from immutable result store execution receipts (latest run.json:timing.completed_at)",
     "resumed_at": "2026-09-29T10:37:35.869737Z",
-    "resumed_at_source": "ROUND1_FULL_EVIDENCE.json:executed_at (resume report time)",
-    "completed_at": "2026-09-29T10:37:35.894964Z",
+    "resumed_at_source": "ROUND1_FULL_EVIDENCE.json:executed_at (resume report start)",
+    "report_generated_at": "2026-09-29T10:37:35.894964Z",
     "funnel": {
       "admitted": 10,
       "admitted_rate": 1,
@@ -70,7 +72,9 @@
   "round_2": {
     "executed_at": "2026-09-29T10:47:06.013681Z",
     "executed_at_source": "session_round_2.json:session.created_at, batch_result_round_2.json:created_at, ROUND2_FULL_EVIDENCE.json:executed_at (consistent)",
-    "completed_at": "2026-09-29T10:53:28.643729Z",
+    "completed_at": "2026-09-29T10:53:19.031509Z",
+    "completed_at_source": "recovered from immutable result store execution receipts (latest run.json:timing.completed_at)",
+    "report_generated_at": "2026-09-29T10:53:28.643729Z",
     "funnel": {
       "admitted": 10,
       "admitted_rate": 1,

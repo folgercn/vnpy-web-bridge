@@ -41,6 +41,7 @@ from research_lab.alpha_discovery import (
 from research_lab.alpha_discovery.signal_binding import (
     CANONICAL_TARGET_DEFINITION,
     SignalBindingError,
+    SyntheticTestEvidence,
     derive_signal_snapshot,
     parse_and_verify_signal_spec,
     parse_strict_trade_day,
@@ -50,6 +51,11 @@ from research_lab.alpha_discovery.signal_binding import (
 )
 from research_lab.config import ResearchLabConfig
 from research_lab.database.result_store import ResultStore
+
+TEST_SYNTHETIC_EVIDENCE = SyntheticTestEvidence(
+    fixture_id="synthetic-offline-test-fixture-v1",
+    description="Authorized offline unit test evidence",
+)
 
 
 def _build_synthetic_source_days() -> list[dict[str, Any]]:
@@ -188,6 +194,7 @@ def test_hand_computed_fixture_two_different_definitions(tmp_path: Path) -> None
         tmp_path / "def_a",
         provenance_path=prov_file,
         provenance_sha256=prov_sha,
+        synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
     )
     # For 7 days and k=1: observation indices are i = 1, 2, 3, 4 (4 rows)
     assert res_a.row_count == 4
@@ -221,6 +228,7 @@ def test_hand_computed_fixture_two_different_definitions(tmp_path: Path) -> None
         tmp_path / "def_b",
         provenance_path=prov_file,
         provenance_sha256=prov_sha,
+        synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
     )
     # For 7 days and k=2: observation indices are i = 2, 3, 4 (3 rows)
     assert res_b.row_count == 3
@@ -258,6 +266,7 @@ def test_deterministic_repeat_stability(tmp_path: Path) -> None:
         tmp_path / "run1",
         provenance_path=prov_file,
         provenance_sha256=prov_sha,
+        synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
     )
     res_run2 = derive_signal_snapshot(
         spec,
@@ -265,6 +274,7 @@ def test_deterministic_repeat_stability(tmp_path: Path) -> None:
         tmp_path / "run2",
         provenance_path=prov_file,
         provenance_sha256=prov_sha,
+        synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
     )
 
     # Bit-for-bit identical snapshot SHA256 and byte length across different dirs
@@ -283,6 +293,7 @@ def test_deterministic_repeat_stability(tmp_path: Path) -> None:
             tmp_path / "run1",
             provenance_path=prov_file,
             provenance_sha256=prov_sha,
+            synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
         )
     assert exc_info.value.reason == "SNAPSHOT_ALREADY_EXISTS"
     assert res_run1.path.read_bytes() == before_csv_bytes
@@ -314,6 +325,7 @@ def test_derive_signal_snapshot_and_precheck_reject_overwrite_existing_files(tmp
             meta_only_dir,
             provenance_path=prov_file,
             provenance_sha256=prov_sha,
+            synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
         )
     assert exc_meta.value.reason == "SNAPSHOT_ALREADY_EXISTS"
     assert existing_meta.read_text(encoding="utf-8") == '{"sentinel": true}'
@@ -326,6 +338,7 @@ def test_derive_signal_snapshot_and_precheck_reject_overwrite_existing_files(tmp
         provenance_path=prov_file,
         output_dir=precheck_dir,
         provenance_sha256=prov_sha,
+        synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
     )
     report_path = Path(rep1["report_path"])
     snap_path = Path(rep1["derived_snapshot"]["path"])
@@ -338,6 +351,7 @@ def test_derive_signal_snapshot_and_precheck_reject_overwrite_existing_files(tmp
             provenance_path=prov_file,
             output_dir=precheck_dir,
             provenance_sha256=prov_sha,
+            synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
         )
     assert exc_pre.value.reason == "SNAPSHOT_ALREADY_EXISTS"
     assert report_path.read_bytes() == before_rep
@@ -431,6 +445,7 @@ def test_negative_cross_contract_window_bleeding(tmp_path: Path) -> None:
         tmp_path / "rb_iso",
         provenance_path=prov_file,
         provenance_sha256=prov_sha,
+        synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
     )
 
     hyp_hc = _build_valid_hypothesis(symbol="HC2701")
@@ -441,6 +456,7 @@ def test_negative_cross_contract_window_bleeding(tmp_path: Path) -> None:
         tmp_path / "hc_iso",
         provenance_path=prov_file,
         provenance_sha256=prov_sha,
+        synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
     )
 
     rb_text = res_rb.path.read_text(encoding="utf-8")
@@ -479,6 +495,7 @@ def test_negative_insufficient_history_window(tmp_path: Path) -> None:
             tmp_path / "trunc",
             provenance_path=prov_file,
             provenance_sha256=prov_sha,
+            synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
         )
     assert exc_info.value.reason == "INSUFFICIENT_HISTORY_WINDOW"
 
@@ -513,6 +530,7 @@ def test_negative_future_data_leakage(tmp_path: Path) -> None:
             tmp_path / "leak1",
             provenance_path=prov_file1,
             provenance_sha256=prov_sha1,
+            synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
         )
     assert exc_info.value.reason == "TEMPORAL_ORDER_VIOLATION"
 
@@ -528,6 +546,7 @@ def test_negative_future_data_leakage(tmp_path: Path) -> None:
             tmp_path / "leak2",
             provenance_path=prov_file2,
             provenance_sha256=prov_sha2,
+            synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
         )
     assert exc_info.value.reason == "TARGET_OVERLAP_VIOLATION"
 
@@ -598,6 +617,7 @@ def test_precheck_candidate_real_data_synthetic(tmp_path: Path) -> None:
         candidate=hyp,
         provenance_path=prov_file,
         output_dir=out_dir,
+        synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
     )
 
     assert report["precheck_status"] == "PRECHECK_PASS"
@@ -612,7 +632,9 @@ def test_discovery_integration_passes_valid_candidate_with_derived_snapshot(tmp_
     store = ResultStore(ResearchLabConfig(root_dir))
     memory = ResearchMemory(store)
     engine = AlphaDiscoveryEngine(memory=memory, result_store=store, output_base_dir=tmp_path / "eng_out")
-    orchestrator = DiscoveryIntegrationOrchestrator(engine)
+    orchestrator = DiscoveryIntegrationOrchestrator(
+        engine, synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE
+    )
 
     source_days = _build_synthetic_source_days()
     prov_file, prov_sha = _build_synthetic_provenance_file(tmp_path, source_days)
@@ -895,6 +917,7 @@ def test_provenance_verification_fail_closed(tmp_path: Path) -> None:
         output_dir=tmp_path / "meta_check",
         provenance_path=prov_file,
         provenance_sha256=prov_sha,
+        synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
     )
     meta = json.loads(derived.metadata_path.read_text(encoding="utf-8"))
     assert meta["source_provenance_sha256"] == prov_sha
@@ -930,6 +953,7 @@ def test_candidate_identity_filename_isolation(tmp_path: Path) -> None:
         candidate_identity_hash=sci_hash1,
         provenance_path=prov_file,
         provenance_sha256=prov_sha,
+        synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
     )
     res2 = derive_signal_snapshot(
         spec2,
@@ -938,6 +962,7 @@ def test_candidate_identity_filename_isolation(tmp_path: Path) -> None:
         candidate_identity_hash=sci_hash2,
         provenance_path=prov_file,
         provenance_sha256=prov_sha,
+        synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
     )
 
     # Isolated filenames, neither overwrote the other
@@ -1006,6 +1031,7 @@ def test_phase_a_precheck_isolated_run_dir_success_and_duplicate_rejection(tmp_p
         run_id=run_id,
         runs_base_dir=runs_base,
         provenance_path=prov_file,
+        synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
     )
     assert run_dir.exists()
     assert run_dir.name == run_id
@@ -1042,6 +1068,7 @@ def test_phase_a_precheck_isolated_run_dir_success_and_duplicate_rejection(tmp_p
             run_id=run_id,
             runs_base_dir=runs_base,
             provenance_path=prov_file,
+            synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
         )
     assert "already exists and overwrite is strictly forbidden" in str(exc_info.value)
 
@@ -1092,6 +1119,7 @@ def test_derive_signal_snapshot_fail_closed_on_source_days_mismatch_and_missing_
             output_dir=out_tampered,
             provenance_path=prov_file,
             provenance_sha256=prov_sha,
+            synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
         )
     assert exc_tampered.value.reason == "SOURCE_DAYS_MISMATCH"
     assert not list(out_tampered.glob("*.csv")), "Must not write any CSV file on source_days mismatch"
@@ -1106,6 +1134,7 @@ def test_derive_signal_snapshot_fail_closed_on_source_days_mismatch_and_missing_
             output_dir=out_no_prov,
             provenance_path=None,
             provenance_sha256=prov_sha,
+            synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
         )
     assert exc_no_prov.value.reason == "MISSING_PROVENANCE_PATH"
     assert not list(out_no_prov.glob("*.csv")), "Must not write any CSV file when provenance_path is None"
@@ -1121,6 +1150,7 @@ def test_derive_signal_snapshot_fail_closed_on_source_days_mismatch_and_missing_
             output_dir=out_missing_prov,
             provenance_path=non_existent_prov,
             provenance_sha256=prov_sha,
+            synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
         )
     assert exc_missing_prov.value.reason == "MISSING_PROVENANCE_FILE"
     assert not list(out_missing_prov.glob("*.csv")), "Must not write any CSV file when provenance file is missing"
@@ -1153,6 +1183,7 @@ def test_backfill_counterexample_and_unverifiable_market_time(tmp_path: Path) ->
             output_dir=out_dir,
             provenance_path=prov_file,
             provenance_sha256=prov_sha,
+            synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
         )
     assert exc_info.value.reason == "UNVERIFIABLE_TARGET_MARKET_TIME"
     assert not list(out_dir.glob("*.csv")), "Must not write CSV when target market time is unverifiable"
@@ -1178,6 +1209,7 @@ def test_unverified_market_time_authority_fails_closed(tmp_path: Path) -> None:
             output_dir=out_dir,
             provenance_path=prov_file,
             provenance_sha256=prov_sha,
+            synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
         )
     assert exc_info.value.reason == "UNVERIFIED_MARKET_TIME_AUTHORITY"
     assert not list(out_dir.glob("*.csv")), "Must not write CSV when market authority is unverified"
@@ -1221,6 +1253,7 @@ def test_lagged_inputs_actual_inputs_only_and_counterexample(tmp_path: Path) -> 
         candidate_identity_hash="test_pos_hash",
         provenance_path=prov_pos,
         provenance_sha256=prov_pos_sha,
+        synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
     )
     assert res_pos.row_count > 0
     assert res_pos.path.exists()
@@ -1239,6 +1272,7 @@ def test_lagged_inputs_actual_inputs_only_and_counterexample(tmp_path: Path) -> 
             candidate_identity_hash="test_neg_hash",
             provenance_path=prov_neg,
             provenance_sha256=prov_neg_sha,
+            synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
         )
     assert exc_neg.value.reason == "INPUT_NOT_COMMITTED_AT_AS_OF"
     assert not list(out_neg.glob("*.csv"))
@@ -1410,7 +1444,9 @@ def test_integration_engine_critic_direction_equivalent_regression(tmp_path: Pat
         result_store=store,
         output_base_dir=tmp_path / "staging",
     )
-    orchestrator = DiscoveryIntegrationOrchestrator(engine=engine)
+    orchestrator = DiscoveryIntegrationOrchestrator(
+        engine=engine, synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE
+    )
     pb = ProjectBinding(project_id="test", workspace_identity=str(tmp_path))
 
     source_days = _build_synthetic_source_days()
@@ -1481,3 +1517,359 @@ def test_integration_engine_critic_direction_equivalent_regression(tmp_path: Pat
     records_pos = memory.find_by_hypothesis_id(hyp_pos["hypothesis_id"])
     assert len(records_pos) == 1
     assert records_pos[0].decision == res_pos.scientific_decision
+
+
+def test_spoofed_shfe_official_authority_fails_closed_without_independent_source(tmp_path: Path) -> None:
+    """Codex counterexample reproduction: Spoofing market_time_authority='SHFE_OFFICIAL' fails closed.
+
+    Reproduces Codex's exact counterexample where setting market_time_authority to 'SHFE_OFFICIAL'
+    in untrusted provenance data previously bypassed verification without an independent exchange source.
+    Asserts:
+    1. derive_signal_snapshot raises UNVERIFIED_MARKET_TIME_AUTHORITY.
+    2. Zero snapshot CSV and zero metadata binding files are written.
+    3. orchestrator.integrate_candidate fails closed with ADMISSION_FAILED and zero scientific decision.
+    """
+    source_days = _build_synthetic_source_days()
+    spoofed_days = copy.deepcopy(source_days)
+    for d in spoofed_days:
+        d["market_time_authority"] = "SHFE_OFFICIAL"
+
+    prov_file, prov_sha = _build_synthetic_provenance_file(tmp_path / "spoof_prov", spoofed_days)
+    hyp = _build_valid_hypothesis(symbol="RB2701")
+    spec = parse_and_verify_signal_spec(hyp)
+
+    # 1. Direct derivation must fail closed
+    out_dir = tmp_path / "spoof_out"
+    with pytest.raises(SignalBindingError) as exc_info:
+        derive_signal_snapshot(
+            spec=spec,
+            source_days=spoofed_days,
+            output_dir=out_dir,
+            provenance_path=prov_file,
+            provenance_sha256=prov_sha,
+        )
+    assert exc_info.value.reason == "UNVERIFIED_MARKET_TIME_AUTHORITY"
+    assert not list(out_dir.glob("*.csv")), "Strictly forbidden to write CSV for spoofed exchange authority"
+    assert not list(out_dir.glob("*.binding.json")), "Strictly forbidden to write metadata for spoofed exchange authority"
+
+    # Even if synthetic_test_evidence is passed, 'SHFE_OFFICIAL' is an untrusted self-attested authority
+    with pytest.raises(SignalBindingError) as exc_with_ev:
+        derive_signal_snapshot(
+            spec=spec,
+            source_days=spoofed_days,
+            output_dir=out_dir,
+            provenance_path=prov_file,
+            provenance_sha256=prov_sha,
+            synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,
+        )
+    assert exc_with_ev.value.reason == "UNVERIFIED_MARKET_TIME_AUTHORITY"
+
+    # 2. Real admission orchestrator rejects candidate
+    config = ResearchLabConfig(root=tmp_path)
+    store = ResultStore(config)
+    memory = ResearchMemory(store)
+    engine = AlphaDiscoveryEngine(memory=memory, result_store=store, output_base_dir=tmp_path / "staging")
+    orchestrator = DiscoveryIntegrationOrchestrator(engine=engine)  # default synthetic_test_evidence=None
+    pb = ProjectBinding(project_id="test", workspace_identity=str(tmp_path))
+
+    cand = AlphaGenerationCandidate(
+        hypothesis=hyp,
+        scientific_identity_hash=compute_scientific_identity_hash(hyp),
+        rationale="test spoofed shfe authority",
+        source_context_refs=(),
+        novelty_statement="test",
+        duplicate_awareness="test",
+        uncertainty="test",
+    )
+    res = orchestrator.integrate_candidate(
+        candidate=cand,
+        snapshot_path=tmp_path / "dummy.csv",
+        dataset_binding={
+            "provenance_path": str(prov_file),
+            "provenance_sha256": prov_sha,
+            "source_days": spoofed_days,
+        },
+        project_binding=pb,
+        request_id="req-spoof-shfe",
+    )
+    assert res.engineering_status == EngineeringStatus.ADMISSION_FAILED.value
+    assert res.scientific_decision is None
+    assert res.error_code == "UNVERIFIED_MARKET_TIME_AUTHORITY"
+    assert len(memory.find_by_hypothesis_id(hyp["hypothesis_id"])) == 0
+
+
+def test_data_string_switch_synthetic_fixture_fails_closed_without_in_memory_evidence(tmp_path: Path) -> None:
+    """Provenance claiming 'SYNTHETIC_TEST_FIXTURE' in untrusted data fails closed without in-memory evidence.
+
+    Ensures that callers cannot bypass the gate simply by putting 'SYNTHETIC_TEST_FIXTURE' into
+    data or provenance JSON unless authorized Python in-memory SyntheticTestEvidence is explicitly supplied.
+    """
+    source_days = _build_synthetic_source_days()
+    # Data has market_time_authority='SYNTHETIC_TEST_FIXTURE'
+    prov_file, prov_sha = _build_synthetic_provenance_file(tmp_path / "switch_prov", source_days)
+    hyp = _build_valid_hypothesis(symbol="RB2701")
+    spec = parse_and_verify_signal_spec(hyp)
+
+    # 1. derive_signal_snapshot without synthetic_test_evidence (synthetic_test_evidence=None)
+    out_dir = tmp_path / "switch_out"
+    with pytest.raises(SignalBindingError) as exc_info:
+        derive_signal_snapshot(
+            spec=spec,
+            source_days=source_days,
+            output_dir=out_dir,
+            provenance_path=prov_file,
+            provenance_sha256=prov_sha,
+            synthetic_test_evidence=None,
+        )
+    assert exc_info.value.reason == "UNVERIFIED_MARKET_TIME_AUTHORITY"
+    assert not list(out_dir.glob("*.csv"))
+    assert not list(out_dir.glob("*.binding.json"))
+
+    # 2. Real admission orchestrator (synthetic_test_evidence=None) fails closed
+    config = ResearchLabConfig(root=tmp_path)
+    store = ResultStore(config)
+    memory = ResearchMemory(store)
+    engine = AlphaDiscoveryEngine(memory=memory, result_store=store, output_base_dir=tmp_path / "staging")
+    orchestrator = DiscoveryIntegrationOrchestrator(engine=engine)  # default synthetic_test_evidence=None
+    pb = ProjectBinding(project_id="test", workspace_identity=str(tmp_path))
+
+    cand = AlphaGenerationCandidate(
+        hypothesis=hyp,
+        scientific_identity_hash=compute_scientific_identity_hash(hyp),
+        rationale="test data string switch",
+        source_context_refs=(),
+        novelty_statement="test",
+        duplicate_awareness="test",
+        uncertainty="test",
+    )
+    res = orchestrator.integrate_candidate(
+        candidate=cand,
+        snapshot_path=tmp_path / "dummy.csv",
+        dataset_binding={
+            "provenance_path": str(prov_file),
+            "provenance_sha256": prov_sha,
+            "source_days": source_days,
+        },
+        project_binding=pb,
+        request_id="req-switch-test",
+    )
+    assert res.engineering_status == EngineeringStatus.ADMISSION_FAILED.value
+    assert res.scientific_decision is None
+    assert res.error_code == "UNVERIFIED_MARKET_TIME_AUTHORITY"
+    assert len(memory.find_by_hypothesis_id(hyp["hypothesis_id"])) == 0
+
+
+def test_arbitrary_caller_chosen_fixture_id_fails_closed(tmp_path: Path) -> None:
+    """Caller attempting to bypass via caller-chosen fixture_id strictly fails closed.
+
+    Ensures SyntheticTestEvidence cannot be instantiated with arbitrary fixture_ids
+    (e.g. 'caller-chosen', 'my-custom-fixture') to bypass verification.
+    """
+    source_days = _build_synthetic_source_days()
+    prov_file, prov_sha = _build_synthetic_provenance_file(tmp_path / "caller_prov", source_days)
+    hyp = _build_valid_hypothesis(symbol="RB2701")
+    spec = parse_and_verify_signal_spec(hyp)
+
+    unauthorized_evidence = SyntheticTestEvidence(fixture_id="caller-chosen")
+
+    out_dir = tmp_path / "caller_out"
+    with pytest.raises(SignalBindingError) as exc_info:
+        derive_signal_snapshot(
+            spec=spec,
+            source_days=source_days,
+            output_dir=out_dir,
+            provenance_path=prov_file,
+            provenance_sha256=prov_sha,
+            synthetic_test_evidence=unauthorized_evidence,
+        )
+    assert exc_info.value.reason == "UNAUTHORIZED_SYNTHETIC_FIXTURE"
+    assert not list(out_dir.glob("*.csv")), "Strictly forbidden to write CSV for unauthorized fixture ID"
+    assert not list(out_dir.glob("*.binding.json")), "Strictly forbidden to write metadata for unauthorized fixture ID"
+
+    # Orchestrator fail-closed test
+    config = ResearchLabConfig(root=tmp_path)
+    store = ResultStore(config)
+    memory = ResearchMemory(store)
+    engine = AlphaDiscoveryEngine(memory=memory, result_store=store, output_base_dir=tmp_path / "staging")
+    orchestrator = DiscoveryIntegrationOrchestrator(
+        engine=engine, synthetic_test_evidence=unauthorized_evidence
+    )
+    pb = ProjectBinding(project_id="test", workspace_identity=str(tmp_path))
+
+    cand = AlphaGenerationCandidate(
+        hypothesis=hyp,
+        scientific_identity_hash=compute_scientific_identity_hash(hyp),
+        rationale="test arbitrary fixture id",
+        source_context_refs=(),
+        novelty_statement="test",
+        duplicate_awareness="test",
+        uncertainty="test",
+    )
+    res = orchestrator.integrate_candidate(
+        candidate=cand,
+        snapshot_path=tmp_path / "dummy.csv",
+        dataset_binding={
+            "provenance_path": str(prov_file),
+            "provenance_sha256": prov_sha,
+            "source_days": source_days,
+        },
+        project_binding=pb,
+        request_id="req-caller-chosen",
+    )
+    assert res.engineering_status == EngineeringStatus.ADMISSION_FAILED.value
+    assert res.scientific_decision is None
+    assert res.error_code == "UNAUTHORIZED_SYNTHETIC_FIXTURE"
+    assert len(memory.find_by_hypothesis_id(hyp["hypothesis_id"])) == 0
+
+
+def test_real_dataset_cannot_bypass_via_synthetic_test_evidence(tmp_path: Path) -> None:
+    """Real or non-whitelisted source datasets cannot bypass market time checks via SyntheticTestEvidence.
+
+    Even if caller supplies authorized in-memory SyntheticTestEvidence(fixture_id="synthetic-offline-test-fixture-v1"),
+    if source_days digest does not match the known fixed mathematical unit test fixtures,
+    derivation strictly fails closed.
+    """
+    # 19-day realistic dataset or modified prices (representing real / non-whitelisted data)
+    real_days = []
+    for i in range(19):
+        d_str = f"2026-09-{i+1:02d}"
+        real_days.append({
+            "day": d_str,
+            "first_seen_at": f"{d_str}T10:30:00.000000Z",
+            "committed_at": f"{d_str}T10:40:00.000000Z",
+            "market_effective_time": f"{d_str}T15:00:00.000000Z",
+            "market_time_authority": "SYNTHETIC_TEST_FIXTURE",  # Spoofed synthetic authority on real/arbitrary data
+            "raw_sha256": "0" * 64,
+            "raw_bytes": 100,
+            "raw_relative_path": f"raw/{d_str}/data.raw",
+            "batch_seal_sha256": "1" * 64,
+            "settlement": {"rb_f": 3000.0 + i, "hc_f": 3100.0 + i},
+        })
+
+    prov_file, prov_sha = _build_synthetic_provenance_file(tmp_path / "real_spoof_prov", real_days)
+    hyp = _build_valid_hypothesis(symbol="RB2701")
+    spec = parse_and_verify_signal_spec(hyp)
+
+    out_dir = tmp_path / "real_bypass_out"
+    with pytest.raises(SignalBindingError) as exc_info:
+        derive_signal_snapshot(
+            spec=spec,
+            source_days=real_days,
+            output_dir=out_dir,
+            provenance_path=prov_file,
+            provenance_sha256=prov_sha,
+            synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE,  # whitelisted fixture_id, but dataset is real/arbitrary
+        )
+    assert exc_info.value.reason == "UNAUTHORIZED_SYNTHETIC_FIXTURE"
+    assert "strictly restricted to known fixed offline unit test fixtures" in exc_info.value.details
+    assert not list(out_dir.glob("*.csv"))
+    assert not list(out_dir.glob("*.binding.json"))
+
+    # Orchestrator fail-closed test
+    config = ResearchLabConfig(root=tmp_path)
+    store = ResultStore(config)
+    memory = ResearchMemory(store)
+    engine = AlphaDiscoveryEngine(memory=memory, result_store=store, output_base_dir=tmp_path / "staging")
+    orchestrator = DiscoveryIntegrationOrchestrator(
+        engine=engine, synthetic_test_evidence=TEST_SYNTHETIC_EVIDENCE
+    )
+    pb = ProjectBinding(project_id="test", workspace_identity=str(tmp_path))
+
+    cand = AlphaGenerationCandidate(
+        hypothesis=hyp,
+        scientific_identity_hash=compute_scientific_identity_hash(hyp),
+        rationale="test real dataset bypass attempt",
+        source_context_refs=(),
+        novelty_statement="test",
+        duplicate_awareness="test",
+        uncertainty="test",
+    )
+    res = orchestrator.integrate_candidate(
+        candidate=cand,
+        snapshot_path=tmp_path / "dummy.csv",
+        dataset_binding={
+            "provenance_path": str(prov_file),
+            "provenance_sha256": prov_sha,
+            "source_days": real_days,
+        },
+        project_binding=pb,
+        request_id="req-real-bypass",
+    )
+    assert res.engineering_status == EngineeringStatus.ADMISSION_FAILED.value
+    assert res.scientific_decision is None
+    assert res.error_code == "UNAUTHORIZED_SYNTHETIC_FIXTURE"
+    assert len(memory.find_by_hypothesis_id(hyp["hypothesis_id"])) == 0
+
+
+def test_real_m2_custody_data_fails_closed_without_market_effective_time(tmp_path: Path) -> None:
+    """Real M2 Research Warehouse custody missing market effective time strictly fails closed.
+
+    Stage 2 real lane remains BLOCKED; 0 snapshot files and 0 scientific memory records.
+    """
+    # 19 days simulating M2 raw custody (only first_seen_at and committed_at, no market_effective_time)
+    m2_days = []
+    for i in range(19):
+        d_str = f"2026-09-{i+1:02d}"
+        m2_days.append({
+            "day": d_str,
+            "first_seen_at": f"{d_str}T10:30:00.000000Z",
+            "committed_at": f"{d_str}T10:40:00.000000Z",
+            # No market_effective_time or settlement_effective_time!
+            "raw_sha256": "0" * 64,
+            "raw_bytes": 100,
+            "raw_relative_path": f"raw/{d_str}/data.raw",
+            "batch_seal_sha256": "1" * 64,
+            "settlement": {"rb_f": 3000.0 + i, "hc_f": 3100.0 + i},
+        })
+
+    prov_file, prov_sha = _build_synthetic_provenance_file(tmp_path / "m2_prov", m2_days)
+    hyp = _build_valid_hypothesis(symbol="RB2701")
+    spec = parse_and_verify_signal_spec(hyp)
+
+    # 1. Direct derivation with default synthetic_test_evidence=None
+    out_dir = tmp_path / "m2_out"
+    with pytest.raises(SignalBindingError) as exc_info:
+        derive_signal_snapshot(
+            spec=spec,
+            source_days=m2_days,
+            output_dir=out_dir,
+            provenance_path=prov_file,
+            provenance_sha256=prov_sha,
+            synthetic_test_evidence=None,
+        )
+    assert exc_info.value.reason == "UNVERIFIABLE_TARGET_MARKET_TIME"
+    assert not list(out_dir.glob("*.csv"))
+    assert not list(out_dir.glob("*.binding.json"))
+
+    # 2. Real admission orchestrator
+    config = ResearchLabConfig(root=tmp_path)
+    store = ResultStore(config)
+    memory = ResearchMemory(store)
+    engine = AlphaDiscoveryEngine(memory=memory, result_store=store, output_base_dir=tmp_path / "staging")
+    orchestrator = DiscoveryIntegrationOrchestrator(engine=engine)  # default synthetic_test_evidence=None
+    pb = ProjectBinding(project_id="test", workspace_identity=str(tmp_path))
+
+    cand = AlphaGenerationCandidate(
+        hypothesis=hyp,
+        scientific_identity_hash=compute_scientific_identity_hash(hyp),
+        rationale="test real m2 custody fail-closed",
+        source_context_refs=(),
+        novelty_statement="test",
+        duplicate_awareness="test",
+        uncertainty="test",
+    )
+    res = orchestrator.integrate_candidate(
+        candidate=cand,
+        snapshot_path=tmp_path / "dummy.csv",
+        dataset_binding={
+            "provenance_path": str(prov_file),
+            "provenance_sha256": prov_sha,
+            "source_days": m2_days,
+        },
+        project_binding=pb,
+        request_id="req-m2-failclosed",
+    )
+    assert res.engineering_status == EngineeringStatus.ADMISSION_FAILED.value
+    assert res.scientific_decision is None
+    assert res.error_code == "UNVERIFIABLE_TARGET_MARKET_TIME"
+    assert len(memory.find_by_hypothesis_id(hyp["hypothesis_id"])) == 0
