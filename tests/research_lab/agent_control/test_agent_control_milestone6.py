@@ -95,7 +95,9 @@ def test_context(tmp_path: Path):
         clean_temp_output=False,
     )
 
-    orchestrator = DiscoveryIntegrationOrchestrator(engine=engine)
+    orchestrator = DiscoveryIntegrationOrchestrator(
+        engine=engine, allow_synthetic_passthrough=True
+    )
 
     # 1. Clean synthetic dataset (strong positive correlation)
     fields = [

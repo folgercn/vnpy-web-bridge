@@ -1543,6 +1543,7 @@ def execute_memory_feedback_loop(
     created_at: str = CANONICAL_SESSION_TIMESTAMP,
     round_2_created_at: str | Callable[[], str] = "2026-01-02T00:00:00.000000Z",
     clock: Callable[[], str] | str | None = None,
+    allow_synthetic_passthrough: bool = False,
 ) -> MemoryFeedbackLoopResult:
     """Execute complete Milestone C two-round memory feedback loop.
 
@@ -1578,7 +1579,10 @@ def execute_memory_feedback_loop(
     )
 
     # Integrate admitted candidates through existing AlphaDiscoveryEngine (Screening -> Critic -> Memory)
-    int_orchestrator = DiscoveryIntegrationOrchestrator(engine=engine)
+    int_orchestrator = DiscoveryIntegrationOrchestrator(
+        engine=engine,
+        allow_synthetic_passthrough=allow_synthetic_passthrough,
+    )
     r1_integration_results: list[DiscoveryIntegrationResult] = []
 
     for cand in batch_res_1.admitted_candidates:

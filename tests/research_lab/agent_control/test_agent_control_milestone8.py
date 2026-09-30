@@ -358,7 +358,9 @@ def discovery_context(tmp_path: Path) -> dict[str, Any]:
         clean_temp_output=False,
     )
 
-    orchestrator = DiscoveryIntegrationOrchestrator(engine=engine)
+    orchestrator = DiscoveryIntegrationOrchestrator(
+        engine=engine, allow_synthetic_passthrough=True
+    )
 
     fields = [
         "timestamp",

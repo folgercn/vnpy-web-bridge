@@ -160,7 +160,9 @@ def test_environment(tmp_path: Path):
         output_base_dir=staging_dir,
         clean_temp_output=False,
     )
-    discovery_orchestrator = DiscoveryIntegrationOrchestrator(engine=engine)
+    discovery_orchestrator = DiscoveryIntegrationOrchestrator(
+        engine=engine, allow_synthetic_passthrough=True
+    )
 
     # Synthetic clean dataset for discovery handover verification
     fields = [

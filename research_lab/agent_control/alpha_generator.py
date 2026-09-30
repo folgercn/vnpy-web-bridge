@@ -51,10 +51,12 @@ from research_lab.contracts import v2
 
 PROMPT_POLICY_VERSION = "alpha_generator_prompt.v1"
 DISCOVERY_POLICY_VERSION = "discovery_generation_policy.v1"
+STAGE2_PROMPT_POLICY_VERSION = "alpha_generator_prompt.stage2.v1"
 DEFAULT_AGENT_ORIGIN_TYPE = "astra"
 GENERATION_POLICY_ORIGIN_TYPES = {
     PROMPT_POLICY_VERSION: DEFAULT_AGENT_ORIGIN_TYPE,
     DISCOVERY_POLICY_VERSION: DEFAULT_AGENT_ORIGIN_TYPE,
+    STAGE2_PROMPT_POLICY_VERSION: DEFAULT_AGENT_ORIGIN_TYPE,
 }
 SUPPORTED_GENERATION_POLICIES = frozenset(GENERATION_POLICY_ORIGIN_TYPES.keys())
 GENERATION_SCHEMA_VERSION = "research_lab.alpha_generation.v1"
@@ -451,7 +453,7 @@ def build_alpha_generation_prompt(
         "duplicate_awareness": "non-empty string",
         "hypothesis": {
             "economic_rationale": "non-empty string without result claims",
-            "expected_direction": "positive or negative",
+            "expected_direction": "positive",
             "falsification_conditions": ["one or more non-empty strings"],
             "frequency": "non-empty string",
             "holding_horizon": "non-empty string",
@@ -505,6 +507,28 @@ def build_alpha_generation_prompt(
     if request.allowed_signal_families is not None:
         fams_str = ", ".join(sorted(x.strip() for x in request.allowed_signal_families))
         prompt_lines.append(f"Allowed signal families: {fams_str}")
+    is_stage2_settlement_scope = (
+        request.generation_policy_version == STAGE2_PROMPT_POLICY_VERSION
+        or (
+            request.generation_policy_version == DISCOVERY_POLICY_VERSION
+            and request.allowed_universe
+            in (("HC2701", "RB2701"), ("RB2701", "HC2701"), "RB2701", "HC2701")
+            and request.allowed_frequency == "1d"
+        )
+    )
+    if is_stage2_settlement_scope:
+        prompt_lines.extend([
+            "--- STAGE 2 SETTLEMENT-ONLY SIGNAL WHITELIST ---",
+            "1. Allowed single-contract universe: strictly 'RB2701' or 'HC2701' (one contract per hypothesis; cross-contract spread/bleeding is strictly unsupported).",
+            "2. Allowed source features: strictly ['settlement'].",
+            "3. Allowed frequency and holding horizon: frequency must be '1d'; holding_horizon must be '1d'.",
+            "4. Allowed target: strictly 'log(settlement[t+2] / settlement[t+1])' (1-day forward execution return entered at day t+1 settlement).",
+            "5. Supported mathematical formulas (6 exact canonical formulas for k in {1, 2, 3}):",
+            "   - Momentum (expected_direction='positive'): 'log(settlement[t] / settlement[t-1])', 'log(settlement[t] / settlement[t-2])', 'log(settlement[t] / settlement[t-3])'",
+            "   - Reversal (expected_direction='positive'): '-log(settlement[t] / settlement[t-1])', '-log(settlement[t] / settlement[t-2])', '-log(settlement[t] / settlement[t-3])' (or inverted ratio 'log(settlement[t-k] / settlement[t])' with expected_direction='positive'; negative expected_direction is unsupported)",
+            "6. Strictly unsupported: multi-column features (volume, open_interest, high, low, open, close, ATR, vwap, spread), intraday bars/OHLCV, custom rolling indicators, or unlisted formulas are strictly rejected.",
+            "------------------------------------------------",
+        ])
     prompt_lines.append(memory_view.to_prompt_context())
     return "\n".join(prompt_lines)
 

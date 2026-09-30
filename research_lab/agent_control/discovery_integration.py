@@ -19,9 +19,11 @@ Core Invariants:
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -53,6 +55,13 @@ from research_lab.alpha_discovery import (
     DiscoveryItemResult,
     ResearchMemoryRecord,
     compute_hypothesis_content_hash,
+)
+from research_lab.alpha_discovery.signal_binding import (
+    SignalBindingError,
+    SyntheticTestEvidence,
+    derive_signal_snapshot,
+    parse_and_verify_signal_spec,
+    parse_strict_utc_iso8601,
 )
 from research_lab.contracts import v2
 
@@ -255,9 +264,13 @@ class DiscoveryIntegrationOrchestrator:
         engine: AlphaDiscoveryEngine,
         *,
         audit_trail: DiscoveryIntegrationAuditTrail | None = None,
+        allow_synthetic_passthrough: bool = False,
+        synthetic_test_evidence: SyntheticTestEvidence | None = None,
     ) -> None:
         self.engine = engine
         self.audit_trail = audit_trail or DiscoveryIntegrationAuditTrail()
+        self.allow_synthetic_passthrough = allow_synthetic_passthrough
+        self.synthetic_test_evidence = synthetic_test_evidence
 
     def integrate_candidate(
         self,
@@ -291,6 +304,9 @@ class DiscoveryIntegrationOrchestrator:
             if isinstance(candidate, AlphaGenerationCandidate)
             else candidate
         )
+        if isinstance(hyp_obj, dict):
+            hyp_obj = AlphaHypothesis.model_validate(hyp_obj)
+
         # Deep defensive copy to guarantee candidate immutability and exact hash profile
         dump_with = hyp_obj.model_dump()
         if compute_hypothesis_content_hash(dump_with) == hyp_obj.hypothesis_content_hash:
@@ -302,12 +318,137 @@ class DiscoveryIntegrationOrchestrator:
         hyp_hash = hyp_dict["hypothesis_content_hash"]
         sci_hash = hyp_obj.scientific_identity_hash
 
+        # Strict caller isolation: synthetic bypass is ONLY allowed when orchestrator is explicitly
+        # instantiated with allow_synthetic_passthrough=True.
+        # Any caller-controlled parameters inside dataset_binding (e.g. mode, provenance, allow_synthetic_passthrough)
+        # MUST NEVER be trusted to bypass validation.
+        is_synthetic_direct = bool(self.allow_synthetic_passthrough)
+        effective_snapshot_path = Path(snapshot_path).resolve()
+        effective_dataset_binding = dataset_binding
+
+        if not is_synthetic_direct:
+            try:
+                # 1. Fail-closed parse and verify candidate mathematical specification against whitelist
+                spec = parse_and_verify_signal_spec(hyp_dict)
+
+                # 2. Unconditional provenance requirement: must supply provenance_path and expected provenance_sha256
+                if not isinstance(dataset_binding, dict):
+                    raise SignalBindingError(
+                        "MISSING_DATASET_BINDING",
+                        "Real candidate signal binding requires dictionary dataset_binding with provenance details",
+                    )
+
+                prov_path = dataset_binding.get("provenance_path")
+                expected_prov_sha = dataset_binding.get("provenance_sha256")
+
+                if not prov_path:
+                    raise SignalBindingError(
+                        "MISSING_PROVENANCE_PATH",
+                        "Real candidate signal binding strictly requires provenance_path in dataset_binding",
+                    )
+                if not expected_prov_sha:
+                    raise SignalBindingError(
+                        "MISSING_PROVENANCE_SHA",
+                        "Real candidate signal binding strictly requires provenance_sha256 digest in dataset_binding",
+                    )
+
+                p_file = Path(prov_path).resolve()
+                if not p_file.exists():
+                    raise SignalBindingError(
+                        "MISSING_PROVENANCE_FILE",
+                        f"Declared provenance file does not exist: {p_file}",
+                    )
+
+                prov_bytes = p_file.read_bytes()
+                actual_prov_sha = v2.sha(prov_bytes)
+                if actual_prov_sha != expected_prov_sha:
+                    raise SignalBindingError(
+                        "PROVENANCE_HASH_MISMATCH",
+                        f"Provenance file at {prov_path} SHA256 {actual_prov_sha} does not match expected {expected_prov_sha}",
+                    )
+
+                prov_data = json.loads(prov_bytes.decode("utf-8"))
+                if not isinstance(prov_data, dict):
+                    raise SignalBindingError(
+                        "MALFORMED_PROVENANCE_STRUCTURE",
+                        f"Provenance file content must be a JSON object (dict), got {type(prov_data).__name__}",
+                    )
+                prov_source_days = prov_data.get("source_days")
+                if not isinstance(prov_source_days, (list, tuple)) or not prov_source_days:
+                    raise SignalBindingError(
+                        "MISSING_SOURCE_DAYS",
+                        "No source_days found in verified provenance file",
+                    )
+
+                # If caller also provided source_days directly, enforce item-by-item exact match
+                caller_source_days = dataset_binding.get("source_days")
+                if caller_source_days is not None:
+                    if caller_source_days != prov_source_days:
+                        raise SignalBindingError(
+                            "SOURCE_DAYS_MISMATCH",
+                            "Caller-supplied source_days does not match canonical verified provenance content",
+                        )
+
+                # Always use canonical verified source_days from provenance
+                source_days = prov_source_days
+
+                # Derive single-contract candidate snapshot (never overwrite existing files)
+                base_derived_dir = Path(self.engine.output_base_dir) / "derived_snapshots"
+                expected_csv_name = f"snapshot_{spec.symbol.lower()}_{spec.formula_id}_{sci_hash[:16]}.csv"
+                derived_dir = base_derived_dir
+                if (derived_dir / expected_csv_name).exists():
+                    sub_tag = f"{hyp_id}_{task_id or request_id or hyp_hash[:8]}"
+                    derived_dir = base_derived_dir / sub_tag
+                    idx = 2
+                    while (derived_dir / expected_csv_name).exists():
+                        derived_dir = base_derived_dir / f"{sub_tag}_{idx}"
+                        idx += 1
+                derived_res = derive_signal_snapshot(
+                    spec=spec,
+                    source_days=source_days,
+                    output_dir=derived_dir,
+                    candidate_identity_hash=sci_hash,
+                    provenance_path=p_file,
+                    provenance_sha256=actual_prov_sha,
+                    synthetic_test_evidence=self.synthetic_test_evidence,
+                )
+                effective_snapshot_path = derived_res.path
+                effective_dataset_binding = derived_res.dataset_binding
+            except (SignalBindingError, ValueError, KeyError, AttributeError, TypeError, json.JSONDecodeError, OSError) as exc:
+                err_code = getattr(exc, "reason", "BINDING_FAILED")
+                if isinstance(exc, KeyError):
+                    err_code = "MALFORMED_PROVENANCE_KEY_ERROR"
+                elif isinstance(exc, (AttributeError, TypeError, json.JSONDecodeError)):
+                    err_code = f"MALFORMED_PROVENANCE_{type(exc).__name__.upper()}"
+                res = DiscoveryIntegrationResult(
+                    engineering_status=EngineeringStatus.ADMISSION_FAILED.value,
+                    scientific_decision=None,
+                    error_code=err_code,
+                    error_message=f"Deterministic signal binding rejected [{err_code}]: {exc}",
+                    request_id=request_id,
+                    task_id=task_id,
+                    route_id=route_id,
+                    provider_job_ref=provider_job_ref,
+                    provider=provider,
+                    model=model,
+                    agent_result_id=agent_result_id,
+                    agent_result_hash=agent_result_hash,
+                    hypothesis_id=hyp_id,
+                    hypothesis_content_hash=hyp_hash,
+                    scientific_identity_hash=sci_hash,
+                    admitted_hypothesis=hyp_obj,
+                    critic_decision=None,
+                    project_binding=binding,
+                )
+                self.audit_trail.append(DiscoveryIntegrationAuditRecord.create(res))
+                return res
+
         # Run through existing deterministic AlphaDiscoveryEngine with global exception boundary
         try:
             item_result: DiscoveryItemResult = self.engine.run_single(
                 hypothesis_input=hyp_dict,
-                snapshot_path=snapshot_path,
-                dataset_binding=dataset_binding,
+                snapshot_path=effective_snapshot_path,
+                dataset_binding=effective_dataset_binding,
                 auto_supplemental=auto_supplemental,
             )
         except Exception as exc:  # noqa: BLE001
@@ -686,3 +827,229 @@ class DiscoveryIntegrationOrchestrator:
             agent_result_hash=generation_result.agent_result_content_hash,
             auto_supplemental=auto_supplemental,
         )
+
+
+def recover_round_execution_timing(
+    integration_records: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    result_store: Any | None = None,
+) -> tuple[str, str]:
+    """Recover execution completion timestamp from verified result store receipts.
+
+    Strict Invariants:
+    1. 1:1 binding between every declared run_ref and its verified receipt.
+    2. When result_store is supplied (e.g. during execution or resume), re-query and
+       cryptographically verify each declared run_ref via ResultStore.query_v2_runs(run_id=..., verify=True)
+       rather than blindly trusting literal cached receipts in integration JSON.
+    3. Validate run_ref content_hash, receipt.run identity, and run.json top-level
+       run_id/run_content_hash against bundle inventory SHA256.
+    4. timing.completed_at validated as strict UTC ISO8601.
+    5. Only returns max(completed_at) on 100% complete coverage across all declared run_refs.
+    6. Fails closed to ('unknown', reason) on any missing, duplicate, corrupt, unverified,
+       or mismatched receipt; zero directory-globbing / loose filesystem scanning.
+    """
+    if not integration_records:
+        return "unknown", "no integration records provided"
+
+    declared_runs: list[tuple[str, str | None]] = []
+    seen_declared_run_ids: set[str] = set()
+
+    for slot_idx, record in enumerate(integration_records):
+        if not isinstance(record, dict):
+            return "unknown", f"malformed integration record at slot {slot_idx}: expected dict"
+        run_refs = record.get("run_refs")
+        if run_refs is None:
+            continue
+        if not isinstance(run_refs, (list, tuple)):
+            return "unknown", f"malformed run_refs at slot {slot_idx}: expected list or tuple"
+        for r_idx, ref in enumerate(run_refs):
+            if isinstance(ref, dict):
+                rid = ref.get("run_id") or ref.get("object_id")
+                chash = ref.get("content_hash") or ref.get("run_content_hash")
+            elif isinstance(ref, str):
+                rid = ref
+                chash = None
+            else:
+                return "unknown", f"malformed run_ref at slot {slot_idx}[{r_idx}]: {ref!r}"
+
+            if not rid or not isinstance(rid, str) or not rid.strip():
+                return "unknown", f"invalid run_id in declared run_ref at slot {slot_idx}[{r_idx}]"
+
+            if rid in seen_declared_run_ids:
+                return "unknown", f"duplicate run_ref declared across slots: {rid}"
+            seen_declared_run_ids.add(rid)
+            declared_runs.append((rid, chash))
+
+    if not declared_runs:
+        return "unknown", "no declared run_refs found in integration records"
+
+    receipt_by_run_id: dict[str, dict[str, Any]] = {}
+    if result_store is not None:
+        for rid, _ in declared_runs:
+            try:
+                matched = result_store.query_v2_runs(run_id=rid, verify=True)
+            except Exception as exc:
+                return "unknown", f"ResultStore verification failed for {rid}: {exc}"
+            if not matched or len(matched) != 1:
+                return (
+                    "unknown",
+                    f"ResultStore query_v2_runs returned {len(matched) if matched else 0} receipts for {rid}",
+                )
+            receipt_by_run_id[rid] = matched[0]
+    else:
+        for slot_idx, record in enumerate(integration_records):
+            receipts = record.get("verified_result_store_receipts")
+            if not receipts:
+                continue
+            if not isinstance(receipts, (list, tuple)):
+                return (
+                    "unknown",
+                    f"malformed verified_result_store_receipts at slot {slot_idx}: expected list or tuple",
+                )
+
+            for rc_idx, rc in enumerate(receipts):
+                if not isinstance(rc, dict):
+                    return "unknown", f"malformed receipt at slot {slot_idx}[{rc_idx}]: expected dict"
+
+                rc_run = rc.get("run")
+                if isinstance(rc_run, dict):
+                    rc_rid = rc_run.get("object_id") or rc_run.get("run_id")
+                elif isinstance(rc_run, str):
+                    rc_rid = rc_run
+                else:
+                    rc_rid = rc.get("run_id")
+
+                if not rc_rid or not isinstance(rc_rid, str) or not rc_rid.strip():
+                    return "unknown", f"receipt missing valid run object_id at slot {slot_idx}[{rc_idx}]"
+
+                if rc_rid in receipt_by_run_id:
+                    return "unknown", f"duplicate verified receipt declared for run_id: {rc_rid}"
+
+                receipt_by_run_id[rc_rid] = rc
+
+        missing_receipts = [rid for rid, _ in declared_runs if rid not in receipt_by_run_id]
+        if missing_receipts:
+            return (
+                "unknown",
+                f"missing verified receipt for declared run_ref(s): {missing_receipts[:3]} "
+                f"(missing {len(missing_receipts)}/{len(declared_runs)})",
+            )
+
+        unmatched_receipts = [rid for rid in receipt_by_run_id if rid not in seen_declared_run_ids]
+        if unmatched_receipts:
+            return (
+                "unknown",
+                f"unmatched verified receipt(s) not in declared run_refs: {unmatched_receipts[:3]}",
+            )
+
+    verified_completed_times: list[tuple[datetime, str]] = []
+    for rid, declared_hash in declared_runs:
+        rc = receipt_by_run_id.get(rid)
+        if not rc:
+            return "unknown", f"missing verified receipt for {rid}"
+
+        rc_run = rc.get("run")
+        if not isinstance(rc_run, dict):
+            return "unknown", f"receipt missing run dict for {rid}"
+        rc_rid = rc_run.get("object_id") or rc_run.get("run_id")
+        if rc_rid != rid:
+            return "unknown", f"receipt run object_id mismatch: declared {rid}, receipt has {rc_rid}"
+        rc_hash = rc_run.get("content_hash") or rc_run.get("run_content_hash")
+        if declared_hash and rc_hash and declared_hash != rc_hash:
+            return (
+                "unknown",
+                f"content_hash mismatch between run_ref and receipt for {rid}: {declared_hash} != {rc_hash}",
+            )
+
+        b_loc = rc.get("bundle_location")
+        if not b_loc or not isinstance(b_loc, (str, Path)):
+            return "unknown", f"verified receipt for {rid} missing bundle_location"
+
+        bundle_path = Path(b_loc)
+        run_file = bundle_path / "run.json"
+        if not run_file.exists() or not run_file.is_file():
+            return "unknown", f"missing run.json at verified bundle_location for {rid}: {run_file}"
+
+        inventory = rc.get("bundle_file_sha256")
+        if not isinstance(inventory, dict):
+            return "unknown", f"receipt for {rid} missing bundle_file_sha256 inventory"
+        expected_run_json_sha = inventory.get("run.json")
+        if not expected_run_json_sha:
+            return "unknown", f"receipt for {rid} missing run.json in bundle_file_sha256 inventory"
+
+        try:
+            raw_bytes = run_file.read_bytes()
+        except Exception as exc:
+            return "unknown", f"failed to read run.json for {rid}: {exc}"
+
+        actual_sha = hashlib.sha256(raw_bytes).hexdigest()
+        if actual_sha != expected_run_json_sha:
+            return (
+                "unknown",
+                f"run.json sha256 mismatch against receipt bundle inventory for {rid}: "
+                f"expected {expected_run_json_sha}, got {actual_sha}",
+            )
+
+        try:
+            run_data = json.loads(raw_bytes.decode("utf-8"))
+        except Exception as exc:
+            return "unknown", f"corrupt or unreadable run.json for {rid}: {exc}"
+
+        if not isinstance(run_data, dict):
+            return "unknown", f"corrupt run.json for {rid}: expected JSON object"
+
+        # Protocol v2 run.json top-level run_id
+        file_rid = run_data.get("run_id")
+        if not file_rid:
+            nested_run = run_data.get("run")
+            if isinstance(nested_run, dict):
+                file_rid = nested_run.get("run_id") or nested_run.get("object_id")
+        if file_rid != rid:
+            return "unknown", f"run.json top-level run_id mismatch for {rid}: found {file_rid}"
+
+        # Protocol v2 run.json top-level run_content_hash
+        file_hash = run_data.get("run_content_hash")
+        if not file_hash:
+            nested_run = run_data.get("run")
+            if isinstance(nested_run, dict):
+                file_hash = nested_run.get("content_hash") or nested_run.get("run_content_hash")
+
+        if declared_hash and file_hash and declared_hash != file_hash:
+            return (
+                "unknown",
+                f"run.json run_content_hash mismatch with declared run_ref for {rid}: "
+                f"expected {declared_hash}, got {file_hash}",
+            )
+        if rc_hash and file_hash and rc_hash != file_hash:
+            return (
+                "unknown",
+                f"run.json run_content_hash mismatch with receipt for {rid}: "
+                f"expected {rc_hash}, got {file_hash}",
+            )
+
+        timing = run_data.get("timing")
+        if not isinstance(timing, dict):
+            return "unknown", f"run.json missing timing object for {rid}"
+
+        c_at = timing.get("completed_at")
+        if not c_at or not isinstance(c_at, str) or not c_at.strip():
+            return "unknown", f"run.json missing timing.completed_at for {rid}"
+
+        try:
+            parsed_dt = parse_strict_utc_iso8601(c_at)
+        except Exception as exc:
+            return "unknown", f"invalid timing.completed_at format for {rid}: {c_at!r} ({exc})"
+
+        verified_completed_times.append((parsed_dt, c_at))
+
+    if len(verified_completed_times) != len(declared_runs) or len(declared_runs) == 0:
+        return (
+            "unknown",
+            f"incomplete receipt coverage: {len(verified_completed_times)}/{len(declared_runs)}",
+        )
+
+    # Chronologically compare by parsed UTC datetime rather than ASCII lexicographical order
+    _, latest_c_at = max(verified_completed_times, key=lambda item: (item[0], item[1]))
+    source_desc = (
+        "recovered from immutable result store execution receipts (latest run.json:timing.completed_at)"
+    )
+    return latest_c_at, source_desc

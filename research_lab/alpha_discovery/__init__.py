@@ -44,6 +44,17 @@ from research_lab.alpha_discovery.screening_plan import (
     compute_plan_content_hash,
     validate_screening_plan,
 )
+from research_lab.alpha_discovery.signal_binding import (
+    DerivedSnapshotResult,
+    ParsedSignalSpec,
+    RowPITVerification,
+    SignalBindingError,
+    SyntheticTestEvidence,
+    derive_signal_snapshot,
+    parse_and_verify_signal_spec,
+    precheck_candidate_real_data,
+    verify_derived_snapshot_pit,
+)
 
 __all__ = [
     "AlphaDiscoveryEngine",
@@ -78,4 +89,13 @@ __all__ = [
     "validate_critic_decision",
     "validate_hypothesis",
     "validate_screening_plan",
+    "DerivedSnapshotResult",
+    "ParsedSignalSpec",
+    "RowPITVerification",
+    "SignalBindingError",
+    "SyntheticTestEvidence",
+    "derive_signal_snapshot",
+    "parse_and_verify_signal_spec",
+    "precheck_candidate_real_data",
+    "verify_derived_snapshot_pit",
 ]

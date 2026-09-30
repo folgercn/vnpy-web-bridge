@@ -1,0 +1,1346 @@
+{
+  "schema_version": "issue502.stage2.real_evidence_index.v1",
+  "baseline_main_commit": "8338786afb2118f8157bbe9d73940e1c47324ca5",
+  "scope": "Exploratory Internal Discovery only; no tradable or production claim",
+  "private_evidence_root": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1",
+  "source": {
+    "description": "M2 Research Warehouse SHFE daily committed custody; RB2701/HC2701 settlement, 1d, 19 source days 2026-08-31..2026-09-24",
+    "provenance_sha256": "e3d6b6b74d8b6617455bcccf7d6eeed3e4f5fbfe8eca1216f40ad03006725354",
+    "original_32_row_csv_sha256": "4361c48f79345855457d633b962a3ea6975171242a770518c32d89945942624d",
+    "original_32_row_csv_bytes": 19489,
+    "time_semantics": "as_of=t custody commit; feature first_seen_at <= as_of; target timing in real M2 custody lacks verified market effective time; warehouse ingestion first_seen_at cannot masquerade as market target start time",
+    "stage2_pit_status": "BLOCKED",
+    "stage2_pit_block_reason": "UNVERIFIABLE_TARGET_MARKET_TIME: The archived provenance and exported snapshot lack verifiable market or settlement effective times for t+1/t+2. Using ingestion first_seen_at as market target_start_time is strictly forbidden fail-closed. Real 2x10 slots cannot claim verified market PIT pass.",
+    "limitations": [
+      "Source signatures not cryptographically verified by exporter",
+      "Only 19 source days; 14-16 derived rows per candidate; overlapping labels and cross-symbol dependence",
+      "No cost sensitivity or sufficient sample size for promotion"
+    ]
+  },
+  "objective_sha256": "00454c65a766a540dc9a188af154b7c85e601f552f4a80716b8a1c8450d3e4e4",
+  "objective_identical": true,
+  "round_1": {
+    "executed_at": "2026-09-29T10:23:57.915302Z",
+    "executed_at_source": "recovered from batch_result_round_1.json:created_at (also matches nested session_round_1.json:session.created_at)",
+    "completed_at": "2026-09-29T10:35:07.281286Z",
+    "completed_at_source": "recovered from immutable result store execution receipts (latest run.json:timing.completed_at)",
+    "resumed_at": "2026-09-29T10:37:35.869737Z",
+    "resumed_at_source": "ROUND1_FULL_EVIDENCE.json:executed_at (resume report start)",
+    "report_generated_at": "2026-09-29T10:37:35.894964Z",
+    "funnel": {
+      "admitted": 10,
+      "admitted_rate": 1,
+      "attempted": 10,
+      "exact_duplicate_count": 0,
+      "exact_duplicate_rate": 0,
+      "generated": 10,
+      "invalid": 0,
+      "not_attempted": 0,
+      "novel_count": 4,
+      "novel_rate": "0.4",
+      "provider_failed": 0,
+      "related_count": 6,
+      "related_rate": "0.6",
+      "requested": 10,
+      "signal_families": {
+        "momentum": 6,
+        "reversal": 4
+      },
+      "unverified_count": 0,
+      "unverified_rate": 0
+    },
+    "memory_a": {
+      "content_hash": "b8eb1cdd47a65bd7aab3e3d2892bb9dd0cd13d888b9932bbe4beea098009f786",
+      "total_entries": 0,
+      "view_id": "memview-5ae4c2d2adf571c8937812e003231228"
+    },
+    "memory_b": {
+      "content_hash": "a18be8a2c7a68231749f33ea36e09a173f97095269bb9f4cb7fa7e464aab8401",
+      "total_entries": 23,
+      "view_id": "memview-248d8e4d90e20fee62ca71f14d5967ed"
+    },
+    "engine_runs": 40,
+    "critic_decisions": {
+      "REJECT": 3,
+      "NEED_MORE_EVIDENCE": 7
+    },
+    "memory_records": 10,
+    "full_evidence": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/ROUND1_FULL_EVIDENCE.json",
+    "sqlite": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/store/research_lab.sqlite3",
+    "sqlite_sha256": "99bdcdfc7fa443456f0f2bcc99d42d1be04fc015014525c6892a85375dfb5489"
+  },
+  "round_2": {
+    "executed_at": "2026-09-29T10:47:06.013681Z",
+    "executed_at_source": "session_round_2.json:session.created_at, batch_result_round_2.json:created_at, ROUND2_FULL_EVIDENCE.json:executed_at (consistent)",
+    "completed_at": "2026-09-29T10:53:19.031509Z",
+    "completed_at_source": "recovered from immutable result store execution receipts (latest run.json:timing.completed_at)",
+    "report_generated_at": "2026-09-29T10:53:28.643729Z",
+    "funnel": {
+      "admitted": 10,
+      "admitted_rate": 1,
+      "attempted": 10,
+      "exact_duplicate_count": 0,
+      "exact_duplicate_rate": 0,
+      "generated": 10,
+      "invalid": 0,
+      "not_attempted": 0,
+      "novel_count": 4,
+      "novel_rate": "0.4",
+      "provider_failed": 0,
+      "related_count": 6,
+      "related_rate": "0.6",
+      "requested": 10,
+      "signal_families": {
+        "momentum": 6,
+        "reversal": 4
+      },
+      "unverified_count": 0,
+      "unverified_rate": 0
+    },
+    "memory_b_used": {
+      "content_hash": "a18be8a2c7a68231749f33ea36e09a173f97095269bb9f4cb7fa7e464aab8401",
+      "total_entries": 23,
+      "view_id": "memview-248d8e4d90e20fee62ca71f14d5967ed"
+    },
+    "engine_runs_new": 60,
+    "critic_decisions": {
+      "REJECT": 5,
+      "NEED_MORE_EVIDENCE": 5
+    },
+    "memory_records_new": 10,
+    "full_evidence": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/ROUND2_FULL_EVIDENCE.json",
+    "sqlite": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/store/research_lab.sqlite3",
+    "r1_sqlite_unchanged": true
+  },
+  "memory_effect": {
+    "causal_validity_status": "BLOCKED",
+    "causal_validity_reason": "Because Round 1 target settlement effective times lacked verifiable exchange timestamps (PIT status BLOCKED), Round 1 scientific decisions cannot be verified as scientifically valid ground truth; therefore the historical memory references from R2 to R1 demonstrate structural schema adherence and reference linking in execution facts, but CANNOT prove scientifically valid causal memory feedback effect.",
+    "raw_execution_facts": {
+      "raw_gap_entry_count": 17,
+      "raw_r2_slots_referencing_r1_entries": 10,
+      "new_methods_in_each_r2_slot": [
+        "stability_split",
+        "outlier_sensitivity"
+      ],
+      "decision_changed_slots": [
+        4,
+        9
+      ]
+    },
+    "verified_causal_effect": "BLOCKED",
+    "attribution_limit": "Raw 2x10 execution facts show that Round 2 slots structurally referenced Round 1 gap entries under the conditional objective rule; however, because Round 1 pricing lacked verifiable exchange release time (PIT status BLOCKED), Round 1 scientific records cannot be certified as valid ground truth. Consequently, the historical 2x10 runs cannot prove that scientifically valid Round 1 results causally influenced Round 2."
+  },
+  "slots": [
+    {
+      "ordinal": 1,
+      "symbol": "RB2701",
+      "signal_family": "momentum",
+      "formula": "log(settlement[t] / settlement[t-1])",
+      "lookback_k": 1,
+      "expected_direction": "positive",
+      "target": "log(settlement[t+2] / settlement[t+1])",
+      "round_1": {
+        "provider_job_ref": "06934213746ea8e154c6406e28ef443e",
+        "task_id": "task-e9896d805c7a22a77f3c11edfde8f7f5",
+        "hypothesis_id": "agent-alpha-8b525e0047b205e3a485fc29",
+        "hypothesis_content_hash": "2049ccebf170885e83cefca35528adf6e1dff14877937b5c78b08616f8163ef4",
+        "scientific_identity_hash": "4e938c73182c10d3b8872c82fd2208f5cd2c6047451fcd9dfb3f4d94d673d177",
+        "admission": "novel_within_view",
+        "engineering_status": "COMPLETED",
+        "precheck_report": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/precheck/slot_01_agent-alpha-8b525e0047b205e3a485fc29/PRECHECK_REPORT.json",
+        "snapshot_sha256": "f3eb2f846b795f6796a64429b8489d202a94e082a5997d07ec7fc55d0d36eef4",
+        "snapshot_bytes": 9910,
+        "pit_rows_verified": 16,
+        "snapshot_csv": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/engine_workspace/derived_snapshots/snapshot_rb2701_log_settlement_momentum_k1_4e938c73182c10d3.csv",
+        "run_ids": [
+          "run-screening-3593a3ffbffb4cbd",
+          "run-screening-ad4e01502c824bed",
+          "run-screening-d1106a8527894f4c",
+          "run-screening-34c6b1017bdb4884"
+        ],
+        "evidence_ids": [
+          "evidence-run-screening-3593a3ffbffb4cbd",
+          "evidence-run-screening-ad4e01502c824bed",
+          "evidence-run-screening-d1106a8527894f4c",
+          "evidence-run-screening-34c6b1017bdb4884"
+        ],
+        "critic_decision": "REJECT",
+        "critic_decision_id": "rev-e78ce36a5aaf2ad0",
+        "critic_review_hash": "e78ce36a5aaf2ad09bba6f9bc2636cba5a0d0602e84253bcb932824c5da107f4",
+        "critic_missing_evidence": [
+          "cost_sensitivity",
+          "insufficient_sample_size",
+          "outlier_sensitivity",
+          "stability_split"
+        ],
+        "critic_reject_reasons": [
+          "Direction consistency 0.3750 < 0.45"
+        ],
+        "memory_record_id": "rmrec-agent-alpha-8b525e0047b205e3a485fc29-rev.1-1-2c7c5ffca976",
+        "slot_evidence": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/slots/slot_01_slot-disc-session-6c6-01-c519861ef7ed.json",
+        "methods_executed": [
+          "coverage",
+          "simple_correlation",
+          "direction_consistency",
+          "leakage_audit"
+        ]
+      },
+      "round_2": {
+        "provider_job_ref": "f6988d0b5fffba351c819bc3056eb1d6",
+        "task_id": "task-8611ee2ec39c3128c949c60c626c38d4",
+        "hypothesis_id": "agent-alpha-71bfc19f80a80a59dc3a6666",
+        "hypothesis_content_hash": "d8746e729acba4380689b1db2f318557622582732ddd9314be068171767d51e4",
+        "scientific_identity_hash": "27bb01daf19f3690fac47e34ff22d9490a296de6d119d8724a357f34d081f1e8",
+        "admission": "novel_within_view",
+        "engineering_status": "COMPLETED",
+        "precheck_report": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/precheck/slot_01_agent-alpha-71bfc19f80a80a59dc3a6666/PRECHECK_REPORT.json",
+        "snapshot_sha256": "f3eb2f846b795f6796a64429b8489d202a94e082a5997d07ec7fc55d0d36eef4",
+        "snapshot_bytes": 9910,
+        "pit_rows_verified": 16,
+        "snapshot_csv": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/engine_workspace/derived_snapshots/snapshot_rb2701_log_settlement_momentum_k1_27bb01daf19f3690.csv",
+        "run_ids": [
+          "run-screening-30ff165a5d33406c",
+          "run-screening-ee4a5467b661455c",
+          "run-screening-29397321ada8481f",
+          "run-screening-90809a71ae3142ba",
+          "run-screening-3016db34d3c04b91",
+          "run-screening-d93c1cd74b354929"
+        ],
+        "evidence_ids": [
+          "evidence-run-screening-30ff165a5d33406c",
+          "evidence-run-screening-ee4a5467b661455c",
+          "evidence-run-screening-29397321ada8481f",
+          "evidence-run-screening-90809a71ae3142ba",
+          "evidence-run-screening-3016db34d3c04b91",
+          "evidence-run-screening-d93c1cd74b354929"
+        ],
+        "critic_decision": "REJECT",
+        "critic_decision_id": "rev-45ae84ab434c776a",
+        "critic_review_hash": "45ae84ab434c776a5035652cfbfd4999ad033d5e83c4a8a45e4606dca779698c",
+        "critic_missing_evidence": [
+          "cost_sensitivity",
+          "insufficient_sample_size"
+        ],
+        "critic_reject_reasons": [
+          "Direction consistency 0.3750 < 0.45",
+          "Severe stability split decay 0.7848 >= 0.50"
+        ],
+        "memory_record_id": "rmrec-agent-alpha-71bfc19f80a80a59dc3a6666-rev.1-1-94277898dac5",
+        "slot_evidence": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/slots/slot_01_slot-disc-session-fee-01-6a31e7e16dd8.json",
+        "memory_b_gap_refs_used": [
+          "rmentry-064441de1fcd768d776b9323",
+          "rmentry-169d2f09dff1f71cc4446851",
+          "rmentry-270aa78b35ae3d2c6cc89761",
+          "rmentry-27d7e6c709a90ce410176319",
+          "rmentry-2e5328a9ba4040673219bed9",
+          "rmentry-3adcc3a0c06d7e1e2e02cf10",
+          "rmentry-403ca2a77401058e8a1f4961",
+          "rmentry-4d4895d0ce1fa0bd7dd2f7ae",
+          "rmentry-698dba8f2e1c1a1d744c2bcf",
+          "rmentry-6ad51e16d86dc1f3dc6f7f72",
+          "rmentry-6ff1f24ff5be8ee947cdbb3e",
+          "rmentry-93ebdeba0a36294149141831",
+          "rmentry-98814e108469c9d067fe72c1",
+          "rmentry-bd842be9932893cb679ae630",
+          "rmentry-c211423dcabbb6ab9a384312",
+          "rmentry-d97c46d474074a2beb0804a3",
+          "rmentry-fc657eb1502be529208c6e9f"
+        ],
+        "methods_executed": [
+          "coverage",
+          "simple_correlation",
+          "direction_consistency",
+          "leakage_audit",
+          "stability_split",
+          "outlier_sensitivity"
+        ]
+      }
+    },
+    {
+      "ordinal": 2,
+      "symbol": "RB2701",
+      "signal_family": "momentum",
+      "formula": "log(settlement[t] / settlement[t-2])",
+      "lookback_k": 2,
+      "expected_direction": "positive",
+      "target": "log(settlement[t+2] / settlement[t+1])",
+      "round_1": {
+        "provider_job_ref": "32e5df65c5863f4a7f534cfb153fe180",
+        "task_id": "task-8be6d62f6e8119533cdd600eb5d48f65",
+        "hypothesis_id": "agent-alpha-cdf30a94f0db4520f83e619e",
+        "hypothesis_content_hash": "8ba9d8ce75a80554c5a8ef0e7ffa8037a8d5501869cb197e312313a42b181987",
+        "scientific_identity_hash": "bd36c64afa2c3ad4ce789ead336528e39907d4d95ad9a4e923c30ef7be90250f",
+        "admission": "related_history",
+        "engineering_status": "COMPLETED",
+        "precheck_report": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/precheck/slot_02_agent-alpha-cdf30a94f0db4520f83e619e/PRECHECK_REPORT.json",
+        "snapshot_sha256": "f5881198fdd9bccdd7e0e098b0bda9b7bf55db93d9f8ecd23e69e8faf5a31aca",
+        "snapshot_bytes": 9307,
+        "pit_rows_verified": 15,
+        "snapshot_csv": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/engine_workspace/derived_snapshots/snapshot_rb2701_log_settlement_momentum_k2_bd36c64afa2c3ad4.csv",
+        "run_ids": [
+          "run-screening-07a7d1bcd7514d73",
+          "run-screening-9a500dcb1b944fa2",
+          "run-screening-b0d7be6b24924cd9",
+          "run-screening-a36690974adb4e19"
+        ],
+        "evidence_ids": [
+          "evidence-run-screening-07a7d1bcd7514d73",
+          "evidence-run-screening-9a500dcb1b944fa2",
+          "evidence-run-screening-b0d7be6b24924cd9",
+          "evidence-run-screening-a36690974adb4e19"
+        ],
+        "critic_decision": "REJECT",
+        "critic_decision_id": "rev-18cd67bd3defda49",
+        "critic_review_hash": "18cd67bd3defda49f969248fee2a51037a62e4e2d0abd53d385d8896b58fc843",
+        "critic_missing_evidence": [
+          "cost_sensitivity",
+          "insufficient_sample_size",
+          "outlier_sensitivity",
+          "stability_split"
+        ],
+        "critic_reject_reasons": [
+          "Direction consistency 0.4000 < 0.45"
+        ],
+        "memory_record_id": "rmrec-agent-alpha-cdf30a94f0db4520f83e619e-rev.1-1-959bee90186f",
+        "slot_evidence": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/slots/slot_02_slot-disc-session-6c6-02-d76d1ad47697.json",
+        "methods_executed": [
+          "coverage",
+          "simple_correlation",
+          "direction_consistency",
+          "leakage_audit"
+        ]
+      },
+      "round_2": {
+        "provider_job_ref": "fc5ad6770982c4d3fdaed57cba2029d0",
+        "task_id": "task-55d1f4e9bfb00de783d738db29995b6a",
+        "hypothesis_id": "agent-alpha-3979b89316474ee7dd51a43d",
+        "hypothesis_content_hash": "a09ee7f5530398b96383df945d60fd6d55f531340f873450903eb7b9fdd6fc80",
+        "scientific_identity_hash": "03131b80abf54a8f815e0afef8be636b0f3e427fb14ae7aaad38872ae6700216",
+        "admission": "admitted_candidate",
+        "engineering_status": "COMPLETED",
+        "precheck_report": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/precheck/slot_02_agent-alpha-3979b89316474ee7dd51a43d/PRECHECK_REPORT.json",
+        "snapshot_sha256": "f5881198fdd9bccdd7e0e098b0bda9b7bf55db93d9f8ecd23e69e8faf5a31aca",
+        "snapshot_bytes": 9307,
+        "pit_rows_verified": 15,
+        "snapshot_csv": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/engine_workspace/derived_snapshots/snapshot_rb2701_log_settlement_momentum_k2_03131b80abf54a8f.csv",
+        "run_ids": [
+          "run-screening-a77ef4042df745a5",
+          "run-screening-8db108e89f6f4b21",
+          "run-screening-2da83b704eb24cff",
+          "run-screening-0df290601fce4518",
+          "run-screening-650dde7aca3d4f2a",
+          "run-screening-c2a9314815704ed7"
+        ],
+        "evidence_ids": [
+          "evidence-run-screening-a77ef4042df745a5",
+          "evidence-run-screening-8db108e89f6f4b21",
+          "evidence-run-screening-2da83b704eb24cff",
+          "evidence-run-screening-0df290601fce4518",
+          "evidence-run-screening-650dde7aca3d4f2a",
+          "evidence-run-screening-c2a9314815704ed7"
+        ],
+        "critic_decision": "REJECT",
+        "critic_decision_id": "rev-f0b9195c476c041b",
+        "critic_review_hash": "f0b9195c476c041be47779790e0b23b64da86ee4469d0e46ea730a01f8a1cbe7",
+        "critic_missing_evidence": [
+          "cost_sensitivity",
+          "insufficient_sample_size"
+        ],
+        "critic_reject_reasons": [
+          "Direction consistency 0.4000 < 0.45"
+        ],
+        "memory_record_id": "rmrec-agent-alpha-3979b89316474ee7dd51a43d-rev.1-1-697c321051c9",
+        "slot_evidence": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/slots/slot_02_slot-disc-session-fee-02-c6f6a45362fa.json",
+        "memory_b_gap_refs_used": [
+          "rmentry-064441de1fcd768d776b9323",
+          "rmentry-169d2f09dff1f71cc4446851",
+          "rmentry-270aa78b35ae3d2c6cc89761",
+          "rmentry-3adcc3a0c06d7e1e2e02cf10",
+          "rmentry-698dba8f2e1c1a1d744c2bcf",
+          "rmentry-6ff1f24ff5be8ee947cdbb3e",
+          "rmentry-93ebdeba0a36294149141831",
+          "rmentry-c211423dcabbb6ab9a384312",
+          "rmentry-d97c46d474074a2beb0804a3",
+          "rmentry-fc657eb1502be529208c6e9f"
+        ],
+        "methods_executed": [
+          "coverage",
+          "simple_correlation",
+          "direction_consistency",
+          "leakage_audit",
+          "stability_split",
+          "outlier_sensitivity"
+        ]
+      }
+    },
+    {
+      "ordinal": 3,
+      "symbol": "RB2701",
+      "signal_family": "momentum",
+      "formula": "log(settlement[t] / settlement[t-3])",
+      "lookback_k": 3,
+      "expected_direction": "positive",
+      "target": "log(settlement[t+2] / settlement[t+1])",
+      "round_1": {
+        "provider_job_ref": "db3e9ed232ee2b7642b2c34944ccdbb1",
+        "task_id": "task-56f0b55f37120b38e78455481468eb4e",
+        "hypothesis_id": "agent-alpha-95924efb184d07598e4842b1",
+        "hypothesis_content_hash": "09ec2980eaf6907a1c9bc9fea3a81b258ce54516b056a533f92649c93804aa40",
+        "scientific_identity_hash": "1bc5e7c46a9e0c426c1d9981f7f161320584c9e689546c559290d1fca622b3d7",
+        "admission": "related_history",
+        "engineering_status": "COMPLETED",
+        "precheck_report": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/precheck/slot_03_agent-alpha-95924efb184d07598e4842b1/PRECHECK_REPORT.json",
+        "snapshot_sha256": "cf0f39587570a8b0f77717ff8bd31e900ba4ea44abaf036592e2ed8d2c880630",
+        "snapshot_bytes": 8686,
+        "pit_rows_verified": 14,
+        "snapshot_csv": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/engine_workspace/derived_snapshots/snapshot_rb2701_log_settlement_momentum_k3_1bc5e7c46a9e0c42.csv",
+        "run_ids": [
+          "run-screening-ad62586c5e7345fe",
+          "run-screening-db7714e4908e4bbb",
+          "run-screening-5bd46cce8c104563",
+          "run-screening-7dc7d353942a4619"
+        ],
+        "evidence_ids": [
+          "evidence-run-screening-ad62586c5e7345fe",
+          "evidence-run-screening-db7714e4908e4bbb",
+          "evidence-run-screening-5bd46cce8c104563",
+          "evidence-run-screening-7dc7d353942a4619"
+        ],
+        "critic_decision": "NEED_MORE_EVIDENCE",
+        "critic_decision_id": "rev-e9346fea16c1589c",
+        "critic_review_hash": "e9346fea16c1589c4cabd78a8daa0becf1b14e6c926ffe6993237ba9e6112e8d",
+        "critic_missing_evidence": [
+          "cost_sensitivity",
+          "insufficient_sample_size",
+          "outlier_sensitivity",
+          "stability_split"
+        ],
+        "critic_reject_reasons": [],
+        "memory_record_id": "rmrec-agent-alpha-95924efb184d07598e4842b1-rev.1-1-74d1e3af8ae1",
+        "slot_evidence": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/slots/slot_03_slot-disc-session-6c6-03-38c1bfbb35bb.json",
+        "methods_executed": [
+          "coverage",
+          "simple_correlation",
+          "direction_consistency",
+          "leakage_audit"
+        ]
+      },
+      "round_2": {
+        "provider_job_ref": "7e92d2dcaab9ae256ec5705f12d8c303",
+        "task_id": "task-6652afe957d0a4eeba2c051a335abc94",
+        "hypothesis_id": "agent-alpha-45f2609aeb087d9bb0a0eb50",
+        "hypothesis_content_hash": "2dd877714df55c440cc3969f7c696093381e40d3836d220f0f82ce20b9b61112",
+        "scientific_identity_hash": "34929f36e907bbf46a16b06b8a34cb30596a42c163ab00d3a1967f7e426cb4f8",
+        "admission": "admitted_candidate",
+        "engineering_status": "COMPLETED",
+        "precheck_report": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/precheck/slot_03_agent-alpha-45f2609aeb087d9bb0a0eb50/PRECHECK_REPORT.json",
+        "snapshot_sha256": "cf0f39587570a8b0f77717ff8bd31e900ba4ea44abaf036592e2ed8d2c880630",
+        "snapshot_bytes": 8686,
+        "pit_rows_verified": 14,
+        "snapshot_csv": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/engine_workspace/derived_snapshots/snapshot_rb2701_log_settlement_momentum_k3_34929f36e907bbf4.csv",
+        "run_ids": [
+          "run-screening-5b15b8eef93c4bc0",
+          "run-screening-2b9235ffebd94ba8",
+          "run-screening-12f090c6b92e4ab5",
+          "run-screening-69ab188b9a9e4e81",
+          "run-screening-ec3b268f08714771",
+          "run-screening-98376f3e64b84953"
+        ],
+        "evidence_ids": [
+          "evidence-run-screening-5b15b8eef93c4bc0",
+          "evidence-run-screening-2b9235ffebd94ba8",
+          "evidence-run-screening-12f090c6b92e4ab5",
+          "evidence-run-screening-69ab188b9a9e4e81",
+          "evidence-run-screening-ec3b268f08714771",
+          "evidence-run-screening-98376f3e64b84953"
+        ],
+        "critic_decision": "NEED_MORE_EVIDENCE",
+        "critic_decision_id": "rev-53a7314d445499a5",
+        "critic_review_hash": "53a7314d445499a54b551bb3d5bc048f60ccd09b06f5c7eaa1d7c10b49609d0c",
+        "critic_missing_evidence": [
+          "cost_sensitivity",
+          "insufficient_sample_size"
+        ],
+        "critic_reject_reasons": [],
+        "memory_record_id": "rmrec-agent-alpha-45f2609aeb087d9bb0a0eb50-rev.1-1-69006190ca75",
+        "slot_evidence": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/slots/slot_03_slot-disc-session-fee-03-0459a2a50c07.json",
+        "memory_b_gap_refs_used": [
+          "rmentry-064441de1fcd768d776b9323",
+          "rmentry-169d2f09dff1f71cc4446851",
+          "rmentry-270aa78b35ae3d2c6cc89761",
+          "rmentry-27d7e6c709a90ce410176319",
+          "rmentry-2e5328a9ba4040673219bed9",
+          "rmentry-3adcc3a0c06d7e1e2e02cf10",
+          "rmentry-403ca2a77401058e8a1f4961",
+          "rmentry-4d4895d0ce1fa0bd7dd2f7ae",
+          "rmentry-698dba8f2e1c1a1d744c2bcf",
+          "rmentry-6ad51e16d86dc1f3dc6f7f72",
+          "rmentry-6ff1f24ff5be8ee947cdbb3e",
+          "rmentry-93ebdeba0a36294149141831",
+          "rmentry-98814e108469c9d067fe72c1",
+          "rmentry-bd842be9932893cb679ae630",
+          "rmentry-c211423dcabbb6ab9a384312",
+          "rmentry-d97c46d474074a2beb0804a3",
+          "rmentry-fc657eb1502be529208c6e9f"
+        ],
+        "methods_executed": [
+          "coverage",
+          "simple_correlation",
+          "direction_consistency",
+          "leakage_audit",
+          "stability_split",
+          "outlier_sensitivity"
+        ]
+      }
+    },
+    {
+      "ordinal": 4,
+      "symbol": "RB2701",
+      "signal_family": "reversal",
+      "formula": "-log(settlement[t] / settlement[t-1])",
+      "lookback_k": 1,
+      "expected_direction": "positive",
+      "target": "log(settlement[t+2] / settlement[t+1])",
+      "round_1": {
+        "provider_job_ref": "f47780540999eed65f2fe35a1a3474dd",
+        "task_id": "task-eda7b91718be67d884402bbfd46832ac",
+        "hypothesis_id": "agent-alpha-f1549c737fed6dcc27bb7552",
+        "hypothesis_content_hash": "01507864ddc11b0f97dcc43d5dbfb32b3bb64902f7886f29cf8dd48e69c7686a",
+        "scientific_identity_hash": "6ad84c403a9bcd1675fa92ede1cf0d9868a47b1f43276d9bb8cbade6f224ff34",
+        "admission": "novel_within_view",
+        "engineering_status": "COMPLETED",
+        "precheck_report": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/precheck/slot_04_agent-alpha-f1549c737fed6dcc27bb7552/PRECHECK_REPORT.json",
+        "snapshot_sha256": "97944e8a4bad4770c1227b44d152bca7430211072a611fafec3f21ef9674a00f",
+        "snapshot_bytes": 9910,
+        "pit_rows_verified": 16,
+        "snapshot_csv": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/engine_workspace/derived_snapshots/snapshot_rb2701_log_settlement_reversal_neg_k1_6ad84c403a9bcd16.csv",
+        "run_ids": [
+          "run-screening-8cf3b5956f8949cb",
+          "run-screening-4b2862893be64769",
+          "run-screening-f33f38b46ee34852",
+          "run-screening-32f23fb53f8448c9"
+        ],
+        "evidence_ids": [
+          "evidence-run-screening-8cf3b5956f8949cb",
+          "evidence-run-screening-4b2862893be64769",
+          "evidence-run-screening-f33f38b46ee34852",
+          "evidence-run-screening-32f23fb53f8448c9"
+        ],
+        "critic_decision": "NEED_MORE_EVIDENCE",
+        "critic_decision_id": "rev-b4f87aeddfa4d166",
+        "critic_review_hash": "b4f87aeddfa4d166d75598737c361825466c551acd58c6c85896374a9a024fc0",
+        "critic_missing_evidence": [
+          "cost_sensitivity",
+          "insufficient_sample_size",
+          "outlier_sensitivity",
+          "stability_split"
+        ],
+        "critic_reject_reasons": [],
+        "memory_record_id": "rmrec-agent-alpha-f1549c737fed6dcc27bb7552-rev.1-1-5bfb2c79602f",
+        "slot_evidence": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/slots/slot_04_slot-disc-session-6c6-04-9cf1e4b9509e.json",
+        "methods_executed": [
+          "coverage",
+          "simple_correlation",
+          "direction_consistency",
+          "leakage_audit"
+        ]
+      },
+      "round_2": {
+        "provider_job_ref": "a664e328d475833113404efc39ba5fd9",
+        "task_id": "task-6621e00e15b501a0baee031662686fa7",
+        "hypothesis_id": "agent-alpha-81340b97ea5aa9da09fab00f",
+        "hypothesis_content_hash": "733bffcdf1ac80142c8c9497bd0f7021373296f39e8d56ad3c50761126fa856e",
+        "scientific_identity_hash": "198ff7b8341864d2aba7969ab35524e8a4d0a38e0fa34d5404e74dff055320d4",
+        "admission": "novel_within_view",
+        "engineering_status": "COMPLETED",
+        "precheck_report": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/precheck/slot_04_agent-alpha-81340b97ea5aa9da09fab00f/PRECHECK_REPORT.json",
+        "snapshot_sha256": "97944e8a4bad4770c1227b44d152bca7430211072a611fafec3f21ef9674a00f",
+        "snapshot_bytes": 9910,
+        "pit_rows_verified": 16,
+        "snapshot_csv": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/engine_workspace/derived_snapshots/snapshot_rb2701_log_settlement_reversal_neg_k1_198ff7b8341864d2.csv",
+        "run_ids": [
+          "run-screening-6c3985a55f4e47a4",
+          "run-screening-10eb79892575412d",
+          "run-screening-99921d08a89f46c2",
+          "run-screening-5a0b4e15df304202",
+          "run-screening-fe236eb5f1784d2a",
+          "run-screening-193b8a825c2c4abf"
+        ],
+        "evidence_ids": [
+          "evidence-run-screening-6c3985a55f4e47a4",
+          "evidence-run-screening-10eb79892575412d",
+          "evidence-run-screening-99921d08a89f46c2",
+          "evidence-run-screening-5a0b4e15df304202",
+          "evidence-run-screening-fe236eb5f1784d2a",
+          "evidence-run-screening-193b8a825c2c4abf"
+        ],
+        "critic_decision": "REJECT",
+        "critic_decision_id": "rev-1e5132092af505c8",
+        "critic_review_hash": "1e5132092af505c87c40d5079e2e8efa6236272638807e3870abeeba940e7b11",
+        "critic_missing_evidence": [
+          "cost_sensitivity",
+          "insufficient_sample_size"
+        ],
+        "critic_reject_reasons": [
+          "Severe stability split decay 0.7848 >= 0.50"
+        ],
+        "memory_record_id": "rmrec-agent-alpha-81340b97ea5aa9da09fab00f-rev.1-1-ae476b5c824a",
+        "slot_evidence": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/slots/slot_04_slot-disc-session-fee-04-f79bd47b9438.json",
+        "memory_b_gap_refs_used": [
+          "rmentry-064441de1fcd768d776b9323",
+          "rmentry-169d2f09dff1f71cc4446851",
+          "rmentry-270aa78b35ae3d2c6cc89761",
+          "rmentry-27d7e6c709a90ce410176319",
+          "rmentry-2e5328a9ba4040673219bed9",
+          "rmentry-3adcc3a0c06d7e1e2e02cf10",
+          "rmentry-403ca2a77401058e8a1f4961",
+          "rmentry-4d4895d0ce1fa0bd7dd2f7ae",
+          "rmentry-698dba8f2e1c1a1d744c2bcf",
+          "rmentry-6ad51e16d86dc1f3dc6f7f72",
+          "rmentry-6ff1f24ff5be8ee947cdbb3e",
+          "rmentry-93ebdeba0a36294149141831",
+          "rmentry-98814e108469c9d067fe72c1",
+          "rmentry-bd842be9932893cb679ae630",
+          "rmentry-c211423dcabbb6ab9a384312",
+          "rmentry-d97c46d474074a2beb0804a3",
+          "rmentry-fc657eb1502be529208c6e9f"
+        ],
+        "methods_executed": [
+          "coverage",
+          "simple_correlation",
+          "direction_consistency",
+          "leakage_audit",
+          "stability_split",
+          "outlier_sensitivity"
+        ]
+      }
+    },
+    {
+      "ordinal": 5,
+      "symbol": "RB2701",
+      "signal_family": "reversal",
+      "formula": "-log(settlement[t] / settlement[t-2])",
+      "lookback_k": 2,
+      "expected_direction": "positive",
+      "target": "log(settlement[t+2] / settlement[t+1])",
+      "round_1": {
+        "provider_job_ref": "47723460d52ea32501da5caa20a51d34",
+        "task_id": "task-dbc11247da1fd957e13ef303acc817fa",
+        "hypothesis_id": "agent-alpha-fece8fb3043ca5ddc5b8c0fb",
+        "hypothesis_content_hash": "52a247ae5f7e5831650c4154bf7ae92a044890ea65cb5e6e4250691397bd8ccf",
+        "scientific_identity_hash": "4a029834465476557eb6a811f623ad9e5117ea24164e134b12f7e360e67e3739",
+        "admission": "related_history",
+        "engineering_status": "COMPLETED",
+        "precheck_report": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/precheck/slot_05_agent-alpha-fece8fb3043ca5ddc5b8c0fb/PRECHECK_REPORT.json",
+        "snapshot_sha256": "aa4fc9ee2aeef7935fb12e54c9e7c20fd31b4c5681013014e88a3f35383cc18a",
+        "snapshot_bytes": 9306,
+        "pit_rows_verified": 15,
+        "snapshot_csv": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/engine_workspace/derived_snapshots/snapshot_rb2701_log_settlement_reversal_neg_k2_4a02983446547655.csv",
+        "run_ids": [
+          "run-screening-f1dcf9c1d6834180",
+          "run-screening-d943804413634927",
+          "run-screening-6f7c018337634193",
+          "run-screening-d072be369b9d459c"
+        ],
+        "evidence_ids": [
+          "evidence-run-screening-f1dcf9c1d6834180",
+          "evidence-run-screening-d943804413634927",
+          "evidence-run-screening-6f7c018337634193",
+          "evidence-run-screening-d072be369b9d459c"
+        ],
+        "critic_decision": "NEED_MORE_EVIDENCE",
+        "critic_decision_id": "rev-d4a1cd2dc162b1c6",
+        "critic_review_hash": "d4a1cd2dc162b1c6de5d71a4bfc8c44864445579fb09d0b37dacfbec25527c1a",
+        "critic_missing_evidence": [
+          "cost_sensitivity",
+          "insufficient_sample_size",
+          "outlier_sensitivity",
+          "stability_split"
+        ],
+        "critic_reject_reasons": [],
+        "memory_record_id": "rmrec-agent-alpha-fece8fb3043ca5ddc5b8c0fb-rev.1-1-48359aa8352a",
+        "slot_evidence": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/slots/slot_05_slot-disc-session-6c6-05-3f9549531d07.json",
+        "methods_executed": [
+          "coverage",
+          "simple_correlation",
+          "direction_consistency",
+          "leakage_audit"
+        ]
+      },
+      "round_2": {
+        "provider_job_ref": "dd287f69d29145b5a209f0f422463bee",
+        "task_id": "task-7853a3b1ce3706c146f36bd94ae5d8e7",
+        "hypothesis_id": "agent-alpha-abf82b4a0ccaf2252bd16681",
+        "hypothesis_content_hash": "38f43aa08cb1318504cb030efb3a9248cc6a5af5ea014cad746e4270adff292d",
+        "scientific_identity_hash": "3b9bbbcb7eab7b72463566c34f1194f9308cb1393d17539134e9e5d04f22a4f9",
+        "admission": "admitted_candidate",
+        "engineering_status": "COMPLETED",
+        "precheck_report": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/precheck/slot_05_agent-alpha-abf82b4a0ccaf2252bd16681/PRECHECK_REPORT.json",
+        "snapshot_sha256": "aa4fc9ee2aeef7935fb12e54c9e7c20fd31b4c5681013014e88a3f35383cc18a",
+        "snapshot_bytes": 9306,
+        "pit_rows_verified": 15,
+        "snapshot_csv": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/engine_workspace/derived_snapshots/snapshot_rb2701_log_settlement_reversal_neg_k2_3b9bbbcb7eab7b72.csv",
+        "run_ids": [
+          "run-screening-d9f59696383843b0",
+          "run-screening-f170a00ccf974750",
+          "run-screening-d8f716cb0b7a479a",
+          "run-screening-d115b25f686849c0",
+          "run-screening-c575cb6a76444c97",
+          "run-screening-3a8b9586cf904195"
+        ],
+        "evidence_ids": [
+          "evidence-run-screening-d9f59696383843b0",
+          "evidence-run-screening-f170a00ccf974750",
+          "evidence-run-screening-d8f716cb0b7a479a",
+          "evidence-run-screening-d115b25f686849c0",
+          "evidence-run-screening-c575cb6a76444c97",
+          "evidence-run-screening-3a8b9586cf904195"
+        ],
+        "critic_decision": "NEED_MORE_EVIDENCE",
+        "critic_decision_id": "rev-b55bf7499b1cc512",
+        "critic_review_hash": "b55bf7499b1cc51273daa1c336f6f98911466355261a3f4ff0be553093ae1c4f",
+        "critic_missing_evidence": [
+          "cost_sensitivity",
+          "insufficient_sample_size"
+        ],
+        "critic_reject_reasons": [],
+        "memory_record_id": "rmrec-agent-alpha-abf82b4a0ccaf2252bd16681-rev.1-1-adb0b8df1513",
+        "slot_evidence": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/slots/slot_05_slot-disc-session-fee-05-e60a387ca527.json",
+        "memory_b_gap_refs_used": [
+          "rmentry-064441de1fcd768d776b9323",
+          "rmentry-169d2f09dff1f71cc4446851",
+          "rmentry-270aa78b35ae3d2c6cc89761",
+          "rmentry-27d7e6c709a90ce410176319",
+          "rmentry-2e5328a9ba4040673219bed9",
+          "rmentry-3adcc3a0c06d7e1e2e02cf10",
+          "rmentry-403ca2a77401058e8a1f4961",
+          "rmentry-4d4895d0ce1fa0bd7dd2f7ae",
+          "rmentry-698dba8f2e1c1a1d744c2bcf",
+          "rmentry-6ad51e16d86dc1f3dc6f7f72",
+          "rmentry-6ff1f24ff5be8ee947cdbb3e",
+          "rmentry-93ebdeba0a36294149141831",
+          "rmentry-98814e108469c9d067fe72c1",
+          "rmentry-bd842be9932893cb679ae630",
+          "rmentry-c211423dcabbb6ab9a384312",
+          "rmentry-d97c46d474074a2beb0804a3",
+          "rmentry-fc657eb1502be529208c6e9f"
+        ],
+        "methods_executed": [
+          "coverage",
+          "simple_correlation",
+          "direction_consistency",
+          "leakage_audit",
+          "stability_split",
+          "outlier_sensitivity"
+        ]
+      }
+    },
+    {
+      "ordinal": 6,
+      "symbol": "HC2701",
+      "signal_family": "momentum",
+      "formula": "log(settlement[t] / settlement[t-1])",
+      "lookback_k": 1,
+      "expected_direction": "positive",
+      "target": "log(settlement[t+2] / settlement[t+1])",
+      "round_1": {
+        "provider_job_ref": "e441c99c021c3bc2fa20cf23ce6d57c4",
+        "task_id": "task-3a9d58e7eff2fa64f7a450943747c578",
+        "hypothesis_id": "agent-alpha-cd0fbfb9d292b990069a66f0",
+        "hypothesis_content_hash": "6b4463a2d6ddef857f0d502789151e96fec38a8f4f6204229d4d9435d5470d9c",
+        "scientific_identity_hash": "3a73a612514bc7b1c4286f3146f8da8b0d7f70160755e340ecd15a240314821c",
+        "admission": "novel_within_view",
+        "engineering_status": "COMPLETED",
+        "precheck_report": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/precheck/slot_06_agent-alpha-cd0fbfb9d292b990069a66f0/PRECHECK_REPORT.json",
+        "snapshot_sha256": "741c1f2c07beadbe4b6fd5c1fcf91b20c135fa2c1907342012a22578c0f2d2bb",
+        "snapshot_bytes": 9917,
+        "pit_rows_verified": 16,
+        "snapshot_csv": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/engine_workspace/derived_snapshots/snapshot_hc2701_log_settlement_momentum_k1_3a73a612514bc7b1.csv",
+        "run_ids": [
+          "run-screening-205e993a448e4a5a",
+          "run-screening-7849d9340cb147ad",
+          "run-screening-962b4ce4cc264dce",
+          "run-screening-40053f34c4c84c54"
+        ],
+        "evidence_ids": [
+          "evidence-run-screening-205e993a448e4a5a",
+          "evidence-run-screening-7849d9340cb147ad",
+          "evidence-run-screening-962b4ce4cc264dce",
+          "evidence-run-screening-40053f34c4c84c54"
+        ],
+        "critic_decision": "REJECT",
+        "critic_decision_id": "rev-e738ae8ae3092dc5",
+        "critic_review_hash": "e738ae8ae3092dc5a9cec9344b6fef8bdd118357788752106a78fb41d73c0845",
+        "critic_missing_evidence": [
+          "cost_sensitivity",
+          "insufficient_sample_size",
+          "outlier_sensitivity",
+          "stability_split"
+        ],
+        "critic_reject_reasons": [
+          "Direction consistency 0.3750 < 0.45"
+        ],
+        "memory_record_id": "rmrec-agent-alpha-cd0fbfb9d292b990069a66f0-rev.1-1-e0341c67017b",
+        "slot_evidence": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/slots/slot_06_slot-disc-session-6c6-06-0a70177d97b1.json",
+        "methods_executed": [
+          "coverage",
+          "simple_correlation",
+          "direction_consistency",
+          "leakage_audit"
+        ]
+      },
+      "round_2": {
+        "provider_job_ref": "c675c0f14943a5659f07057b71b17dd5",
+        "task_id": "task-6572ed90483698735beeaf575c519d62",
+        "hypothesis_id": "agent-alpha-de9d7dc8b8c2844be0bcd00c",
+        "hypothesis_content_hash": "c0d18a9d1ffe2df6fbc06b298ea0843f7d2dc6c50d423e261029091a851a712c",
+        "scientific_identity_hash": "8c4a7a32eb76a9114b96012d89b9b531ec22f2ae28304b36859e956794e9f598",
+        "admission": "novel_within_view",
+        "engineering_status": "COMPLETED",
+        "precheck_report": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/precheck/slot_06_agent-alpha-de9d7dc8b8c2844be0bcd00c/PRECHECK_REPORT.json",
+        "snapshot_sha256": "741c1f2c07beadbe4b6fd5c1fcf91b20c135fa2c1907342012a22578c0f2d2bb",
+        "snapshot_bytes": 9917,
+        "pit_rows_verified": 16,
+        "snapshot_csv": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/engine_workspace/derived_snapshots/snapshot_hc2701_log_settlement_momentum_k1_8c4a7a32eb76a911.csv",
+        "run_ids": [
+          "run-screening-e2ae5478c5264a21",
+          "run-screening-d34dc3166eba429b",
+          "run-screening-93243d6e669b4fe5",
+          "run-screening-9fa0741db57e4f60",
+          "run-screening-d597cf2236df4d4a",
+          "run-screening-ea340d2387414d32"
+        ],
+        "evidence_ids": [
+          "evidence-run-screening-e2ae5478c5264a21",
+          "evidence-run-screening-d34dc3166eba429b",
+          "evidence-run-screening-93243d6e669b4fe5",
+          "evidence-run-screening-9fa0741db57e4f60",
+          "evidence-run-screening-d597cf2236df4d4a",
+          "evidence-run-screening-ea340d2387414d32"
+        ],
+        "critic_decision": "REJECT",
+        "critic_decision_id": "rev-0bef192726a7a034",
+        "critic_review_hash": "0bef192726a7a03478f20163dde396f168aad1da0a7a4a4be309fcb81521747e",
+        "critic_missing_evidence": [
+          "cost_sensitivity",
+          "insufficient_sample_size"
+        ],
+        "critic_reject_reasons": [
+          "Direction consistency 0.3750 < 0.45",
+          "Severe stability split decay 0.7768 >= 0.50"
+        ],
+        "memory_record_id": "rmrec-agent-alpha-de9d7dc8b8c2844be0bcd00c-rev.1-1-a9cbb8859951",
+        "slot_evidence": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/slots/slot_06_slot-disc-session-fee-06-94f117410be8.json",
+        "memory_b_gap_refs_used": [
+          "rmentry-064441de1fcd768d776b9323",
+          "rmentry-169d2f09dff1f71cc4446851",
+          "rmentry-270aa78b35ae3d2c6cc89761",
+          "rmentry-27d7e6c709a90ce410176319",
+          "rmentry-2e5328a9ba4040673219bed9",
+          "rmentry-3adcc3a0c06d7e1e2e02cf10",
+          "rmentry-403ca2a77401058e8a1f4961",
+          "rmentry-4d4895d0ce1fa0bd7dd2f7ae",
+          "rmentry-698dba8f2e1c1a1d744c2bcf",
+          "rmentry-6ad51e16d86dc1f3dc6f7f72",
+          "rmentry-6ff1f24ff5be8ee947cdbb3e",
+          "rmentry-93ebdeba0a36294149141831",
+          "rmentry-98814e108469c9d067fe72c1",
+          "rmentry-bd842be9932893cb679ae630",
+          "rmentry-c211423dcabbb6ab9a384312",
+          "rmentry-d97c46d474074a2beb0804a3",
+          "rmentry-fc657eb1502be529208c6e9f"
+        ],
+        "methods_executed": [
+          "coverage",
+          "simple_correlation",
+          "direction_consistency",
+          "leakage_audit",
+          "stability_split",
+          "outlier_sensitivity"
+        ]
+      }
+    },
+    {
+      "ordinal": 7,
+      "symbol": "HC2701",
+      "signal_family": "momentum",
+      "formula": "log(settlement[t] / settlement[t-2])",
+      "lookback_k": 2,
+      "expected_direction": "positive",
+      "target": "log(settlement[t+2] / settlement[t+1])",
+      "round_1": {
+        "provider_job_ref": "5327747e1502c2d85ad244f520042ba9",
+        "task_id": "task-2ca330ba80bd5723db861ce73c50239d",
+        "hypothesis_id": "agent-alpha-2fb66703ed0a9ad142fc4f7b",
+        "hypothesis_content_hash": "b4aad0783e7022e8050d762e8a4ff4f7364dfa8cd5a5beb480de06043ec588b6",
+        "scientific_identity_hash": "d9f1da4e591fbb2cbe66bbed5b1f8f7cc318c2909fca2860b64875bde57500e3",
+        "admission": "related_history",
+        "engineering_status": "COMPLETED",
+        "precheck_report": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/precheck/slot_07_agent-alpha-2fb66703ed0a9ad142fc4f7b/PRECHECK_REPORT.json",
+        "snapshot_sha256": "3cd9eb7b2db5ddf742f62e67dec2468a1545aeb7b6b7148ff8661cf03cb13b23",
+        "snapshot_bytes": 9291,
+        "pit_rows_verified": 15,
+        "snapshot_csv": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/engine_workspace/derived_snapshots/snapshot_hc2701_log_settlement_momentum_k2_d9f1da4e591fbb2c.csv",
+        "run_ids": [
+          "run-screening-e0aa14d63b0a4e19",
+          "run-screening-22144d0275874812",
+          "run-screening-049b24ce5bc64028",
+          "run-screening-cfb320bbd86a49c4"
+        ],
+        "evidence_ids": [
+          "evidence-run-screening-e0aa14d63b0a4e19",
+          "evidence-run-screening-22144d0275874812",
+          "evidence-run-screening-049b24ce5bc64028",
+          "evidence-run-screening-cfb320bbd86a49c4"
+        ],
+        "critic_decision": "NEED_MORE_EVIDENCE",
+        "critic_decision_id": "rev-7293d380c126bc1b",
+        "critic_review_hash": "7293d380c126bc1b95b16b75a4f63b464478bbda1b74ee6c027a343afa144d8b",
+        "critic_missing_evidence": [
+          "cost_sensitivity",
+          "insufficient_sample_size",
+          "outlier_sensitivity",
+          "stability_split"
+        ],
+        "critic_reject_reasons": [],
+        "memory_record_id": "rmrec-agent-alpha-2fb66703ed0a9ad142fc4f7b-rev.1-1-022fc2a735bd",
+        "slot_evidence": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/slots/slot_07_slot-disc-session-6c6-07-3230d97bb3fb.json",
+        "methods_executed": [
+          "coverage",
+          "simple_correlation",
+          "direction_consistency",
+          "leakage_audit"
+        ]
+      },
+      "round_2": {
+        "provider_job_ref": "05712dd6f1cb63f5a57b6355c6e52376",
+        "task_id": "task-a7174e770dae20fa30a97ba9882ba6df",
+        "hypothesis_id": "agent-alpha-cd579133cc30c3601a9afab0",
+        "hypothesis_content_hash": "a72003ddad38f5dde5d8678ec545fbe3d916ffd4736d503fc413931e09be9ced",
+        "scientific_identity_hash": "13fe498fe85fdc26c760b5a84759f7aa974ba995268fb6340acc4f1c37473af2",
+        "admission": "admitted_candidate",
+        "engineering_status": "COMPLETED",
+        "precheck_report": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/precheck/slot_07_agent-alpha-cd579133cc30c3601a9afab0/PRECHECK_REPORT.json",
+        "snapshot_sha256": "3cd9eb7b2db5ddf742f62e67dec2468a1545aeb7b6b7148ff8661cf03cb13b23",
+        "snapshot_bytes": 9291,
+        "pit_rows_verified": 15,
+        "snapshot_csv": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/engine_workspace/derived_snapshots/snapshot_hc2701_log_settlement_momentum_k2_13fe498fe85fdc26.csv",
+        "run_ids": [
+          "run-screening-07a8e834e4ff412f",
+          "run-screening-e096452e7e824d4a",
+          "run-screening-2be36299e27b483c",
+          "run-screening-072c58d604d64407",
+          "run-screening-1a021ceb483946e2",
+          "run-screening-936608fd9402408b"
+        ],
+        "evidence_ids": [
+          "evidence-run-screening-07a8e834e4ff412f",
+          "evidence-run-screening-e096452e7e824d4a",
+          "evidence-run-screening-2be36299e27b483c",
+          "evidence-run-screening-072c58d604d64407",
+          "evidence-run-screening-1a021ceb483946e2",
+          "evidence-run-screening-936608fd9402408b"
+        ],
+        "critic_decision": "NEED_MORE_EVIDENCE",
+        "critic_decision_id": "rev-5999a4484785af54",
+        "critic_review_hash": "5999a4484785af54e0d42921f9c70b2182f3c30a4e04f82405fa3d8c3d5a286a",
+        "critic_missing_evidence": [
+          "cost_sensitivity",
+          "insufficient_sample_size"
+        ],
+        "critic_reject_reasons": [],
+        "memory_record_id": "rmrec-agent-alpha-cd579133cc30c3601a9afab0-rev.1-1-9b7bee7398e8",
+        "slot_evidence": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/slots/slot_07_slot-disc-session-fee-07-9b553491ec02.json",
+        "memory_b_gap_refs_used": [
+          "rmentry-064441de1fcd768d776b9323",
+          "rmentry-169d2f09dff1f71cc4446851",
+          "rmentry-270aa78b35ae3d2c6cc89761",
+          "rmentry-27d7e6c709a90ce410176319",
+          "rmentry-2e5328a9ba4040673219bed9",
+          "rmentry-3adcc3a0c06d7e1e2e02cf10",
+          "rmentry-403ca2a77401058e8a1f4961",
+          "rmentry-4d4895d0ce1fa0bd7dd2f7ae",
+          "rmentry-698dba8f2e1c1a1d744c2bcf",
+          "rmentry-6ad51e16d86dc1f3dc6f7f72",
+          "rmentry-6ff1f24ff5be8ee947cdbb3e",
+          "rmentry-93ebdeba0a36294149141831",
+          "rmentry-98814e108469c9d067fe72c1",
+          "rmentry-bd842be9932893cb679ae630",
+          "rmentry-c211423dcabbb6ab9a384312",
+          "rmentry-d97c46d474074a2beb0804a3",
+          "rmentry-fc657eb1502be529208c6e9f"
+        ],
+        "methods_executed": [
+          "coverage",
+          "simple_correlation",
+          "direction_consistency",
+          "leakage_audit",
+          "stability_split",
+          "outlier_sensitivity"
+        ]
+      }
+    },
+    {
+      "ordinal": 8,
+      "symbol": "HC2701",
+      "signal_family": "momentum",
+      "formula": "log(settlement[t] / settlement[t-3])",
+      "lookback_k": 3,
+      "expected_direction": "positive",
+      "target": "log(settlement[t+2] / settlement[t+1])",
+      "round_1": {
+        "provider_job_ref": "3aa4ea176215185a66115c82d602868b",
+        "task_id": "task-8120a7c767d514ca292135bdb51ce1c7",
+        "hypothesis_id": "agent-alpha-09bed3a7dbabea818e217f35",
+        "hypothesis_content_hash": "c31a147810eab04e0e22909e9c9fd6dcadd34b631d751c2569cccf50c9041877",
+        "scientific_identity_hash": "81603021107a8bb6026513a44c0cfc6923fd8b9250dc082705d353d91b38ffb2",
+        "admission": "related_history",
+        "engineering_status": "COMPLETED",
+        "precheck_report": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/precheck/slot_08_agent-alpha-09bed3a7dbabea818e217f35/PRECHECK_REPORT.json",
+        "snapshot_sha256": "1ffbf14ac5d5010f3b4db9309187136058690959d8c7b7c5f8bf538454b1c4cb",
+        "snapshot_bytes": 8716,
+        "pit_rows_verified": 14,
+        "snapshot_csv": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/engine_workspace/derived_snapshots/snapshot_hc2701_log_settlement_momentum_k3_81603021107a8bb6.csv",
+        "run_ids": [
+          "run-screening-1f123dbef09246ee",
+          "run-screening-51c307c33ef84f20",
+          "run-screening-cfb1afcc78e94733",
+          "run-screening-19d1d5fbacda4ffd"
+        ],
+        "evidence_ids": [
+          "evidence-run-screening-1f123dbef09246ee",
+          "evidence-run-screening-51c307c33ef84f20",
+          "evidence-run-screening-cfb1afcc78e94733",
+          "evidence-run-screening-19d1d5fbacda4ffd"
+        ],
+        "critic_decision": "NEED_MORE_EVIDENCE",
+        "critic_decision_id": "rev-95f606c6499492e0",
+        "critic_review_hash": "95f606c6499492e0b9285b9032f703d5bfc09277cd892d220ce6e1b905145e5c",
+        "critic_missing_evidence": [
+          "cost_sensitivity",
+          "insufficient_sample_size",
+          "outlier_sensitivity",
+          "stability_split"
+        ],
+        "critic_reject_reasons": [],
+        "memory_record_id": "rmrec-agent-alpha-09bed3a7dbabea818e217f35-rev.1-1-e8d9cd516236",
+        "slot_evidence": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/slots/slot_08_slot-disc-session-6c6-08-db52383c1839.json",
+        "methods_executed": [
+          "coverage",
+          "simple_correlation",
+          "direction_consistency",
+          "leakage_audit"
+        ]
+      },
+      "round_2": {
+        "provider_job_ref": "075d81b16dad71e5cc59a83298097690",
+        "task_id": "task-196c85cc8848affcb5a589dcfb5a0774",
+        "hypothesis_id": "agent-alpha-2a39043b0c8496a91872524e",
+        "hypothesis_content_hash": "1aeec16a2a9ba93ac0e5f5738d65cd202624a1191d524b0481afed0cb1745cb3",
+        "scientific_identity_hash": "fea20d825096664f24c581e48e47d409722fd353648b4f6d592ff071ae76c06d",
+        "admission": "admitted_candidate",
+        "engineering_status": "COMPLETED",
+        "precheck_report": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/precheck/slot_08_agent-alpha-2a39043b0c8496a91872524e/PRECHECK_REPORT.json",
+        "snapshot_sha256": "1ffbf14ac5d5010f3b4db9309187136058690959d8c7b7c5f8bf538454b1c4cb",
+        "snapshot_bytes": 8716,
+        "pit_rows_verified": 14,
+        "snapshot_csv": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/engine_workspace/derived_snapshots/snapshot_hc2701_log_settlement_momentum_k3_fea20d825096664f.csv",
+        "run_ids": [
+          "run-screening-71cc86c2bdfe46c6",
+          "run-screening-c144da0614534b83",
+          "run-screening-b96b360ebd53400f",
+          "run-screening-6c76070014eb4707",
+          "run-screening-6d1c05fa0a114ede",
+          "run-screening-581d7f9abd664fcd"
+        ],
+        "evidence_ids": [
+          "evidence-run-screening-71cc86c2bdfe46c6",
+          "evidence-run-screening-c144da0614534b83",
+          "evidence-run-screening-b96b360ebd53400f",
+          "evidence-run-screening-6c76070014eb4707",
+          "evidence-run-screening-6d1c05fa0a114ede",
+          "evidence-run-screening-581d7f9abd664fcd"
+        ],
+        "critic_decision": "NEED_MORE_EVIDENCE",
+        "critic_decision_id": "rev-812cf5f1df9950d1",
+        "critic_review_hash": "812cf5f1df9950d1dadfd877562f94fcad55ac840005030427ee05a40c1d915a",
+        "critic_missing_evidence": [
+          "cost_sensitivity",
+          "insufficient_sample_size"
+        ],
+        "critic_reject_reasons": [],
+        "memory_record_id": "rmrec-agent-alpha-2a39043b0c8496a91872524e-rev.1-1-d9f664202f7b",
+        "slot_evidence": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/slots/slot_08_slot-disc-session-fee-08-265d6521fd6e.json",
+        "memory_b_gap_refs_used": [
+          "rmentry-064441de1fcd768d776b9323",
+          "rmentry-169d2f09dff1f71cc4446851",
+          "rmentry-270aa78b35ae3d2c6cc89761",
+          "rmentry-27d7e6c709a90ce410176319",
+          "rmentry-2e5328a9ba4040673219bed9",
+          "rmentry-3adcc3a0c06d7e1e2e02cf10",
+          "rmentry-403ca2a77401058e8a1f4961",
+          "rmentry-4d4895d0ce1fa0bd7dd2f7ae",
+          "rmentry-698dba8f2e1c1a1d744c2bcf",
+          "rmentry-6ad51e16d86dc1f3dc6f7f72",
+          "rmentry-6ff1f24ff5be8ee947cdbb3e",
+          "rmentry-93ebdeba0a36294149141831",
+          "rmentry-98814e108469c9d067fe72c1",
+          "rmentry-bd842be9932893cb679ae630",
+          "rmentry-c211423dcabbb6ab9a384312",
+          "rmentry-d97c46d474074a2beb0804a3",
+          "rmentry-fc657eb1502be529208c6e9f"
+        ],
+        "methods_executed": [
+          "coverage",
+          "simple_correlation",
+          "direction_consistency",
+          "leakage_audit",
+          "stability_split",
+          "outlier_sensitivity"
+        ]
+      }
+    },
+    {
+      "ordinal": 9,
+      "symbol": "HC2701",
+      "signal_family": "reversal",
+      "formula": "-log(settlement[t] / settlement[t-1])",
+      "lookback_k": 1,
+      "expected_direction": "positive",
+      "target": "log(settlement[t+2] / settlement[t+1])",
+      "round_1": {
+        "provider_job_ref": "f25e4a633643f22d54216b66bcb674c0",
+        "task_id": "task-9d154f009dd48d6704b4147a08867c5b",
+        "hypothesis_id": "agent-alpha-f00f7aec176f77f2adefe6aa",
+        "hypothesis_content_hash": "fc610bf1a68b3d6279e940528f6f584dce6f77417fa94f546a3b819206284df6",
+        "scientific_identity_hash": "64749bda6c137b13e53b68761ad065ab036f9d6a050039f179695334ac4f0998",
+        "admission": "novel_within_view",
+        "engineering_status": "COMPLETED",
+        "precheck_report": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/precheck/slot_09_agent-alpha-f00f7aec176f77f2adefe6aa/PRECHECK_REPORT.json",
+        "snapshot_sha256": "692914d588b59265b8d238bea83f45faf6ab6747a440e88701b65a7891f5396c",
+        "snapshot_bytes": 9915,
+        "pit_rows_verified": 16,
+        "snapshot_csv": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/engine_workspace/derived_snapshots/snapshot_hc2701_log_settlement_reversal_neg_k1_64749bda6c137b13.csv",
+        "run_ids": [
+          "run-screening-1e1599a667db4657",
+          "run-screening-6745e10c40294525",
+          "run-screening-3b64616459c84f4f",
+          "run-screening-7fc8cc6b274f41ec"
+        ],
+        "evidence_ids": [
+          "evidence-run-screening-1e1599a667db4657",
+          "evidence-run-screening-6745e10c40294525",
+          "evidence-run-screening-3b64616459c84f4f",
+          "evidence-run-screening-7fc8cc6b274f41ec"
+        ],
+        "critic_decision": "NEED_MORE_EVIDENCE",
+        "critic_decision_id": "rev-bddf36455ba521f0",
+        "critic_review_hash": "bddf36455ba521f0f0d58a0451b90c8df640cec8ca30a77f5934e44f0f21bf5b",
+        "critic_missing_evidence": [
+          "cost_sensitivity",
+          "insufficient_sample_size",
+          "outlier_sensitivity",
+          "stability_split"
+        ],
+        "critic_reject_reasons": [],
+        "memory_record_id": "rmrec-agent-alpha-f00f7aec176f77f2adefe6aa-rev.1-1-978e9c956e26",
+        "slot_evidence": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/slots/slot_09_slot-disc-session-6c6-09-6f9d7e3ef63e.json",
+        "methods_executed": [
+          "coverage",
+          "simple_correlation",
+          "direction_consistency",
+          "leakage_audit"
+        ]
+      },
+      "round_2": {
+        "provider_job_ref": "62ffab22c5139dd6304c8e6eaaaa4b35",
+        "task_id": "task-cc9d407f31a933a122bb24897584673e",
+        "hypothesis_id": "agent-alpha-47e98d43f3298867550dd03a",
+        "hypothesis_content_hash": "125222879b926af92c86d9d9488102f430a6ddf58d57087d9e03bf1abfeceef2",
+        "scientific_identity_hash": "a179932d06ddb26c3aa6be0661793709eefa723f4d720397261155c367b327d3",
+        "admission": "novel_within_view",
+        "engineering_status": "COMPLETED",
+        "precheck_report": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/precheck/slot_09_agent-alpha-47e98d43f3298867550dd03a/PRECHECK_REPORT.json",
+        "snapshot_sha256": "692914d588b59265b8d238bea83f45faf6ab6747a440e88701b65a7891f5396c",
+        "snapshot_bytes": 9915,
+        "pit_rows_verified": 16,
+        "snapshot_csv": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/engine_workspace/derived_snapshots/snapshot_hc2701_log_settlement_reversal_neg_k1_a179932d06ddb26c.csv",
+        "run_ids": [
+          "run-screening-2932207af8d94e1c",
+          "run-screening-b2c95c0ebc0b4419",
+          "run-screening-22620ee16cea4f84",
+          "run-screening-5f74c114d77a4b38",
+          "run-screening-967ea76bc3e547f8",
+          "run-screening-0c8e1c071a34489e"
+        ],
+        "evidence_ids": [
+          "evidence-run-screening-2932207af8d94e1c",
+          "evidence-run-screening-b2c95c0ebc0b4419",
+          "evidence-run-screening-22620ee16cea4f84",
+          "evidence-run-screening-5f74c114d77a4b38",
+          "evidence-run-screening-967ea76bc3e547f8",
+          "evidence-run-screening-0c8e1c071a34489e"
+        ],
+        "critic_decision": "REJECT",
+        "critic_decision_id": "rev-ce8ce70322af9250",
+        "critic_review_hash": "ce8ce70322af9250c9a10e617c8e63a328bd536118d974ed0d1bfbfcb8c853ea",
+        "critic_missing_evidence": [
+          "cost_sensitivity",
+          "insufficient_sample_size"
+        ],
+        "critic_reject_reasons": [
+          "Severe stability split decay 0.7768 >= 0.50"
+        ],
+        "memory_record_id": "rmrec-agent-alpha-47e98d43f3298867550dd03a-rev.1-1-8fb83d209494",
+        "slot_evidence": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/slots/slot_09_slot-disc-session-fee-09-4faac43e9537.json",
+        "memory_b_gap_refs_used": [
+          "rmentry-064441de1fcd768d776b9323",
+          "rmentry-169d2f09dff1f71cc4446851",
+          "rmentry-270aa78b35ae3d2c6cc89761",
+          "rmentry-27d7e6c709a90ce410176319",
+          "rmentry-2e5328a9ba4040673219bed9",
+          "rmentry-3adcc3a0c06d7e1e2e02cf10",
+          "rmentry-403ca2a77401058e8a1f4961",
+          "rmentry-4d4895d0ce1fa0bd7dd2f7ae",
+          "rmentry-698dba8f2e1c1a1d744c2bcf",
+          "rmentry-6ad51e16d86dc1f3dc6f7f72",
+          "rmentry-6ff1f24ff5be8ee947cdbb3e",
+          "rmentry-93ebdeba0a36294149141831",
+          "rmentry-98814e108469c9d067fe72c1",
+          "rmentry-bd842be9932893cb679ae630",
+          "rmentry-c211423dcabbb6ab9a384312",
+          "rmentry-d97c46d474074a2beb0804a3",
+          "rmentry-fc657eb1502be529208c6e9f"
+        ],
+        "methods_executed": [
+          "coverage",
+          "simple_correlation",
+          "direction_consistency",
+          "leakage_audit",
+          "stability_split",
+          "outlier_sensitivity"
+        ]
+      }
+    },
+    {
+      "ordinal": 10,
+      "symbol": "HC2701",
+      "signal_family": "reversal",
+      "formula": "-log(settlement[t] / settlement[t-2])",
+      "lookback_k": 2,
+      "expected_direction": "positive",
+      "target": "log(settlement[t+2] / settlement[t+1])",
+      "round_1": {
+        "provider_job_ref": "dbf2b94b9d13432f64a72a2f6387e37e",
+        "task_id": "task-003b18327ff2a1a1ad49d93690aecdee",
+        "hypothesis_id": "agent-alpha-50032684edc5b040d2c14b6f",
+        "hypothesis_content_hash": "189ed6d9258c35c53ded70d6585d1c298b2e9bfeab5e4cccbf3b3a38719e2c48",
+        "scientific_identity_hash": "55328d1d0daef2aa4c2afacb27f74aa02aa609d0961af8b6ad2e5f4ee63a6c90",
+        "admission": "related_history",
+        "engineering_status": "COMPLETED",
+        "precheck_report": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/precheck/slot_10_agent-alpha-50032684edc5b040d2c14b6f/PRECHECK_REPORT.json",
+        "snapshot_sha256": "83c7b7f1b6d267b20ae47420db931ff0632970019e62e61770006af2162d4811",
+        "snapshot_bytes": 9288,
+        "pit_rows_verified": 15,
+        "snapshot_csv": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/engine_workspace/derived_snapshots/snapshot_hc2701_log_settlement_reversal_neg_k2_55328d1d0daef2aa.csv",
+        "run_ids": [
+          "run-screening-5799909e00eb4808",
+          "run-screening-1b121236268540ee",
+          "run-screening-4e2beca1c6ef4840",
+          "run-screening-94fa890fda94482a"
+        ],
+        "evidence_ids": [
+          "evidence-run-screening-5799909e00eb4808",
+          "evidence-run-screening-1b121236268540ee",
+          "evidence-run-screening-4e2beca1c6ef4840",
+          "evidence-run-screening-94fa890fda94482a"
+        ],
+        "critic_decision": "NEED_MORE_EVIDENCE",
+        "critic_decision_id": "rev-9b7ebb0daa9950ae",
+        "critic_review_hash": "9b7ebb0daa9950aedd86be80c26f5f7748960d2778b1b50f17ae607e5cf0a315",
+        "critic_missing_evidence": [
+          "cost_sensitivity",
+          "insufficient_sample_size",
+          "outlier_sensitivity",
+          "stability_split"
+        ],
+        "critic_reject_reasons": [],
+        "memory_record_id": "rmrec-agent-alpha-50032684edc5b040d2c14b6f-rev.1-1-97ce2468d345",
+        "slot_evidence": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/slots/slot_10_slot-disc-session-6c6-10-b28ab9f61ff4.json",
+        "methods_executed": [
+          "coverage",
+          "simple_correlation",
+          "direction_consistency",
+          "leakage_audit"
+        ]
+      },
+      "round_2": {
+        "provider_job_ref": "9c6f9ee801bb8a57bb44163c150c677a",
+        "task_id": "task-5f8ea99cd844cff8b3988d30270711db",
+        "hypothesis_id": "agent-alpha-81854e9ea95a091e9a65988d",
+        "hypothesis_content_hash": "231eaf4ca2766c1020a1b5f89d90e1fb443c86766659453650d8fe3ced8efeea",
+        "scientific_identity_hash": "e295f98f5f5dbdc84d8066b69ecc04bc9698db01d00125203c77cbf9c157d3c7",
+        "admission": "admitted_candidate",
+        "engineering_status": "COMPLETED",
+        "precheck_report": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/precheck/slot_10_agent-alpha-81854e9ea95a091e9a65988d/PRECHECK_REPORT.json",
+        "snapshot_sha256": "83c7b7f1b6d267b20ae47420db931ff0632970019e62e61770006af2162d4811",
+        "snapshot_bytes": 9288,
+        "pit_rows_verified": 15,
+        "snapshot_csv": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/engine_workspace/derived_snapshots/snapshot_hc2701_log_settlement_reversal_neg_k2_e295f98f5f5dbdc8.csv",
+        "run_ids": [
+          "run-screening-e562ef7945954e21",
+          "run-screening-b47e7266f1c649b6",
+          "run-screening-3617b6426240499d",
+          "run-screening-108bdabd8a8f4856",
+          "run-screening-4b3703a5a6474290",
+          "run-screening-ff0ecc3d4a2a4e6d"
+        ],
+        "evidence_ids": [
+          "evidence-run-screening-e562ef7945954e21",
+          "evidence-run-screening-b47e7266f1c649b6",
+          "evidence-run-screening-3617b6426240499d",
+          "evidence-run-screening-108bdabd8a8f4856",
+          "evidence-run-screening-4b3703a5a6474290",
+          "evidence-run-screening-ff0ecc3d4a2a4e6d"
+        ],
+        "critic_decision": "NEED_MORE_EVIDENCE",
+        "critic_decision_id": "rev-46e21ba40e2d69ee",
+        "critic_review_hash": "46e21ba40e2d69ee9233afa4af76d49b8d64ffa51c6a23a6e2d66df4b194025a",
+        "critic_missing_evidence": [
+          "cost_sensitivity",
+          "insufficient_sample_size"
+        ],
+        "critic_reject_reasons": [],
+        "memory_record_id": "rmrec-agent-alpha-81854e9ea95a091e9a65988d-rev.1-1-fe054879fe2c",
+        "slot_evidence": "artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_2_real_v1/slots/slot_10_slot-disc-session-fee-10-eb91c6f98aeb.json",
+        "memory_b_gap_refs_used": [
+          "rmentry-064441de1fcd768d776b9323",
+          "rmentry-169d2f09dff1f71cc4446851",
+          "rmentry-270aa78b35ae3d2c6cc89761",
+          "rmentry-27d7e6c709a90ce410176319",
+          "rmentry-2e5328a9ba4040673219bed9",
+          "rmentry-3adcc3a0c06d7e1e2e02cf10",
+          "rmentry-403ca2a77401058e8a1f4961",
+          "rmentry-4d4895d0ce1fa0bd7dd2f7ae",
+          "rmentry-698dba8f2e1c1a1d744c2bcf",
+          "rmentry-6ad51e16d86dc1f3dc6f7f72",
+          "rmentry-6ff1f24ff5be8ee947cdbb3e",
+          "rmentry-93ebdeba0a36294149141831",
+          "rmentry-98814e108469c9d067fe72c1",
+          "rmentry-bd842be9932893cb679ae630",
+          "rmentry-c211423dcabbb6ab9a384312",
+          "rmentry-d97c46d474074a2beb0804a3",
+          "rmentry-fc657eb1502be529208c6e9f"
+        ],
+        "methods_executed": [
+          "coverage",
+          "simple_correlation",
+          "direction_consistency",
+          "leakage_audit",
+          "stability_split",
+          "outlier_sensitivity"
+        ]
+      }
+    }
+  ]
+}
