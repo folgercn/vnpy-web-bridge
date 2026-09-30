@@ -411,6 +411,8 @@ class DiscoveryIntegrationOrchestrator:
                     provenance_path=p_file,
                     provenance_sha256=actual_prov_sha,
                     synthetic_test_evidence=self.synthetic_test_evidence,
+                    real_source_bundle_root=dataset_binding.get("real_source_bundle_root"),
+                    official_rules_root=dataset_binding.get("official_rules_root"),
                 )
                 effective_snapshot_path = derived_res.path
                 effective_dataset_binding = derived_res.dataset_binding
