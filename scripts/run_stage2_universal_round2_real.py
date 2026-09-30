@@ -312,7 +312,8 @@ def main() -> None:
         memory_store=ReadOnlyResearchMemoryReader(r1_sqlite_path),
         current_time=r1_view_snapshot["generated_at"],
     )
-    verify_r1_feedback_view(view_b, r1_view_snapshot, r1_evidence, store)
+    verify_r1_feedback_view(view_b, r1_view_snapshot, r1_evidence, store,
+                            memory_reader=ReadOnlyResearchMemoryReader(r1_sqlite_path))
     if r1_evidence.get("objective") != objective or r1_evidence.get("objective_sha256") != obj_sha:
         raise ValueError("Round 2 objective must exactly match this completed R1")
 
