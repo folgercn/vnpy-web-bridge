@@ -23,6 +23,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -940,7 +941,7 @@ def recover_round_execution_timing(
                 f"unmatched verified receipt(s) not in declared run_refs: {unmatched_receipts[:3]}",
             )
 
-    verified_completed_times: list[str] = []
+    verified_completed_times: list[tuple[datetime, str]] = []
     for rid, declared_hash in declared_runs:
         rc = receipt_by_run_id.get(rid)
         if not rc:
@@ -1034,11 +1035,11 @@ def recover_round_execution_timing(
             return "unknown", f"run.json missing timing.completed_at for {rid}"
 
         try:
-            parse_strict_utc_iso8601(c_at)
+            parsed_dt = parse_strict_utc_iso8601(c_at)
         except Exception as exc:
             return "unknown", f"invalid timing.completed_at format for {rid}: {c_at!r} ({exc})"
 
-        verified_completed_times.append(c_at)
+        verified_completed_times.append((parsed_dt, c_at))
 
     if len(verified_completed_times) != len(declared_runs) or len(declared_runs) == 0:
         return (
@@ -1046,8 +1047,9 @@ def recover_round_execution_timing(
             f"incomplete receipt coverage: {len(verified_completed_times)}/{len(declared_runs)}",
         )
 
-    max_c_at = max(verified_completed_times)
+    # Chronologically compare by parsed UTC datetime rather than ASCII lexicographical order
+    _, latest_c_at = max(verified_completed_times, key=lambda item: (item[0], item[1]))
     source_desc = (
         "recovered from immutable result store execution receipts (latest run.json:timing.completed_at)"
     )
-    return max_c_at, source_desc
+    return latest_c_at, source_desc

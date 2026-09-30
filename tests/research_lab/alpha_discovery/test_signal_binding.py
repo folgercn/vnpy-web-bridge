@@ -2111,6 +2111,65 @@ def test_recover_round_execution_timing_duplicate_run_ref_returns_unknown(tmp_pa
     assert "duplicate run_ref declared across slots" in source
 
 
+def test_recover_round_execution_timing_chronological_datetime_comparison_counterexample(
+    tmp_path: Path,
+) -> None:
+    """Reviewer counterexample: 2026-09-29T10:35:07Z vs 2026-09-29T10:35:07.123456Z compares chronologically by datetime, not ASCII."""
+    # Run A: 2026-09-29T10:35:07Z (ASCII string is higher because 'Z' > '.')
+    # Run B: 2026-09-29T10:35:07.123456Z (chronologically later by 123.456ms)
+    # Run C: 2026-09-29T10:35:07.050+00:00 (offset format, earlier than B)
+    # Run D: 2026-09-29T10:35:07.999Z (later than B)
+    # Run E: 2026-09-29T10:35:08+00:00 (latest across all)
+
+    specs = [
+        ("run-a", "2026-09-29T10:35:07Z"),
+        ("run-b", "2026-09-29T10:35:07.123456Z"),
+        ("run-c", "2026-09-29T10:35:07.050+00:00"),
+        ("run-d", "2026-09-29T10:35:07.999Z"),
+        ("run-e", "2026-09-29T10:35:08+00:00"),
+    ]
+
+    s_runs = []
+    s_receipts = []
+    for rid, c_time in specs:
+        b_dir = tmp_path / rid
+        b_dir.mkdir(parents=True, exist_ok=True)
+        r_file = b_dir / "run.json"
+        chash = hashlib.sha256(rid.encode("utf-8")).hexdigest()
+        raw_bytes = json.dumps({
+            "run_id": rid,
+            "run_content_hash": chash,
+            "timing": {"completed_at": c_time},
+        }).encode("utf-8")
+        r_file.write_bytes(raw_bytes)
+
+        s_runs.append({"run_id": rid, "content_hash": chash})
+        s_receipts.append({
+            "run": {"object_id": rid, "content_hash": chash},
+            "bundle_location": str(b_dir),
+            "bundle_file_sha256": {"run.json": hashlib.sha256(raw_bytes).hexdigest()},
+        })
+
+    # Test pair A vs B directly: pure ASCII string would wrongly select Run A because 'Z' > '.'
+    pair_ab_record = [{
+        "ordinal": 0,
+        "run_refs": s_runs[:2],
+        "verified_result_store_receipts": s_receipts[:2],
+    }]
+    cat_ab, _ = recover_round_execution_timing(pair_ab_record)
+    assert cat_ab == "2026-09-29T10:35:07.123456Z"
+    assert cat_ab != "2026-09-29T10:35:07Z"
+
+    # Test all 5 mixed precision/offsets: Run E (2026-09-29T10:35:08+00:00) must be selected
+    all_5_record = [{
+        "ordinal": 0,
+        "run_refs": s_runs,
+        "verified_result_store_receipts": s_receipts,
+    }]
+    cat_all, _ = recover_round_execution_timing(all_5_record)
+    assert cat_all == "2026-09-29T10:35:08+00:00"
+
+
 def test_recover_round_execution_timing_real_r1_and_r2_receipts_regression() -> None:
     """Existing real Round 1 (40 runs) and Round 2 (60 runs) receipts maintain 100% verification with zero regression."""
     r1_path = Path("artifacts/stage2_real_runs/run_20260929_stage2_universal_r1_real_v1/round_1/ROUND1_FULL_EVIDENCE.json")
