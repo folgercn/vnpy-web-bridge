@@ -1,0 +1,1834 @@
+{
+  "manual_candidates": [
+    {
+      "effective_rows": 16,
+      "engineering_status": "COMPLETED",
+      "formula": "log(settlement[t] / settlement[t-1])",
+      "hypothesis_content_hash": "f3cbfcc901cf10f7c1c0fca8bc2e6644ea918fb88a633b15be4377ea5b775845",
+      "label": "human-momentum-k1-rb",
+      "origin_type": "human",
+      "rows": [
+        {
+          "as_of_time": "2026-09-01T10:40:10.644345Z",
+          "as_of_trade_day": "2026-09-01",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-08-31T10:40:11.856579Z",
+            "2026-09-01T10:40:10.644345Z"
+          ],
+          "feature_input_days": [
+            "2026-08-31",
+            "2026-09-01"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-08-31T10:30:22.741188Z",
+            "2026-09-01T10:30:13.890612Z"
+          ],
+          "feature_input_prices": [
+            3186.0,
+            3175.0
+          ],
+          "feature_input_raw_sha256": [
+            "81686cd4f0a5724726e31795acafeb720297a244126736af0e995a81f2a32a89",
+            "34734c6bddb4ff32d2dacff069c958fce0def39565bd2c9c0c441e94b0d680b1"
+          ],
+          "feature_val": "-0.0034585791432018482",
+          "lookback_k": 1,
+          "symbol": "RB2701",
+          "target_days": [
+            "2026-09-02",
+            "2026-09-03"
+          ],
+          "target_not_before": [
+            "2026-09-02T07:00:00Z",
+            "2026-09-03T07:00:00Z"
+          ],
+          "target_prices": [
+            3158.0,
+            3137.0
+          ],
+          "target_raw_sha256": [
+            "bfd9a7e3beab27e03a5db92a479c6d172f242489bb09a8d3a42e3df875e84e88",
+            "92c4edfc8cd8420fcd3da96cef0583fa676246454c828eb563849730b753da7d"
+          ],
+          "target_val": "-0.0066719866249092766",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-02T10:40:10.945359Z",
+          "as_of_trade_day": "2026-09-02",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-01T10:40:10.644345Z",
+            "2026-09-02T10:40:10.945359Z"
+          ],
+          "feature_input_days": [
+            "2026-09-01",
+            "2026-09-02"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-01T10:30:13.890612Z",
+            "2026-09-02T10:30:13.834615Z"
+          ],
+          "feature_input_prices": [
+            3175.0,
+            3158.0
+          ],
+          "feature_input_raw_sha256": [
+            "34734c6bddb4ff32d2dacff069c958fce0def39565bd2c9c0c441e94b0d680b1",
+            "bfd9a7e3beab27e03a5db92a479c6d172f242489bb09a8d3a42e3df875e84e88"
+          ],
+          "feature_val": "-0.0053687165112046306",
+          "lookback_k": 1,
+          "symbol": "RB2701",
+          "target_days": [
+            "2026-09-03",
+            "2026-09-04"
+          ],
+          "target_not_before": [
+            "2026-09-03T07:00:00Z",
+            "2026-09-04T07:00:00Z"
+          ],
+          "target_prices": [
+            3137.0,
+            3160.0
+          ],
+          "target_raw_sha256": [
+            "92c4edfc8cd8420fcd3da96cef0583fa676246454c828eb563849730b753da7d",
+            "c38ccb6ddd408ba0abc77f7bdee60dabe6a68fd597d452eb8e0e39ca3e508ca3"
+          ],
+          "target_val": "0.0073050983902795468",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-03T10:40:11.220866Z",
+          "as_of_trade_day": "2026-09-03",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-02T10:40:10.945359Z",
+            "2026-09-03T10:40:11.220866Z"
+          ],
+          "feature_input_days": [
+            "2026-09-02",
+            "2026-09-03"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-02T10:30:13.834615Z",
+            "2026-09-03T10:30:18.167696Z"
+          ],
+          "feature_input_prices": [
+            3158.0,
+            3137.0
+          ],
+          "feature_input_raw_sha256": [
+            "bfd9a7e3beab27e03a5db92a479c6d172f242489bb09a8d3a42e3df875e84e88",
+            "92c4edfc8cd8420fcd3da96cef0583fa676246454c828eb563849730b753da7d"
+          ],
+          "feature_val": "-0.0066719866249092766",
+          "lookback_k": 1,
+          "symbol": "RB2701",
+          "target_days": [
+            "2026-09-04",
+            "2026-09-07"
+          ],
+          "target_not_before": [
+            "2026-09-04T07:00:00Z",
+            "2026-09-07T07:00:00Z"
+          ],
+          "target_prices": [
+            3160.0,
+            3158.0
+          ],
+          "target_raw_sha256": [
+            "c38ccb6ddd408ba0abc77f7bdee60dabe6a68fd597d452eb8e0e39ca3e508ca3",
+            "12a4bd09042e99135322a7adcf1d3704b7ac87e9cb45289afa61977efa740856"
+          ],
+          "target_val": "-0.00063311176537040042",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-04T10:40:10.433195Z",
+          "as_of_trade_day": "2026-09-04",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-03T10:40:11.220866Z",
+            "2026-09-04T10:40:10.433195Z"
+          ],
+          "feature_input_days": [
+            "2026-09-03",
+            "2026-09-04"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-03T10:30:18.167696Z",
+            "2026-09-04T10:30:18.017948Z"
+          ],
+          "feature_input_prices": [
+            3137.0,
+            3160.0
+          ],
+          "feature_input_raw_sha256": [
+            "92c4edfc8cd8420fcd3da96cef0583fa676246454c828eb563849730b753da7d",
+            "c38ccb6ddd408ba0abc77f7bdee60dabe6a68fd597d452eb8e0e39ca3e508ca3"
+          ],
+          "feature_val": "0.0073050983902795468",
+          "lookback_k": 1,
+          "symbol": "RB2701",
+          "target_days": [
+            "2026-09-07",
+            "2026-09-08"
+          ],
+          "target_not_before": [
+            "2026-09-07T07:00:00Z",
+            "2026-09-08T07:00:00Z"
+          ],
+          "target_prices": [
+            3158.0,
+            3163.0
+          ],
+          "target_raw_sha256": [
+            "12a4bd09042e99135322a7adcf1d3704b7ac87e9cb45289afa61977efa740856",
+            "875dccc9c369aeaf7a367ac23cbf38824d3d6f0ab3f84e7692e469a24337f155"
+          ],
+          "target_val": "0.0015820284900615099",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-07T10:40:10.036372Z",
+          "as_of_trade_day": "2026-09-07",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-04T10:40:10.433195Z",
+            "2026-09-07T10:40:10.036372Z"
+          ],
+          "feature_input_days": [
+            "2026-09-04",
+            "2026-09-07"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-04T10:30:18.017948Z",
+            "2026-09-07T10:30:16.557718Z"
+          ],
+          "feature_input_prices": [
+            3160.0,
+            3158.0
+          ],
+          "feature_input_raw_sha256": [
+            "c38ccb6ddd408ba0abc77f7bdee60dabe6a68fd597d452eb8e0e39ca3e508ca3",
+            "12a4bd09042e99135322a7adcf1d3704b7ac87e9cb45289afa61977efa740856"
+          ],
+          "feature_val": "-0.00063311176537040042",
+          "lookback_k": 1,
+          "symbol": "RB2701",
+          "target_days": [
+            "2026-09-08",
+            "2026-09-09"
+          ],
+          "target_not_before": [
+            "2026-09-08T07:00:00Z",
+            "2026-09-09T07:00:00Z"
+          ],
+          "target_prices": [
+            3163.0,
+            3164.0
+          ],
+          "target_raw_sha256": [
+            "875dccc9c369aeaf7a367ac23cbf38824d3d6f0ab3f84e7692e469a24337f155",
+            "8e1f2067dee545611d36d2867ae6512927515f54ab88dd2805ea62b125759b12"
+          ],
+          "target_val": "0.00031610558189559254",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-08T10:40:09.818107Z",
+          "as_of_trade_day": "2026-09-08",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-07T10:40:10.036372Z",
+            "2026-09-08T10:40:09.818107Z"
+          ],
+          "feature_input_days": [
+            "2026-09-07",
+            "2026-09-08"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-07T10:30:16.557718Z",
+            "2026-09-08T10:30:13.053578Z"
+          ],
+          "feature_input_prices": [
+            3158.0,
+            3163.0
+          ],
+          "feature_input_raw_sha256": [
+            "12a4bd09042e99135322a7adcf1d3704b7ac87e9cb45289afa61977efa740856",
+            "875dccc9c369aeaf7a367ac23cbf38824d3d6f0ab3f84e7692e469a24337f155"
+          ],
+          "feature_val": "0.0015820284900615099",
+          "lookback_k": 1,
+          "symbol": "RB2701",
+          "target_days": [
+            "2026-09-09",
+            "2026-09-10"
+          ],
+          "target_not_before": [
+            "2026-09-09T07:00:00Z",
+            "2026-09-10T07:00:00Z"
+          ],
+          "target_prices": [
+            3164.0,
+            3147.0
+          ],
+          "target_raw_sha256": [
+            "8e1f2067dee545611d36d2867ae6512927515f54ab88dd2805ea62b125759b12",
+            "91be3872550ce4511c0690a2c89407072258b51de83606c6f46b5de53ae86cab"
+          ],
+          "target_val": "-0.0053874318231376421",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-09T10:40:11.134239Z",
+          "as_of_trade_day": "2026-09-09",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-08T10:40:09.818107Z",
+            "2026-09-09T10:40:11.134239Z"
+          ],
+          "feature_input_days": [
+            "2026-09-08",
+            "2026-09-09"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-08T10:30:13.053578Z",
+            "2026-09-09T10:30:22.716245Z"
+          ],
+          "feature_input_prices": [
+            3163.0,
+            3164.0
+          ],
+          "feature_input_raw_sha256": [
+            "875dccc9c369aeaf7a367ac23cbf38824d3d6f0ab3f84e7692e469a24337f155",
+            "8e1f2067dee545611d36d2867ae6512927515f54ab88dd2805ea62b125759b12"
+          ],
+          "feature_val": "0.00031610558189559254",
+          "lookback_k": 1,
+          "symbol": "RB2701",
+          "target_days": [
+            "2026-09-10",
+            "2026-09-11"
+          ],
+          "target_not_before": [
+            "2026-09-10T07:00:00Z",
+            "2026-09-11T07:00:00Z"
+          ],
+          "target_prices": [
+            3147.0,
+            3117.0
+          ],
+          "target_raw_sha256": [
+            "91be3872550ce4511c0690a2c89407072258b51de83606c6f46b5de53ae86cab",
+            "6a143efbbd3ae23c9de268305d65c951da0fac113f55d3deb8c4d577b2e5172a"
+          ],
+          "target_val": "-0.0095786172970697726",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-10T10:40:10.843294Z",
+          "as_of_trade_day": "2026-09-10",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-09T10:40:11.134239Z",
+            "2026-09-10T10:40:10.843294Z"
+          ],
+          "feature_input_days": [
+            "2026-09-09",
+            "2026-09-10"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-09T10:30:22.716245Z",
+            "2026-09-10T10:30:11.407739Z"
+          ],
+          "feature_input_prices": [
+            3164.0,
+            3147.0
+          ],
+          "feature_input_raw_sha256": [
+            "8e1f2067dee545611d36d2867ae6512927515f54ab88dd2805ea62b125759b12",
+            "91be3872550ce4511c0690a2c89407072258b51de83606c6f46b5de53ae86cab"
+          ],
+          "feature_val": "-0.0053874318231376421",
+          "lookback_k": 1,
+          "symbol": "RB2701",
+          "target_days": [
+            "2026-09-11",
+            "2026-09-14"
+          ],
+          "target_not_before": [
+            "2026-09-11T07:00:00Z",
+            "2026-09-14T07:00:00Z"
+          ],
+          "target_prices": [
+            3117.0,
+            3097.0
+          ],
+          "target_raw_sha256": [
+            "6a143efbbd3ae23c9de268305d65c951da0fac113f55d3deb8c4d577b2e5172a",
+            "526d8c519613526febeed4620575564aa5b8c8e95c25a32c57971b05923107e6"
+          ],
+          "target_val": "-0.0064370997941343407",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-11T10:40:09.404370Z",
+          "as_of_trade_day": "2026-09-11",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-10T10:40:10.843294Z",
+            "2026-09-11T10:40:09.404370Z"
+          ],
+          "feature_input_days": [
+            "2026-09-10",
+            "2026-09-11"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-10T10:30:11.407739Z",
+            "2026-09-11T10:30:22.141825Z"
+          ],
+          "feature_input_prices": [
+            3147.0,
+            3117.0
+          ],
+          "feature_input_raw_sha256": [
+            "91be3872550ce4511c0690a2c89407072258b51de83606c6f46b5de53ae86cab",
+            "6a143efbbd3ae23c9de268305d65c951da0fac113f55d3deb8c4d577b2e5172a"
+          ],
+          "feature_val": "-0.0095786172970697726",
+          "lookback_k": 1,
+          "symbol": "RB2701",
+          "target_days": [
+            "2026-09-14",
+            "2026-09-15"
+          ],
+          "target_not_before": [
+            "2026-09-14T07:00:00Z",
+            "2026-09-15T07:00:00Z"
+          ],
+          "target_prices": [
+            3097.0,
+            3103.0
+          ],
+          "target_raw_sha256": [
+            "526d8c519613526febeed4620575564aa5b8c8e95c25a32c57971b05923107e6",
+            "80c1eb825c211615036cec4775b44d0e1180538e7ff43fd2fca41a453ec85c97"
+          ],
+          "target_val": "0.0019354844751774886",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-14T10:40:09.638144Z",
+          "as_of_trade_day": "2026-09-14",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-11T10:40:09.404370Z",
+            "2026-09-14T10:40:09.638144Z"
+          ],
+          "feature_input_days": [
+            "2026-09-11",
+            "2026-09-14"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-11T10:30:22.141825Z",
+            "2026-09-14T10:30:12.842988Z"
+          ],
+          "feature_input_prices": [
+            3117.0,
+            3097.0
+          ],
+          "feature_input_raw_sha256": [
+            "6a143efbbd3ae23c9de268305d65c951da0fac113f55d3deb8c4d577b2e5172a",
+            "526d8c519613526febeed4620575564aa5b8c8e95c25a32c57971b05923107e6"
+          ],
+          "feature_val": "-0.0064370997941343407",
+          "lookback_k": 1,
+          "symbol": "RB2701",
+          "target_days": [
+            "2026-09-15",
+            "2026-09-16"
+          ],
+          "target_not_before": [
+            "2026-09-15T07:00:00Z",
+            "2026-09-16T07:00:00Z"
+          ],
+          "target_prices": [
+            3103.0,
+            3126.0
+          ],
+          "target_raw_sha256": [
+            "80c1eb825c211615036cec4775b44d0e1180538e7ff43fd2fca41a453ec85c97",
+            "f46e53aa0eaf26ba26f6f0cb9074d84f65c67786957767a4ac6b7631d8737fec"
+          ],
+          "target_val": "0.0073848465330417987",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-15T10:40:09.157856Z",
+          "as_of_trade_day": "2026-09-15",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-14T10:40:09.638144Z",
+            "2026-09-15T10:40:09.157856Z"
+          ],
+          "feature_input_days": [
+            "2026-09-14",
+            "2026-09-15"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-14T10:30:12.842988Z",
+            "2026-09-15T10:30:17.668764Z"
+          ],
+          "feature_input_prices": [
+            3097.0,
+            3103.0
+          ],
+          "feature_input_raw_sha256": [
+            "526d8c519613526febeed4620575564aa5b8c8e95c25a32c57971b05923107e6",
+            "80c1eb825c211615036cec4775b44d0e1180538e7ff43fd2fca41a453ec85c97"
+          ],
+          "feature_val": "0.0019354844751774886",
+          "lookback_k": 1,
+          "symbol": "RB2701",
+          "target_days": [
+            "2026-09-16",
+            "2026-09-17"
+          ],
+          "target_not_before": [
+            "2026-09-16T07:00:00Z",
+            "2026-09-17T07:00:00Z"
+          ],
+          "target_prices": [
+            3126.0,
+            3128.0
+          ],
+          "target_raw_sha256": [
+            "f46e53aa0eaf26ba26f6f0cb9074d84f65c67786957767a4ac6b7631d8737fec",
+            "84e325e4a27b471e6ce53cb86d3e705704cdf529cff284f7706342a347a08536"
+          ],
+          "target_val": "0.00063959068377979818",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-16T10:40:11.276414Z",
+          "as_of_trade_day": "2026-09-16",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-15T10:40:09.157856Z",
+            "2026-09-16T10:40:11.276414Z"
+          ],
+          "feature_input_days": [
+            "2026-09-15",
+            "2026-09-16"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-15T10:30:17.668764Z",
+            "2026-09-16T10:30:12.417181Z"
+          ],
+          "feature_input_prices": [
+            3103.0,
+            3126.0
+          ],
+          "feature_input_raw_sha256": [
+            "80c1eb825c211615036cec4775b44d0e1180538e7ff43fd2fca41a453ec85c97",
+            "f46e53aa0eaf26ba26f6f0cb9074d84f65c67786957767a4ac6b7631d8737fec"
+          ],
+          "feature_val": "0.0073848465330417987",
+          "lookback_k": 1,
+          "symbol": "RB2701",
+          "target_days": [
+            "2026-09-17",
+            "2026-09-18"
+          ],
+          "target_not_before": [
+            "2026-09-17T07:00:00Z",
+            "2026-09-18T07:00:00Z"
+          ],
+          "target_prices": [
+            3128.0,
+            3104.0
+          ],
+          "target_raw_sha256": [
+            "84e325e4a27b471e6ce53cb86d3e705704cdf529cff284f7706342a347a08536",
+            "224819fc35027afc7019db9652d42bd37cf2f768e97f59df1f1eb68f3d82b123"
+          ],
+          "target_val": "-0.007702220362092351",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-17T10:40:11.223559Z",
+          "as_of_trade_day": "2026-09-17",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-16T10:40:11.276414Z",
+            "2026-09-17T10:40:11.223559Z"
+          ],
+          "feature_input_days": [
+            "2026-09-16",
+            "2026-09-17"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-16T10:30:12.417181Z",
+            "2026-09-17T10:30:14.772521Z"
+          ],
+          "feature_input_prices": [
+            3126.0,
+            3128.0
+          ],
+          "feature_input_raw_sha256": [
+            "f46e53aa0eaf26ba26f6f0cb9074d84f65c67786957767a4ac6b7631d8737fec",
+            "84e325e4a27b471e6ce53cb86d3e705704cdf529cff284f7706342a347a08536"
+          ],
+          "feature_val": "0.00063959068377979818",
+          "lookback_k": 1,
+          "symbol": "RB2701",
+          "target_days": [
+            "2026-09-18",
+            "2026-09-21"
+          ],
+          "target_not_before": [
+            "2026-09-18T07:00:00Z",
+            "2026-09-21T07:00:00Z"
+          ],
+          "target_prices": [
+            3104.0,
+            3108.0
+          ],
+          "target_raw_sha256": [
+            "224819fc35027afc7019db9652d42bd37cf2f768e97f59df1f1eb68f3d82b123",
+            "73a3226a61c97703364a7ac225b83cf65596a795f1daa9d362741fb401954802"
+          ],
+          "target_val": "0.0012878301844286859",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-18T10:40:11.877935Z",
+          "as_of_trade_day": "2026-09-18",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-17T10:40:11.223559Z",
+            "2026-09-18T10:40:11.877935Z"
+          ],
+          "feature_input_days": [
+            "2026-09-17",
+            "2026-09-18"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-17T10:30:14.772521Z",
+            "2026-09-18T10:30:13.492702Z"
+          ],
+          "feature_input_prices": [
+            3128.0,
+            3104.0
+          ],
+          "feature_input_raw_sha256": [
+            "84e325e4a27b471e6ce53cb86d3e705704cdf529cff284f7706342a347a08536",
+            "224819fc35027afc7019db9652d42bd37cf2f768e97f59df1f1eb68f3d82b123"
+          ],
+          "feature_val": "-0.007702220362092351",
+          "lookback_k": 1,
+          "symbol": "RB2701",
+          "target_days": [
+            "2026-09-21",
+            "2026-09-22"
+          ],
+          "target_not_before": [
+            "2026-09-21T07:00:00Z",
+            "2026-09-22T07:00:00Z"
+          ],
+          "target_prices": [
+            3108.0,
+            3121.0
+          ],
+          "target_raw_sha256": [
+            "73a3226a61c97703364a7ac225b83cf65596a795f1daa9d362741fb401954802",
+            "9a097cc124e0d5a6154c48e174c2cfcb8b14cfec1326bea9cb546ce6a9ae8274"
+          ],
+          "target_val": "0.0041740307832413429",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-21T10:40:13.843546Z",
+          "as_of_trade_day": "2026-09-21",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-18T10:40:11.877935Z",
+            "2026-09-21T10:40:13.843546Z"
+          ],
+          "feature_input_days": [
+            "2026-09-18",
+            "2026-09-21"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-18T10:30:13.492702Z",
+            "2026-09-21T10:30:12.035751Z"
+          ],
+          "feature_input_prices": [
+            3104.0,
+            3108.0
+          ],
+          "feature_input_raw_sha256": [
+            "224819fc35027afc7019db9652d42bd37cf2f768e97f59df1f1eb68f3d82b123",
+            "73a3226a61c97703364a7ac225b83cf65596a795f1daa9d362741fb401954802"
+          ],
+          "feature_val": "0.0012878301844286859",
+          "lookback_k": 1,
+          "symbol": "RB2701",
+          "target_days": [
+            "2026-09-22",
+            "2026-09-23"
+          ],
+          "target_not_before": [
+            "2026-09-22T07:00:00Z",
+            "2026-09-23T07:00:00Z"
+          ],
+          "target_prices": [
+            3121.0,
+            3117.0
+          ],
+          "target_raw_sha256": [
+            "9a097cc124e0d5a6154c48e174c2cfcb8b14cfec1326bea9cb546ce6a9ae8274",
+            "ebf9d76c20228451cce24eed77195e8ba1faeab481bb705ebe14c0c7e99b833e"
+          ],
+          "target_val": "-0.0012824625034423597",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-22T10:40:04.344566Z",
+          "as_of_trade_day": "2026-09-22",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-21T10:40:13.843546Z",
+            "2026-09-22T10:40:04.344566Z"
+          ],
+          "feature_input_days": [
+            "2026-09-21",
+            "2026-09-22"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-21T10:30:12.035751Z",
+            "2026-09-22T10:30:07.058654Z"
+          ],
+          "feature_input_prices": [
+            3108.0,
+            3121.0
+          ],
+          "feature_input_raw_sha256": [
+            "73a3226a61c97703364a7ac225b83cf65596a795f1daa9d362741fb401954802",
+            "9a097cc124e0d5a6154c48e174c2cfcb8b14cfec1326bea9cb546ce6a9ae8274"
+          ],
+          "feature_val": "0.0041740307832413429",
+          "lookback_k": 1,
+          "symbol": "RB2701",
+          "target_days": [
+            "2026-09-23",
+            "2026-09-24"
+          ],
+          "target_not_before": [
+            "2026-09-23T07:00:00Z",
+            "2026-09-24T07:00:00Z"
+          ],
+          "target_prices": [
+            3117.0,
+            3111.0
+          ],
+          "target_raw_sha256": [
+            "ebf9d76c20228451cce24eed77195e8ba1faeab481bb705ebe14c0c7e99b833e",
+            "0e19dd992c4c0920b93a74ef68af3b47dbb01354f86ff079e3420b764b373de4"
+          ],
+          "target_val": "-0.0019267828697000567",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        }
+      ],
+      "run_refs": [
+        {
+          "content_hash": "43fd585eb056372087a4c2d4b958686dcd7037258cbf70ffd1176212c8382ec4",
+          "run_id": "run-screening-b8657a37c4ee46dc",
+          "run_status": "COMPLETED"
+        },
+        {
+          "content_hash": "93f84206ba64ec5d700fd320f4c0605174ff46337c79a6f15d56740133e8c363",
+          "run_id": "run-screening-1aec141afa0d4329",
+          "run_status": "COMPLETED"
+        },
+        {
+          "content_hash": "5b08930d810711cf52698ebefa914acd14cf2ea2612fd3f5ccbc6f810d2756e1",
+          "run_id": "run-screening-75478129751c47db",
+          "run_status": "COMPLETED"
+        },
+        {
+          "content_hash": "124c57774f207c66f6af0aed0e22b86ecb3fc0e9f62e7a8b19310298caab973f",
+          "run_id": "run-screening-623da8e3dfdf431d",
+          "run_status": "COMPLETED"
+        }
+      ],
+      "scientific_decision": "REJECT",
+      "snapshot_bytes": 9798,
+      "snapshot_sha256": "c9692245d37d0491de91117897f2518364f857deed5015a567b57b9a5a258d44",
+      "source_day_count": 19,
+      "symbol": "RB2701",
+      "target": "log(settlement[t+2] / settlement[t+1])",
+      "target_tail_days": 2,
+      "verified_resultstore_receipts": 4,
+      "warmup_days": 1
+    },
+    {
+      "effective_rows": 15,
+      "engineering_status": "COMPLETED",
+      "formula": "-log(settlement[t] / settlement[t-2])",
+      "hypothesis_content_hash": "8cf5760767f096eef5a4279409f68951133acd93cd7fa9bebdbe767f2bfff769",
+      "label": "human-reversal-k2-hc",
+      "origin_type": "human",
+      "rows": [
+        {
+          "as_of_time": "2026-09-02T10:40:10.945359Z",
+          "as_of_trade_day": "2026-09-02",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-08-31T10:40:11.856579Z",
+            "2026-09-02T10:40:10.945359Z"
+          ],
+          "feature_input_days": [
+            "2026-08-31",
+            "2026-09-02"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-08-31T10:30:22.741188Z",
+            "2026-09-02T10:30:13.834615Z"
+          ],
+          "feature_input_prices": [
+            3398.0,
+            3385.0
+          ],
+          "feature_input_raw_sha256": [
+            "81686cd4f0a5724726e31795acafeb720297a244126736af0e995a81f2a32a89",
+            "bfd9a7e3beab27e03a5db92a479c6d172f242489bb09a8d3a42e3df875e84e88"
+          ],
+          "feature_val": "0.0038331168855019241",
+          "lookback_k": 2,
+          "symbol": "HC2701",
+          "target_days": [
+            "2026-09-03",
+            "2026-09-04"
+          ],
+          "target_not_before": [
+            "2026-09-03T07:00:00Z",
+            "2026-09-04T07:00:00Z"
+          ],
+          "target_prices": [
+            3363.0,
+            3380.0
+          ],
+          "target_raw_sha256": [
+            "92c4edfc8cd8420fcd3da96cef0583fa676246454c828eb563849730b753da7d",
+            "c38ccb6ddd408ba0abc77f7bdee60dabe6a68fd597d452eb8e0e39ca3e508ca3"
+          ],
+          "target_val": "0.0050422767367948231",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-03T10:40:11.220866Z",
+          "as_of_trade_day": "2026-09-03",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-01T10:40:10.644345Z",
+            "2026-09-03T10:40:11.220866Z"
+          ],
+          "feature_input_days": [
+            "2026-09-01",
+            "2026-09-03"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-01T10:30:13.890612Z",
+            "2026-09-03T10:30:18.167696Z"
+          ],
+          "feature_input_prices": [
+            3390.0,
+            3363.0
+          ],
+          "feature_input_raw_sha256": [
+            "34734c6bddb4ff32d2dacff069c958fce0def39565bd2c9c0c441e94b0d680b1",
+            "92c4edfc8cd8420fcd3da96cef0583fa676246454c828eb563849730b753da7d"
+          ],
+          "feature_val": "0.0079964886342263775",
+          "lookback_k": 2,
+          "symbol": "HC2701",
+          "target_days": [
+            "2026-09-04",
+            "2026-09-07"
+          ],
+          "target_not_before": [
+            "2026-09-04T07:00:00Z",
+            "2026-09-07T07:00:00Z"
+          ],
+          "target_prices": [
+            3380.0,
+            3374.0
+          ],
+          "target_raw_sha256": [
+            "c38ccb6ddd408ba0abc77f7bdee60dabe6a68fd597d452eb8e0e39ca3e508ca3",
+            "12a4bd09042e99135322a7adcf1d3704b7ac87e9cb45289afa61977efa740856"
+          ],
+          "target_val": "-0.0017767253711509091",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-04T10:40:10.433195Z",
+          "as_of_trade_day": "2026-09-04",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-02T10:40:10.945359Z",
+            "2026-09-04T10:40:10.433195Z"
+          ],
+          "feature_input_days": [
+            "2026-09-02",
+            "2026-09-04"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-02T10:30:13.834615Z",
+            "2026-09-04T10:30:18.017948Z"
+          ],
+          "feature_input_prices": [
+            3385.0,
+            3380.0
+          ],
+          "feature_input_raw_sha256": [
+            "bfd9a7e3beab27e03a5db92a479c6d172f242489bb09a8d3a42e3df875e84e88",
+            "c38ccb6ddd408ba0abc77f7bdee60dabe6a68fd597d452eb8e0e39ca3e508ca3"
+          ],
+          "feature_val": "0.0014781968693108945",
+          "lookback_k": 2,
+          "symbol": "HC2701",
+          "target_days": [
+            "2026-09-07",
+            "2026-09-08"
+          ],
+          "target_not_before": [
+            "2026-09-07T07:00:00Z",
+            "2026-09-08T07:00:00Z"
+          ],
+          "target_prices": [
+            3374.0,
+            3380.0
+          ],
+          "target_raw_sha256": [
+            "12a4bd09042e99135322a7adcf1d3704b7ac87e9cb45289afa61977efa740856",
+            "875dccc9c369aeaf7a367ac23cbf38824d3d6f0ab3f84e7692e469a24337f155"
+          ],
+          "target_val": "0.0017767253711508493",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-07T10:40:10.036372Z",
+          "as_of_trade_day": "2026-09-07",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-03T10:40:11.220866Z",
+            "2026-09-07T10:40:10.036372Z"
+          ],
+          "feature_input_days": [
+            "2026-09-03",
+            "2026-09-07"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-03T10:30:18.167696Z",
+            "2026-09-07T10:30:16.557718Z"
+          ],
+          "feature_input_prices": [
+            3363.0,
+            3374.0
+          ],
+          "feature_input_raw_sha256": [
+            "92c4edfc8cd8420fcd3da96cef0583fa676246454c828eb563849730b753da7d",
+            "12a4bd09042e99135322a7adcf1d3704b7ac87e9cb45289afa61977efa740856"
+          ],
+          "feature_val": "-0.003265551365644112",
+          "lookback_k": 2,
+          "symbol": "HC2701",
+          "target_days": [
+            "2026-09-08",
+            "2026-09-09"
+          ],
+          "target_not_before": [
+            "2026-09-08T07:00:00Z",
+            "2026-09-09T07:00:00Z"
+          ],
+          "target_prices": [
+            3380.0,
+            3381.0
+          ],
+          "target_raw_sha256": [
+            "875dccc9c369aeaf7a367ac23cbf38824d3d6f0ab3f84e7692e469a24337f155",
+            "8e1f2067dee545611d36d2867ae6512927515f54ab88dd2805ea62b125759b12"
+          ],
+          "target_val": "0.00029581423082162829",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-08T10:40:09.818107Z",
+          "as_of_trade_day": "2026-09-08",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-04T10:40:10.433195Z",
+            "2026-09-08T10:40:09.818107Z"
+          ],
+          "feature_input_days": [
+            "2026-09-04",
+            "2026-09-08"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-04T10:30:18.017948Z",
+            "2026-09-08T10:30:13.053578Z"
+          ],
+          "feature_input_prices": [
+            3380.0,
+            3380.0
+          ],
+          "feature_input_raw_sha256": [
+            "c38ccb6ddd408ba0abc77f7bdee60dabe6a68fd597d452eb8e0e39ca3e508ca3",
+            "875dccc9c369aeaf7a367ac23cbf38824d3d6f0ab3f84e7692e469a24337f155"
+          ],
+          "feature_val": "-0",
+          "lookback_k": 2,
+          "symbol": "HC2701",
+          "target_days": [
+            "2026-09-09",
+            "2026-09-10"
+          ],
+          "target_not_before": [
+            "2026-09-09T07:00:00Z",
+            "2026-09-10T07:00:00Z"
+          ],
+          "target_prices": [
+            3381.0,
+            3364.0
+          ],
+          "target_raw_sha256": [
+            "8e1f2067dee545611d36d2867ae6512927515f54ab88dd2805ea62b125759b12",
+            "91be3872550ce4511c0690a2c89407072258b51de83606c6f46b5de53ae86cab"
+          ],
+          "target_val": "-0.0050407816150473397",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-09T10:40:11.134239Z",
+          "as_of_trade_day": "2026-09-09",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-07T10:40:10.036372Z",
+            "2026-09-09T10:40:11.134239Z"
+          ],
+          "feature_input_days": [
+            "2026-09-07",
+            "2026-09-09"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-07T10:30:16.557718Z",
+            "2026-09-09T10:30:22.716245Z"
+          ],
+          "feature_input_prices": [
+            3374.0,
+            3381.0
+          ],
+          "feature_input_raw_sha256": [
+            "12a4bd09042e99135322a7adcf1d3704b7ac87e9cb45289afa61977efa740856",
+            "8e1f2067dee545611d36d2867ae6512927515f54ab88dd2805ea62b125759b12"
+          ],
+          "feature_val": "-0.0020725396019723751",
+          "lookback_k": 2,
+          "symbol": "HC2701",
+          "target_days": [
+            "2026-09-10",
+            "2026-09-11"
+          ],
+          "target_not_before": [
+            "2026-09-10T07:00:00Z",
+            "2026-09-11T07:00:00Z"
+          ],
+          "target_prices": [
+            3364.0,
+            3337.0
+          ],
+          "target_raw_sha256": [
+            "91be3872550ce4511c0690a2c89407072258b51de83606c6f46b5de53ae86cab",
+            "6a143efbbd3ae23c9de268305d65c951da0fac113f55d3deb8c4d577b2e5172a"
+          ],
+          "target_val": "-0.0080585423414647177",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-10T10:40:10.843294Z",
+          "as_of_trade_day": "2026-09-10",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-08T10:40:09.818107Z",
+            "2026-09-10T10:40:10.843294Z"
+          ],
+          "feature_input_days": [
+            "2026-09-08",
+            "2026-09-10"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-08T10:30:13.053578Z",
+            "2026-09-10T10:30:11.407739Z"
+          ],
+          "feature_input_prices": [
+            3380.0,
+            3364.0
+          ],
+          "feature_input_raw_sha256": [
+            "875dccc9c369aeaf7a367ac23cbf38824d3d6f0ab3f84e7692e469a24337f155",
+            "91be3872550ce4511c0690a2c89407072258b51de83606c6f46b5de53ae86cab"
+          ],
+          "feature_val": "0.0047449673842257494",
+          "lookback_k": 2,
+          "symbol": "HC2701",
+          "target_days": [
+            "2026-09-11",
+            "2026-09-14"
+          ],
+          "target_not_before": [
+            "2026-09-11T07:00:00Z",
+            "2026-09-14T07:00:00Z"
+          ],
+          "target_prices": [
+            3337.0,
+            3312.0
+          ],
+          "target_raw_sha256": [
+            "6a143efbbd3ae23c9de268305d65c951da0fac113f55d3deb8c4d577b2e5172a",
+            "526d8c519613526febeed4620575564aa5b8c8e95c25a32c57971b05923107e6"
+          ],
+          "target_val": "-0.0075199632462236415",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-11T10:40:09.404370Z",
+          "as_of_trade_day": "2026-09-11",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-09T10:40:11.134239Z",
+            "2026-09-11T10:40:09.404370Z"
+          ],
+          "feature_input_days": [
+            "2026-09-09",
+            "2026-09-11"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-09T10:30:22.716245Z",
+            "2026-09-11T10:30:22.141825Z"
+          ],
+          "feature_input_prices": [
+            3381.0,
+            3337.0
+          ],
+          "feature_input_raw_sha256": [
+            "8e1f2067dee545611d36d2867ae6512927515f54ab88dd2805ea62b125759b12",
+            "6a143efbbd3ae23c9de268305d65c951da0fac113f55d3deb8c4d577b2e5172a"
+          ],
+          "feature_val": "0.013099323956512005",
+          "lookback_k": 2,
+          "symbol": "HC2701",
+          "target_days": [
+            "2026-09-14",
+            "2026-09-15"
+          ],
+          "target_not_before": [
+            "2026-09-14T07:00:00Z",
+            "2026-09-15T07:00:00Z"
+          ],
+          "target_prices": [
+            3312.0,
+            3311.0
+          ],
+          "target_raw_sha256": [
+            "526d8c519613526febeed4620575564aa5b8c8e95c25a32c57971b05923107e6",
+            "80c1eb825c211615036cec4775b44d0e1180538e7ff43fd2fca41a453ec85c97"
+          ],
+          "target_val": "-0.00030197795790398442",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-14T10:40:09.638144Z",
+          "as_of_trade_day": "2026-09-14",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-10T10:40:10.843294Z",
+            "2026-09-14T10:40:09.638144Z"
+          ],
+          "feature_input_days": [
+            "2026-09-10",
+            "2026-09-14"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-10T10:30:11.407739Z",
+            "2026-09-14T10:30:12.842988Z"
+          ],
+          "feature_input_prices": [
+            3364.0,
+            3312.0
+          ],
+          "feature_input_raw_sha256": [
+            "91be3872550ce4511c0690a2c89407072258b51de83606c6f46b5de53ae86cab",
+            "526d8c519613526febeed4620575564aa5b8c8e95c25a32c57971b05923107e6"
+          ],
+          "feature_val": "0.015578505587688335",
+          "lookback_k": 2,
+          "symbol": "HC2701",
+          "target_days": [
+            "2026-09-15",
+            "2026-09-16"
+          ],
+          "target_not_before": [
+            "2026-09-15T07:00:00Z",
+            "2026-09-16T07:00:00Z"
+          ],
+          "target_prices": [
+            3311.0,
+            3321.0
+          ],
+          "target_raw_sha256": [
+            "80c1eb825c211615036cec4775b44d0e1180538e7ff43fd2fca41a453ec85c97",
+            "f46e53aa0eaf26ba26f6f0cb9074d84f65c67786957767a4ac6b7631d8737fec"
+          ],
+          "target_val": "0.0030156838295002362",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-15T10:40:09.157856Z",
+          "as_of_trade_day": "2026-09-15",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-11T10:40:09.404370Z",
+            "2026-09-15T10:40:09.157856Z"
+          ],
+          "feature_input_days": [
+            "2026-09-11",
+            "2026-09-15"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-11T10:30:22.141825Z",
+            "2026-09-15T10:30:17.668764Z"
+          ],
+          "feature_input_prices": [
+            3337.0,
+            3311.0
+          ],
+          "feature_input_raw_sha256": [
+            "6a143efbbd3ae23c9de268305d65c951da0fac113f55d3deb8c4d577b2e5172a",
+            "80c1eb825c211615036cec4775b44d0e1180538e7ff43fd2fca41a453ec85c97"
+          ],
+          "feature_val": "0.0078219412041276876",
+          "lookback_k": 2,
+          "symbol": "HC2701",
+          "target_days": [
+            "2026-09-16",
+            "2026-09-17"
+          ],
+          "target_not_before": [
+            "2026-09-16T07:00:00Z",
+            "2026-09-17T07:00:00Z"
+          ],
+          "target_prices": [
+            3321.0,
+            3327.0
+          ],
+          "target_raw_sha256": [
+            "f46e53aa0eaf26ba26f6f0cb9074d84f65c67786957767a4ac6b7631d8737fec",
+            "84e325e4a27b471e6ce53cb86d3e705704cdf529cff284f7706342a347a08536"
+          ],
+          "target_val": "0.0018050546417302405",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-16T10:40:11.276414Z",
+          "as_of_trade_day": "2026-09-16",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-14T10:40:09.638144Z",
+            "2026-09-16T10:40:11.276414Z"
+          ],
+          "feature_input_days": [
+            "2026-09-14",
+            "2026-09-16"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-14T10:30:12.842988Z",
+            "2026-09-16T10:30:12.417181Z"
+          ],
+          "feature_input_prices": [
+            3312.0,
+            3321.0
+          ],
+          "feature_input_raw_sha256": [
+            "526d8c519613526febeed4620575564aa5b8c8e95c25a32c57971b05923107e6",
+            "f46e53aa0eaf26ba26f6f0cb9074d84f65c67786957767a4ac6b7631d8737fec"
+          ],
+          "feature_val": "-0.0027137058715963258",
+          "lookback_k": 2,
+          "symbol": "HC2701",
+          "target_days": [
+            "2026-09-17",
+            "2026-09-18"
+          ],
+          "target_not_before": [
+            "2026-09-17T07:00:00Z",
+            "2026-09-18T07:00:00Z"
+          ],
+          "target_prices": [
+            3327.0,
+            3302.0
+          ],
+          "target_raw_sha256": [
+            "84e325e4a27b471e6ce53cb86d3e705704cdf529cff284f7706342a347a08536",
+            "224819fc35027afc7019db9652d42bd37cf2f768e97f59df1f1eb68f3d82b123"
+          ],
+          "target_val": "-0.0075426515384033836",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-17T10:40:11.223559Z",
+          "as_of_trade_day": "2026-09-17",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-15T10:40:09.157856Z",
+            "2026-09-17T10:40:11.223559Z"
+          ],
+          "feature_input_days": [
+            "2026-09-15",
+            "2026-09-17"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-15T10:30:17.668764Z",
+            "2026-09-17T10:30:14.772521Z"
+          ],
+          "feature_input_prices": [
+            3311.0,
+            3327.0
+          ],
+          "feature_input_raw_sha256": [
+            "80c1eb825c211615036cec4775b44d0e1180538e7ff43fd2fca41a453ec85c97",
+            "84e325e4a27b471e6ce53cb86d3e705704cdf529cff284f7706342a347a08536"
+          ],
+          "feature_val": "-0.004820738471230445",
+          "lookback_k": 2,
+          "symbol": "HC2701",
+          "target_days": [
+            "2026-09-18",
+            "2026-09-21"
+          ],
+          "target_not_before": [
+            "2026-09-18T07:00:00Z",
+            "2026-09-21T07:00:00Z"
+          ],
+          "target_prices": [
+            3302.0,
+            3305.0
+          ],
+          "target_raw_sha256": [
+            "224819fc35027afc7019db9652d42bd37cf2f768e97f59df1f1eb68f3d82b123",
+            "73a3226a61c97703364a7ac225b83cf65596a795f1daa9d362741fb401954802"
+          ],
+          "target_val": "0.00090812780571340854",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-18T10:40:11.877935Z",
+          "as_of_trade_day": "2026-09-18",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-16T10:40:11.276414Z",
+            "2026-09-18T10:40:11.877935Z"
+          ],
+          "feature_input_days": [
+            "2026-09-16",
+            "2026-09-18"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-16T10:30:12.417181Z",
+            "2026-09-18T10:30:13.492702Z"
+          ],
+          "feature_input_prices": [
+            3321.0,
+            3302.0
+          ],
+          "feature_input_raw_sha256": [
+            "f46e53aa0eaf26ba26f6f0cb9074d84f65c67786957767a4ac6b7631d8737fec",
+            "224819fc35027afc7019db9652d42bd37cf2f768e97f59df1f1eb68f3d82b123"
+          ],
+          "feature_val": "0.0057375968966732575",
+          "lookback_k": 2,
+          "symbol": "HC2701",
+          "target_days": [
+            "2026-09-21",
+            "2026-09-22"
+          ],
+          "target_not_before": [
+            "2026-09-21T07:00:00Z",
+            "2026-09-22T07:00:00Z"
+          ],
+          "target_prices": [
+            3305.0,
+            3307.0
+          ],
+          "target_raw_sha256": [
+            "73a3226a61c97703364a7ac225b83cf65596a795f1daa9d362741fb401954802",
+            "9a097cc124e0d5a6154c48e174c2cfcb8b14cfec1326bea9cb546ce6a9ae8274"
+          ],
+          "target_val": "0.00060496069600612815",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-21T10:40:13.843546Z",
+          "as_of_trade_day": "2026-09-21",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-17T10:40:11.223559Z",
+            "2026-09-21T10:40:13.843546Z"
+          ],
+          "feature_input_days": [
+            "2026-09-17",
+            "2026-09-21"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-17T10:30:14.772521Z",
+            "2026-09-21T10:30:12.035751Z"
+          ],
+          "feature_input_prices": [
+            3327.0,
+            3305.0
+          ],
+          "feature_input_raw_sha256": [
+            "84e325e4a27b471e6ce53cb86d3e705704cdf529cff284f7706342a347a08536",
+            "73a3226a61c97703364a7ac225b83cf65596a795f1daa9d362741fb401954802"
+          ],
+          "feature_val": "0.0066345237326900491",
+          "lookback_k": 2,
+          "symbol": "HC2701",
+          "target_days": [
+            "2026-09-22",
+            "2026-09-23"
+          ],
+          "target_not_before": [
+            "2026-09-22T07:00:00Z",
+            "2026-09-23T07:00:00Z"
+          ],
+          "target_prices": [
+            3307.0,
+            3304.0
+          ],
+          "target_raw_sha256": [
+            "9a097cc124e0d5a6154c48e174c2cfcb8b14cfec1326bea9cb546ce6a9ae8274",
+            "ebf9d76c20228451cce24eed77195e8ba1faeab481bb705ebe14c0c7e99b833e"
+          ],
+          "target_val": "-0.00090757834092412848",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        },
+        {
+          "as_of_time": "2026-09-22T10:40:04.344566Z",
+          "as_of_trade_day": "2026-09-22",
+          "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+          "feature_input_committed_at": [
+            "2026-09-18T10:40:11.877935Z",
+            "2026-09-22T10:40:04.344566Z"
+          ],
+          "feature_input_days": [
+            "2026-09-18",
+            "2026-09-22"
+          ],
+          "feature_input_first_seen_at": [
+            "2026-09-18T10:30:13.492702Z",
+            "2026-09-22T10:30:07.058654Z"
+          ],
+          "feature_input_prices": [
+            3302.0,
+            3307.0
+          ],
+          "feature_input_raw_sha256": [
+            "224819fc35027afc7019db9652d42bd37cf2f768e97f59df1f1eb68f3d82b123",
+            "9a097cc124e0d5a6154c48e174c2cfcb8b14cfec1326bea9cb546ce6a9ae8274"
+          ],
+          "feature_val": "-0.0015130885017194274",
+          "lookback_k": 2,
+          "symbol": "HC2701",
+          "target_days": [
+            "2026-09-23",
+            "2026-09-24"
+          ],
+          "target_not_before": [
+            "2026-09-23T07:00:00Z",
+            "2026-09-24T07:00:00Z"
+          ],
+          "target_prices": [
+            3304.0,
+            3293.0
+          ],
+          "target_raw_sha256": [
+            "ebf9d76c20228451cce24eed77195e8ba1faeab481bb705ebe14c0c7e99b833e",
+            "0e19dd992c4c0920b93a74ef68af3b47dbb01354f86ff079e3420b764b373de4"
+          ],
+          "target_val": "-0.0033348522645044081",
+          "time_rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47"
+        }
+      ],
+      "run_refs": [
+        {
+          "content_hash": "1b11ef0560c38107a5b2aa2d984e305169b724f818d0520dc339da4ff5848dcf",
+          "run_id": "run-screening-956960f7083a4e34",
+          "run_status": "COMPLETED"
+        },
+        {
+          "content_hash": "30e0a5d44c784be0f857104d9ec7a73bd6cc5afec5c50ca7300850ca83e81347",
+          "run_id": "run-screening-1d0ba64c47db4eed",
+          "run_status": "COMPLETED"
+        },
+        {
+          "content_hash": "66e51f3be5779aaea17495b5cf5e77bab45d8c73c113dae3b7aa8664108fc281",
+          "run_id": "run-screening-1a31706f49574938",
+          "run_status": "COMPLETED"
+        },
+        {
+          "content_hash": "74d853b0e6630b9bd7750fc7e4cdf002d5f5d133d35f405dd02ee4e99b6e49e1",
+          "run_id": "run-screening-5e1f2a8b6ebd45eb",
+          "run_status": "COMPLETED"
+        }
+      ],
+      "scientific_decision": "NEED_MORE_EVIDENCE",
+      "snapshot_bytes": 9183,
+      "snapshot_sha256": "5ab8d5eff48d9b80dbb28687ac7ecc1dbc8b9f6ba7c1b557fa25f508b311197c",
+      "source_day_count": 19,
+      "symbol": "HC2701",
+      "target": "log(settlement[t+2] / settlement[t+1])",
+      "target_tail_days": 2,
+      "verified_resultstore_receipts": 4,
+      "warmup_days": 2
+    }
+  ],
+  "private_manual_summary_sha256": "fb86cacbf8f51d364711a0fc5fd27f30fb6b85a39f10640bb8cc3b0dfae982e1",
+  "schema": "issue502.public-manual-real-source-pit-precheck.v1",
+  "signed_source_days": {
+    "2026-08-31": {
+      "batch_seal_sha256": "d1b22e2334738bbc1908d510217c0e391b784909d22858e75b043e2d226fbeea",
+      "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+      "committed_at": "2026-08-31T10:40:11.856579Z",
+      "first_seen_at": "2026-08-31T10:30:22.741188Z",
+      "raw_sha256": "81686cd4f0a5724726e31795acafeb720297a244126736af0e995a81f2a32a89",
+      "revision_id": "revision-7aa33379c3e6bdb78b971e29a13b9bc0910a04960d25a5ce4e93c8b9e22af99b",
+      "rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47",
+      "settlement": {
+        "hc_f": 3398.0,
+        "rb_f": 3186.0
+      },
+      "settlement_not_before": "2026-08-31T07:00:00Z",
+      "source_url": "https://www.shfe.com.cn/data/tradedata/future/dailydata/kx20260831.dat",
+      "trade_day": "2026-08-31"
+    },
+    "2026-09-01": {
+      "batch_seal_sha256": "0620491b71a6094d74d68107d25561ffc722107839e61e50c7b9c039b78a8f17",
+      "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+      "committed_at": "2026-09-01T10:40:10.644345Z",
+      "first_seen_at": "2026-09-01T10:30:13.890612Z",
+      "raw_sha256": "34734c6bddb4ff32d2dacff069c958fce0def39565bd2c9c0c441e94b0d680b1",
+      "revision_id": "revision-4861f6bdd4670d9bec94697c94a9e163f032d759483440c56bcf2f39640e69d0",
+      "rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47",
+      "settlement": {
+        "hc_f": 3390.0,
+        "rb_f": 3175.0
+      },
+      "settlement_not_before": "2026-09-01T07:00:00Z",
+      "source_url": "https://www.shfe.com.cn/data/tradedata/future/dailydata/kx20260901.dat",
+      "trade_day": "2026-09-01"
+    },
+    "2026-09-02": {
+      "batch_seal_sha256": "311a42743875053698a34bbc664a2827fd4558d47ccf03e51d8d34f688582f93",
+      "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+      "committed_at": "2026-09-02T10:40:10.945359Z",
+      "first_seen_at": "2026-09-02T10:30:13.834615Z",
+      "raw_sha256": "bfd9a7e3beab27e03a5db92a479c6d172f242489bb09a8d3a42e3df875e84e88",
+      "revision_id": "revision-936e51a6fd14eaf50a19e3270a598b52aea3bcc74280766951e8e91a14a111d1",
+      "rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47",
+      "settlement": {
+        "hc_f": 3385.0,
+        "rb_f": 3158.0
+      },
+      "settlement_not_before": "2026-09-02T07:00:00Z",
+      "source_url": "https://www.shfe.com.cn/data/tradedata/future/dailydata/kx20260902.dat",
+      "trade_day": "2026-09-02"
+    },
+    "2026-09-03": {
+      "batch_seal_sha256": "4964ded6f742eb88ff7d012391725f43d9969d34f790567fd70bd56ada9b3072",
+      "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+      "committed_at": "2026-09-03T10:40:11.220866Z",
+      "first_seen_at": "2026-09-03T10:30:18.167696Z",
+      "raw_sha256": "92c4edfc8cd8420fcd3da96cef0583fa676246454c828eb563849730b753da7d",
+      "revision_id": "revision-d4e1392456e200619fd60236e81e5c6d2865260ab769c1acc925203685c0c044",
+      "rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47",
+      "settlement": {
+        "hc_f": 3363.0,
+        "rb_f": 3137.0
+      },
+      "settlement_not_before": "2026-09-03T07:00:00Z",
+      "source_url": "https://www.shfe.com.cn/data/tradedata/future/dailydata/kx20260903.dat",
+      "trade_day": "2026-09-03"
+    },
+    "2026-09-04": {
+      "batch_seal_sha256": "30b6fe29bcdf6b1d6b0d2874a27a4098d100873d0084981f5412219655a292aa",
+      "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+      "committed_at": "2026-09-04T10:40:10.433195Z",
+      "first_seen_at": "2026-09-04T10:30:18.017948Z",
+      "raw_sha256": "c38ccb6ddd408ba0abc77f7bdee60dabe6a68fd597d452eb8e0e39ca3e508ca3",
+      "revision_id": "revision-9bb71ec463528c4ddaabf1081f568299509164ff447f30159ca5da27835fd881",
+      "rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47",
+      "settlement": {
+        "hc_f": 3380.0,
+        "rb_f": 3160.0
+      },
+      "settlement_not_before": "2026-09-04T07:00:00Z",
+      "source_url": "https://www.shfe.com.cn/data/tradedata/future/dailydata/kx20260904.dat",
+      "trade_day": "2026-09-04"
+    },
+    "2026-09-07": {
+      "batch_seal_sha256": "163a257c57c987143d0deb7cb621faf1da8ed4befa9a00d27be169d989a54104",
+      "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+      "committed_at": "2026-09-07T10:40:10.036372Z",
+      "first_seen_at": "2026-09-07T10:30:16.557718Z",
+      "raw_sha256": "12a4bd09042e99135322a7adcf1d3704b7ac87e9cb45289afa61977efa740856",
+      "revision_id": "revision-40846971a9a013be794835aa599800d45c2c1e5340a85b1bb3b5f6dce4bc5725",
+      "rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47",
+      "settlement": {
+        "hc_f": 3374.0,
+        "rb_f": 3158.0
+      },
+      "settlement_not_before": "2026-09-07T07:00:00Z",
+      "source_url": "https://www.shfe.com.cn/data/tradedata/future/dailydata/kx20260907.dat",
+      "trade_day": "2026-09-07"
+    },
+    "2026-09-08": {
+      "batch_seal_sha256": "6d39cb1159a10ad54ae316492fb343845e9cb3cb07df4396c69061c72b81a659",
+      "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+      "committed_at": "2026-09-08T10:40:09.818107Z",
+      "first_seen_at": "2026-09-08T10:30:13.053578Z",
+      "raw_sha256": "875dccc9c369aeaf7a367ac23cbf38824d3d6f0ab3f84e7692e469a24337f155",
+      "revision_id": "revision-d7c16c1891c57a271663c8ec16bf7a2e31c189ce28b4b721c99095c86503cf20",
+      "rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47",
+      "settlement": {
+        "hc_f": 3380.0,
+        "rb_f": 3163.0
+      },
+      "settlement_not_before": "2026-09-08T07:00:00Z",
+      "source_url": "https://www.shfe.com.cn/data/tradedata/future/dailydata/kx20260908.dat",
+      "trade_day": "2026-09-08"
+    },
+    "2026-09-09": {
+      "batch_seal_sha256": "b8a59edfd986d433875e668fd4400a11f8aa5fc6025e25edad3f4ccae884641e",
+      "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+      "committed_at": "2026-09-09T10:40:11.134239Z",
+      "first_seen_at": "2026-09-09T10:30:22.716245Z",
+      "raw_sha256": "8e1f2067dee545611d36d2867ae6512927515f54ab88dd2805ea62b125759b12",
+      "revision_id": "revision-83665570feb47cdbb193b45c494827d8b27d3ff203479c7e95e4ce48701ed63b",
+      "rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47",
+      "settlement": {
+        "hc_f": 3381.0,
+        "rb_f": 3164.0
+      },
+      "settlement_not_before": "2026-09-09T07:00:00Z",
+      "source_url": "https://www.shfe.com.cn/data/tradedata/future/dailydata/kx20260909.dat",
+      "trade_day": "2026-09-09"
+    },
+    "2026-09-10": {
+      "batch_seal_sha256": "cd70a6b9a4b3ff15633e64a7a75056f75bab66fe97f58dc5dd09fe9889a73213",
+      "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+      "committed_at": "2026-09-10T10:40:10.843294Z",
+      "first_seen_at": "2026-09-10T10:30:11.407739Z",
+      "raw_sha256": "91be3872550ce4511c0690a2c89407072258b51de83606c6f46b5de53ae86cab",
+      "revision_id": "revision-edd9fd733f31309a71ccf466c51a9d2af78b3c191253e0ced222eddcb1c7660e",
+      "rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47",
+      "settlement": {
+        "hc_f": 3364.0,
+        "rb_f": 3147.0
+      },
+      "settlement_not_before": "2026-09-10T07:00:00Z",
+      "source_url": "https://www.shfe.com.cn/data/tradedata/future/dailydata/kx20260910.dat",
+      "trade_day": "2026-09-10"
+    },
+    "2026-09-11": {
+      "batch_seal_sha256": "1c19b5751d2f7e942ca25f061ab49a2b5875a3c031bee0ba4c3de6c8fd4937c7",
+      "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+      "committed_at": "2026-09-11T10:40:09.404370Z",
+      "first_seen_at": "2026-09-11T10:30:22.141825Z",
+      "raw_sha256": "6a143efbbd3ae23c9de268305d65c951da0fac113f55d3deb8c4d577b2e5172a",
+      "revision_id": "revision-a3c098669fa053f612e47d2f7b00afaf82503e8807e81d4b60ca50c3f2159325",
+      "rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47",
+      "settlement": {
+        "hc_f": 3337.0,
+        "rb_f": 3117.0
+      },
+      "settlement_not_before": "2026-09-11T07:00:00Z",
+      "source_url": "https://www.shfe.com.cn/data/tradedata/future/dailydata/kx20260911.dat",
+      "trade_day": "2026-09-11"
+    },
+    "2026-09-14": {
+      "batch_seal_sha256": "ef7df75b0b381884d1877c4d4ae9286bb879b6c47d590ea0c418c251c6ca8333",
+      "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+      "committed_at": "2026-09-14T10:40:09.638144Z",
+      "first_seen_at": "2026-09-14T10:30:12.842988Z",
+      "raw_sha256": "526d8c519613526febeed4620575564aa5b8c8e95c25a32c57971b05923107e6",
+      "revision_id": "revision-357a883e28a23326bb2d3aac5731f2ccf38db8a0e9491b03fb9aefa58c6505f5",
+      "rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47",
+      "settlement": {
+        "hc_f": 3312.0,
+        "rb_f": 3097.0
+      },
+      "settlement_not_before": "2026-09-14T07:00:00Z",
+      "source_url": "https://www.shfe.com.cn/data/tradedata/future/dailydata/kx20260914.dat",
+      "trade_day": "2026-09-14"
+    },
+    "2026-09-15": {
+      "batch_seal_sha256": "1d3b7d6e1d40300472da7539732a8b58b71d6efa21e3e59eb29c00a79d8b06c1",
+      "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+      "committed_at": "2026-09-15T10:40:09.157856Z",
+      "first_seen_at": "2026-09-15T10:30:17.668764Z",
+      "raw_sha256": "80c1eb825c211615036cec4775b44d0e1180538e7ff43fd2fca41a453ec85c97",
+      "revision_id": "revision-ab1989c412ca0ed6b2f3bfaa804783b98a8c4e27f1b4a0286d21f110a6b4ffaa",
+      "rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47",
+      "settlement": {
+        "hc_f": 3311.0,
+        "rb_f": 3103.0
+      },
+      "settlement_not_before": "2026-09-15T07:00:00Z",
+      "source_url": "https://www.shfe.com.cn/data/tradedata/future/dailydata/kx20260915.dat",
+      "trade_day": "2026-09-15"
+    },
+    "2026-09-16": {
+      "batch_seal_sha256": "c52c7f23a00b91a7e59d59e5870610286211b1dbe9352377c93357ebe434fd9d",
+      "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+      "committed_at": "2026-09-16T10:40:11.276414Z",
+      "first_seen_at": "2026-09-16T10:30:12.417181Z",
+      "raw_sha256": "f46e53aa0eaf26ba26f6f0cb9074d84f65c67786957767a4ac6b7631d8737fec",
+      "revision_id": "revision-e01ff57c609e0d7bfe94ff2a219096c3f4be0946b5f4f2f49ce195af70b228f2",
+      "rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47",
+      "settlement": {
+        "hc_f": 3321.0,
+        "rb_f": 3126.0
+      },
+      "settlement_not_before": "2026-09-16T07:00:00Z",
+      "source_url": "https://www.shfe.com.cn/data/tradedata/future/dailydata/kx20260916.dat",
+      "trade_day": "2026-09-16"
+    },
+    "2026-09-17": {
+      "batch_seal_sha256": "b162a2c7f2389a31cf86cec05398a68f1425b4a3f953d7dca75da4c3e85645a6",
+      "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+      "committed_at": "2026-09-17T10:40:11.223559Z",
+      "first_seen_at": "2026-09-17T10:30:14.772521Z",
+      "raw_sha256": "84e325e4a27b471e6ce53cb86d3e705704cdf529cff284f7706342a347a08536",
+      "revision_id": "revision-139eee17c1bf0ebbafb3c8122fbd3347e3d6674941b22cf04d1718b72b492108",
+      "rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47",
+      "settlement": {
+        "hc_f": 3327.0,
+        "rb_f": 3128.0
+      },
+      "settlement_not_before": "2026-09-17T07:00:00Z",
+      "source_url": "https://www.shfe.com.cn/data/tradedata/future/dailydata/kx20260917.dat",
+      "trade_day": "2026-09-17"
+    },
+    "2026-09-18": {
+      "batch_seal_sha256": "fc14869c7f94b32709de76bdae9c5842d6c2b9f9cae6a9e89348b94480227f59",
+      "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+      "committed_at": "2026-09-18T10:40:11.877935Z",
+      "first_seen_at": "2026-09-18T10:30:13.492702Z",
+      "raw_sha256": "224819fc35027afc7019db9652d42bd37cf2f768e97f59df1f1eb68f3d82b123",
+      "revision_id": "revision-fc5952afee70b6e75a1138c7353e2d6827cb9a8c236a8f591dc041fe4aa8e344",
+      "rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47",
+      "settlement": {
+        "hc_f": 3302.0,
+        "rb_f": 3104.0
+      },
+      "settlement_not_before": "2026-09-18T07:00:00Z",
+      "source_url": "https://www.shfe.com.cn/data/tradedata/future/dailydata/kx20260918.dat",
+      "trade_day": "2026-09-18"
+    },
+    "2026-09-21": {
+      "batch_seal_sha256": "d79971a53e4d4e54bb95d6c02806ad6f46bec9ff73d1f48b10833254f3ecff69",
+      "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+      "committed_at": "2026-09-21T10:40:13.843546Z",
+      "first_seen_at": "2026-09-21T10:30:12.035751Z",
+      "raw_sha256": "73a3226a61c97703364a7ac225b83cf65596a795f1daa9d362741fb401954802",
+      "revision_id": "revision-d44f8e8b3ca307edc6bcadb1459f7f445c983e2809c52a6eab8bea832cdb2cd7",
+      "rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47",
+      "settlement": {
+        "hc_f": 3305.0,
+        "rb_f": 3108.0
+      },
+      "settlement_not_before": "2026-09-21T07:00:00Z",
+      "source_url": "https://www.shfe.com.cn/data/tradedata/future/dailydata/kx20260921.dat",
+      "trade_day": "2026-09-21"
+    },
+    "2026-09-22": {
+      "batch_seal_sha256": "5c53496ad457d1256adea3a8fa6491e1f4c77a0b5d668ea39242083f7b0deb77",
+      "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+      "committed_at": "2026-09-22T10:40:04.344566Z",
+      "first_seen_at": "2026-09-22T10:30:07.058654Z",
+      "raw_sha256": "9a097cc124e0d5a6154c48e174c2cfcb8b14cfec1326bea9cb546ce6a9ae8274",
+      "revision_id": "revision-4576df1f3e7d175b1a15977bf09dc0c8bbfabccc7aab4e1c4c93fdeb1e914815",
+      "rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47",
+      "settlement": {
+        "hc_f": 3307.0,
+        "rb_f": 3121.0
+      },
+      "settlement_not_before": "2026-09-22T07:00:00Z",
+      "source_url": "https://www.shfe.com.cn/data/tradedata/future/dailydata/kx20260922.dat",
+      "trade_day": "2026-09-22"
+    },
+    "2026-09-23": {
+      "batch_seal_sha256": "2f36673474bae2f82dc42d4814be1a9490cc7a75407674276255385be88f1802",
+      "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+      "committed_at": "2026-09-23T10:40:10.039431Z",
+      "first_seen_at": "2026-09-23T10:30:13.014544Z",
+      "raw_sha256": "ebf9d76c20228451cce24eed77195e8ba1faeab481bb705ebe14c0c7e99b833e",
+      "revision_id": "revision-08db036cbe06073adf63d369be1cd1f5a1257f64c5d30079b856274327c7b7a5",
+      "rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47",
+      "settlement": {
+        "hc_f": 3304.0,
+        "rb_f": 3117.0
+      },
+      "settlement_not_before": "2026-09-23T07:00:00Z",
+      "source_url": "https://www.shfe.com.cn/data/tradedata/future/dailydata/kx20260923.dat",
+      "trade_day": "2026-09-23"
+    },
+    "2026-09-24": {
+      "batch_seal_sha256": "91e58306e33f3ca531470513756bc840b74f020bb8fc90f3ba5bfd7e89bc2c5a",
+      "calendar_sha256": "b0fddf98c56a68d995edc9be9eb0d1277006d5dcfcc62a26a05b6b61984d4291",
+      "committed_at": "2026-09-24T10:40:15.339243Z",
+      "first_seen_at": "2026-09-24T10:30:16.295631Z",
+      "raw_sha256": "0e19dd992c4c0920b93a74ef68af3b47dbb01354f86ff079e3420b764b373de4",
+      "revision_id": "revision-9f44204566f93628f73a75a1677b7a7fd7d81f9b16ce26ca57305e221f23244a",
+      "rule_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47",
+      "settlement": {
+        "hc_f": 3293.0,
+        "rb_f": 3111.0
+      },
+      "settlement_not_before": "2026-09-24T07:00:00Z",
+      "source_url": "https://www.shfe.com.cn/data/tradedata/future/dailydata/kx20260924.dat",
+      "trade_day": "2026-09-24"
+    }
+  },
+  "source_bundle_archive_sha256": "f680b3bb6c70a9d440e2ba4f57b0e3848be8aaa0b92ea3c8a41d99e14b1a133b",
+  "source_provenance_sha256": "e3d6b6b74d8b6617455bcccf7d6eeed3e4f5fbfe8eca1216f40ad03006725354",
+  "source_scope": "SHFE original daily settlement, RB2701 and HC2701, 2026-08-31 through 2026-09-24 (19 official trading days)",
+  "status": "REAL_SOURCE_PIT_PRECHECK_PASSED; STAGE2_SCIENTIFIC_ACCEPTANCE_BLOCKED",
+  "time_boundary": {
+    "hc_product_rules_sha256": "0a2d9d26a558dac71e8e00fe162532c1fdb4fc33a85d645c82fe61ab8df9d9f8",
+    "hc_product_rules_url": "https://www.shfe.com.cn/regulation/exchangerules/productrules/202512/P020251231388355404219.docx",
+    "official_trading_rules_sha256": "2657195f541a79560b60894f3ca7bbc043f30c6c4cf4388e0a6fd1c5ae585e47",
+    "official_trading_rules_url": "https://www.shfe.com.cn/regulation/exchangerules/rules/202606/P020260603536202760412.docx",
+    "rb_product_rules_sha256": "9cf890ba528c37dffd054a17de8a1fef42db523cb050601dced6a06729d738b2",
+    "rb_product_rules_url": "https://www.shfe.com.cn/regulation/exchangerules/productrules/202512/P020251231387806725796.docx",
+    "retrieved_at_utc": "2026-09-30T03:32:00Z to 2026-09-30T03:37:00Z",
+    "semantics": "settlement not determined before 15:00 Asia/Shanghai trading-day close; not a publication time or warehouse acquisition time"
+  }
+}

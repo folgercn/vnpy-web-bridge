@@ -23,6 +23,19 @@ python -m venv .venv-research-lab
 .venv-research-lab/bin/python -m pip install -r research_lab/requirements.txt
 ```
 
+The optional [#502 SHFE real-source PIT precheck](../docs/issue-502-real-source-pit-precheck.md)
+also requires `cryptography==48.0.0` (the existing M2 runtime version) and a
+Unix platform with the standard-library `fcntl` module:
+
+```bash
+.venv-research-lab/bin/python -m pip install cryptography==48.0.0
+```
+
+Ordinary Alpha Discovery imports and offline synthetic signal binding use
+only the standalone dependencies. A real-source request without these optional
+capabilities fails with `REAL_SOURCE_DEPENDENCY_UNAVAILABLE` during admission,
+before Engine, Critic or Research Memory run.
+
 Run its focused tests and included example:
 
 ```bash
