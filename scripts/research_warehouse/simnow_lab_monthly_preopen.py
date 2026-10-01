@@ -177,6 +177,7 @@ def build_monthly_preopen(
     source_month: str,
     shfe_contract_parameters: ShfeContractParameterEvidence | None = None,
     execution_day_override: date | None = None,
+    recovery_observed_at: str | None = None,
 ) -> BuiltMonthlyPreopen:
     """Build the two M2-only month-end halves before the execution open exists.
 
@@ -336,6 +337,16 @@ def build_monthly_preopen(
         "operator_pins": operator_pins,
         "history_days": history_days,
     }
+    if recovery_observed_at is not None:
+        from .timeutil import parse_utc
+
+        parse_utc(recovery_observed_at, "recovery observed_at")
+        lineage["late_recovery"] = {
+            "observed_at": recovery_observed_at,
+            "natural_execution_day": natural_execution_day.isoformat(),
+            "execution_day_override": execution_day.isoformat(),
+            "late_publication": True,
+        }
     if shfe_expiry_lineage:
         lineage["shfe_contract_parameter_expiries"] = shfe_expiry_lineage
     pair_identity = {
@@ -352,6 +363,8 @@ def build_monthly_preopen(
     }
     if shfe_expiry_lineage:
         pair_identity["shfe_contract_parameter_expiries"] = shfe_expiry_lineage
+    if recovery_observed_at is not None:
+        pair_identity["late_recovery"] = lineage["late_recovery"]
     pair_id = "simnow-monthly-preopen-" + sha256(
         canonical_json(pair_identity)
     )[:32]
