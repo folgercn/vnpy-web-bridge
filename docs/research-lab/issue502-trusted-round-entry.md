@@ -111,3 +111,14 @@ This is a consistency check of existing local research artifacts and verified
 receipts. It adds no new trust source and does not authenticate a rewritten local
 artifact collection as a real Provider round. Real two-round provenance, trusted
 PIT sources and measurable Memory feedback remain the #502 acceptance gate.
+
+The #594 review correction also calls the existing `validate_screening_plan` on
+every baseline/supplemental Plan before comparing its references. For each
+verified receipt, it parses `evidence.json` from the sealed bundle and rechecks
+its inventory digest and Evidence identity. The existing
+`validate_critic_decision` then verifies each decision's content seal against the
+actual Evidence accumulated within that candidate's baseline/supplemental cycle;
+`critic_ref` must match the validated decision. Evidence is never reconstructed
+from the Critic's declared refs, and cumulative baseline Evidence remains valid
+for supplemental decisions. Inconsistent Plan/Critic bodies are rejected before
+Provider construction on both initial R2 entry and resume.

@@ -109,3 +109,57 @@ def test_missing_receipt_for_declared_memory_ref_rejected(chain):
         db.execute("DELETE FROM v2_result_runs WHERE run_id = ?", (run_id,))
     with pytest.raises(ValueError, match="receipt missing"):
         verify_r1_scientific_lineage(evidence, context["memory"].as_readonly_reader(), context["store"])
+
+
+def persist_memory_copies(context, evidence):
+    """Change only disposable fixture Memory; original sealed receipts stay intact."""
+    with sqlite3.connect(context["memory"].db_path) as db:
+        for integration in evidence["integrations"]:
+            for record in integration["memory_records"]:
+                fields = {"plan_payload": record["plan_payload"],
+                          "critic_decision_payload": record["critic_decision_payload"],
+                          "critic_ref_json": record["critic_ref"]}
+                fields.update({f"{kind}_refs_json": record[f"{kind}_refs"] for kind in ("task", "spec", "run", "manifest", "evidence")})
+                for column, value in fields.items():
+                    db.execute(f"UPDATE research_memory_records SET {column} = ? WHERE record_id = ?",
+                               (json.dumps(value), record["record_id"]))
+
+
+@pytest.mark.parametrize("chain", [(True, 1)], indirect=True)
+@pytest.mark.parametrize("record_index", [0, 1])
+@pytest.mark.parametrize("tamper", ["plan_body", "critic_body", "critic_ref"])
+def test_existing_seals_and_critic_ref_checked_for_each_cycle_record(chain, record_index, tamper):
+    context, evidence = chain
+    changed = deepcopy(evidence)
+    integration = changed["integrations"][0]
+    assert len(integration["memory_records"]) == 2  # actual baseline + supplemental
+    record = integration["memory_records"][record_index]
+    if tamper == "plan_body":
+        record["plan_payload"]["methods"][0]["parameters"]["changed_without_reseal"] = True
+        expected = "plan_content_hash mismatch"
+    elif tamper == "critic_body":
+        record["critic_decision_payload"]["criteria"]["min_coverage"] = "0.7"
+        if record_index == 1:
+            integration["critic_decision"] = deepcopy(record["critic_decision_payload"])
+        expected = "review_content_hash mismatch"
+    else:
+        record["critic_ref"]["decision_id"] = "different-decision"
+        expected = "critic_ref mismatch"
+    persist_memory_copies(context, changed)
+    with pytest.raises(ValueError, match=expected):
+        verify_r1_scientific_lineage(changed, context["memory"].as_readonly_reader(), context["store"])
+
+
+@pytest.mark.parametrize("chain", [(False, 2)], indirect=True)
+def test_valid_receipts_cannot_be_cross_wired_between_candidates(chain):
+    context, evidence = chain
+    changed = deepcopy(evidence)
+    first, second = changed["integrations"]
+    for kind in ("task", "spec", "run", "manifest", "evidence"):
+        key = f"{kind}_refs"
+        first[key], second[key] = second[key], first[key]
+        first["memory_records"][0][key], second["memory_records"][0][key] = (
+            second["memory_records"][0][key], first["memory_records"][0][key])
+    persist_memory_copies(context, changed)
+    with pytest.raises(ValueError, match="Evidence ID mismatch"):
+        verify_r1_scientific_lineage(changed, context["memory"].as_readonly_reader(), context["store"])

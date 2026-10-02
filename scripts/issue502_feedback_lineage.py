@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 from research_lab.agent_control.contracts import _clean_for_canonical
 from research_lab.alpha_discovery.hypothesis import compute_scientific_identity_hash, compute_semantic_hash
+from research_lab.alpha_discovery.critic_gate import validate_critic_decision
+from research_lab.alpha_discovery.screening_plan import validate_screening_plan
+from research_lab.contracts import v2
 
 REF_KINDS = ("task", "spec", "run", "manifest", "evidence")
 
@@ -52,6 +56,7 @@ def verify_r1_scientific_lineage(evidence: dict, memory_reader: Any, store: Any)
                 raise ValueError("R1 lineage integration Memory payload mismatch")
             if record.record_type != "evaluation":
                 raise ValueError("R1 lineage requires scientific evaluation Memory")
+            validate_screening_plan(record.plan_payload)
             if (record.scientific_identity_hash != compute_scientific_identity_hash(record.hypothesis_payload)
                     or record.semantic_hash != compute_semantic_hash(record.hypothesis_payload)
                     or record.hypothesis_ref.get("hypothesis_id") != record.hypothesis_id
@@ -86,6 +91,7 @@ def verify_r1_scientific_lineage(evidence: dict, memory_reader: Any, store: Any)
             actual = _refs([ref for r in owned for ref in getattr(r, f"{kind}_refs")], kind)
             if _clean_for_canonical(declared) != _clean_for_canonical(actual):
                 raise ValueError(f"R1 lineage incomplete/mismatched integration {kind} refs")
+        cumulative_evidence: dict[str, dict] = {}
         for record in owned:
             refs = {kind: _refs(getattr(record, f"{kind}_refs"), kind) for kind in REF_KINDS}
             resolved = {kind: set() for kind in REF_KINDS}
@@ -108,8 +114,24 @@ def verify_r1_scientific_lineage(evidence: dict, memory_reader: Any, store: Any)
                     resolved[kind].add(object_id)
                 if receipt.get("run_status") != run_ref.get("run_status"):
                     raise ValueError("R1 lineage receipt run status mismatch")
+                # Read the actual sealed Evidence, never reconstruct it from refs.
+                raw = v2.safe_read(Path(receipt["bundle_location"]), "evidence.json")
+                if v2.sha(raw) != receipt["bundle_file_sha256"].get("evidence.json"):
+                    raise ValueError("R1 lineage Evidence inventory mismatch")
+                actual_evidence = v2.parse(raw)
+                if (actual_evidence.get("evidence_id") != receipt["evidence"]["object_id"]
+                        or actual_evidence.get("evidence_content_hash") != receipt["evidence"]["content_hash"]):
+                    raise ValueError("R1 lineage actual Evidence reference mismatch")
+                cumulative_evidence[actual_evidence["evidence_id"]] = actual_evidence
                 covered_runs.add(run_id)
             if any(resolved[kind] != set(refs[kind]) for kind in REF_KINDS):
                 raise ValueError("R1 lineage Memory refs not fully covered by receipts")
+            # Supplemental decisions legitimately retain the baseline Evidence.
+            decision = validate_critic_decision(record.critic_decision_payload,
+                                                record.hypothesis_payload,
+                                                list(cumulative_evidence.values()))
+            if record.critic_ref != {"decision_id": decision["decision_id"],
+                                     "review_content_hash": decision["review_content_hash"]}:
+                raise ValueError("R1 lineage critic_ref mismatch")
     if covered_records != set(by_id):
         raise ValueError("R1 lineage Memory record omitted from integration summary")

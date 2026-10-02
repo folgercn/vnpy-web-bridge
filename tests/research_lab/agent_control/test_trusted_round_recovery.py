@@ -118,7 +118,7 @@ def test_feedback_view_is_this_r1_snapshot_and_receipts(tmp_path):
         verify_r1_feedback_view(view, snapshot, evidence, MissingStore(), memory_reader=memory.as_readonly_reader())
 
 
-@pytest.mark.parametrize("tamper", [None, "identity", "omitted_receipt"])
+@pytest.mark.parametrize("tamper", [None, "identity", "omitted_receipt", "plan_body", "critic_body"])
 def test_round2_actual_main_binds_fresh_r1_view_before_provider(tmp_path, monkeypatch, tamper):
     """A local contract fixture reaches the Provider boundary; never real acceptance."""
     import hashlib
@@ -185,17 +185,37 @@ def test_round2_actual_main_binds_fresh_r1_view_before_provider(tmp_path, monkey
         evidence = json.loads(evidence_path.read_text())
         if tamper == "identity":
             evidence["integrations"][0]["scientific_identity_hash"] = "0" * 64
-        else:
+        elif tamper == "omitted_receipt":
             import sqlite3
             missing = evidence["integrations"][0]["run_refs"].pop()
             with sqlite3.connect(r1 / "store/research_lab.sqlite3") as db:
                 db.execute("DELETE FROM v2_result_runs WHERE run_id = ?", (missing["run_id"],))
+        else:
+            import sqlite3
+            integration = evidence["integrations"][0]
+            record = integration["memory_records"][0]
+            if tamper == "plan_body":
+                field = "plan_payload"
+                record[field]["methods"][0]["parameters"]["changed_without_reseal"] = True
+            else:
+                field = "critic_decision_payload"
+                record[field]["criteria"]["min_coverage"] = "0.7"
+                integration["critic_decision"] = record[field]
+            with sqlite3.connect(r1 / "store/research_lab.sqlite3") as db:
+                db.execute(f"UPDATE research_memory_records SET {field} = ? WHERE record_id = ?",
+                           (json.dumps(record[field]), record["record_id"]))
         runner._dump_json(evidence_path, evidence)
+    persisted_view_bytes = (r1 / "memory_view_after_round_1.json").read_bytes()
     original_sha = hashlib.sha256((r1 / "store/research_lab.sqlite3").read_bytes()).hexdigest()
     if tamper:
         with pytest.raises(ValueError, match="mismatch"):
             runner.main()
         assert calls == []
+        monkeypatch.setattr(sys, "argv", [*sys.argv, "--resume"])
+        with pytest.raises(ValueError, match="mismatch"):
+            runner.main()
+        assert calls == []
+        assert (r1 / "memory_view_after_round_1.json").read_bytes() == persisted_view_bytes
     else:
         with pytest.raises(RuntimeError, match="provider boundary reached"):
             runner.main()
