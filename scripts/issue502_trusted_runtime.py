@@ -16,6 +16,8 @@ from research_lab.agent_control.contracts import _clean_for_canonical
 from research_lab.agent_control.errors import ProviderError, ProviderErrorCode
 from research_lab.agent_control.transports.local_mcp import LocalMCPTransport
 from research_lab.alpha_discovery.real_source_time import verify_shfe_settlement_days
+from research_lab.alpha_discovery.research_memory import ReadOnlyResearchMemoryReader
+from scripts.issue502_feedback_lineage import verify_r1_scientific_lineage
 
 PROVENANCE_SHA256 = "e3d6b6b74d8b6617455bcccf7d6eeed3e4f5fbfe8eca1216f40ad03006725354"
 
@@ -146,7 +148,8 @@ def bind_run_root(root: Path, inputs: dict[str, Any], repo: Path, *, create: boo
         raise ValueError("Existing run belongs to different source inputs or checkout")
 
 
-def verify_r1_feedback_view(view: Any, persisted: dict, evidence: dict, store: Any) -> None:
+def verify_r1_feedback_view(view: Any, persisted: dict, evidence: dict, store: Any, *,
+                            memory_reader: Any = None) -> None:
     """Bind the next session to verified receipts and this R1's full controlled view."""
     observed = view.to_dict()
     expected = dict(persisted)
@@ -169,13 +172,9 @@ def verify_r1_feedback_view(view: Any, persisted: dict, evidence: dict, store: A
     integrations = evidence.get("integrations", [])
     if not integrations:
         raise ValueError("R1 has no verified scientific integrations")
-    for record in integrations:
-        if record.get("engineering_status") != "COMPLETED" or not record.get("run_refs"):
-            raise ValueError("R1 scientific integration incomplete")
-        for ref in record["run_refs"]:
-            receipts = store.query_v2_runs(run_id=ref["run_id"], verify=True)
-            if len(receipts) != 1:
-                raise ValueError("R1 run receipt missing or ambiguous")
+    verify_r1_scientific_lineage(
+        evidence, memory_reader or ReadOnlyResearchMemoryReader(store.config.database_path), store
+    )
 
 
 def write_json_atomic(path: Path, payload: Any) -> None:

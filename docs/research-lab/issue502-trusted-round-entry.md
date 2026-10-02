@@ -92,3 +92,33 @@ receipt. Historical view IDs, hashes, entry counts and fixed missing-dimension
 text are no longer prerequisites. Required structured stability/outlier gaps
 remain enforced. Contract fixtures exercise this boundary only; they do not count
 as either real Provider round or scientific acceptance.
+
+### Complete R1 scientific reference coverage
+
+Before creating the Round 2 Provider, the runner reads **all** original R1
+Memory records through the existing read-only domain reader, including records
+outside the bounded controlled view. Every evaluation record must occur exactly
+once in the integration summary. The summary's hypothesis identity, final plan,
+Critic decision and complete task/spec/run/manifest/evidence reference sets must
+agree with those records. Each declared run is then re-read with
+`ResultStore.query_v2_runs(..., verify=True)`; receipt IDs, hashes, applicable
+revisions and run status must resolve all Memory references. Removing a receipt
+and also omitting it from the summary cannot hide a remaining Memory reference.
+A resumed R2 continues using the original R1 reader rather than its own expanded
+Memory database.
+
+This is a consistency check of existing local research artifacts and verified
+receipts. It adds no new trust source and does not authenticate a rewritten local
+artifact collection as a real Provider round. Real two-round provenance, trusted
+PIT sources and measurable Memory feedback remain the #502 acceptance gate.
+
+The #594 review correction also calls the existing `validate_screening_plan` on
+every baseline/supplemental Plan before comparing its references. For each
+verified receipt, it parses `evidence.json` from the sealed bundle and rechecks
+its inventory digest and Evidence identity. The existing
+`validate_critic_decision` then verifies each decision's content seal against the
+actual Evidence accumulated within that candidate's baseline/supplemental cycle;
+`critic_ref` must match the validated decision. Evidence is never reconstructed
+from the Critic's declared refs, and cumulative baseline Evidence remains valid
+for supplemental decisions. Inconsistent Plan/Critic bodies are rejected before
+Provider construction on both initial R2 entry and resume.

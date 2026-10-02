@@ -20,6 +20,18 @@ helper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helper)
 
 
+def integration_payload(result):
+    from dataclasses import asdict
+    fields = ("engineering_status", "hypothesis_id", "hypothesis_content_hash", "scientific_identity_hash",
+              "memory_record_id", "plan_id", "plan_content_hash", "scientific_decision")
+    payload = {name: getattr(result, name) for name in fields}
+    payload["memory_records"] = [asdict(record) for record in result.memory_records]
+    payload["critic_decision"] = result.critic_decision.model_dump()
+    for kind in ("task", "spec", "run", "manifest", "evidence"):
+        payload[f"{kind}_refs"] = list(getattr(result, f"{kind}_refs"))
+    return payload
+
+
 @pytest.mark.parametrize("round_no", [1, 2])
 @pytest.mark.parametrize("failure", ["submit_uncertain", "handle_disk_full", "result_uncertain"])
 def test_exact_hooks_stop_second_slot_on_ambiguous_outcome(tmp_path, round_no, failure):
@@ -93,7 +105,8 @@ def test_feedback_view_is_this_r1_snapshot_and_receipts(tmp_path):
         def query_v2_runs(self, *, run_id, verify):
             assert run_id == "fixture-run" and verify is True
             return [{"fixture": True}]
-    verify_r1_feedback_view(view, snapshot, evidence, ReceiptStore())
+    with pytest.raises(ValueError, match="missing scientific Memory"):
+        verify_r1_feedback_view(view, snapshot, evidence, ReceiptStore(), memory_reader=memory.as_readonly_reader())
     with pytest.raises(ValueError, match="snapshot"):
         verify_r1_feedback_view(view, {**snapshot, "view_id": "historical-view"}, evidence, ReceiptStore())
     with pytest.raises(ValueError, match="disagree"):
@@ -101,11 +114,12 @@ def test_feedback_view_is_this_r1_snapshot_and_receipts(tmp_path):
     class MissingStore:
         def query_v2_runs(self, **kwargs):
             return []
-    with pytest.raises(ValueError, match="receipt"):
-        verify_r1_feedback_view(view, snapshot, evidence, MissingStore())
+    with pytest.raises(ValueError, match="missing scientific Memory"):
+        verify_r1_feedback_view(view, snapshot, evidence, MissingStore(), memory_reader=memory.as_readonly_reader())
 
 
-def test_round2_actual_main_binds_fresh_r1_view_before_provider(tmp_path, monkeypatch):
+@pytest.mark.parametrize("tamper", [None, "identity", "omitted_receipt", "plan_body", "critic_body"])
+def test_round2_actual_main_binds_fresh_r1_view_before_provider(tmp_path, monkeypatch, tamper):
     """A local contract fixture reaches the Provider boundary; never real acceptance."""
     import hashlib
     import sys
@@ -148,7 +162,7 @@ def test_round2_actual_main_binds_fresh_r1_view_before_provider(tmp_path, monkey
         "round": 1, "objective": objective, "objective_sha256": hashlib.sha256(objective.encode()).hexdigest(),
         "funnel": {"requested": 10}, "slots": [{"ordinal": i} for i in range(1, 11)],
         "post_r1_memory_view": {"view_id": view_b.view_id, "content_hash": view_b.view_content_hash, "total_entries": view_b.total_entries},
-        "integrations": [{"engineering_status": result.engineering_status, "run_refs": list(result.run_refs)}]})
+        "integrations": [integration_payload(result)]})
     source = tmp_path / "source"
     source.mkdir()
     provenance = source / "snapshot-provenance.json"
@@ -166,11 +180,57 @@ def test_round2_actual_main_binds_fresh_r1_view_before_provider(tmp_path, monkey
     monkeypatch.setattr(runner, "make_transport", provider_boundary)
     monkeypatch.setattr(sys, "argv", ["r2", "--run-id", "fixture-r1", "--evidence-root", str(source),
         "--output-root", str(tmp_path / "runs"), "--mcp-command", '["DO-NOT-EXECUTE", "--transport", "stdio"]'])
+    if tamper:
+        evidence_path = r1 / "ROUND1_FULL_EVIDENCE.json"
+        evidence = json.loads(evidence_path.read_text())
+        if tamper == "identity":
+            evidence["integrations"][0]["scientific_identity_hash"] = "0" * 64
+        elif tamper == "omitted_receipt":
+            import sqlite3
+            missing = evidence["integrations"][0]["run_refs"].pop()
+            with sqlite3.connect(r1 / "store/research_lab.sqlite3") as db:
+                db.execute("DELETE FROM v2_result_runs WHERE run_id = ?", (missing["run_id"],))
+        else:
+            import sqlite3
+            integration = evidence["integrations"][0]
+            record = integration["memory_records"][0]
+            if tamper == "plan_body":
+                field = "plan_payload"
+                record[field]["methods"][0]["parameters"]["changed_without_reseal"] = True
+            else:
+                field = "critic_decision_payload"
+                record[field]["criteria"]["min_coverage"] = "0.7"
+                integration["critic_decision"] = record[field]
+            with sqlite3.connect(r1 / "store/research_lab.sqlite3") as db:
+                db.execute(f"UPDATE research_memory_records SET {field} = ? WHERE record_id = ?",
+                           (json.dumps(record[field]), record["record_id"]))
+        runner._dump_json(evidence_path, evidence)
+    persisted_view_bytes = (r1 / "memory_view_after_round_1.json").read_bytes()
     original_sha = hashlib.sha256((r1 / "store/research_lab.sqlite3").read_bytes()).hexdigest()
-    with pytest.raises(RuntimeError, match="provider boundary reached"):
-        runner.main()
-    assert calls == ["provider boundary"]
+    if tamper:
+        with pytest.raises(ValueError, match="mismatch"):
+            runner.main()
+        assert calls == []
+        monkeypatch.setattr(sys, "argv", [*sys.argv, "--resume"])
+        with pytest.raises(ValueError, match="mismatch"):
+            runner.main()
+        assert calls == []
+        assert (r1 / "memory_view_after_round_1.json").read_bytes() == persisted_view_bytes
+    else:
+        with pytest.raises(RuntimeError, match="provider boundary reached"):
+            runner.main()
+        assert calls == ["provider boundary"]
     assert hashlib.sha256((r1 / "store/research_lab.sqlite3").read_bytes()).hexdigest() == original_sha
+    if tamper is None:
+        # R2's expanded/corrupted Memory is not the source for restored R1 feedback.
+        import sqlite3
+        with sqlite3.connect(run_root / "round_2_real_v1/store/research_lab.sqlite3") as db:
+            db.execute("UPDATE research_memory_records SET content_hash = ?", ("0" * 64,))
+        monkeypatch.setattr(sys, "argv", [*sys.argv, "--resume"])
+        with pytest.raises(RuntimeError, match="provider boundary reached"):
+            runner.main()
+        assert calls == ["provider boundary", "provider boundary"]
+        assert hashlib.sha256((r1 / "store/research_lab.sqlite3").read_bytes()).hexdigest() == original_sha
 
 
 def test_atomic_ownership_write_preserves_intent_on_fsync_failure(tmp_path, monkeypatch):
