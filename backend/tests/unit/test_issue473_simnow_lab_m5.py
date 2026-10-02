@@ -801,7 +801,7 @@ def test_monthly_preopen_rejects_calendar_and_shfe_expiry_disagreement() -> None
         )
 
 
-def _monthly_preopen_pair() -> tuple[bytes, bytes]:
+def _monthly_preopen_pair(source_month="2026-07") -> tuple[bytes, bytes]:
     calendar, history, daily_raw, registry_raw = _monthly_preopen_inputs()
     built = preopen.build_monthly_preopen(
         calendar=calendar,
@@ -812,7 +812,7 @@ def _monthly_preopen_pair() -> tuple[bytes, bytes]:
         operator_pins={"operator_state_raw_sha256": "4" * 64},
         daily_source_raw=daily_raw,
         contract_registry_raw=registry_raw,
-        source_month="2026-07",
+        source_month=source_month,
     )
     return built.static_raw, built.thermostat_raw
 
@@ -1123,6 +1123,144 @@ def test_month_end_after_night_open_fails_without_recomputing_preopen(
     assert (root / research_job.SIMNOW_LAB_EXPORT_NAMES[2]).read_bytes() == b"route"
     assert not (root / research_job.SIMNOW_LAB_EXPORT_NAMES[0]).exists()
     assert not (root / research_job.SIMNOW_LAB_EXPORT_NAMES[1]).exists()
+
+
+def _late_recovery_setup(monkeypatch, tmp_path):
+    calendar, history, daily_raw, _registry = _monthly_preopen_inputs()
+    through = history["official_days"][-1]
+    history = {**history, "through_trade_day": through}
+    receipt_path = tmp_path / "history-run-receipts" / f"{through}.json"
+    receipt_path.parent.mkdir()
+    receipt_path.write_bytes(b"real-history-receipt")
+    receipt_path.chmod(0o600)
+    history["daily_receipts"] = [{
+        "run_receipt_relative_path": f"history-run-receipts/{through}.json",
+        "run_receipt_raw_sha256": preopen.sha256(receipt_path.read_bytes()),
+    }]
+    monkeypatch.setattr(research_job, "validate_live_clock_sample", lambda *_a, **_k: None)
+    monkeypatch.setattr(research_job, "revalidate_official_calendar_evidence", lambda *_a: None)
+    monkeypatch.setattr(research_job, "_one_186_day_backfill", lambda *_a: (history, b"history"))
+    monkeypatch.setattr(research_job, "_backfill_daily_raw", lambda *_a: daily_raw)
+    monkeypatch.setattr(research_job, "_simnow_lab_contract_parameter_evidence", lambda: None)
+    monkeypatch.setattr(research_job, "load_run_receipt", lambda path: {"receipt_id": str(path)})
+    route = target_fixture._route(target_fixture._bundle())
+    route["metadata"] = {"execution_day": "2026-08-03"}
+    monkeypatch.setattr(research_job, "_daily_route", lambda **_kw: route)
+    root = tmp_path / "exports"
+    monkeypatch.setattr(research_job, "SIMNOW_LAB_INPUT_DIRECTORY", root)
+    context = SimpleNamespace(
+        calendar=calendar, runtime=SimpleNamespace(root=tmp_path),
+        availability=SimpleNamespace(raw_sha256="2" * 64, require_available=lambda *_a, **_k: None),
+        registry=SimpleNamespace(raw_sha256="1" * 64),
+    )
+    state = SimpleNamespace(raw_sha256="4" * 64, payload={
+        name: "5" * 64 for name in (
+            "manifest_genesis_seal_sha256", "manifest_head_seal_sha256",
+            "manifest_head_commit_seal_sha256", "commit_anchor_ledger_raw_sha256",
+        )
+    })
+    kwargs = {
+        "context": context, "history_receipt_path": tmp_path / "history.json",
+        "expected_receipt_sha256": preopen.sha256(b"history"), "operator_state": state,
+        "clock_sample": SimpleNamespace(trusted_now=datetime.fromisoformat("2026-08-01T02:00:00Z")),
+    }
+    return root, kwargs
+
+
+def test_explicit_late_recovery_replaces_old_preopen_and_is_same_month_stable(monkeypatch, tmp_path):
+    root, kwargs = _late_recovery_setup(monkeypatch, tmp_path)
+    root.mkdir(mode=0o755)
+    # A complete older month pair is valid input; no legacy fallback is required.
+    old_static, old_thermostat = _monthly_preopen_pair("2026-06")
+    paths = [root / name for name in research_job.SIMNOW_LAB_EXPORT_NAMES]
+    for path, raw in zip(paths, (old_static, old_thermostat, b"old-route"), strict=True):
+        path.write_bytes(raw)
+        path.chmod(0o644)
+    result = research_job.recover_late_monthly_inputs(**kwargs)
+    assert result["execution_day"] == "2026-08-03"  # August 1/2 are CLOSED.
+    static, thermostat = preopen.validate_preopen_pair(paths[0].read_bytes(), paths[1].read_bytes())
+    assert static["source_month"] == "2026-07"
+    assert static["research_as_of_official_day"] == "2026-07-31"
+    assert static["lineage"]["late_recovery"] == {
+        "observed_at": "2026-08-01T02:00:00.000000Z", "natural_execution_day": "2026-08-03",
+        "execution_day_override": "2026-08-03", "late_publication": True,
+    }
+    assert not any(static["authority"].values())
+    assert thermostat["static_preopen_sha256"] == preopen.sha256(paths[0].read_bytes())
+    before = [(path.read_bytes(), path.stat().st_mtime_ns) for path in paths]
+    assert research_job.recover_late_monthly_inputs(**kwargs)["status"].endswith("ALREADY_PUBLISHED")
+    assert before == [(path.read_bytes(), path.stat().st_mtime_ns) for path in paths]
+    monkeypatch.setattr(research_job, "_precompute_daily_route_export", lambda *_a: paths[2].read_bytes())
+    research_job.export_simnow_lab_inputs(
+        context=kwargs["context"], daily_result={"status": "ALREADY_COMPLETE", "trade_day": "2026-08-03"},
+        history_receipt_path=kwargs["history_receipt_path"], operator_state=kwargs["operator_state"],
+    )
+    assert before == [(path.read_bytes(), path.stat().st_mtime_ns) for path in paths]
+
+
+@pytest.mark.parametrize("failure", ("hash", "raw", "plan"))
+def test_explicit_late_recovery_invalid_input_preserves_existing_files(monkeypatch, tmp_path, failure):
+    root, kwargs = _late_recovery_setup(monkeypatch, tmp_path)
+    root.mkdir(mode=0o755)
+    paths = [root / name for name in research_job.SIMNOW_LAB_EXPORT_NAMES]
+    static_raw, thermostat_raw = _monthly_preopen_pair("2026-06")
+    for path, raw in zip(paths, (static_raw, thermostat_raw, b"route"), strict=True):
+        path.write_bytes(raw)
+        path.chmod(0o644)
+    before = [(path.read_bytes(), path.stat().st_mtime_ns) for path in paths]
+    if failure == "hash":
+        kwargs["expected_receipt_sha256"] = "0" * 64
+    elif failure == "raw":
+        def fail(*_args):
+            raise research_job.RegistryError("history raw binding drifted")
+        monkeypatch.setattr(research_job, "_backfill_daily_raw", fail)
+    else:
+        history, raw = research_job._one_186_day_backfill(None, None)
+        monkeypatch.setattr(research_job, "_one_186_day_backfill", lambda *_a: ({**history, "official_days": history["official_days"][1:]}, raw))
+    with pytest.raises(research_job.RegistryError):
+        research_job.recover_late_monthly_inputs(**kwargs)
+    assert before == [(path.read_bytes(), path.stat().st_mtime_ns) for path in paths]
+
+
+def test_explicit_recovery_requires_receipt_pin_and_excludes_verifier_mode(monkeypatch):
+    with pytest.raises(SystemExit):
+        research_job.parser().parse_args(["--recover-late-monthly", "receipt", "--verify-history-receipt", "receipt"])
+    monkeypatch.setattr(research_job, "load_runtime_context", lambda *_a: object())
+    assert research_job.main(["--recover-late-monthly", "receipt"]) == 2
+
+
+def test_september_recovery_uses_october8_without_a_preceding_night(monkeypatch, tmp_path):
+    root, kwargs = _late_recovery_setup(monkeypatch, tmp_path)
+    calendar = _extend_calendar(kwargs["context"].calendar, date(2026, 10, 12))
+    rows = dict(calendar.days)
+    for day in range(1, 8):
+        value = date(2026, 10, day)
+        rows[value] = calendar_models.CalendarDay(value, "CLOSED", None)
+    calendar = calendar_models.OfficialCalendar.create(
+        **{name: getattr(calendar, name) for name in (
+            "calendar_id", "raw_sha256", "valid_from", "valid_to", "issued_at",
+            "exchanges", "source_evidence", "source_evidence_root",
+        )}, days=rows,
+    )
+    kwargs["context"].calendar = calendar
+    history, raw = research_job._one_186_day_backfill(None, None)
+    history = {**history, "through_trade_day": "2026-09-30", "official_days": [
+        day.isoformat() for day in calendar.official_days_through(date(2026, 9, 30), count=186)
+    ]}
+    monkeypatch.setattr(research_job, "_one_186_day_backfill", lambda *_a: (history, raw))
+    kwargs["clock_sample"].trusted_now = datetime.fromisoformat("2026-10-01T02:00:00Z")
+    captured = {}
+    def capture(_context, trade_day, *_args, **options):
+        captured.update(options)
+        captured["trade_day"] = trade_day
+        raise research_job.RegistryError("captured before any publication")
+    monkeypatch.setattr(research_job, "_precompute_monthly_preopen_exports", capture)
+    with pytest.raises(research_job.RegistryError, match="captured"):
+        research_job.recover_late_monthly_inputs(**kwargs)
+    assert captured["trade_day"] == "2026-09-30"
+    assert captured["execution_day_override"] == date(2026, 10, 8)
+    assert captured["recovery_observed_at"] == "2026-10-01T02:00:00.000000Z"
+    assert not any(root.iterdir())
 
 
 def test_noncompleted_daily_result_does_not_roll_history_or_export(

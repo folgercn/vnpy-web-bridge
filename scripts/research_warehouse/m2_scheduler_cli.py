@@ -21,6 +21,7 @@ from simnow_experimental_timely_daily_route import ROUTE_MODE, _timely_cutoff
 
 from .acquisition import acquire_daily
 from .canonical import canonical_json_line, parse_json_strict, sha256
+from .clock_quality import validate_live_clock_sample
 from .daily_pit_main_roll_source import _following_official_days
 from .errors import RegistryError
 from .file_integrity import fsync_dir, read_regular_strict, write_all
@@ -44,6 +45,7 @@ from .m2_receipts import load_run_receipt
 from .m2_request_gate import PersistentRequestGate
 from .m2_runtime_input import DEFAULT_RUNTIME_INPUT
 from .m2_runtime_loader import load_runtime_context
+from .official_calendar import revalidate_official_calendar_evidence
 from .pit_source_view import (
     _official_month_boundary,
     _safe_relative_path,
@@ -376,6 +378,8 @@ def _precompute_daily_route_export(context, trade_day: str) -> bytes:
 def _precompute_monthly_preopen_exports(
     context, trade_day: str, history_receipt_path: Path, operator_state,
     *, execution_day_override: date | None = None,
+    recovery_observed_at: str | None = None,
+    expected_receipt_sha256: str | None = None,
 ) -> tuple[bytes, bytes]:
     """Prepare only a just-completed source month; never catch it up later."""
 
@@ -384,6 +388,8 @@ def _precompute_monthly_preopen_exports(
         if source_month is None:
             raise RegistryError("SIMNOW_LAB preopen is only valid at a source-month close")
         history, history_raw = _one_186_day_backfill(context, history_receipt_path)
+        if expected_receipt_sha256 is not None and sha256(history_raw) != expected_receipt_sha256:
+            raise RegistryError("SIMNOW_LAB recovery receipt SHA256 drifted")
         daily_raw = _backfill_daily_raw(context, history)
         parameters = _simnow_lab_contract_parameter_evidence()
         state = operator_state
@@ -411,6 +417,8 @@ def _precompute_monthly_preopen_exports(
             source_month=source_month,
             shfe_contract_parameters=parameters,
             execution_day_override=execution_day_override,
+            **({"recovery_observed_at": recovery_observed_at}
+               if recovery_observed_at is not None else {}),
         )
         return built.static_raw, built.thermostat_raw
     except RegistryError:
@@ -796,6 +804,110 @@ def export_simnow_lab_inputs(
     )
 
 
+def recover_late_monthly_inputs(
+    *, context, history_receipt_path: Path, expected_receipt_sha256: str,
+    operator_state, clock_sample,
+) -> dict:
+    """Explicit Lab-only publication recovery; never execute or acquire data."""
+    validate_live_clock_sample(clock_sample, local_now=datetime.now(timezone.utc))
+    revalidate_official_calendar_evidence(context.calendar)
+    context.availability.require_available(
+        context.calendar, cutoff_at=clock_sample.trusted_now
+    )
+    history, history_raw = _one_186_day_backfill(context, history_receipt_path)
+    if sha256(history_raw) != expected_receipt_sha256:
+        raise RegistryError("SIMNOW_LAB recovery receipt SHA256 differs")
+    through = date.fromisoformat(history["through_trade_day"])
+    source_month = _preopen_source_month_for_completed_day(context, through.isoformat())
+    if source_month is None:
+        raise RegistryError("SIMNOW_LAB recovery requires a source-month close")
+    expected_days = [
+        day.isoformat() for day in context.calendar.official_days_through(
+            through, count=DEFAULT_HISTORY_DAYS
+        )
+    ]
+    if history["official_days"] != expected_days:
+        raise RegistryError("SIMNOW_LAB recovery requires the exact 186-day plan")
+    local = clock_sample.trusted_now.astimezone(SHANGHAI)
+    if local.date() < through or (
+        local.date() == through and local.time() < time(18, 30)
+    ):
+        raise RegistryError("SIMNOW_LAB recovery source close is not completed")
+    _research, natural_execution, _cutoff = _official_month_boundary(
+        context.calendar, source_month=source_month
+    )
+    eligible = []
+    for day in sorted(context.calendar.days):
+        row = context.calendar.require_day(day)
+        if not row.is_official or day < natural_execution:
+            continue
+        evening = row.evening_session_natural_date
+        publication_cutoff = datetime.combine(
+            evening or day,
+            PREOPEN_PUBLICATION_DEADLINE if evening else time(8, 45),
+            tzinfo=SHANGHAI,
+        )
+        if local < publication_cutoff:
+            eligible.append(day)
+    if not eligible:
+        raise RegistryError("SIMNOW_LAB recovery lacks a next executable official day")
+    execution_day = eligible[0]
+    root = _export_root()
+    paths = tuple(root / name for name in SIMNOW_LAB_EXPORT_NAMES[:2])
+    current = tuple(_existing(path) for path in paths)
+    if current != (None, None):
+        if current[0] is None or current[1] is None:
+            raise RegistryError("SIMNOW_LAB recovery monthly pair is incomplete")
+        static, _thermostat = validate_preopen_pair(current[0], current[1])
+        if static["source_month"] > source_month:
+            raise RegistryError("SIMNOW_LAB recovery source month moved backwards")
+        if static["source_month"] == source_month:
+            return {"status": "SIMNOW_LAB_RECOVERY_ALREADY_PUBLISHED",
+                    "source_month": source_month, "execution_day": static["execution_day"]}
+    # Validate and build both halves before touching public or pending files.
+    static_raw, thermostat_raw = _precompute_monthly_preopen_exports(
+        context, through.isoformat(), history_receipt_path, operator_state,
+        execution_day_override=execution_day,
+        recovery_observed_at=format_utc(clock_sample.trusted_now),
+        expected_receipt_sha256=expected_receipt_sha256,
+    )
+    route_path = root / SIMNOW_LAB_EXPORT_NAMES[2]
+    current_route = _existing(route_path)
+    if execution_day == natural_execution:
+        receipt_path = _safe_relative_path(
+            context.runtime.root, history["daily_receipts"][-1]["run_receipt_relative_path"],
+            "SIMNOW_LAB recovery daily receipt",
+        )
+        receipt_raw = read_regular_strict(receipt_path, "SIMNOW_LAB recovery daily receipt")
+        if sha256(receipt_raw) != history["daily_receipts"][-1]["run_receipt_raw_sha256"]:
+            raise RegistryError("SIMNOW_LAB recovery daily receipt SHA256 drifted")
+        route = _daily_route(
+            context=context, trade_day=through.isoformat(),
+            receipt=load_run_receipt(receipt_path), receipt_raw=receipt_raw,
+            daily_raw=_backfill_daily_raw(context, history)[through.isoformat()],
+            registry_raw=_frozen_contract_registry_raw(),
+            parameters=_simnow_lab_contract_parameter_evidence(),
+        )
+        route_raw = canonical_json_line(route)
+    else:
+        if current_route is None:
+            raise RegistryError("SIMNOW_LAB recovery requires a current DAILY PIT route")
+        route_raw = current_route
+        route = parse_json_strict(route_raw, "SIMNOW_LAB recovery DAILY PIT route")
+    _daily_routes(route)
+    if route["metadata"]["execution_day"] != execution_day.isoformat():
+        raise RegistryError("SIMNOW_LAB recovery DAILY PIT execution day differs")
+    _replace_if_changed(route_path, current_route, route_raw)
+    _stage_and_publish_preopen_pair(
+        root=root, monthly_paths=paths, current=current,
+        static_raw=static_raw, thermostat_raw=thermostat_raw,
+    )
+    return {"status": "SIMNOW_LAB_LATE_MONTHLY_PUBLISHED", "source_month": source_month,
+            "research_as_of_official_day": through.isoformat(),
+            "execution_day": execution_day.isoformat(),
+            "observed_at": format_utc(clock_sample.trusted_now)}
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument(
@@ -806,6 +918,8 @@ def parser() -> argparse.ArgumentParser:
     mode = result.add_mutually_exclusive_group()
     mode.add_argument("--history-through")
     mode.add_argument("--verify-history-receipt", type=Path)
+    mode.add_argument("--recover-late-monthly", type=Path,
+                      help="explicit Lab-only recovery from an existing 186-day receipt")
     result.add_argument("--expected-history-receipt-sha256")
     result.add_argument(
         "--history-days",
@@ -836,7 +950,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         context = load_runtime_context(args.runtime_input)
-        if args.verify_history_receipt is not None:
+        if args.recover_late_monthly is not None:
+            if args.expected_history_receipt_sha256 is None:
+                raise RegistryError("late recovery requires expected receipt SHA256")
+            with operator_state_lock(args.operator_state, exclusive=False):
+                state = load_operator_state(args.operator_state)
+                result = recover_late_monthly_inputs(
+                    context=context, history_receipt_path=args.recover_late_monthly,
+                    expected_receipt_sha256=args.expected_history_receipt_sha256,
+                    operator_state=state, clock_sample=query_trusted_clock(),
+                )
+        elif args.verify_history_receipt is not None:
             from .m2_history_verifier import verify_history_backfill
 
             if args.expected_history_receipt_sha256 is None:
@@ -857,7 +981,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
         elif args.expected_history_receipt_sha256 is not None:
             raise RegistryError(
-                "expected history receipt SHA256 requires verifier mode"
+                "expected history receipt SHA256 requires verifier or recovery mode"
             )
         elif args.history_through is None:
             request_gate = PersistentRequestGate(
