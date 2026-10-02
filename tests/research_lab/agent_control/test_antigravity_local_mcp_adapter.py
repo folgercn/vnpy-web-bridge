@@ -279,6 +279,40 @@ class TestAntigravityLocalMCPAdapter(unittest.TestCase):
         self.assertEqual(len(snapshot.quota_windows), 2)
         self.assertEqual(snapshot.quota_windows[0]["remaining_fraction"], "0.85")
 
+    def test_installed_manager_envelope_uses_actual_desktop_quota(self) -> None:
+        raw = {
+            "active_email": "manager@example.invalid",
+            "quota": {"groups": [{"displayName": "Manager", "buckets": [
+                {"window": "weekly", "remainingFraction": 1.0}]}]},
+            "desktop": {"status": "OK", "account": {"email": "desktop@example.invalid"},
+                        "quota": {"groups": [{"displayName": "Gemini", "buckets": [
+                            {"bucketId": "desktop-weekly", "window": "weekly",
+                             "remainingFraction": 0.0, "resetTime": "2026-10-04T00:00:00Z"},
+                            {"window": "5-hour"}]}]}},
+        }
+        original = copy.deepcopy(raw)
+        transport = LocalMCPTransport(tool_catalog=list(ALL_MCP_OPERATIONS),
+                                      tool_caller=lambda op, args: raw)
+        snapshot = AntigravityLocalMCPProvider(transport=transport).account_usage()
+        self.assertEqual(snapshot.model_group, "Gemini")
+        self.assertEqual(len(snapshot.quota_windows), 2)
+        self.assertEqual(snapshot.quota_windows[0]["remaining_fraction"], 0)
+        self.assertIsNone(snapshot.quota_windows[1]["remaining_fraction"])
+        self.assertEqual(raw, original)
+        self.assertNotIn("example.invalid", str(snapshot.to_dict()))
+
+    def test_unavailable_desktop_never_uses_positive_manager_quota(self) -> None:
+        for desktop in (None, {}, {"status": "UNKNOWN"},
+                        {"status": "OK", "quota": {"groups": "unknown"}}):
+            with self.subTest(desktop=desktop):
+                raw = {"desktop": desktop, "quota_windows": [
+                    {"window": "weekly", "remaining_fraction": 1.0}]}
+                transport = LocalMCPTransport(tool_catalog=list(ALL_MCP_OPERATIONS),
+                                              tool_caller=lambda op, args: raw)
+                with self.assertRaises(ProviderError) as error:
+                    AntigravityLocalMCPProvider(transport=transport).account_usage()
+                self.assertEqual(error.exception.code, ProviderErrorCode.QUOTA_UNAVAILABLE)
+
     # 8. account_usage unknown fields preserved as None/unknown
     def test_08_account_usage_unknown_fields(self) -> None:
         def fake_caller(op: str, args: dict) -> Any:

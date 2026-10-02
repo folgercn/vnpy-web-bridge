@@ -287,6 +287,21 @@ class AntigravityLocalMCPProvider(AgentProvider):
                 "Invalid response from account_usage tool",
             )
 
+        # Current installed MCP also reports Manager-selected account data.
+        # Only the nested Desktop response describes the actual executor.
+        # If that envelope is present, never fall back to another account.
+        if "desktop" in raw:
+            desktop = raw["desktop"]
+            if (not isinstance(desktop, dict)
+                    or desktop.get("status") != "OK"
+                    or not isinstance(desktop.get("quota"), dict)
+                    or not isinstance(desktop["quota"].get("groups"), list)):
+                raise ProviderError(
+                    ProviderErrorCode.QUOTA_UNAVAILABLE,
+                    "Actual Desktop quota is unavailable",
+                )
+            raw = desktop
+
         account_info = raw.get("account", {}) if isinstance(raw.get("account"), dict) else {}
         _plan = str(account_info.get("planName") or raw.get("plan", "unknown"))
 
