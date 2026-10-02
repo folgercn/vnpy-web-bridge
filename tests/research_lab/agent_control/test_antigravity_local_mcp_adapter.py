@@ -296,8 +296,8 @@ class TestAntigravityLocalMCPAdapter(unittest.TestCase):
         snapshot = AntigravityLocalMCPProvider(transport=transport).account_usage()
         self.assertEqual(snapshot.model_group, "Gemini")
         self.assertEqual(len(snapshot.quota_windows), 2)
-        self.assertEqual(snapshot.quota_windows[0]["remaining_fraction"], 0)
-        self.assertIsNone(snapshot.quota_windows[1]["remaining_fraction"])
+        self.assertIsNone(snapshot.quota_windows[0]["remaining_fraction"])
+        self.assertEqual(snapshot.quota_windows[1]["remaining_fraction"], 0)
         self.assertEqual(raw, original)
         self.assertNotIn("example.invalid", str(snapshot.to_dict()))
 

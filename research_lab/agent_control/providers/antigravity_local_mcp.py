@@ -21,6 +21,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import math
 from collections.abc import Callable
 from typing import Any
 
@@ -83,6 +84,41 @@ def _extract_fraction(d: dict[str, Any], *keys: str) -> float | None:
             except (ValueError, TypeError):
                 continue
     return None
+
+
+def _desktop_gemini_windows(groups: list[Any]) -> tuple[str, list[dict[str, Any]]]:
+    """Select the frozen Gemini family; independent model quotas cannot help it.
+
+    Missing required windows remain explicit UNKNOWN facts. Duplicate groups or
+    windows are ambiguous and rejected rather than choosing the favorable one.
+    """
+    aliases = {"gemini", "gemini models", "gemini shared group"}
+    selected = [g for g in groups if isinstance(g, dict)
+                and isinstance(g.get("displayName"), str)
+                and g["displayName"].strip().casefold() in aliases]
+    if len(selected) > 1:
+        raise ProviderError(ProviderErrorCode.QUOTA_UNAVAILABLE, "Ambiguous Desktop Gemini quota group")
+    name = selected[0]["displayName"] if selected else "Gemini Models"
+    buckets = selected[0].get("buckets", []) if selected else []
+    windows: dict[str, dict[str, Any]] = {}
+    window_aliases = {"5h": "5h", "5-hour": "5h", "weekly": "weekly"}
+    for bucket in buckets if isinstance(buckets, list) else []:
+        if not isinstance(bucket, dict):
+            raise ProviderError(ProviderErrorCode.QUOTA_UNAVAILABLE, "Invalid Desktop Gemini quota bucket")
+        window = window_aliases.get(bucket.get("window")) if isinstance(bucket.get("window"), str) else None
+        if window is None or window in windows:
+            raise ProviderError(ProviderErrorCode.QUOTA_UNAVAILABLE, "Ambiguous Desktop Gemini quota window")
+        values = [bucket[k] for k in ("remaining_fraction", "remainingFraction") if k in bucket]
+        fractions = [_extract_fraction({"value": value}, "value") for value in values]
+        valid = bool(values) and all(not isinstance(value, bool) for value in values)
+        valid = valid and all(value is not None and math.isfinite(value) and 0 <= value <= 1
+                              for value in fractions)
+        valid = valid and len(set(fractions)) == 1
+        windows[window] = {"remaining_fraction": fractions[0] if valid else None,
+                           "reset_time": bucket.get("reset_time") or bucket.get("resetTime")}
+    return name, [{"window": window, "group_id": "gemini-shared", "group_display_name": name,
+                   **windows.get(window, {"remaining_fraction": None, "reset_time": None})}
+                  for window in ("5h", "weekly")]
 
 
 _STATUS_WORDS = frozenset(
@@ -300,7 +336,11 @@ class AntigravityLocalMCPProvider(AgentProvider):
                     ProviderErrorCode.QUOTA_UNAVAILABLE,
                     "Actual Desktop quota is unavailable",
                 )
-            raw = desktop
+            model_group, windows = _desktop_gemini_windows(desktop["quota"]["groups"])
+            return AgentUsageSnapshot.create(
+                provider="antigravity", model_group=model_group, quota_windows=windows,
+                captured_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            )
 
         account_info = raw.get("account", {}) if isinstance(raw.get("account"), dict) else {}
         _plan = str(account_info.get("planName") or raw.get("plan", "unknown"))
