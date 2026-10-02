@@ -10,10 +10,10 @@ description: 在 vnpy 仓库通过 Antigravity MCP 委派工作时使用，固�
 ## 固定目标
 
 - Antigravity 项目名称：`vnpy`
-- 项目 ID：`a173ba08-8e0c-4c26-8604-0d462da55529`
-- 已登记目录：`/Users/fujun/node/vnpy`
+- 项目 ID：`81ba0c89-c7fc-4028-a3e0-e5fa766a6f50`
+- 已登记目录：`/Users/fujun/node/vnpy-web-bridge`
 
-提交前调用 `projects(cwd="/Users/fujun/node/vnpy")`，确认名称、ID、目录均与上述目标一致。当前 MCP 的 `submit` 按 `cwd` 解析项目，不接受 `project_id` 参数；不要虚构参数，也不要仅在提示词中写项目名称代替接口绑定。
+提交前调用 `projects(cwd="/Users/fujun/node/vnpy-web-bridge")`，确认名称、ID、目录均与上述目标一致。当前 MCP 的 `submit` 按 `cwd` 解析项目，不接受 `project_id` 参数；不要虚构参数，也不要仅在提示词中写项目名称代替接口绑定。
 
 实际任务使用本次授权的工作目录。若用户指定另一个 worktree，应查询该实际目录的 `projects(cwd=...)`，同时确认后端执行环境确实是该 worktree 且仍属于上述 vnpy 项目。现有入口未提供独立 worktree 环境选择；不能满足时停止委派并说明，不得悄悄改用主目录或 gzgs 项目。
 
