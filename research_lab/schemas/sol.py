@@ -63,6 +63,8 @@ class ExperimentPlan(BaseModel):
     experiment: ExperimentSpec
     status: PlanStatus
     worker_id: str | None = None
+    farm_task_id: str | None = None
+    farm_attempt: int | None = Field(default=None, ge=1)
     approved_by: str | None = None
     approved_at: datetime | None = None
     retry_count: int = Field(default=0, ge=0)
